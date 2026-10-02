@@ -1,0 +1,8 @@
+{
+  "allowed_prefixes": [
+    "127.0.0.1/32",
+    "::1/128"
+  ],
+  "runtime_drop_in": "10-tensorplate-validation-offline.conf",
+  "unit": "tensorplate-agent.service"
+}

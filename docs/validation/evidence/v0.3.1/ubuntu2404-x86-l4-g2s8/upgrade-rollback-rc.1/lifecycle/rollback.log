@@ -1,0 +1,208 @@
+==> rolling back by the documented procedure
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following packages will be REMOVED:
+  tensorplate-agent tensorplate-backend-python-pytorch tensorplate-cli
+  tensorplate-common tensorplate-observability tensorplate-serving
+0 upgraded, 0 newly installed, 6 to remove and 11 not upgraded.
+After this operation, 9909 kB disk space will be freed.
+(Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 89925 files and directories currently installed.)
+Removing tensorplate-agent (0.3.1~rc.1-1) ...
+Removing tensorplate-backend-python-pytorch (0.3.1~rc.1-1) ...
+dpkg: warning: while removing tensorplate-backend-python-pytorch, directory '/usr/lib/tensorplate/backends/python_pytorch/src/tensorplate_pytorch_backend/backends' not empty so not removed
+Removing tensorplate-cli (0.3.1~rc.1-1) ...
+Removing tensorplate-serving (0.3.1~rc.1-1) ...
+Removing tensorplate-observability (0.3.1~rc.1-1) ...
+Removing tensorplate-common (0.3.1~rc.1-1) ...
+every TensorPlate package is removed with its conffiles kept
+==> installing the baseline fresh through its own installer
+==> TensorPlate installer v0.2.1
+==> cosign not found; downloading pinned cosign-linux-amd64 v3.0.2
+==> downloading https://github.com/sigstore/cosign/releases/download/v3.0.2/cosign-linux-amd64
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+
+  0  149M    0  666k    0     0  3208k      0  0:00:47 --:--:--  0:00:47 3208k
+100  149M  100  149M    0     0   126M      0  0:00:01  0:00:01 --:--:--  152M
+cosign-linux-amd64: OK
+==> verifying SHA256SUMS signature with cosign (keyless)
+==> SHA256SUMS signature verified: signed by tensorplate/tensorplate release workflow
+==> verifying install.sh with SHA256SUMS
+install.sh: OK
+==> OS validation passed: Ubuntu 24.04 on x86_64 detected
+==> hardware validation passed: x86_64 host with an NVIDIA driver, arch=x86_64
+==> cosign not found; downloading pinned cosign-linux-amd64 v3.0.2
+==> downloading https://github.com/sigstore/cosign/releases/download/v3.0.2/cosign-linux-amd64
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+
+  6  149M    6 10.3M    0     0  36.0M      0  0:00:04 --:--:--  0:00:04 36.0M
+100  149M  100  149M    0     0   129M      0  0:00:01  0:00:01 --:--:--  160M
+cosign-linux-amd64: OK
+==> verifying SHA256SUMS signature with cosign (keyless)
+==> SHA256SUMS signature verified: signed by tensorplate/tensorplate release workflow
+==> verifying local artifacts with SHA256SUMS
+tensorplate-v0.2.1-artifacts.json: OK
+tensorplate-common_0.2.1-1_all.deb: OK
+tensorplate-agent_0.2.1-1_amd64.deb: OK
+tensorplate-serving_0.2.1-1_amd64.deb: OK
+tensorplate-observability_0.2.1-1_amd64.deb: OK
+tensorplate-cli_0.2.1-1_amd64.deb: OK
+tensorplate-backend-python-pytorch_0.2.1-1_all.deb: OK
+==> updating apt package metadata
+Get:1 file:/var/cudnn-local-repo-ubuntu2404-9.13.0  InRelease [1572 B]
+Get:1 file:/var/cudnn-local-repo-ubuntu2404-9.13.0  InRelease [1572 B]
+Hit:2 https://us-apt.pkg.dev/projects/REDACTED gpudirect-gib-apt InRelease
+Hit:3 http://packages.cloud.google.com/apt apt-transport-artifact-registry-stable InRelease
+Hit:4 https://nvidia.github.io/libnvidia-container/stable/deb/amd64  InRelease
+Hit:5 http://REDACTED.gce.archive.ubuntu.com/ubuntu noble InRelease
+Hit:6 http://REDACTED.gce.archive.ubuntu.com/ubuntu noble-updates InRelease
+Hit:7 http://REDACTED.gce.archive.ubuntu.com/ubuntu noble-backports InRelease
+Hit:8 http://security.ubuntu.com/ubuntu noble-security InRelease
+Reading package lists...
+W: https://us-apt.pkg.dev/projects/REDACTED/dists/gpudirect-gib-apt/InRelease: Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg), see the DEPRECATION section in apt-key(8) for details.
+W: http://packages.cloud.google.com/apt/dists/apt-transport-artifact-registry-stable/InRelease: Key is stored in legacy trusted.gpg keyring (/etc/apt/trusted.gpg), see the DEPRECATION section in apt-key(8) for details.
+==> installing TensorPlate runtime packages with apt --reinstall
+Reading package lists...
+Building dependency tree...
+Reading state information...
+The following NEW packages will be installed:
+  tensorplate-agent tensorplate-backend-python-pytorch tensorplate-cli
+  tensorplate-common tensorplate-observability tensorplate-serving
+0 upgraded, 6 newly installed, 0 to remove and 11 not upgraded.
+Need to get 0 B/2967 kB of archives.
+After this operation, 8655 kB of additional disk space will be used.
+Get:1 /tmp/tensorplate-install-v0.2.1.BRcEdH/tensorplate-common_0.2.1-1_all.deb tensorplate-common all 0.2.1-1 [11.3 kB]
+Get:2 /tmp/tensorplate-install-v0.2.1.BRcEdH/tensorplate-agent_0.2.1-1_amd64.deb tensorplate-agent amd64 0.2.1-1 [712 kB]
+Get:3 /tmp/tensorplate-install-v0.2.1.BRcEdH/tensorplate-observability_0.2.1-1_amd64.deb tensorplate-observability amd64 0.2.1-1 [374 kB]
+Get:4 /tmp/tensorplate-install-v0.2.1.BRcEdH/tensorplate-serving_0.2.1-1_amd64.deb tensorplate-serving amd64 0.2.1-1 [291 kB]
+Get:5 /tmp/tensorplate-install-v0.2.1.BRcEdH/tensorplate-backend-python-pytorch_0.2.1-1_all.deb tensorplate-backend-python-pytorch all 0.2.1-1 [20.2 kB]
+Get:6 /tmp/tensorplate-install-v0.2.1.BRcEdH/tensorplate-cli_0.2.1-1_amd64.deb tensorplate-cli amd64 0.2.1-1 [1559 kB]
+Selecting previously unselected package tensorplate-common.
+(Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 89817 files and directories currently installed.)
+Preparing to unpack .../tensorplate-common_0.2.1-1_all.deb ...
+Unpacking tensorplate-common (0.2.1-1) ...
+Setting up tensorplate-common (0.2.1-1) ...
+Selecting previously unselected package tensorplate-agent.
+(Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 89865 files and directories currently installed.)
+Preparing to unpack .../tensorplate-agent_0.2.1-1_amd64.deb ...
+Unpacking tensorplate-agent (0.2.1-1) ...
+Selecting previously unselected package tensorplate-observability.
+Preparing to unpack .../tensorplate-observability_0.2.1-1_amd64.deb ...
+Unpacking tensorplate-observability (0.2.1-1) ...
+Selecting previously unselected package tensorplate-serving.
+Preparing to unpack .../tensorplate-serving_0.2.1-1_amd64.deb ...
+Unpacking tensorplate-serving (0.2.1-1) ...
+Selecting previously unselected package tensorplate-backend-python-pytorch.
+Preparing to unpack .../tensorplate-backend-python-pytorch_0.2.1-1_all.deb ...
+Unpacking tensorplate-backend-python-pytorch (0.2.1-1) ...
+Selecting previously unselected package tensorplate-cli.
+Preparing to unpack .../tensorplate-cli_0.2.1-1_amd64.deb ...
+Unpacking tensorplate-cli (0.2.1-1) ...
+Setting up tensorplate-backend-python-pytorch (0.2.1-1) ...
+Setting up tensorplate-observability (0.2.1-1) ...
+Setting up tensorplate-serving (0.2.1-1) ...
+Setting up tensorplate-agent (0.2.1-1) ...
+Setting up tensorplate-cli (0.2.1-1) ...
+
+Running kernel seems to be up-to-date.
+
+No services need to be restarted.
+
+No containers need to be restarted.
+
+No user sessions are running outdated binaries.
+
+No VM guests are running outdated hypervisor (qemu) binaries on this host.
+==> enabling TensorPlate services
+==> waiting for TensorPlate services to become ready
+==> running tensorplate doctor --output json
+==> TensorPlate v0.2.1 install complete
+Installed TensorPlate runtime packages from local artifacts at /opt/tp/assets/baseline.
+Installed optional Python/PyTorch backend package. Install the platform PyTorch stack separately if doctor reports it missing.
+Next: use tensorplate status and tensorplate doctor for operational checks.
+installed packages are exactly v0.2.1
+==> doctor on the baseline exited 0; filed as evidence, not asserted
+the rolled-back agent answers with no active or previous deployment
+==> deploying on the rolled-back version
+==> validating the deploy-smoke bundle before deploying it
+{"backend_profile": "fixture", "bundle": "x86-fixture-smoke"}
+==> staging the bundle at /opt/tensorplate-validation/x86-fixture-smoke for the agent to read
+==> deploying
+==> issuing an inference request
+infer: posting to `http://127.0.0.1:18080/infer` (correlation_id=cli-eee6b962-a755-42b5-b10b-f5ff47c53311)
+infer: endpoint=http://127.0.0.1:18080/infer status=success request_id=cloud-lifecycle-smoke-1
+  outputs: 1 tensor(s)
+    - echo_probe shape=[1,4]
+
+PASS: rolled back to the baseline; operator edit kept; state set aside unchanged and not loaded; machine-type record restored and instance binding kept; deploy and inference answered

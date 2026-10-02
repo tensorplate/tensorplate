@@ -1,0 +1,6 @@
+tensorplate-agent config-files 0.3.1~rc.1-1
+tensorplate-backend-python-pytorch not-installed 
+tensorplate-cli config-files 0.3.1~rc.1-1
+tensorplate-common not-installed 
+tensorplate-observability config-files 0.3.1~rc.1-1
+tensorplate-serving config-files 0.3.1~rc.1-1

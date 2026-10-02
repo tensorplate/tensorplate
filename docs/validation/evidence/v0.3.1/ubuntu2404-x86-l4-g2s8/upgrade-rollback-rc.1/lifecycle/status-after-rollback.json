@@ -1,0 +1,35 @@
+{
+  "command": "status",
+  "correlation_id": "cli-4908cde2-2053-4016-b973-bbaa1090bdbf",
+  "payload": {
+    "agent": {
+      "active": null,
+      "agent_state": "ready",
+      "available": true,
+      "candidate": null,
+      "in_flight_transaction": null,
+      "last_error": null,
+      "platform_telemetry": {
+        "memory": {
+          "accelerator_total_bytes": 24152899584,
+          "effective_budget_bytes": 24152899584,
+          "gate": "load_bearing",
+          "host_total_bytes": 33646985216,
+          "memory_profile": "discrete_gpu",
+          "row_nominal_capacity_bytes": 25769803776,
+          "shares_one_pool": false
+        },
+        "row_id": "ubuntu2404-x86-l4-g2s8",
+        "validated": true
+      },
+      "previous_active": null,
+      "quarantined": [],
+      "supervision": null
+    },
+    "agent_response_status": "ok",
+    "severity": "ready"
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": null
+}

@@ -1,0 +1,5 @@
+e934738d85fef025796fedba38c88d29b1117d5d61545b4cd8f3b0ca29ee56c4  ./manifest.json
+5abb01e2403b072bf03d04fde160443e209d7a0dad49a423be15196b9b43c17f  ./model/config.json
+496dba118d1a58f5f3db2efc88dbdc216e0483fc89fe6e47ee1f2c53f18ad1e4  ./model/kokoro-v1_0.pth
+0ab5709b8ffab19bfd849cd11d98f75b60af7733253ad0d67b12382a102cb4ff  ./model/voices/af_heart.pt
+a679f3fca2a4c30611d590592e1fe1cc973143fa5b80c44d5923bcb456390820  ./tts-kokoro-candidate.json

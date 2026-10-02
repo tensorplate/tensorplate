@@ -22,6 +22,28 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   fixture inventory now pins the two provisioned clips (FLEURS test split,
   CC BY 4.0) and the three clips derived from them.
   (V030-E01-F02-T01, V030-E01-F02-T03)
+- Recorded on a `g2-standard-8` with one NVIDIA L4, against `v0.3.1-rc.1`:
+  two candidate qualification runs of Kokoro-82M (voice `af_heart`), filed
+  under `docs/validation/evidence/speech-candidate-kokoro-l4-2026-10-01/`
+  with their memory observations and the host facts they depend on. Both
+  records are `fail` and are filed as recorded: every fixture request
+  returned `ok` and every request-time negative returned its typed code,
+  but the two deploys built to fail while the runner loads (an undeclared
+  voice, too little device memory) returned `timeout` where `unsupported`
+  and `oom_error` were expected, and a rollback issued right after was
+  refused as `busy`. Candidate records only; no support
+  row's evidence changes. (V030-E01-F02-T02, V030-E01-F02-T03)
+- Recorded on a `g2-standard-8` with one NVIDIA L4: the Ubuntu cloud
+  lifecycle harness against the published `v0.3.1-rc.1` set with the
+  published `v0.2.1` set as its baseline, both signature-verified. All
+  eight stages pass, including the upgrade over a live deployment and the
+  rollback by the documented procedure, and a separate check shows the
+  rolled-back 0.2.1 agent starting from the restored machine-type record
+  with all IP traffic but loopback denied to its unit. Filed under
+  `docs/validation/evidence/v0.3.1/ubuntu2404-x86-l4-g2s8/upgrade-rollback-rc.1/`
+  as a run record: the report has no `reboot` stage, so the release
+  evidence gate still reports the row incomplete for 0.3.1.
+  (V030-E01-F01-T02)
 
 ### Changed
 

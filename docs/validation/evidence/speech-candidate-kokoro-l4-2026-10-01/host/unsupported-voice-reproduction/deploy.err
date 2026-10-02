@@ -1,0 +1,10 @@
+{
+  "command": "deploy",
+  "error": {
+    "code": "timeout",
+    "hint": "agent did not respond within the configured timeout; retry with --timeout-ms",
+    "message": "operation timed out after 30000 ms"
+  },
+  "schema_version": "0.1",
+  "status": "error"
+}
