@@ -24,6 +24,13 @@ and the logs it cites; no other row's report may carry one. The
 [physical-row](../../physical-row-runbooks.md) runbooks say how each row
 is run and filed.
 
+A run that is not a row's bundle is filed in a named directory below the
+row's, with a README that says what it is. The checker reads a report
+only at the row's own directory, so such a record never completes a row:
+[`ubuntu2404-x86-l4-g2s8/upgrade-rollback-rc.1/`](ubuntu2404-x86-l4-g2s8/upgrade-rollback-rc.1/README.md)
+is the upgrade from the published 0.2.1 set to the first 0.3.1 candidate
+and the rollback, recorded before the harness has the reboot stage.
+
 ## Sanitize and scan before the first commit
 
 The rules in [`../v0.2.1/README.md`](../v0.2.1/README.md) apply to these
