@@ -14,7 +14,7 @@
           "stratum": "clean16k",
           "language": "en",
           "sample_rate_hz": 16000,
-          "digest": null,
+          "digest": "sha256:12173c13a069a7fc024990679970ab7d634e39aeae881528f9f039b9f3b30d7c",
           "derived_from": null,
           "derivation": null,
           "duration_s": {
@@ -28,7 +28,7 @@
           "stratum": "clean16k",
           "language": "ar",
           "sample_rate_hz": 16000,
-          "digest": null,
+          "digest": "sha256:5075e14075e0adcd9df3dc8a224bee471b46023fcfc41f33b1aa79362a317cb6",
           "derived_from": null,
           "derivation": null,
           "duration_s": {
@@ -42,7 +42,7 @@
           "stratum": "noisy16k",
           "language": "en",
           "sample_rate_hz": 16000,
-          "digest": null,
+          "digest": "sha256:ae3bd6262e72be9b96bcec0fab63dd9ffce059d78b97e38a217ff8491aabbe9b",
           "derived_from": "en-clean-16k-01",
           "derivation": {
             "kind": "seeded_noise_mix",
@@ -60,7 +60,7 @@
           "stratum": "noisy16k",
           "language": "ar",
           "sample_rate_hz": 16000,
-          "digest": null,
+          "digest": "sha256:9e54f8b8d2445dee1febbb1ab883d30de9e2eaa6733bfb03b79e0c0a5ccd87af",
           "derived_from": "ar-clean-16k-01",
           "derivation": {
             "kind": "seeded_noise_mix",
@@ -78,7 +78,7 @@
           "stratum": "telephony8k",
           "language": "en",
           "sample_rate_hz": 8000,
-          "digest": null,
+          "digest": "sha256:873f4ea1fa63a0c89ee4b9e4ea895da4beb841e635dd53ff8d38db885e7c2723",
           "derived_from": "en-clean-16k-01",
           "derivation": {
             "kind": "telephony_8k_ulaw"

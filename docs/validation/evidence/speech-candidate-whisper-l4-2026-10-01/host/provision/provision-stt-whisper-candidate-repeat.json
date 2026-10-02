@@ -1,0 +1,14 @@
+{
+  "command": "bundle",
+  "correlation_id": null,
+  "payload": {
+    "bundle": "stt-whisper-candidate",
+    "bytes": 1621669131,
+    "files": 7,
+    "outcome": "verified",
+    "path": "/var/lib/tensorplate/bundles/import/stt-whisper-candidate"
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": null
+}

@@ -1,0 +1,11 @@
+{
+  "ct2_cuda_devices": 1,
+  "ctranslate2": "4.8.2",
+  "cuda_is_available": true,
+  "executable": "/usr/lib/tensorplate/speech-runtime/bin/python",
+  "faster_whisper": "1.2.1",
+  "kokoro": "0.9.4",
+  "python": "3.12.3",
+  "torch": "2.13.0+cu129",
+  "torch_cuda_build": "12.9"
+}

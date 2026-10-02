@@ -1,0 +1,14 @@
+{
+  "command": "deploy",
+  "correlation_id": "cli-aee79688-7ab8-4b39-adde-a261c1a2e0a3",
+  "payload": {
+    "agent_response_status": "ok",
+    "bundle_digest": "sha256:fbb37b2d3f0b9dd5550d7085eb48d612c04df17e87ca5522e251f4ab4bf287f1",
+    "deployment_id": "cold-whisper-1",
+    "phase": "active",
+    "transaction_id": "tx-94e1b209-907a-426a-843b-97add506d017"
+  },
+  "schema_version": "0.1",
+  "status": "ok",
+  "transaction_id": "tx-94e1b209-907a-426a-843b-97add506d017"
+}
