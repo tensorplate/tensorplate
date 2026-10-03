@@ -222,12 +222,12 @@ where
             )
         }
         Subcommand::Deploy(opts) => {
-            let profile = resolve_profile()?;
+            let profile = resolve_profile()?.for_transaction(parsed.global.timeout_ms);
             let client = client_factory(&profile)?;
             commands::deploy::run(&renderer, &profile, &*client, &opts, stdout, stderr)
         }
         Subcommand::Rollback(opts) => {
-            let profile = resolve_profile()?;
+            let profile = resolve_profile()?.for_transaction(parsed.global.timeout_ms);
             let client = client_factory(&profile)?;
             commands::rollback::run(&renderer, &profile, &*client, &opts, stdout, stderr)
         }

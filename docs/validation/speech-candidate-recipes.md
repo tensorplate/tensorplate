@@ -198,12 +198,15 @@ tools/validation/candidate-qualify.py \
 ```
 
 `--agent-timeout-ms` (120,000 by default) must stay above the agent's
-`worker.warm_timeout_ms` (30,000 as packaged). A runner that fails while
-loading is answered by the agent only after that warm timeout, and the
-CLI's own default timeout is the same 30 s: a deploy left at the default
-gives up first, the negative case records `timeout` instead of the agent's
-answer, and the agent is still inside the transaction when the next
-command arrives. `--teardown-busy-wait-ms` (60,000 by default) bounds how
+`worker.warm_timeout_ms` (30,000 as packaged). `v0.3.1-rc.1` answers a
+runner that fails while loading only after that warm timeout, as
+`inference_failed`, and its CLI's default timeout is the same 30 s: a
+deploy left at the default gives up first, the negative case records
+`timeout` instead of the agent's answer, and the agent is still inside the
+transaction when the next command arrives. A later agent answers with the
+runner's code as soon as the candidate worker exits, and a later CLI waits
+at least 120,000 ms for a deploy or rollback by default; the option stays
+for a candidate that hangs instead of exiting. `--teardown-busy-wait-ms` (60,000 by default) bounds how
 long the teardown retries a rollback refused as `busy`, once a second
 (any other answer, an error included, is final);
 `teardown.wall_ms` covers the wait, and a teardown still refused at the

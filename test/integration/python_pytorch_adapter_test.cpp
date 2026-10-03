@@ -24,6 +24,7 @@ TEST(PythonPytorchAdapter, FeatureFlagDisabled) {
 #else
 
 #include <fcntl.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -35,6 +36,8 @@ TEST(PythonPytorchAdapter, FeatureFlagDisabled) {
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <nlohmann/json.hpp>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -296,6 +299,117 @@ TEST_F(PythonPytorchAdapterFixture, LoadErrorsCarryNoPathOrProfileName) {
     EXPECT_EQ(written.find(canary), std::string::npos) << written;
   }
 }
+
+#ifdef TP_SERVING_WORKER_BINARY
+
+struct WorkerRun {
+  int exit_status;
+  std::string stderr_text;
+};
+
+WorkerRun run_serving_worker(const std::string& arguments, const std::filesystem::path& dir) {
+  const std::filesystem::path stderr_file = dir / "worker-stderr.txt";
+  const std::string command = std::string{"'"} + TP_SERVING_WORKER_BINARY + "' " + arguments +
+                              " 2> '" + stderr_file.string() + "'";
+  const int status = std::system(command.c_str());
+  std::ifstream in(stderr_file);
+  return {WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+          {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()}};
+}
+
+// The last line of a worker's stderr as JSON, without its clock reading.
+nlohmann::json last_record(const std::string& text) {
+  std::istringstream lines(text);
+  std::string line;
+  std::string last;
+  while (std::getline(lines, line)) {
+    if (!line.empty()) {
+      last = line;
+    }
+  }
+  auto record = nlohmann::json::parse(last, nullptr, /*allow_exceptions=*/false);
+  if (record.is_object()) {
+    record.erase("ts_ns");
+  }
+  return record;
+}
+
+// The stderr the agent's deploy tests replay is what this worker writes: a
+// Kokoro entry selecting an undeclared voice is refused by the runner, and
+// the worker's last line carries the runner's code before it exits.
+TEST_F(PythonPytorchAdapterFixture, WorkerReportsTheRunnersLoadCodeBeforeExiting) {
+  const std::filesystem::path source{TP_SOURCE_DIR};
+  const ScratchDir scratch{std::filesystem::temp_directory_path() /
+                           ("tp-worker-startup-" + std::to_string(::getpid()))};
+  const auto& dir = scratch.path;
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  std::filesystem::copy(source / "test/models/bundles/v0_1/tts_kokoro_candidate", dir / "bundle",
+                        std::filesystem::copy_options::recursive);
+  const auto entry_path = dir / "bundle" / "tts-kokoro-candidate.json";
+  std::string entry;
+  {
+    std::ifstream in(entry_path);
+    entry.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+  }
+  const std::string declared = R"("voice": "af_heart")";
+  const auto at = entry.find(declared);
+  ASSERT_NE(at, std::string::npos);
+  entry.replace(at, declared.size(), R"("voice": "af_undeclared")");
+  { std::ofstream(entry_path, std::ios::trunc) << entry; }
+
+  nlohmann::json config;
+  config["schema_version"] = "0.1";
+  config["bind"] = {{"host", "127.0.0.1"}, {"port", 0}, {"allow_non_loopback", false}};
+  config["enable_stderr_logs"] = true;
+  config["deployment"] = {{"use_mock_session", false},
+                          {"endpoint", "kokoro-undeclared-voice"},
+                          {"backend", "python_pytorch"},
+                          {"model",
+                           {{"model_id", "kokoro-undeclared-voice"},
+                            {"model_class", "custom"},
+                            {"artifact_path", entry_path.string()},
+                            {"backend_hint", "python_pytorch"},
+                            {"precision_hint", "auto"}}}};
+  const auto config_path = dir / "serving.json";
+  { std::ofstream(config_path) << config.dump(); }
+
+  const auto run = run_serving_worker("--config '" + config_path.string() + "'", dir);
+
+  EXPECT_EQ(run.exit_status, 65) << run.stderr_text;
+  std::ifstream recorded(source /
+                         "agent/tests/fixtures/worker_stderr/kokoro_undeclared_voice.stderr");
+  ASSERT_TRUE(recorded.is_open());
+  const std::string fixture{std::istreambuf_iterator<char>(recorded),
+                            std::istreambuf_iterator<char>()};
+  const auto expected = last_record(fixture);
+  ASSERT_TRUE(expected.is_object());
+  EXPECT_EQ(expected["message"], "worker startup failed");
+  EXPECT_EQ(expected["fields"]["code"], "unsupported");
+  EXPECT_EQ(last_record(run.stderr_text), expected) << run.stderr_text;
+}
+
+// A config the worker cannot parse is reported the same way, with stderr
+// logs never having been enabled.
+TEST(ServingWorkerStartup, ConfigErrorIsReportedAsTheLastStderrLine) {
+  const ScratchDir scratch{std::filesystem::temp_directory_path() /
+                           ("tp-worker-config-" + std::to_string(::getpid()))};
+  std::filesystem::remove_all(scratch.path);
+  std::filesystem::create_directories(scratch.path);
+
+  const auto run = run_serving_worker("--config-json '{'", scratch.path);
+
+  EXPECT_EQ(run.exit_status, 64) << run.stderr_text;
+  const auto record = last_record(run.stderr_text);
+  ASSERT_TRUE(record.is_object()) << run.stderr_text;
+  EXPECT_EQ(record["level"], "error");
+  EXPECT_EQ(record["component"], "serving");
+  EXPECT_EQ(record["message"], "worker startup failed");
+  EXPECT_EQ(record["fields"]["code"], "config_invalid");
+  EXPECT_TRUE(record["fields"]["message"].is_string());
+}
+
+#endif  // TP_SERVING_WORKER_BINARY
 
 }  // namespace
 }  // namespace tensorplate
