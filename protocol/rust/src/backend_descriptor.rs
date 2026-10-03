@@ -11,18 +11,29 @@
 //
 // The on-disk location is
 // `/usr/share/tensorplate/backends/<backend_name>/backend.json` (see
-// [`crate::install_paths::BACKEND_DESCRIPTOR_DIR`]).
+// [`crate::install_paths::BACKEND_DESCRIPTOR_DIR`]). A package that installs
+// a runner profile without owning that file declares the profile in a file
+// of its own under `runner_profiles.d/` beside it; [`BackendDescriptor::read_from`]
+// merges those declarations into `runner_profiles`, so every reader of the
+// descriptor sees the profiles that are installed and no others.
 //
 // The schema mirrors `protocol/schemas/backend_descriptor.json`. Both
 // shall be edited together.
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::serde_shape::{deserialize_vec_map_only, is_canonical_snake_identifier};
+use crate::package_inventory::{DpkgInventory, PackageInventory};
+use crate::serde_shape::{
+    deserialize_map_only, deserialize_some, deserialize_vec_map_only, is_canonical_snake_identifier,
+};
 use crate::SCHEMA_VERSION;
+
+/// Directory beside a backend's `backend.json` holding one runner profile
+/// declaration per installed profile package.
+pub const RUNNER_PROFILE_DECLARATION_DIR: &str = "runner_profiles.d";
 
 /// Parsed backend descriptor.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -48,8 +59,9 @@ pub struct BackendDescriptor {
     pub install_hint: Option<String>,
     /// Installed runner profiles: the interpreter environment each profile's
     /// sidecar runs in, apart from `python`'s. Profiles may share one
-    /// environment. Empty when the descriptor declares none; `python` then
-    /// describes the only interpreter the backend uses.
+    /// environment. Empty when none is installed; `python` then describes
+    /// the only interpreter the backend uses. [`Self::read_from`] appends
+    /// the profiles declared under [`RUNNER_PROFILE_DECLARATION_DIR`].
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -222,7 +234,34 @@ pub struct RunnerProfile {
     pub compute_types: Vec<ComputeType>,
 }
 
-/// Typed errors raised when parsing a backend descriptor.
+/// One runner profile declared by the package that installs it: a file
+/// under [`RUNNER_PROFILE_DECLARATION_DIR`]. Mirrors the schema's
+/// `definitions.runner_profile_declaration`. It does not implement
+/// `Deserialize`: [`Self::parse_with_path`] is the only way to one, so no
+/// loader skips its checks.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RunnerProfileDeclaration {
+    #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
+    pub schema_version: String,
+    /// `backend_name` of the descriptor the profile belongs to.
+    pub backend_name: String,
+    pub runner_profile: RunnerProfile,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunnerProfileDeclarationWire {
+    #[serde(rename = "$schema", default, deserialize_with = "deserialize_some")]
+    schema: Option<String>,
+    schema_version: String,
+    backend_name: String,
+    #[serde(deserialize_with = "deserialize_map_only")]
+    runner_profile: RunnerProfile,
+}
+
+/// Typed errors raised when reading a backend descriptor or one of its
+/// runner profile declarations. `path` names the file at fault.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendDescriptorError {
     #[error("backend descriptor file `{path}` does not exist")]
@@ -253,34 +292,134 @@ pub enum BackendDescriptorError {
 
     #[error("backend descriptor `{path}`: {message}")]
     Invalid { path: String, message: String },
+
+    #[error(
+        "backend descriptor `{second}`: runner profile `{id}` is already declared by `{first}`"
+    )]
+    DuplicateRunnerProfile {
+        id: String,
+        first: String,
+        second: String,
+    },
+
+    #[error("backend descriptor `{path}`: runner profile `{profile}` names package `{package}`, which is not installed")]
+    PackageNotInstalled {
+        path: String,
+        profile: String,
+        package: String,
+    },
+
+    #[error("backend descriptor `{path}`: cannot tell whether the packages of its runner profiles are installed: {detail}")]
+    PackageInventoryUnavailable { path: String, detail: String },
 }
 
 impl BackendDescriptor {
-    /// Read and parse the descriptor at `path`. Returns a typed error
+    /// Read the descriptor at `path` as installed: parsed, with the runner
+    /// profile declarations beside it merged in and every package a runner
+    /// profile names checked against dpkg. Returns a typed error
     /// distinguishing "file is missing" from "file is malformed" so
     /// callers (doctor probes, deploy compatibility) can surface
     /// actionable findings without ambiguity.
     ///
     /// # Errors
     ///
-    /// Returns [`BackendDescriptorError`] for missing, malformed,
-    /// version-mismatched, or semantically invalid descriptors.
+    /// Returns [`BackendDescriptorError`] for a missing, malformed,
+    /// version-mismatched, or semantically invalid descriptor, and for
+    /// each refusal [`Self::read_with_inventory`] lists.
     pub fn read_from(path: &Path) -> Result<Self, BackendDescriptorError> {
-        let raw = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(BackendDescriptorError::Missing {
-                    path: path.display().to_string(),
+        Self::read_with_inventory(path, &DpkgInventory::default())
+    }
+
+    /// [`Self::read_from`] with the installed packages taken from
+    /// `inventory`, which is asked only when a runner profile exists.
+    ///
+    /// Declarations are the `*.json` files of
+    /// [`RUNNER_PROFILE_DECLARATION_DIR`] beside `path`, merged in file
+    /// name order after the descriptor's own profiles. Other entries of
+    /// that directory are not declarations and are not read; a missing
+    /// directory declares nothing.
+    ///
+    /// # Errors
+    ///
+    /// The whole descriptor is refused, never a single profile: when a
+    /// declaration cannot be read, is malformed or names another backend;
+    /// when two sources declare one profile id; when a profile names a
+    /// package that is not installed; and when `inventory` cannot answer.
+    pub fn read_with_inventory(
+        path: &Path,
+        inventory: &dyn PackageInventory,
+    ) -> Result<Self, BackendDescriptorError> {
+        let mut descriptor = Self::parse_with_path(&read_text(path, true)?, path)?;
+        let mut sources: BTreeMap<String, PathBuf> = descriptor
+            .runner_profiles
+            .iter()
+            .map(|profile| (profile.id.clone(), path.to_path_buf()))
+            .collect();
+        let directory = path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(RUNNER_PROFILE_DECLARATION_DIR);
+        for file in declaration_files(&directory)? {
+            let declaration =
+                RunnerProfileDeclaration::parse_with_path(&read_text(&file, false)?, &file)?;
+            if declaration.backend_name != descriptor.backend_name {
+                return Err(BackendDescriptorError::Invalid {
+                    path: file.display().to_string(),
+                    message: format!(
+                        "declares a runner profile of backend `{}` beside the descriptor of `{}`",
+                        declaration.backend_name, descriptor.backend_name
+                    ),
                 });
             }
-            Err(source) => {
-                return Err(BackendDescriptorError::Io {
-                    path: path.display().to_string(),
-                    source,
+            let id = declaration.runner_profile.id.clone();
+            if let Some(first) = sources.get(&id) {
+                return Err(BackendDescriptorError::DuplicateRunnerProfile {
+                    id,
+                    first: first.display().to_string(),
+                    second: file.display().to_string(),
                 });
             }
-        };
-        Self::parse_with_path(&raw, path)
+            sources.insert(id, file);
+            descriptor.runner_profiles.push(declaration.runner_profile);
+        }
+        descriptor.require_installed_packages(path, &sources, inventory)?;
+        Ok(descriptor)
+    }
+
+    fn require_installed_packages(
+        &self,
+        path: &Path,
+        sources: &BTreeMap<String, PathBuf>,
+        inventory: &dyn PackageInventory,
+    ) -> Result<(), BackendDescriptorError> {
+        let names: BTreeSet<&str> = self
+            .runner_profiles
+            .iter()
+            .flat_map(|profile| profile.packages.iter().map(String::as_str))
+            .collect();
+        if names.is_empty() {
+            return Ok(());
+        }
+        let installed = inventory.installed(&names).map_err(|detail| {
+            BackendDescriptorError::PackageInventoryUnavailable {
+                path: path.display().to_string(),
+                detail,
+            }
+        })?;
+        for profile in &self.runner_profiles {
+            if let Some(package) = profile.packages.iter().find(|p| !installed.contains(*p)) {
+                return Err(BackendDescriptorError::PackageNotInstalled {
+                    path: sources
+                        .get(&profile.id)
+                        .map_or(path, PathBuf::as_path)
+                        .display()
+                        .to_string(),
+                    profile: profile.id.clone(),
+                    package: package.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Parse a JSON descriptor from a string. `path_for_diagnostics`
@@ -386,6 +525,96 @@ impl BackendDescriptor {
     pub fn requires_pytorch(&self) -> bool {
         self.pytorch.as_ref().is_some_and(|p| p.required)
     }
+}
+
+impl RunnerProfileDeclaration {
+    /// Parse one declaration. `path_for_diagnostics` names the file in
+    /// errors, as for [`BackendDescriptor::parse_with_path`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackendDescriptorError`] when the JSON is malformed, the
+    /// schema version is missing or unsupported, or the profile breaks a
+    /// runner profile rule.
+    pub fn parse_with_path(
+        text: &str,
+        path_for_diagnostics: &Path,
+    ) -> Result<Self, BackendDescriptorError> {
+        let path = || path_for_diagnostics.display().to_string();
+        let malformed = |source| BackendDescriptorError::Malformed {
+            path: path(),
+            source,
+        };
+        let value: serde_json::Value = serde_json::from_str(text).map_err(malformed)?;
+        if let Some(observed) = value.get("schema_version").and_then(|v| v.as_str()) {
+            if observed != SCHEMA_VERSION {
+                return Err(BackendDescriptorError::UnsupportedSchemaVersion {
+                    path: path(),
+                    got: observed.to_string(),
+                    expected: SCHEMA_VERSION,
+                });
+            }
+        }
+        let wire: RunnerProfileDeclarationWire = deserialize_map_only(value).map_err(malformed)?;
+        let parsed = Self {
+            schema: wire.schema,
+            schema_version: wire.schema_version,
+            backend_name: wire.backend_name,
+            runner_profile: wire.runner_profile,
+        };
+        let invalid = |message: String| BackendDescriptorError::Invalid {
+            path: path(),
+            message,
+        };
+        if parsed.backend_name.trim().is_empty() {
+            return Err(invalid("`backend_name` must be non-empty".into()));
+        }
+        parsed.runner_profile.check().map_err(invalid)?;
+        Ok(parsed)
+    }
+}
+
+/// The text of `path`. A descriptor that is absent is `Missing`; a
+/// declaration that vanished after it was listed is an I/O refusal.
+fn read_text(path: &Path, absent_is_missing: bool) -> Result<String, BackendDescriptorError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if absent_is_missing && e.kind() == std::io::ErrorKind::NotFound => {
+            Err(BackendDescriptorError::Missing {
+                path: path.display().to_string(),
+            })
+        }
+        Err(source) => Err(BackendDescriptorError::Io {
+            path: path.display().to_string(),
+            source,
+        }),
+    }
+}
+
+/// The `*.json` entries of `directory` in file name order; none when the
+/// directory does not exist.
+fn declaration_files(directory: &Path) -> Result<Vec<PathBuf>, BackendDescriptorError> {
+    let io = |source| BackendDescriptorError::Io {
+        path: directory.display().to_string(),
+        source,
+    };
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(io(source)),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let file = entry.map_err(io)?.path();
+        if file
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            files.push(file);
+        }
+    }
+    files.sort();
+    Ok(files)
 }
 
 impl RunnerProfile {

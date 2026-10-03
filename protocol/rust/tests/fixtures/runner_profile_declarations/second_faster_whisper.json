@@ -1,0 +1,11 @@
+{
+  "schema_version": "0.1",
+  "backend_name": "python_pytorch",
+  "runner_profile": {
+    "id": "faster_whisper",
+    "interpreter": "/opt/another-speech-runtime/bin/python",
+    "environment_root": "/opt/another-speech-runtime",
+    "packages": ["another-speech-runtime"],
+    "compute_types": ["int8"]
+  }
+}

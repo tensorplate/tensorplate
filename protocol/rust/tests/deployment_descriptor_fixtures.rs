@@ -4,12 +4,16 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use serde_json::{json, Value};
-use tensorplate_protocol::backend_descriptor::{BackendDescriptor, RunnerProfile};
+use tensorplate_protocol::backend_descriptor::{
+    BackendDescriptor, RunnerProfile, RUNNER_PROFILE_DECLARATION_DIR,
+};
 use tensorplate_protocol::canonical_json::{canonicalize, sha256_digest};
+use tensorplate_protocol::package_inventory::PackageInventory;
 use tensorplate_protocol::{
     parse_bundle, AdmissionMode, DeploymentDescriptor, DeploymentDescriptorError, DescriptorInputs,
     DomainQuotaBytes, ErrorCode, MemberQuota, ProtocolError, CANONICAL_JSON_VERSION,
@@ -205,6 +209,76 @@ fn committed_descriptors_are_what_the_speech_bundles_derive() {
     for fixture in [STT, STT_RESTART, TTS] {
         let expected = DeploymentDescriptor::from_json(&read(fixture)).expect("fixture");
         assert_eq!(derive(fixture), expected, "{fixture}");
+    }
+}
+
+/// A package database in which every package is installed.
+struct EveryPackage;
+
+impl PackageInventory for EveryPackage {
+    fn installed(&self, names: &BTreeSet<&str>) -> Result<BTreeSet<String>, String> {
+        Ok(names.iter().map(ToString::to_string).collect())
+    }
+}
+
+/// The runner profiles the descriptor reader finds on a host where the
+/// packaged descriptor and these profiles' packaged declarations are
+/// installed.
+fn profiles_installed_by(declarations: &[&str]) -> Vec<RunnerProfile> {
+    let root = tempfile::tempdir().expect("tempdir");
+    let backend = root.path().join("python_pytorch");
+    let directory = backend.join(RUNNER_PROFILE_DECLARATION_DIR);
+    std::fs::create_dir_all(&directory).expect("directories");
+    let descriptor = backend.join("backend.json");
+    std::fs::copy(
+        repo_path("packaging/backend-metadata/python_pytorch.json"),
+        &descriptor,
+    )
+    .expect("descriptor");
+    for id in declarations {
+        let file = format!("{id}.json");
+        std::fs::copy(
+            repo_path("packaging/backend-metadata/runner_profiles").join(&file),
+            directory.join(&file),
+        )
+        .expect("declaration");
+    }
+    BackendDescriptor::read_with_inventory(&descriptor, &EveryPackage)
+        .expect("installed descriptor")
+        .runner_profiles
+}
+
+#[test]
+fn a_bundles_runner_resolves_against_the_profiles_the_installed_packages_declare() {
+    let both = profiles_installed_by(&["faster_whisper", "kokoro"]);
+    for fixture in [STT, STT_RESTART, TTS] {
+        let expected = DeploymentDescriptor::from_json(&read(fixture)).expect("fixture");
+        let derived = derive_with(fixture, &both, |_| {}).expect("derive");
+        assert_eq!(derived, expected, "{fixture}");
+    }
+
+    for (installed, its_bundle, other_bundle, missing) in [
+        ("faster_whisper", STT, TTS, "kokoro"),
+        ("kokoro", TTS, STT, "faster_whisper"),
+    ] {
+        let profiles = profiles_installed_by(&[installed]);
+        let expected = DeploymentDescriptor::from_json(&read(its_bundle)).expect("fixture");
+        let derived = derive_with(its_bundle, &profiles, |_| {}).expect("its own bundle");
+        assert_eq!(derived, expected, "{installed}");
+        let err = derive_with(other_bundle, &profiles, |_| {}).expect_err("the other bundle");
+        assert!(
+            matches!(&err, DeploymentDescriptorError::UnknownRunnerProfile(id) if id == missing),
+            "{installed}: {err}"
+        );
+    }
+
+    let neither = profiles_installed_by(&[]);
+    for (fixture, missing) in [(STT, "faster_whisper"), (TTS, "kokoro")] {
+        let err = derive_with(fixture, &neither, |_| {}).expect_err("no profile installed");
+        assert!(
+            matches!(&err, DeploymentDescriptorError::UnknownRunnerProfile(id) if id == missing),
+            "{fixture}: {err}"
+        );
     }
 }
 

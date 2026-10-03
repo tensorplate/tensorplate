@@ -54,6 +54,7 @@ pub mod memory_budget;
 pub mod memory_observation;
 pub mod metric_event;
 pub mod model_spec;
+pub mod package_inventory;
 pub mod platform_memory_profile;
 pub mod provisioning_manifest;
 pub mod python_pytorch_ipc;

@@ -46,7 +46,8 @@ packaging/
 │   ├── build-deb.sh                Source-tree helper for dpkg-buildpackage.
 │   └── ...                         Maintainer-script helpers installed by tensorplate-common.
 ├── speech-runtime/                 Lock, builder and loader for the tensorplate-speech-runtime-* packages; see its README.
-└── backend-metadata/               JSON descriptors consumed by doctor + agent for backend detection.
+└── backend-metadata/               JSON descriptors consumed by doctor + agent for backend detection;
+                                    runner_profiles/ holds the declaration each speech profile package installs.
 ```
 
 ## Package split

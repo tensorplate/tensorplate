@@ -1,0 +1,6 @@
+nothing-installed 1
+inside-trigger 0
+each-state 1
+inside-trigger-during-purge 0
+after-unpack-run 1
+triggers-deferred 1
