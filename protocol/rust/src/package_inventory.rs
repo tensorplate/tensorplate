@@ -345,8 +345,28 @@ mod tests {
     }
 
     fn ask(program: &Path, names: &[&str]) -> Result<BTreeSet<String>, String> {
-        DpkgInventory::with_program(program, Duration::from_secs(5))
-            .installed(&names.iter().copied().collect())
+        ask_within(program, names, Duration::from_secs(5))
+    }
+
+    /// Asks the stub again while the kernel refuses to execute it: a test
+    /// on another thread that forks in the instant the stub is being
+    /// written holds it open for writing until its own exec.
+    fn ask_within(
+        program: &Path,
+        names: &[&str],
+        timeout: Duration,
+    ) -> Result<BTreeSet<String>, String> {
+        let inventory = DpkgInventory::with_program(program, timeout);
+        let names = names.iter().copied().collect();
+        for _ in 0..500 {
+            match inventory.installed(&names) {
+                Err(e) if e.contains("Text file busy") => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                answer => return answer,
+            }
+        }
+        panic!("{} stayed busy", program.display());
     }
 
     #[test]
@@ -406,9 +426,7 @@ mod tests {
             &format!("echo $$ >{}\nexec sleep 60", pid_file.display()),
         );
         let started = Instant::now();
-        let err = DpkgInventory::with_program(program, Duration::from_secs(1))
-            .installed(&BTreeSet::from(["tprec-leaf"]))
-            .unwrap_err();
+        let err = ask_within(&program, &["tprec-leaf"], Duration::from_secs(1)).unwrap_err();
         assert!(err.contains("no exit within"), "{err}");
         assert!(
             started.elapsed() < Duration::from_secs(30),

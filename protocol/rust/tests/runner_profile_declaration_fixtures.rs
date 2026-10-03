@@ -84,6 +84,17 @@ fn stt_with(pointer: &str, value: Option<Value>) -> Value {
 fn schema_refused_cases() -> Vec<(&'static str, Value)> {
     vec![
         ("an array", json!([read_json(STT)])),
+        (
+            // The members in declaration order: a derived reader would
+            // take it for the object.
+            "its members as an array",
+            json!([
+                null,
+                "0.1",
+                "python_pytorch",
+                read_json(STT)["runner_profile"]
+            ]),
+        ),
         ("missing schema_version", stt_with("/schema_version", None)),
         (
             "null schema_version",
@@ -104,6 +115,20 @@ fn schema_refused_cases() -> Vec<(&'static str, Value)> {
             stt_with(
                 "/runner_profile",
                 Some(json!([read_json(STT)["runner_profile"]])),
+            ),
+        ),
+        (
+            "a profile's members as an array",
+            stt_with(
+                "/runner_profile",
+                Some(json!([
+                    "faster_whisper",
+                    "/usr/lib/tensorplate/speech-runtime/bin/python",
+                    "/usr/lib/tensorplate/speech-runtime",
+                    [],
+                    ["tensorplate-speech-runtime-ct2"],
+                    ["float16"]
+                ])),
             ),
         ),
         (
@@ -371,9 +396,18 @@ fn both_packages_give_the_merged_fixtures_view_and_one_question() {
 
 #[test]
 fn declarations_merge_in_file_name_order() {
-    let (_root, path) = install(BASE, &json!({"2.json": STT, "1.json": TTS}));
+    // Eight files written in an order that is not their names' order; a
+    // directory listing returns them in neither.
+    let (_root, path) = install(BASE, &json!({}));
+    let directory = path.with_file_name(RUNNER_PROFILE_DECLARATION_DIR);
+    for n in [5, 2, 7, 0, 3, 6, 1, 4] {
+        let declaration = stt_with("/runner_profile/id", Some(json!(format!("profile_{n}"))));
+        std::fs::write(directory.join(format!("{n}.json")), declaration.to_string())
+            .expect("write");
+    }
     let read = BackendDescriptor::read_with_inventory(&path, &Unconditional).expect("reads");
-    assert_eq!(ids(&read), ["kokoro", "faster_whisper"]);
+    let expected: Vec<String> = (0..8).map(|n| format!("profile_{n}")).collect();
+    assert_eq!(ids(&read), expected);
 }
 
 /// A package database in which every package is installed.
