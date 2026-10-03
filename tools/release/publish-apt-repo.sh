@@ -45,6 +45,9 @@ Options:
   --allow-unverified-assets
                          Skip cosign bundle verification. Staging and
                          container tests only; never for production.
+  --with-speech-runtime  Pool the tensorplate-speech-runtime packages found
+                         in the assets. Without it they are left out of the
+                         pool: they redistribute third-party libraries.
 EOF
 }
 
@@ -67,6 +70,7 @@ COMPONENT="main"
 ARCHITECTURES="arm64 amd64"
 COSIGN_IDENTITY=""
 ALLOW_UNVERIFIED=0
+WITH_SPEECH_RUNTIME=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -80,6 +84,7 @@ while [[ $# -gt 0 ]]; do
     --architectures) ARCHITECTURES="${2:-}"; shift 2 ;;
     --cosign-identity) COSIGN_IDENTITY="${2:-}"; shift 2 ;;
     --allow-unverified-assets) ALLOW_UNVERIFIED=1; shift ;;
+    --with-speech-runtime) WITH_SPEECH_RUNTIME=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option '$1'" ;;
   esac
@@ -175,12 +180,24 @@ if [[ -n "$EXISTING_POOL" ]]; then
   note "carried ${staged} package(s) forward from the existing pool"
 fi
 new_count=0
+left_out=0
 while IFS= read -r deb; do
+  case "$(basename -- "$deb")" in
+    tensorplate-speech-runtime_*|tensorplate-speech-runtime-*)
+      if ((! WITH_SPEECH_RUNTIME)); then
+        left_out=$((left_out + 1))
+        continue
+      fi
+      ;;
+  esac
   stage_deb "$deb"
   new_count=$((new_count + 1))
 done < <(find "$ASSETS_DIR" -maxdepth 1 -type f -name '*.deb')
 ((new_count > 0)) || die "no .deb assets found in $ASSETS_DIR"
 note "staged ${new_count} package(s) from release assets"
+if ((left_out > 0)); then
+  note "left ${left_out} speech runtime package(s) out of the pool; --with-speech-runtime pools them"
+fi
 
 note "generating package indexes"
 for arch in $ARCHITECTURES; do

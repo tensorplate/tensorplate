@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_artifact_identity import (  # noqa: E402
     DPKG_DEB_STUB,
+    SPEECH_RUNTIME_PACKAGES,
     fixture_control,
     github_served_name,
 )
@@ -49,6 +50,7 @@ FIXTURE_SOURCES = (
     "packaging/version.sh",
     "packaging/scripts/install.sh",
     "packaging/apt/tensorplate-archive-keyring.asc",
+    "tools/release/stage-debian-changelog.sh",
     PROFILE,
 )
 
@@ -686,7 +688,7 @@ class ReleaseStagingTests(BuilderFixture):
         for step in (["git", "add", "-A"], ["git", *identity, "commit", "-qm", "fixture"]):
             subprocess.run(step, cwd=self.repo, check=True, capture_output=True)
 
-    def build(self, tag: str, deb_version: str, python_version: str):
+    def build(self, tag: str, deb_version: str, python_version: str, *extra: str):
         """Run the release build for tag, with the amd64 set and SDK staged."""
         # The amd64 runtime set, which the release job moves into the
         # repository's parent before the build, as dpkg named it.
@@ -702,7 +704,7 @@ class ReleaseStagingTests(BuilderFixture):
             [str(BUILD_SCRIPT), "--version", "0.2.1", "--tag", tag,
              "--deb-version", deb_version, "--python-version", python_version,
              "--skip-tag-verify", "--artifacts-dir", "artifacts", "--arch", "arm64",
-             "--sdk-dist-dir", str(sdk)],
+             "--sdk-dist-dir", str(sdk), *extra],
             cwd=self.repo,
             env=self.environment("arm64", {"FIXTURE_CMAKE_STATUS": "0"}),
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -715,7 +717,18 @@ class ReleaseStagingTests(BuilderFixture):
                     ("tensorplate-apt-source", "all")]
         packages += [(package, "arm64") for package in SECONDARY_PACKAGES]
         packages += [(package, "amd64") for package in SECONDARY_PACKAGES]
+        packages += [(package, "amd64") for package in self.speech_runtime]
         return sorted(packages)
+
+    # The family this case expects the build to publish; none by default.
+    speech_runtime: tuple[str, ...] = ()
+
+    def stage_speech_runtime(self, deb_version: str, packages=SPEECH_RUNTIME_PACKAGES) -> None:
+        """What the speech runtime job leaves in the repository's parent."""
+        for package in packages:
+            (self.root / f"{package}_{deb_version}-1_amd64.deb").write_text(
+                fixture_control(package, f"{deb_version}-1", "amd64", "speech runtime job")
+            )
 
     def assert_published_as(self, artifacts: Path, tag: str, deb_version: str) -> None:
         served = sorted(
@@ -755,6 +768,37 @@ class ReleaseStagingTests(BuilderFixture):
             sorted(path.name for path in artifacts.glob("*.deb")),
             sorted(path.name for path in self.root.glob("*.deb")),
         )
+
+
+    def test_a_build_asked_for_the_speech_runtime_publishes_the_whole_family(self) -> None:
+        self.stage_speech_runtime(RELEASE_DEB_VERSION)
+        self.speech_runtime = SPEECH_RUNTIME_PACKAGES
+        result, artifacts = self.build(
+            RELEASE_TAG, RELEASE_DEB_VERSION, "0.2.1rc1", "--with-speech-runtime")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(len(list(artifacts.glob("*.deb"))), 21)
+        self.assert_published_as(artifacts, RELEASE_TAG, RELEASE_DEB_VERSION)
+
+    def test_a_build_not_asked_for_it_leaves_a_staged_family_out(self) -> None:
+        # A rehearsal's packages can outlive it on a persistent runner.
+        self.stage_speech_runtime(RELEASE_DEB_VERSION)
+        result, artifacts = self.build(RELEASE_TAG, RELEASE_DEB_VERSION, "0.2.1rc1")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(len(list(artifacts.glob("*.deb"))), 13)
+        self.assert_published_as(artifacts, RELEASE_TAG, RELEASE_DEB_VERSION)
+
+    def test_a_build_asked_for_it_refuses_an_incomplete_family(self) -> None:
+        self.stage_speech_runtime(RELEASE_DEB_VERSION, SPEECH_RUNTIME_PACKAGES[:-1])
+        # Another build's copy of the missing package does not stand in for it.
+        self.stage_speech_runtime("0.2.1", SPEECH_RUNTIME_PACKAGES[-1:])
+        result, artifacts = self.build(
+            RELEASE_TAG, RELEASE_DEB_VERSION, "0.2.1rc1", "--with-speech-runtime")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(
+            f"expected exactly one {SPEECH_RUNTIME_PACKAGES[-1]}_{RELEASE_DEB_VERSION}-*_amd64.deb",
+            result.stdout,
+        )
+        self.assertFalse((artifacts / "SHA256SUMS").exists(), result.stdout)
 
 
 class ReleaseStagingRouteTests(unittest.TestCase):

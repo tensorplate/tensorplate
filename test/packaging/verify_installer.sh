@@ -408,4 +408,34 @@ if bash "${installer}" --dry-run --cli-only --with-python-backend >"${td}/cli-co
 fi
 grep -q "cannot be combined" "${td}/cli-conflict.err"
 
+# The speech runtime opt-in: runtime mode on the x86_64 platform only.
+TP_INSTALL_NV_TEGRA_RELEASE="${td}/absent-nv-tegra" \
+TP_INSTALL_OS_RELEASE="${td}/os-release.noble" \
+TP_INSTALL_NVIDIA_VERSION="${td}/nvidia-version" \
+TP_INSTALL_ARCH="x86_64" \
+TP_INSTALL_DEB_ARCH="amd64" \
+  bash "${installer}" --dry-run --yes --with-speech-runtime >"${td}/speech.out" 2>"${td}/speech.err"
+grep -q "Would also install the speech runtime packages the release publishes for amd64 (tensorplate-speech-runtime and its components) and tensorplate-backend-python-pytorch; refused if it publishes none." "${td}/speech.out"
+if grep -q "speech runtime" "${td}/x86.out"; then
+  echo "FAIL: a plain install plans the speech runtime packages" >&2
+  exit 1
+fi
+
+if TP_INSTALL_NV_TEGRA_RELEASE="${td}/nv-tegra.supported" \
+   TP_INSTALL_OS_RELEASE="${td}/os-release.supported" \
+   TP_INSTALL_DEVICE_MODEL="${td}/model.supported" \
+   TP_INSTALL_ARCH="aarch64" \
+   TP_INSTALL_DEB_ARCH="arm64" \
+     bash "${installer}" --dry-run --yes --with-speech-runtime >"${td}/speech-arm.out" 2>"${td}/speech-arm.err"; then
+  echo "FAIL: --with-speech-runtime unexpectedly passed on arm64" >&2
+  exit 1
+fi
+grep -q -- "--with-speech-runtime needs an amd64 host" "${td}/speech-arm.err"
+
+if bash "${installer}" --dry-run --cli-only --with-speech-runtime >"${td}/speech-cli.out" 2>"${td}/speech-cli.err"; then
+  echo "FAIL: --cli-only with --with-speech-runtime unexpectedly passed" >&2
+  exit 1
+fi
+grep -q -- "--with-speech-runtime cannot be combined with --cli-only" "${td}/speech-cli.err"
+
 echo "verify_installer: ok"

@@ -38,6 +38,21 @@ readonly SECONDARY_ARCH_PACKAGES=(
 # The secondary set is built on the oldest LTS it must run on, so its
 # shared-library floor admits both supported Ubuntu releases.
 readonly SECONDARY_TARGET_OS="Ubuntu 22.04 LTS / 24.04 LTS (x86_64)"
+# In an artifact set only under --with-speech-runtime. In lockstep with
+# build-release-artifacts.sh and the stanzas in packaging/debian/control.
+readonly SPEECH_RUNTIME_FAMILY="tensorplate-speech-runtime"
+readonly SPEECH_RUNTIME_ARCH="amd64"
+readonly SPEECH_RUNTIME_TARGET_OS="Ubuntu 24.04 LTS (x86_64)"
+readonly SPEECH_RUNTIME_PACKAGES=(
+  tensorplate-speech-runtime
+  tensorplate-speech-runtime-base
+  tensorplate-speech-runtime-cublas
+  tensorplate-speech-runtime-vad
+  tensorplate-speech-runtime-ct2
+  tensorplate-speech-runtime-cuda
+  tensorplate-speech-runtime-torch
+  tensorplate-speech-runtime-kokoro
+)
 readonly APPROVED_PREPARE_FILES=(
   CMakeLists.txt
   Cargo.toml
@@ -87,6 +102,11 @@ Common options:
                             and checksums without requiring a local annotated tag.
   --allow-snapshot-version  Allow X.Y.Z~dev.YYYYMMDD.gitsha for unreleased
                             local-source snapshot manifest/verify operations.
+  --with-speech-runtime     The artifact set carries the speech runtime
+                            package family: manifest, verify, preflight and
+                            publish then require all of it, for amd64.
+                            Without the flag they refuse a set that carries
+                            any of it.
   --dry-run                 Print intended action without mutating repository or GitHub state.
   --execute                 Execute a mutating operation.
   --push                    Push the release tag after cut. The trunk is
@@ -223,6 +243,7 @@ parse_common_args() {
   SKIP_CI=0
   SKIP_TAG_VERIFY=0
   ALLOW_SNAPSHOT_VERSION=0
+  WITH_SPEECH_RUNTIME=0
   DRY_RUN=0
   EXECUTE=0
   PUSH=0
@@ -252,6 +273,7 @@ parse_common_args() {
       --skip-ci) SKIP_CI=1; shift ;;
       --skip-tag-verify) SKIP_TAG_VERIFY=1; shift ;;
       --allow-snapshot-version) ALLOW_SNAPSHOT_VERSION=1; shift ;;
+      --with-speech-runtime) WITH_SPEECH_RUNTIME=1; shift ;;
       --dry-run) DRY_RUN=1; shift ;;
       --execute) EXECUTE=1; shift ;;
       --push) PUSH=1; shift ;;
@@ -1289,10 +1311,16 @@ After it merges: git switch ${RELEASE_BRANCH} && git pull --ff-only, then re-run
 }
 
 manifest_python() {
-  local secondary_packages
+  local secondary_packages speech_packages
   secondary_packages="$(printf '%s,' "${SECONDARY_ARCH_PACKAGES[@]}")"
+  speech_packages="$(printf '%s,' "${SPEECH_RUNTIME_PACKAGES[@]}")"
   export TP_DEB_VERSION="${DEB_VERSION:-$VERSION}"
   export TP_PYTHON_VERSION="${PYTHON_VERSION:-$VERSION}"
+  export TP_SPEECH_RUNTIME_FAMILY="$SPEECH_RUNTIME_FAMILY"
+  export TP_SPEECH_RUNTIME_ARCH="$SPEECH_RUNTIME_ARCH"
+  export TP_SPEECH_RUNTIME_TARGET_OS="$SPEECH_RUNTIME_TARGET_OS"
+  export TP_SPEECH_RUNTIME_PACKAGES="${speech_packages%,}"
+  export TP_WITH_SPEECH_RUNTIME="${WITH_SPEECH_RUNTIME:-0}"
   python3 - "$VERSION" "$TAG" "$ARTIFACTS_DIR" "$MANIFEST" "$CHECKSUMS" "$TARGET_OS" "$TARGET_ARCH" "$(git rev-parse HEAD)" "$RELEASE_BRANCH" "$VALIDATION_REPORT" "$CLEAN_ROOM_REPORT" "$SECONDARY_ARCH" "${secondary_packages%,}" "$SECONDARY_TARGET_OS" <<'PY'
 import datetime
 import hashlib
@@ -1315,6 +1343,11 @@ from pathlib import Path
 deb_version = os.environ.get("TP_DEB_VERSION") or version
 python_version = os.environ.get("TP_PYTHON_VERSION") or version
 secondary_packages = set(secondary_packages_raw.split(",")) if secondary_packages_raw else set()
+speech_family = os.environ["TP_SPEECH_RUNTIME_FAMILY"]
+speech_arch = os.environ["TP_SPEECH_RUNTIME_ARCH"]
+speech_target_os = os.environ["TP_SPEECH_RUNTIME_TARGET_OS"]
+speech_packages = os.environ["TP_SPEECH_RUNTIME_PACKAGES"].split(",")
+with_speech = os.environ["TP_WITH_SPEECH_RUNTIME"] == "1"
 root = Path(artifacts_dir)
 
 
@@ -1377,11 +1410,34 @@ def sha256(path):
             h.update(chunk)
     return h.hexdigest()
 
+# The family enters a manifest whole and only on request: its packages
+# redistribute third-party libraries, so a stray one is never signed in.
+staged_speech = sorted(
+    path.name
+    for path in root.glob("*.deb")
+    if path.name.split("_", 1)[0] == speech_family
+    or path.name.startswith(speech_family + "-")
+)
+if staged_speech and not with_speech:
+    raise SystemExit(
+        "speech runtime packages are staged, but this artifact set was not "
+        "asked to carry them (--with-speech-runtime): " + ", ".join(staged_speech)
+    )
+unknown_speech = [
+    name for name in staged_speech if name.split("_", 1)[0] not in speech_packages
+]
+if unknown_speech:
+    raise SystemExit(
+        "not a package of the speech runtime family: " + ", ".join(unknown_speech)
+    )
+expected_speech = speech_packages if with_speech else []
+
 artifacts = []
 missing = []
 seen = set()
 secondary_matches = []
-for package in required:
+for package in required + expected_speech:
+    speech = package in expected_speech
     matches = sorted(root.glob(f"{package}_*.deb"))
     if not matches:
         missing.append(package)
@@ -1417,12 +1473,18 @@ for package in required:
         # because staging refuses a name holding any other tilde, and held
         # to the package's control Version below.
         package_version = deb_version + file_version[len(published_deb_version):]
-        if parsed_package != package and parsed_package not in required:
+        if parsed_package != package and parsed_package not in required + expected_speech:
             raise SystemExit(
                 f"{path.name}: file name does not match a published package "
                 f"(parsed {parsed_package!r} while globbing {package!r})"
             )
-        if arch not in (target_arch, "all"):
+        if speech:
+            if arch != speech_arch:
+                raise SystemExit(
+                    f"{path.name}: {parsed_package} is published for architecture "
+                    f"{speech_arch} only"
+                )
+        elif arch not in (target_arch, "all"):
             # A foreign architecture is admissible only for a package that
             # the secondary runtime set declares. Anything else reaching the
             # artifacts directory is a staging mistake, and signing it into
@@ -1435,12 +1497,12 @@ for package in required:
         if key in seen:
             raise SystemExit(f"duplicate artifact for package/architecture: {key[0]} {key[1]}")
         seen.add(key)
-        if arch in (target_arch, "all"):
+        if speech or arch in (target_arch, "all"):
             target_matches.append(path.name)
         # Independent of the branch above, not an else: when the primary
         # target IS the secondary architecture, one artifact satisfies both
         # and an `else` would report the whole secondary set as absent.
-        if arch == secondary_arch:
+        if arch == secondary_arch and not speech:
             secondary_matches.append(parsed_package)
         control = control_version(path)
         if control != package_version:
@@ -1455,13 +1517,17 @@ for package in required:
                 "package": parsed_package,
                 "version": control,
                 "architecture": arch,
-                "target_os": target_os if arch in (target_arch, "all") else secondary_target_os,
+                "target_os": speech_target_os if speech
+                else target_os if arch in (target_arch, "all")
+                else secondary_target_os,
                 "size_bytes": path.stat().st_size,
                 "sha256": digest,
             }
         )
     if not target_matches:
-        missing.append(f"{package} ({target_arch} or all)")
+        missing.append(
+            f"{package} ({speech_arch})" if speech else f"{package} ({target_arch} or all)"
+        )
 
 if missing:
     raise SystemExit("missing package artifacts: " + ", ".join(missing))
@@ -1572,10 +1638,15 @@ verify_manifest_python() (
   # caller gets the same identity checks; the subshell lets preflight
   # report a tuple failure without exiting before it writes its report.
   require_version_tuple
-  local secondary_packages
+  local secondary_packages speech_packages
   secondary_packages="$(printf '%s,' "${SECONDARY_ARCH_PACKAGES[@]}")"
+  speech_packages="$(printf '%s,' "${SPEECH_RUNTIME_PACKAGES[@]}")"
   export TP_DEB_VERSION="${DEB_VERSION:-$VERSION}"
   export TP_PYTHON_VERSION="${PYTHON_VERSION:-$VERSION}"
+  export TP_SPEECH_RUNTIME_FAMILY="$SPEECH_RUNTIME_FAMILY"
+  export TP_SPEECH_RUNTIME_ARCH="$SPEECH_RUNTIME_ARCH"
+  export TP_SPEECH_RUNTIME_PACKAGES="${speech_packages%,}"
+  export TP_WITH_SPEECH_RUNTIME="${WITH_SPEECH_RUNTIME:-0}"
   python3 - "$1" "$2" "$3" "$4" "$5" "$SECONDARY_ARCH" "${secondary_packages%,}" <<'PY'
 import hashlib
 import json
@@ -1731,6 +1802,36 @@ if not snapshot:
     if absent:
         raise SystemExit(
             f"manifest is missing required {secondary_arch} packages: " + ", ".join(absent)
+        )
+speech_family = os.environ["TP_SPEECH_RUNTIME_FAMILY"]
+speech_arch = os.environ["TP_SPEECH_RUNTIME_ARCH"]
+speech_listed = {
+    (artifact["package"], artifact.get("architecture"))
+    for artifact in manifest.get("artifacts", [])
+    if isinstance(artifact.get("package"), str)
+    and (
+        artifact["package"] == speech_family
+        or artifact["package"].startswith(speech_family + "-")
+    )
+}
+if os.environ["TP_WITH_SPEECH_RUNTIME"] != "1":
+    if speech_listed:
+        raise SystemExit(
+            "manifest lists speech runtime packages, which this verification was "
+            "not told to expect (--with-speech-runtime): "
+            + ", ".join(sorted(f"{package} {arch}" for package, arch in speech_listed))
+        )
+else:
+    speech_expected = {
+        (package, speech_arch)
+        for package in os.environ["TP_SPEECH_RUNTIME_PACKAGES"].split(",")
+    }
+    if speech_listed != speech_expected:
+        raise SystemExit(
+            "manifest does not carry exactly the speech runtime family; missing: "
+            + (", ".join(sorted(f"{p} {a}" for p, a in speech_expected - speech_listed)) or "none")
+            + "; unexpected: "
+            + (", ".join(sorted(f"{p} {a}" for p, a in speech_listed - speech_expected)) or "none")
         )
 if not any(artifact.get("file") == "install.sh" for artifact in manifest.get("artifacts", [])):
     raise SystemExit("manifest is missing install.sh")

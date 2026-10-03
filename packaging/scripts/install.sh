@@ -12,6 +12,8 @@ set -euo pipefail
 readonly DEFAULT_VERSION="${TP_INSTALL_DEFAULT_VERSION:-0.3.1}"
 readonly DEFAULT_REPO="${TP_INSTALL_REPO:-tensorplate/tensorplate}"
 readonly OPTIONAL_PYTHON_PACKAGE="tensorplate-backend-python-pytorch"
+readonly SPEECH_RUNTIME_FAMILY="tensorplate-speech-runtime"
+readonly SPEECH_RUNTIME_ARCH="amd64"
 readonly CLI_PACKAGE="tensorplate-cli"
 readonly COMMON_PACKAGE="tensorplate-common"
 readonly AGENT_UNIT="tensorplate-agent"
@@ -26,6 +28,7 @@ readonly COSIGN_LINUX_ARM64_SHA256="17fd784737ca54d7d8a343c82da6c5d6dbdee971e666
 VERSION_INPUT="$DEFAULT_VERSION"
 INSTALL_MODE="runtime"
 WITH_PYTHON_BACKEND=0
+WITH_SPEECH_RUNTIME=0
 YES=0
 FORCE_OS=0
 STRICT_HARDWARE=0
@@ -49,6 +52,10 @@ Options:
                              Skips runtime OS/hardware validation, service enablement, and doctor.
   --with-python-backend      Install tensorplate-backend-python-pytorch in addition to core packages.
                              Runtime install mode only.
+  --with-speech-runtime      Install the speech runtime packages the release publishes
+                             (tensorplate-speech-runtime and its components), with
+                             tensorplate-backend-python-pytorch. Ubuntu 24.04 on x86_64 only.
+                             Refused when the release publishes none.
   --yes, -y                  Continue without interactive prompts; intended for unattended provisioning.
   --force-os                 Continue on an unsupported OS. This is unsupported and at your own risk.
                              Runtime install supports JetPack 6.x / L4T 36.x on Ubuntu 22.04 (arm64)
@@ -133,6 +140,10 @@ while (($# > 0)); do
       WITH_PYTHON_BACKEND=1
       shift
       ;;
+    --with-speech-runtime)
+      WITH_SPEECH_RUNTIME=1
+      shift
+      ;;
     --yes|-y)
       YES=1
       shift
@@ -213,6 +224,9 @@ else
 fi
 if [[ "$INSTALL_MODE" == "cli" && "$WITH_PYTHON_BACKEND" -eq 1 ]]; then
   die "--with-python-backend cannot be combined with --cli-only"
+fi
+if [[ "$INSTALL_MODE" == "cli" && "$WITH_SPEECH_RUNTIME" -eq 1 ]]; then
+  die "--with-speech-runtime cannot be combined with --cli-only"
 fi
 
 readonly REPO="$DEFAULT_REPO"
@@ -611,7 +625,8 @@ write_install_deb_list() {
   local include_python="$2"
   local mode="$3"
   local deb_arch="$4"
-  python3 - "$manifest" "$include_python" "$mode" "$deb_arch" "$OPTIONAL_PYTHON_PACKAGE" "$COMMON_PACKAGE" "$CLI_PACKAGE" <<'PY'
+  local include_speech="${5:-0}"
+  python3 - "$manifest" "$include_python" "$mode" "$deb_arch" "$OPTIONAL_PYTHON_PACKAGE" "$COMMON_PACKAGE" "$CLI_PACKAGE" "$include_speech" "$SPEECH_RUNTIME_FAMILY" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -623,6 +638,8 @@ deb_arch = sys.argv[4]
 optional_package = sys.argv[5]
 common_package = sys.argv[6]
 cli_package = sys.argv[7]
+include_speech = sys.argv[8] == "1"
+speech_family = sys.argv[9]
 if mode == "runtime":
     required = [
         common_package,
@@ -631,7 +648,7 @@ if mode == "runtime":
         "tensorplate-observability",
         cli_package,
     ]
-    if include_python:
+    if include_python or include_speech:
         required.append(optional_package)
 elif mode == "cli":
     required = [common_package, cli_package]
@@ -639,6 +656,26 @@ else:
     raise SystemExit(f"unknown install mode: {mode}")
 
 artifacts = manifest.get("artifacts", [])
+if include_speech:
+    # The signed manifest says which packages the family is at this release;
+    # apt refuses the install if one that another depends on is absent.
+    family = sorted({
+        artifact["package"]
+        for artifact in artifacts
+        if isinstance(artifact.get("package"), str)
+        and (
+            artifact["package"] == speech_family
+            or artifact["package"].startswith(speech_family + "-")
+        )
+        and artifact.get("architecture") == deb_arch
+    })
+    if speech_family not in family:
+        tag = manifest.get("release", {}).get("tag", "this release")
+        raise SystemExit(
+            f"{tag} does not publish the speech runtime packages for "
+            f"architecture {deb_arch}; --with-speech-runtime cannot be satisfied"
+        )
+    required.extend(family)
 selected = []
 for package in required:
     matches = []
@@ -663,6 +700,14 @@ for package in required:
 for name in selected:
     print(name)
 PY
+}
+
+# The package files this install takes from the manifest, one per line.
+# Called in a command substitution, so a manifest that cannot satisfy the
+# request stops the install instead of selecting nothing.
+select_install_debs() {
+  write_install_deb_list "$1" "$WITH_PYTHON_BACKEND" "$INSTALL_MODE" "$(host_deb_arch)" "$WITH_SPEECH_RUNTIME" ||
+    die "release ${TAG} does not provide the packages this install asks for; nothing was installed"
 }
 
 write_checksum_subset() {
@@ -697,19 +742,19 @@ download_and_verify_assets() {
   local checksums_path="${workdir}/SHA256SUMS"
   local bundle_path="${workdir}/SHA256SUMS.cosign.bundle"
   local file
-  local deb_arch
+  local selection
   local selected=()
 
   download_file "${RELEASE_URL}/${MANIFEST_NAME}" "$manifest_path"
   download_file "${RELEASE_URL}/SHA256SUMS" "$checksums_path"
   verify_checksums_signature "$checksums_path" "$workdir" "$bundle_path"
 
-  deb_arch="$(host_deb_arch)"
+  selection="$(select_install_debs "$manifest_path")" || exit 1
   while IFS= read -r file; do
     [[ -n "$file" ]] || continue
     selected+=("$file")
     [[ -f "${workdir}/${file}" ]] || download_file "${RELEASE_URL}/${file}" "${workdir}/${file}"
-  done < <(write_install_deb_list "$manifest_path" "$WITH_PYTHON_BACKEND" "$INSTALL_MODE" "$deb_arch")
+  done <<<"$selection"
 
   note "verifying downloaded assets with SHA256SUMS"
   (
@@ -725,7 +770,7 @@ copy_and_verify_local_assets() {
   local checksums_path="${workdir}/SHA256SUMS"
   local bundle_path="${workdir}/SHA256SUMS.cosign.bundle"
   local file
-  local deb_arch
+  local selection
   local selected=()
 
   [[ -f "${LOCAL_ARTIFACTS_DIR}/${MANIFEST_NAME}" ]] ||
@@ -737,14 +782,14 @@ copy_and_verify_local_assets() {
   cp -- "${LOCAL_ARTIFACTS_DIR}/SHA256SUMS" "$checksums_path"
   verify_checksums_signature "$checksums_path" "$LOCAL_ARTIFACTS_DIR" "$bundle_path"
 
-  deb_arch="$(host_deb_arch)"
+  selection="$(select_install_debs "$manifest_path")" || exit 1
   while IFS= read -r file; do
     [[ -n "$file" ]] || continue
     selected+=("$file")
     [[ -f "${LOCAL_ARTIFACTS_DIR}/${file}" ]] ||
       die "local artifact package is missing: ${LOCAL_ARTIFACTS_DIR}/${file}"
     cp -- "${LOCAL_ARTIFACTS_DIR}/${file}" "${workdir}/${file}"
-  done < <(write_install_deb_list "$manifest_path" "$WITH_PYTHON_BACKEND" "$INSTALL_MODE" "$deb_arch")
+  done <<<"$selection"
 
   note "verifying local artifacts with SHA256SUMS"
   (
@@ -758,14 +803,14 @@ install_packages() {
   local workdir="$1"
   local manifest_path="${workdir}/${MANIFEST_NAME}"
   local deb
-  local deb_arch
+  local selection
   local deb_paths=()
 
-  deb_arch="$(host_deb_arch)"
+  selection="$(select_install_debs "$manifest_path")" || exit 1
   while IFS= read -r deb; do
     [[ -n "$deb" ]] || continue
     deb_paths+=("./${deb}")
-  done < <(write_install_deb_list "$manifest_path" "$WITH_PYTHON_BACKEND" "$INSTALL_MODE" "$deb_arch")
+  done <<<"$selection"
 
   ((${#deb_paths[@]} > 0)) || die "manifest did not select any Debian packages to install"
 
@@ -907,6 +952,10 @@ dry_run_summary() {
     if ((WITH_PYTHON_BACKEND)); then
       printf 'Would also install %s.\n' "$OPTIONAL_PYTHON_PACKAGE"
     fi
+    if ((WITH_SPEECH_RUNTIME)); then
+      printf 'Would also install the speech runtime packages the release publishes for %s (%s and its components) and %s; refused if it publishes none.\n' \
+        "$SPEECH_RUNTIME_ARCH" "$SPEECH_RUNTIME_FAMILY" "$OPTIONAL_PYTHON_PACKAGE"
+    fi
     printf 'Would enable %s and %s, wait for %s, then run tensorplate doctor --output json.\n' \
       "$AGENT_UNIT" "$OBSERVABILITY_UNIT" "$AGENT_SOCKET_PATH"
   fi
@@ -919,6 +968,9 @@ main() {
   if [[ "$INSTALL_MODE" == "runtime" ]]; then
     validate_os
     validate_hardware
+    if ((WITH_SPEECH_RUNTIME)) && [[ "$(host_deb_arch)" != "$SPEECH_RUNTIME_ARCH" ]]; then
+      die "--with-speech-runtime needs an ${SPEECH_RUNTIME_ARCH} host: the speech runtime packages are built for Ubuntu 24.04 on x86_64, and this host is $(host_deb_arch)"
+    fi
   else
     note "CLI-only mode selected; skipping runtime OS and hardware validation"
   fi
@@ -969,6 +1021,9 @@ main() {
     fi
     if ((WITH_PYTHON_BACKEND)); then
       printf 'Installed optional Python/PyTorch backend package. Install the platform PyTorch stack separately if doctor reports it missing.\n'
+    fi
+    if ((WITH_SPEECH_RUNTIME)); then
+      printf 'Installed the speech runtime packages under /usr/lib/tensorplate/speech-runtime. Provision models with tensorplate bundle provision.\n'
     fi
     printf 'Next: use tensorplate status and tensorplate doctor for operational checks.\n'
   fi
