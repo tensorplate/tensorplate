@@ -21,6 +21,7 @@ verify_release_asset_names="test/release/test_release_asset_names.py"
 verify_build_source_identity="test/release/test_build_source_identity.py"
 verify_build_configuration="test/release/test_build_configuration.py"
 verify_changelog_fold="test/release/test_changelog_fold.py"
+verify_speech_runtime_release="test/release/test_speech_runtime_release.py"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -73,6 +74,7 @@ python3 "$verify_release_asset_names"
 python3 "$verify_build_source_identity"
 python3 "$verify_build_configuration"
 python3 "$verify_changelog_fold"
+python3 "$verify_speech_runtime_release"
 
 # Manifest generation reads each package's control Version with dpkg-deb,
 # and every fixture package below is a control-style text file. This
@@ -891,6 +893,11 @@ PYSDK
   stage_dir="$(mktemp -d)"; mkdir -p "$stage_dir/packaging/debian"
   printf 'tensorplate (0.2.1-1) unstable; urgency=medium\n\n  * Release.\n' \
     >"$stage_dir/packaging/debian/changelog"
+  # The builder stages the version with the tree's own script.
+  mkdir -p "$stage_dir/tools/release"
+  cp tools/release/stage-debian-changelog.sh "$stage_dir/tools/release/"
+  cp packaging/version.sh "$stage_dir/packaging/"
+  printf '0.2.1\n' >"$stage_dir/packaging/VERSION"
   # Read the staged line inside the subshell: write_staged_changelog
   # installs an EXIT trap that restores the tree's changelog, which in a
   # real build fires only after the packages are built.
@@ -911,7 +918,7 @@ PYSDK
   rm -rf "$stage_dir"
 
   python3 - "$workflow" <<'PYAMD'
-import subprocess, sys, tempfile, pathlib, yaml
+import shutil, subprocess, sys, tempfile, pathlib, yaml
 w = yaml.safe_load(open(sys.argv[1]))
 step = next(s for s in w["jobs"]["build_packages_amd64"]["steps"]
             if s.get("name") == "Build amd64 runtime packages")
@@ -919,6 +926,11 @@ body = step["run"].split("packaging/scripts/build-deb.sh")[0]
 d = tempfile.mkdtemp(); pathlib.Path(d, "packaging/debian").mkdir(parents=True)
 pathlib.Path(d, "packaging/debian/changelog").write_text(
     "tensorplate (0.2.1-1) unstable; urgency=medium\n\n  * Release.\n")
+# The step stages the version with the tree's own script.
+pathlib.Path(d, "tools/release").mkdir(parents=True)
+shutil.copy2("tools/release/stage-debian-changelog.sh", pathlib.Path(d, "tools/release"))
+shutil.copy2("packaging/version.sh", pathlib.Path(d, "packaging"))
+pathlib.Path(d, "packaging/VERSION").write_text("0.2.1\n")
 r = subprocess.run(["bash", "-c", body], cwd=d,
                    env={"DEB_VERSION": "0.2.1~rc.1", "PATH": "/usr/bin:/bin"},
                    capture_output=True, text=True)

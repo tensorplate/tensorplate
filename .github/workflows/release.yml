@@ -19,6 +19,14 @@ on:
         description: 'Optional source ref for build-only validation. Pass the commit the tag names, not a moving branch. Publish mode always uses the tag.'
         required: false
         type: string
+      speech_runtime:
+        description: 'Speech runtime package family. "stub" builds it from stub wheels to rehearse its job; refused with publish=true.'
+        required: false
+        default: 'off'
+        type: choice
+        options:
+          - 'off'
+          - stub
 
 # Permissions are scoped per job rather than granted workflow-wide. The
 # Jetson job builds the ARM64 artifacts with TensorRT SDK access; the hosted
@@ -51,6 +59,7 @@ jobs:
       notes: ${{ steps.meta.outputs.notes }}
       trunk_branch: ${{ steps.meta.outputs.trunk_branch }}
       publish: ${{ steps.meta.outputs.publish }}
+      speech_runtime: ${{ steps.meta.outputs.speech_runtime }}
       checkout_ref: ${{ steps.source.outputs.checkout_ref }}
       source_label: ${{ steps.source.outputs.source_label }}
 
@@ -68,6 +77,7 @@ jobs:
           INPUT_TAG: ${{ inputs.tag }}
           INPUT_PUBLISH: ${{ inputs.publish }}
           INPUT_SOURCE_REF: ${{ inputs.source_ref }}
+          INPUT_SPEECH_RUNTIME: ${{ inputs.speech_runtime }}
         run: |
           set -Eeuo pipefail
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
@@ -115,6 +125,25 @@ jobs:
             echo "::error::publish=true must run from the release tag ref $tag; use publish=false for branch build-only validation"
             exit 1
           fi
+          # No run publishes the speech runtime family: a tag push has no
+          # inputs and leaves it off, and `stub` builds rehearsal stand-ins.
+          speech_runtime="off"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && -n "$INPUT_SPEECH_RUNTIME" ]]; then
+            speech_runtime="$INPUT_SPEECH_RUNTIME"
+          fi
+          case "$speech_runtime" in
+            off) ;;
+            stub)
+              if [[ "$publish" == "true" ]]; then
+                echo "::error::speech_runtime=stub builds stand-in packages for a build-only rehearsal and is never published; use publish=false"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::speech_runtime must be off or stub; got '${speech_runtime}'"
+              exit 1
+              ;;
+          esac
           release_dir="dist/release/${tag}"
           # Releases are tagged off the trunk; no release branch is cut.
           # Keeping a maintenance line in sync with the trunk, and
@@ -136,6 +165,7 @@ jobs:
             echo "notes=docs/release/notes/v${version}.md"
             echo "trunk_branch=${trunk_branch}"
             echo "publish=${publish}"
+            echo "speech_runtime=${speech_runtime}"
             echo "checkout_ref=${checkout_ref}"
           } >>"$GITHUB_OUTPUT"
 
@@ -398,16 +428,9 @@ jobs:
           # any argument. A candidate build left this at the tree's final
           # version, so the amd64 packages were named 0.2.1 while the ARM
           # collector looked for 0.2.1~rc.1 and reported every one missing.
-          python3 - "$DEB_VERSION" <<'PYVER'
-          import sys
-          from pathlib import Path
-          path = Path("packaging/debian/changelog")
-          lines = path.read_text().splitlines()
-          head = lines[0]
-          lines[0] = f"tensorplate ({sys.argv[1]}-1) unstable; urgency=medium"
-          path.write_text("\n".join(lines) + "\n")
-          print(f"staged debian/changelog: {head!r} -> {lines[0]!r}")
-          PYVER
+          # The speech runtime job stages the same version the same way:
+          # its packages depend on this job's serving worker at exactly it.
+          tools/release/stage-debian-changelog.sh "$DEB_VERSION"
           # Binary-arch only: the architecture-independent packages
           # (tensorplate-common, the Python backend, the apt bootstrap) are
           # shared and are built once by the primary job.
@@ -493,6 +516,152 @@ jobs:
           path: dist/amd64/*.deb
           if-no-files-found: error
 
+  build_speech_runtime:
+    name: build speech runtime packages
+    needs: [meta, evidence_gate]
+    # Noble, not the jammy runner of the job above: the family's environment
+    # runs on Ubuntu 24.04's python3.12 and is built on that release.
+    #
+    # Gated per step, not with a job-level `if`: a skipped job skips every
+    # job downstream of it, and the whole publish chain is downstream.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Speech runtime family is off for this run
+        if: ${{ needs.meta.outputs.speech_runtime != 'stub' }}
+        shell: bash
+        run: echo "The speech runtime package family is not built or published by this run."
+
+      - name: Checkout release source
+        if: ${{ needs.meta.outputs.speech_runtime == 'stub' }}
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.meta.outputs.checkout_ref }}
+
+      # A response timeout turns a stalled mirror into an error a retry can
+      # recover; the amd64 job's copy of this step says why.
+      - name: Make apt fail fast and retry
+        if: ${{ needs.meta.outputs.speech_runtime == 'stub' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
+          apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
+            echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
+
+      # No setup-python in this job: the environment links the interpreter
+      # that builds it, which must be the distribution's /usr/bin/python3.12.
+      - name: Install speech runtime build dependencies
+        if: ${{ needs.meta.outputs.speech_runtime == 'stub' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            debhelper \
+            dh-exec \
+            dpkg-dev \
+            gnupg \
+            python3.12 \
+            python3.12-venv \
+            libespeak-ng1 \
+            espeak-ng-data
+
+      # Stub wheels only. A step that fetches the locked wheelhouse belongs
+      # here once a redistribution review clears the family. It will need four
+      # hosts (PyPI, download.pytorch.org, pypi.nvidia.com for the nvidia-*
+      # wheels, GitHub release assets), about 16 GB of disk at once for the
+      # wheelhouse, the staged environment and the packages, which the root
+      # volume does not reliably have free, and a longer timeout. A recorded
+      # build: docs/validation/evidence/speech-candidate-whisper-l4-2026-10-01/.
+      - name: Stage the speech runtime wheelhouse
+        if: ${{ needs.meta.outputs.speech_runtime == 'stub' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stage="${RUNNER_TEMP}/speech-runtime"
+          mkdir -p "$stage"
+          python3.12 test/packaging/speech_runtime_stub_wheelhouse.py \
+            "$stage" packaging/speech-runtime/lock
+          python3.12 packaging/speech-runtime/build-environment.py fetch \
+            --lock-dir "${stage}/lock" \
+            --wheelhouse "${stage}/wheelhouse" \
+            --work-dir "${stage}/fetch-work"
+
+      - name: Build speech runtime packages
+        if: ${{ needs.meta.outputs.speech_runtime == 'stub' }}
+        shell: bash
+        env:
+          DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
+        run: |
+          set -Eeuo pipefail
+          # The same staging as the amd64 job, so `tensorplate-serving
+          # (= ${binary:Version})` names the serving worker that job builds.
+          tools/release/stage-debian-changelog.sh "$DEB_VERSION"
+          stage="${RUNNER_TEMP}/speech-runtime"
+          DEB_BUILD_PROFILES=pkg.tensorplate.speech-runtime \
+          TP_SPEECH_RUNTIME_LOCK_DIR="${stage}/lock" \
+          TP_SPEECH_RUNTIME_WHEELHOUSE="${stage}/wheelhouse" \
+            packaging/scripts/build-deb.sh -B
+          mkdir -p dist/speech-runtime
+          for pkg in tensorplate-speech-runtime tensorplate-speech-runtime-base \
+                     tensorplate-speech-runtime-cublas tensorplate-speech-runtime-vad \
+                     tensorplate-speech-runtime-ct2 tensorplate-speech-runtime-cuda \
+                     tensorplate-speech-runtime-torch tensorplate-speech-runtime-kokoro; do
+            cp "../${pkg}_${DEB_VERSION}-1_amd64.deb" dist/speech-runtime/
+          done
+
+      - name: Assert speech runtime package closure
+        if: ${{ needs.meta.outputs.speech_runtime == 'stub' }}
+        shell: bash
+        env:
+          DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
+        run: |
+          set -Eeuo pipefail
+          shopt -s nullglob
+          debs=(dist/speech-runtime/*.deb)
+          shopt -u nullglob
+          ((${#debs[@]} == 8)) || {
+            echo "::error::expected the eight speech runtime packages; found ${#debs[@]}"
+            exit 1
+          }
+          # What the manifest writer and apt would refuse later, asserted
+          # here where the build is at hand.
+          for deb in "${debs[@]}"; do
+            version="$(dpkg-deb -f "$deb" Version)"
+            architecture="$(dpkg-deb -f "$deb" Architecture)"
+            depends="$(dpkg-deb -f "$deb" Depends)"
+            [[ "$version" == "${DEB_VERSION}-1" ]] || {
+              echo "::error::${deb} is version ${version}, not ${DEB_VERSION}-1"
+              exit 1
+            }
+            [[ "$architecture" == "amd64" ]] || {
+              echo "::error::${deb} is Architecture: ${architecture}, not amd64"
+              exit 1
+            }
+            grep -qF "tensorplate-serving (= ${DEB_VERSION}-1)" <<<"$depends" || {
+              echo "::error::${deb} does not depend on tensorplate-serving (= ${DEB_VERSION}-1): ${depends}"
+              exit 1
+            }
+          done
+
+      - name: Upload speech runtime packages
+        if: ${{ needs.meta.outputs.speech_runtime == 'stub' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tensorplate-speech-runtime-debs
+          path: dist/speech-runtime/*.deb
+          if-no-files-found: error
+
   build_sdk_python:
     name: build tensorplate-python wheel + sdist
     needs: [meta, evidence_gate]
@@ -538,7 +707,7 @@ jobs:
 
   build_packages:
     name: build packages
-    needs: [meta, build_packages_amd64, build_sdk_python]
+    needs: [meta, build_packages_amd64, build_speech_runtime, build_sdk_python]
     runs-on: [self-hosted, linux, ARM64, tensorplate-release]
     timeout-minutes: 120
     permissions:
@@ -658,6 +827,21 @@ jobs:
           mv -f "${RUNNER_TEMP}/amd64-debs"/*_amd64.deb ..
           ls ../*_amd64.deb
 
+      - name: Stage speech runtime packages next to build outputs
+        if: ${{ needs.meta.outputs.speech_runtime == 'stub' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tensorplate-speech-runtime-debs
+          path: ${{ runner.temp }}/speech-runtime-debs
+
+      - name: Move speech runtime packages into release collection scope
+        if: ${{ needs.meta.outputs.speech_runtime == 'stub' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mv -f "${RUNNER_TEMP}/speech-runtime-debs"/*_amd64.deb ..
+          ls ../tensorplate-speech-runtime*_amd64.deb
+
       - name: Stage tensorplate-python SDK distribution
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -678,6 +862,7 @@ jobs:
           CHECKSUMS: ${{ needs.meta.outputs.checksums }}
           PUBLISH: ${{ needs.meta.outputs.publish }}
           SOURCE_LABEL: ${{ needs.meta.outputs.source_label }}
+          SPEECH_RUNTIME: ${{ needs.meta.outputs.speech_runtime }}
         run: |
           set -Eeuo pipefail
           # The manifest's release.branch is a published, cosign-covered
@@ -703,7 +888,32 @@ jobs:
           if [[ "$PUBLISH" != "true" ]]; then
             args+=(--skip-tag-verify)
           fi
+          if [[ "$SPEECH_RUNTIME" == "stub" ]]; then
+            args+=(--with-speech-runtime)
+          fi
           "${args[@]}"
+
+      - name: Assert the release package count
+        shell: bash
+        env:
+          RELEASE_DIR: ${{ needs.meta.outputs.release_dir }}
+          SPEECH_RUNTIME: ${{ needs.meta.outputs.speech_runtime }}
+        run: |
+          set -Eeuo pipefail
+          # Thirteen is the core set (eight arm64 and architecture-independent,
+          # five amd64); a stub rehearsal adds the eight speech runtime packages.
+          expected=13
+          if [[ "$SPEECH_RUNTIME" == "stub" ]]; then
+            expected=21
+          fi
+          shopt -s nullglob
+          deb_assets=("${RELEASE_DIR}"/*.deb)
+          shopt -u nullglob
+          ((${#deb_assets[@]} == expected)) || {
+            echo "::error::expected exactly ${expected} .deb packages with speech_runtime=${SPEECH_RUNTIME}; found ${#deb_assets[@]}"
+            printf '%s\n' "${deb_assets[@]}"
+            exit 1
+          }
 
       - name: Upload unsigned release build artifact bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -717,12 +927,16 @@ jobs:
         shell: bash
         env:
           TAG: ${{ needs.meta.outputs.tag }}
+          SPEECH_RUNTIME: ${{ needs.meta.outputs.speech_runtime }}
         run: |
           set -Eeuo pipefail
           {
             echo "Release asset build completed without creating a GitHub Release."
             echo "Download the workflow artifact named tensorplate-${TAG}-release-assets-unsigned to test install.sh before publishing."
             echo "Build-only assets are unsigned; smoke-test the installer with --allow-unsigned. Signing and provenance run on the publish path (RC or final tag)."
+            if [[ "$SPEECH_RUNTIME" == "stub" ]]; then
+              echo "The tensorplate-speech-runtime packages in this bundle are stand-ins built from stub wheels: they exercise the build, the manifest and install.sh --with-speech-runtime, and serve no model."
+            fi
           } >>"$GITHUB_STEP_SUMMARY"
 
   publish-release:
@@ -759,8 +973,10 @@ jobs:
           set -Eeuo pipefail
           shopt -s nullglob
           deb_assets=("${RELEASE_DIR}"/*.deb)
-          ((${#deb_assets[@]} >= 13)) || {
-            echo "::error::expected at least thirteen .deb packages (arm64 runtime set, apt-source, metapackage, and the amd64 runtime set) plus install.sh, manifest, and checksums"
+          # Exactly the core set: no release carries the speech runtime
+          # family, so one more package here is a staging mistake.
+          ((${#deb_assets[@]} == 13)) || {
+            echo "::error::expected exactly thirteen .deb packages (arm64 runtime set, apt-source, metapackage, and the amd64 runtime set) plus install.sh, manifest, and checksums; found ${#deb_assets[@]}"
             find "$RELEASE_DIR" -maxdepth 2 -type f -print
             exit 1
           }
@@ -878,8 +1094,8 @@ jobs:
 
           shopt -s nullglob
           deb_assets=("${RELEASE_DIR}"/*.deb)
-          ((${#deb_assets[@]} >= 13)) || {
-            echo "::error::expected at least thirteen .deb packages (arm64 runtime set, apt-source, metapackage, and the amd64 runtime set) plus install.sh, manifest, and checksums"
+          ((${#deb_assets[@]} == 13)) || {
+            echo "::error::expected exactly thirteen .deb packages (arm64 runtime set, apt-source, metapackage, and the amd64 runtime set) plus install.sh, manifest, and checksums; found ${#deb_assets[@]}"
             exit 1
           }
           installer="${RELEASE_DIR}/install.sh"

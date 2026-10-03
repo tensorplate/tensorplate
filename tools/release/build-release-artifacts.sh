@@ -28,6 +28,19 @@ readonly SECONDARY_ARCH_PACKAGES=(
   tensorplate-cli
   tensorplate
 )
+# The speech runtime family, staged like the secondary set and collected only
+# under --with-speech-runtime. In lockstep with tensorplate-release.sh.
+readonly SPEECH_RUNTIME_ARCH="amd64"
+readonly SPEECH_RUNTIME_PACKAGES=(
+  tensorplate-speech-runtime
+  tensorplate-speech-runtime-base
+  tensorplate-speech-runtime-cublas
+  tensorplate-speech-runtime-vad
+  tensorplate-speech-runtime-ct2
+  tensorplate-speech-runtime-cuda
+  tensorplate-speech-runtime-torch
+  tensorplate-speech-runtime-kokoro
+)
 readonly INSTALLER_SOURCE="packaging/scripts/install.sh"
 
 usage() {
@@ -75,6 +88,10 @@ Options:
                          the tag-driven release path.
   --build-dir DIR        CMake build directory. Defaults to build/release, or build/snapshot-ARCH for snapshots.
   --sdk-dist-dir DIR     Directory holding the tensorplate-python wheel + sdist to include in the release.
+  --with-speech-runtime  Collect the speech runtime package family, staged
+                         in the repository parent by its own build job, and
+                         require all of it. Without the flag the family is
+                         left out, staged or not.
 EOF
 }
 
@@ -141,6 +158,7 @@ SNAPSHOT=0
 BRANCH=""
 CHANGELOG_BACKUP=""
 SDK_DIST_DIR=""
+WITH_SPEECH_RUNTIME=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -158,6 +176,7 @@ while [[ $# -gt 0 ]]; do
     --branch) BRANCH="${2:-}"; shift 2 ;;
     --build-dir) BUILD_DIR="${2:-}"; shift 2 ;;
     --sdk-dist-dir) SDK_DIST_DIR="${2:-}"; shift 2 ;;
+    --with-speech-runtime) WITH_SPEECH_RUNTIME=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option '$1'" ;;
   esac
@@ -271,18 +290,7 @@ write_staged_changelog() {
   CHANGELOG_BACKUP="$(mktemp)"
   cp -- packaging/debian/changelog "$CHANGELOG_BACKUP"
   trap restore_staged_changelog EXIT
-  python3 - "$DEB_VERSION" "$distribution" <<'PY'
-import sys
-from pathlib import Path
-
-version, distribution = sys.argv[1], sys.argv[2]
-path = Path("packaging/debian/changelog")
-lines = path.read_text().splitlines()
-if not lines:
-    raise SystemExit("packaging/debian/changelog is empty")
-lines[0] = f"tensorplate ({version}-1) {distribution}; urgency=medium"
-path.write_text("\n".join(lines) + "\n")
-PY
+  tools/release/stage-debian-changelog.sh "$DEB_VERSION" "$distribution" >/dev/null
 }
 
 BRANCH="${BRANCH:-$(git symbolic-ref --quiet --short HEAD 2>/dev/null || git rev-parse --short=12 HEAD)}"
@@ -619,6 +627,17 @@ if [[ "$TARGET_ARCH" != "$SECONDARY_ARCH" ]]; then
     fi
   done
 fi
+# A rehearsal can leave the family in the repository parent of a persistent
+# runner, so its presence there says nothing: only the flag collects it.
+if ((WITH_SPEECH_RUNTIME)); then
+  for pkg in "${SPEECH_RUNTIME_PACKAGES[@]}"; do
+    mapfile -t matches < <(find "$repo_parent" -maxdepth 1 -type f \
+      -name "${pkg}_${DEB_VERSION}-*_${SPEECH_RUNTIME_ARCH}.deb" | sort)
+    ((${#matches[@]} == 1)) ||
+      die "expected exactly one ${pkg}_${DEB_VERSION}-*_${SPEECH_RUNTIME_ARCH}.deb in $repo_parent; found ${#matches[@]}. The release workflow's speech runtime job must stage the whole family before release artifact builds"
+    debs+=("${matches[0]}")
+  done
+fi
 stage_release_debs "$ARTIFACTS_DIR" "${debs[@]}"
 install -m 0755 "$INSTALLER_SOURCE" "$ARTIFACTS_DIR/install.sh"
 
@@ -665,6 +684,9 @@ manifest_args+=(--release-branch "$BRANCH")
 if ((SNAPSHOT)); then
   manifest_args+=(--allow-snapshot-version)
 fi
+if ((WITH_SPEECH_RUNTIME)); then
+  manifest_args+=(--with-speech-runtime)
+fi
 tools/release/tensorplate-release.sh "${manifest_args[@]}"
 
 verify_args=(
@@ -682,6 +704,9 @@ if [[ "$SKIP_TAG_VERIFY" -eq 1 ]]; then
 fi
 if ((SNAPSHOT)); then
   verify_args+=(--allow-snapshot-version)
+fi
+if ((WITH_SPEECH_RUNTIME)); then
+  verify_args+=(--with-speech-runtime)
 fi
 tools/release/tensorplate-release.sh "${verify_args[@]}"
 
