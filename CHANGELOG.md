@@ -45,7 +45,38 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   evidence gate still reports the row incomplete for 0.3.1.
   (V030-E01-F01-T02)
 
+- The release pipeline can carry the speech runtime package family, and by
+  default does not. The `Release` workflow gains a `build speech runtime
+  packages` job on Ubuntu 24.04 and a `speech_runtime` dispatch input. A tag
+  push leaves the family off and the release holds exactly the thirteen
+  core packages; `stub` builds the family from stub wheels for a build-only
+  rehearsal and is refused with `publish=true`. No workflow builds the
+  locked environment, and no release or package repository carries the
+  family: it redistributes third-party libraries, and a redistribution
+  review comes first. `build-release-artifacts.sh` and
+  `tensorplate-release.sh manifest`, `verify`, `preflight` and `publish`
+  take `--with-speech-runtime`: with it an artifact set must hold all eight
+  packages for `amd64` at the release's package version, and without it a
+  set that holds any of them is refused. `publish-apt-repo.sh` pools none
+  of the family from a release's assets unless given the same flag.
+  `install.sh --with-speech-runtime` installs the family a release's manifest lists,
+  with `tensorplate-backend-python-pytorch`, on an `amd64` host, and
+  refuses a release that lists none.
+  `tools/release/stage-debian-changelog.sh` stages a package version into
+  `packaging/debian/changelog`. Both hosted package jobs and
+  `build-release-artifacts.sh` use it, so the family's dependency on
+  `tensorplate-serving` names the serving worker of the same build, and it
+  replaces the hand edit a candidate-version build outside the workflow
+  needed. `test/packaging/verify_speech_runtime_release_job.sh` runs the
+  new job's wheelhouse, build and closure steps on every packaging change,
+  and the stub wheelhouse generator moves to
+  `test/packaging/speech_runtime_stub_wheelhouse.py`. (V030-E01-F01-T04)
+
 ### Changed
+
+- The release workflow's package count checks are exact: the publish path
+  requires thirteen `.deb` assets, where it accepted thirteen or more.
+  (V030-E01-F01-T04)
 
 - `tools/validation/candidate-qualify.py` gives every deploy and rollback
   a CLI agent timeout (`--agent-timeout-ms`, 120,000 by default) above the
