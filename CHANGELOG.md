@@ -17,9 +17,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   with one profile's packages reads as having that profile and no other.
   The reader refuses the whole descriptor, with a typed error naming the
   file, when a declaration is malformed or names another backend, when a
-  profile id is declared twice, when a profile names a package dpkg has not
-  unpacked, or when `dpkg-query` cannot be asked; a host with no runner
-  profile is read as before and dpkg is not consulted.
+  profile id is declared twice, when a profile names a package that is not
+  installed, or when `dpkg-query` cannot be asked; a host with no runner
+  profile is read as before and dpkg is not consulted. A profile package
+  that is not installed is its own backend probe state,
+  `runner_profile_package_missing`, and refuses a deploy with the reason
+  `missing_backend_package`.
   `backend_descriptor.json` gains the declaration document (additive change
   inside protocol 0.1; version constants unchanged). Nothing launches from
   a declared profile yet: the sidecar launcher and doctor's runtime probe

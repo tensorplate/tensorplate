@@ -105,20 +105,29 @@ deployment on the host, rather than drop one profile:
 | A profile names a package that is not installed | the declaration's path, the profile and the package |
 | `dpkg-query` is missing, fails or does not answer within five seconds | the descriptor's path and the failure |
 
-A package counts as installed once dpkg has unpacked its files: in the
-states `unpacked`, `half-configured`, `triggers-awaited`, `triggers-pending`
-and `installed`. That is deliberate. The agent is restarted from the base
-package's own trigger, and while that trigger runs dpkg reports the base
-package as `half-configured`; after a `dpkg` run that only unpacks, the new
-packages are `unpacked`. Requiring `installed` would refuse the descriptor at
-the restart that is meant to pick the family up. The packages of the family
-create no files when they are configured, so an unpacked package is a
-complete one. A host with no declaration is never asked about its packages,
-so nothing changes where the family is not installed.
+A package counts as installed in the dpkg states `installed`,
+`triggers-pending`, `triggers-awaited` and `half-configured`. The last is
+deliberate. The agent is restarted from the base package's own trigger, and
+while that trigger runs dpkg reports the base package as `half-configured`,
+so requiring `installed` would refuse the descriptor at the restart that is
+meant to pick the family up. It is also the state of a package whose own
+post-installation script failed; the family's component packages have no
+such script, and the base package's does nothing when it is configured.
+
+A package that is only `unpacked` does not count. dpkg leaves a package there
+when it cannot configure it, as with a dependency that is not met or a
+`tensorplate-serving` of another version, and after a `dpkg --unpack` that no
+configure run has followed. The descriptor is refused until the packages are
+configured, which restarts the agent again. A host with no declaration is
+never asked about its packages, so nothing changes where the family is not
+installed.
 
 `tensorplate doctor` reports a refusal as a failed `python_pytorch_backend`
-finding that carries the reason, and the agent logs it at startup in its
-`backend probe:` line as `state=DescriptorMalformed` with the same reason.
+finding that carries the reason. The agent logs it at startup in its
+`backend probe:` line, as `state=RunnerProfilePackageMissing` for a package
+that is not installed and `state=DescriptorMalformed` for every other
+refusal, and refuses `python_pytorch` deployments with the reason
+`missing_backend_package` or `accelerator_runtime_unavailable` respectively.
 
 ## Licenses
 

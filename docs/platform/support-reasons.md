@@ -21,9 +21,9 @@ an engineer who greps another are looking at the same fact.
 | `unsupported_cpu_arch` | The CPU architecture is not one this release builds for. |
 | `unsupported_cpu_vendor` | The architecture is built for, but no row covers this vendor. Distinct from the arch reason: the two send an operator to different answers. |
 | `mig_mode_enabled` | At least one reported accelerator is partitioned. After every device row has been parsed, this is checked before device count and SKU, regardless of which device reports MIG enabled. |
-| `missing_backend_package` | A package the matched row requires for the backend path a bundle names is not installed — including a backend whose descriptor is absent — **or** the row declares no package set for that path at all. The two are not the same next step; see below. |
+| `missing_backend_package` | A package the matched row requires for the backend path a bundle names is not installed — including a backend whose descriptor is absent, and a runner profile that names a package which is not installed — **or** the row declares no package set for that path at all. The two are not the same next step; see below. |
 | `missing_driver_runtime` | A required driver or compute runtime is absent or version-mismatched, **or** the PCI bus reports an accelerator that no driver could identify. |
-| `accelerator_runtime_unavailable` | The runtime is installed and not usable: a malformed descriptor, an absent or wrong-version interpreter, a module or framework that will not import, or an accelerator runtime (MPS today) that reports itself unavailable. Never a missing package. |
+| `accelerator_runtime_unavailable` | The runtime is installed and not usable: a malformed descriptor or runner profile declaration, an absent or wrong-version interpreter, a module or framework that will not import, or an accelerator runtime (MPS today) that reports itself unavailable. Never a missing package. |
 | `telemetry_degraded` | In a supplied collector snapshot, a telemetry source expected on the matched row fails or omits its result. Whether that blocks a deploy is the row's decision, not this reason's: a `load_bearing` source degrades deployment, a `context_only` source degrades status and is recorded without blocking. A signal the row declares `not_applicable` was never asked for and cannot produce this. Live non-memory collectors remain part of hardware validation; their absence from the ordinary startup path is not synthesized as either success or failure. |
 | `row_planned_not_validated` | The machine matches a Planned row exactly: named, carrying no validation evidence. |
 | `unsupported_accelerator_topology` | The detected accelerator set is heterogeneous, or its device count matches no row that otherwise fits the host and SKU. Rows declare an exact `device_count` and the registry carries multi-device rows, so this is a count miss against the registry rather than a refusal of every multi-device host; a supported card installed in a count no row names does not inherit that row's validation. |
@@ -37,17 +37,19 @@ operator whose PyTorch cannot reach its accelerator to reinstall a
 package they already have. The classification is one function so both
 sides cannot drift.
 
-**One reason, three producers, two next steps.** Two of the three mean
+**One reason, four producers, two next steps.** Three of the four mean
 install something: a package the matched row requires for the backend
-path a bundle names and that is not installed, and a backend descriptor
-the startup probe reports absent — that one is raised while a deploy's
-bundle is verified, before admission reads the row at all. The third is
+path a bundle names and that is not installed; a backend descriptor
+the startup probe reports absent; and a runner profile declared for the
+backend that names a package which is not installed. The last two are
+raised while a deploy's bundle is verified, before admission reads the
+row at all. The fourth is
 a backend path the row declares no package set for, where there is
 nothing to install: admission reads the row's declarations and never
 looks at the installed set, so no package changes that answer. The value
-stays one because all three refuse the same thing, a backend path this
+stays one because all four refuse the same thing, a backend path this
 host cannot serve; the detail line is what separates them, and in the
-third case it names the architecture and the paths the row does declare.
+fourth case it names the architecture and the paths the row does declare.
 It claims nothing about which backends the installed build compiled in:
 the x86_64 rows declare no `tensorrt` path because the amd64 serving
 build has no such adapter (issue #204), but the row records a package

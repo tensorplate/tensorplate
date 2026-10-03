@@ -259,12 +259,19 @@ the backend is then not runnable for any bundle:
 | Profile names a package that is not installed | `PackageNotInstalled` |
 | The package database cannot be asked | `PackageInventoryUnavailable` |
 
-Installed means dpkg has unpacked the package's files (`unpacked` or any
-later state). The reader asks through the `PackageInventory` trait; the
-default implementation runs one bounded `dpkg-query` and is not consulted
-when no runner profile exists, so a host without profile packages needs no
-dpkg. [`docs/install/speech-runtime.md`](../install/speech-runtime.md#runner-profile-declarations)
+Installed means dpkg has configured the package or is running one of its
+scripts: the states `installed`, `triggers-pending`, `triggers-awaited` and
+`half-configured`, and not `unpacked`. The reader asks through the
+`PackageInventory` trait; the default implementation runs one bounded
+`dpkg-query` and is not consulted when no runner profile exists, so a host
+without profile packages needs no dpkg.
+[`docs/install/speech-runtime.md`](../install/speech-runtime.md#runner-profile-declarations)
 has the operator's view and the reason for that reading of dpkg's states.
+
+The startup probe reports `PackageNotInstalled` as its own state,
+`runner_profile_package_missing`, which the platform reason vocabulary
+classifies as `missing_backend_package`. Every other refusal above is a
+`descriptor_malformed` probe state and `accelerator_runtime_unavailable`.
 
 ## Non-goals
 
