@@ -8,6 +8,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Runner profile declarations: each speech runtime profile package now says
+  which runner profile it installs. `tensorplate-speech-runtime-ct2` and
+  `tensorplate-speech-runtime-kokoro` each install one declaration under
+  `/usr/share/tensorplate/backends/python_pytorch/runner_profiles.d/`, and
+  the backend descriptor reader shared by the agent and `tensorplate doctor`
+  merges the declarations into the descriptor's `runner_profiles`, so a host
+  with one profile's packages reads as having that profile and no other.
+  The reader refuses the whole descriptor, with a typed error naming the
+  file, when a declaration is malformed or names another backend, when a
+  profile id is declared twice, when a profile names a package dpkg has not
+  unpacked, or when `dpkg-query` cannot be asked; a host with no runner
+  profile is read as before and dpkg is not consulted.
+  `backend_descriptor.json` gains the declaration document (additive change
+  inside protocol 0.1; version constants unchanged). Nothing launches from
+  a declared profile yet: the sidecar launcher and doctor's runtime probe
+  still use `python.interpreter`. (V030-E01-F01-T04)
 - Recorded on a `g2-standard-8` with one NVIDIA L4, against `v0.3.1-rc.1`:
   two candidate qualification runs of Whisper large-v3-turbo through
   faster-whisper, filed under
