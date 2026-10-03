@@ -1,2 +1,2 @@
-{"component":"serving","fields":{"code":"oom_error","message":"the Kokoro model could not be loaded"},"level":"error","message":"session load failed","ts_ns":272615873313747}
-worker init failed: the Kokoro model could not be loaded
+{"component":"serving","fields":{"code":"oom_error","message":"the Kokoro model could not be loaded"},"level":"error","message":"session load failed","ts_ns":272794557326300}
+{"component":"serving","fields":{"code":"oom_error","message":"the Kokoro model could not be loaded"},"level":"error","message":"worker startup failed","ts_ns":272794557372477}

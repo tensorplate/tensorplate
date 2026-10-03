@@ -8,6 +8,7 @@
 // and runs `serve_forever`.
 
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -15,10 +16,12 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <string>
 #include <string_view>
 
+#include "tensorplate/core/error.hpp"
 #include "tensorplate/serving/config.hpp"
 #include "tensorplate/serving/worker.hpp"
 #include "tensorplate/version.hpp"
@@ -48,6 +51,27 @@ void install_signal_handlers() {
   // Defense-in-depth: the runtime already suppresses SIGPIPE per socket,
   // so this protects only any other write paths the binary may add.
   std::signal(SIGPIPE, SIG_IGN);
+}
+
+// The last stderr line of a worker that could not start. The agent reads the
+// code from it to answer the deploy that spawned this worker, so the line is
+// written whether or not the config enables stderr logs.
+void report_startup_failure(const tensorplate::Error& error) noexcept {
+  try {
+    nlohmann::json record;
+    record["ts_ns"] = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                          std::chrono::steady_clock::now().time_since_epoch())
+                          .count();
+    record["level"] = "error";
+    record["component"] = "serving";
+    record["message"] = "worker startup failed";
+    record["fields"] = {{"code", std::string{tensorplate::to_string(error.code)}},
+                        {"message", error.message}};
+    std::cerr << record.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
+  } catch (...) {
+    // The exit status still tells the agent the worker failed to start.
+    std::fputs("worker startup failed\n", stderr);
+  }
 }
 
 void print_version() {
@@ -158,13 +182,13 @@ int main(int argc, char** argv) {
     return EXIT_SUCCESS;
   }
   if (!cfg_r) {
-    std::cerr << "config error: " << cfg_r.error().message << '\n';
+    report_startup_failure(cfg_r.error());
     return static_cast<int>(tensorplate::ServingExitCode::ConfigError);
   }
   install_signal_handlers();
   auto worker_r = tensorplate::ServingWorker::create(std::move(cfg_r).value());
   if (!worker_r) {
-    std::cerr << "worker init failed: " << worker_r.error().message << '\n';
+    report_startup_failure(worker_r.error());
     return static_cast<int>(tensorplate::ServingExitCode::LoadError);
   }
   auto worker = std::move(worker_r).value();
