@@ -62,6 +62,25 @@ SHA256SUMS
 SHA256SUMS.cosign.bundle
 ```
 
+### Speech runtime family
+
+The eight `tensorplate-speech-runtime*` packages (see
+[`docs/install/speech-runtime.md`](../install/speech-runtime.md)) are not
+release assets. They redistribute third-party libraries, and no release
+carries them before a redistribution review. The release tooling can carry
+them and keeps them out unless asked:
+
+- `build-release-artifacts.sh` and `tensorplate-release.sh manifest`,
+  `verify`, `preflight` and `publish` take `--with-speech-runtime`. With it
+  the artifact set must hold all eight packages for `amd64`, at the
+  release's package version. Without it a set that holds any of them is
+  refused.
+- `publish-apt-repo.sh` pools none of the family from a release's assets
+  unless it is given `--with-speech-runtime`. Packages already in the pool
+  it is handed are carried forward as before.
+- `install.sh --with-speech-runtime` installs the family a release's
+  manifest lists and refuses a release that lists none.
+
 ## Build Flow
 
 The normal release build runs in `.github/workflows/release.yml` after
@@ -89,6 +108,17 @@ set is built by its own hosted job and pre-staged in the repository parent
 directory alongside the other Debian outputs; the release build collects it
 into the artifact set and labels it with the `x86_64` target OS. A missing
 member of that set fails the build rather than being silently dropped.
+
+The speech runtime family has its own job on Ubuntu 24.04, the release its
+environment runs on. A tag push leaves it off: the job runs no build step
+and the release holds exactly the thirteen core packages. A build-only
+dispatch with `speech_runtime: stub` builds the family from stub wheels
+through the real builder, at the release's package version, and adds it to
+the unsigned artifact bundle, 21 packages in all. The stand-in packages
+serve no model, and the mode is refused with `publish=true`. Every job
+that builds packages stages the release's package version with
+`tools/release/stage-debian-changelog.sh`, so the family's dependency on
+`tensorplate-serving` names the serving worker the `x86_64` job builds.
 
 The `x86_64` serving worker is built without the TensorRT adapter — a hosted
 runner has no CUDA/TensorRT SDK, and shipping the adapter without one

@@ -34,6 +34,15 @@ the sidecar module in the environment always matches the serving worker that
 talks to it. The base package also depends on
 `tensorplate-backend-python-pytorch`, which ships the backend descriptor.
 
+## Installing from a release
+
+`install.sh --with-speech-runtime` installs the family with the core runtime
+and `tensorplate-backend-python-pytorch`, in one `apt` transaction. It takes
+the packages the release's signed manifest lists for `amd64` and needs an
+`amd64` host on Ubuntu 24.04. A release that publishes no speech runtime
+package refuses the option before anything is installed. That is every
+release so far.
+
 ## What installing does
 
 - Unpacks files under `/usr/lib/tensorplate/speech-runtime/` and a license

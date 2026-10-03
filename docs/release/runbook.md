@@ -431,6 +431,11 @@ Before pushing a final tag or creating a public prerelease, run the
 
 - `tag`: `${TP_TAG}`
 - `publish`: `false`
+- `speech_runtime`: `off`, the default. `stub` also rehearses the speech
+  runtime package job: it builds that family from stub wheels and adds the
+  eight stand-in packages to the unsigned bundle, which then holds 21
+  `.deb` files instead of 13. The stand-ins serve no model, and the mode is
+  refused with `publish: true`.
 - `source_ref`: the tag's commit, **not** a branch name:
 
   ```bash
