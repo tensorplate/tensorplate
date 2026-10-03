@@ -89,7 +89,7 @@ fn schema_refused_cases() -> Vec<(&'static str, Value)> {
             // take it for the object.
             "its members as an array",
             json!([
-                null,
+                read_json(STT)["$schema"],
                 "0.1",
                 "python_pytorch",
                 read_json(STT)["runner_profile"]
@@ -104,6 +104,7 @@ fn schema_refused_cases() -> Vec<(&'static str, Value)> {
             "another schema_version",
             stt_with("/schema_version", Some(json!("0.2"))),
         ),
+        ("a null $schema", stt_with("/$schema", Some(Value::Null))),
         ("missing backend_name", stt_with("/backend_name", None)),
         (
             "empty backend_name",
@@ -352,6 +353,7 @@ fn every_install_combination_reads_as_its_case_says() {
         "both",
         "duplicate_profile_id",
         "a_package_of_the_profile_is_not_installed",
+        "a_package_of_the_second_profile_is_not_installed",
         "malformed_file",
     ] {
         assert!(seen.contains(required), "cases.json lost `{required}`");
@@ -484,6 +486,46 @@ fn an_entry_that_is_not_a_readable_file_is_refused_not_skipped() {
     let err = BackendDescriptor::read_with_inventory(&path, &Unconditional).expect_err("directory");
     assert_eq!(variant(&err), "Io", "{err}");
     assert!(err.to_string().contains("runner_profiles.d/kokoro.json"));
+
+    // Listed and then gone: not the "backend is not installed" answer an
+    // absent descriptor gets.
+    let (_root, path) = install(BASE, &json!({"faster_whisper.json": STT}));
+    let directory = path.with_file_name(RUNNER_PROFILE_DECLARATION_DIR);
+    std::os::unix::fs::symlink(directory.join("removed"), directory.join("kokoro.json"))
+        .expect("a link to nothing");
+    let err = BackendDescriptor::read_with_inventory(&path, &Unconditional).expect_err("dangling");
+    assert_eq!(variant(&err), "Io", "{err}");
+    assert!(err.to_string().contains("runner_profiles.d/kokoro.json"));
+}
+
+#[test]
+fn a_declaration_directory_that_cannot_be_listed_is_refused_not_read_as_empty() {
+    let (_root, path) = install(BASE, &Value::Null);
+    let directory = path.with_file_name(RUNNER_PROFILE_DECLARATION_DIR);
+    std::fs::write(directory, "").expect("a file where the directory belongs");
+    let err = BackendDescriptor::read_with_inventory(&path, &Unconditional).expect_err("a file");
+    assert_eq!(variant(&err), "Io", "{err}");
+    assert!(err.to_string().contains("runner_profiles.d`"), "{err}");
+}
+
+#[test]
+fn the_descriptors_own_profiles_come_before_the_declared_ones() {
+    // The descriptor lists `kokoro`; `faster_whisper` is declared beside it
+    // and would sort first by name.
+    let root = tempfile::tempdir().expect("tempdir");
+    let backend = root.path().join("python_pytorch");
+    let directory = backend.join(RUNNER_PROFILE_DECLARATION_DIR);
+    std::fs::create_dir_all(&directory).expect("directories");
+    let mut descriptor = read_json(MERGED);
+    descriptor["runner_profiles"]
+        .as_array_mut()
+        .expect("profiles")
+        .retain(|profile| profile["id"] == "kokoro");
+    let path = backend.join("backend.json");
+    std::fs::write(&path, descriptor.to_string()).expect("descriptor");
+    std::fs::copy(repo_path(STT), directory.join("faster_whisper.json")).expect("declaration");
+    let read = BackendDescriptor::read_with_inventory(&path, &Unconditional).expect("reads");
+    assert_eq!(ids(&read), ["kokoro", "faster_whisper"]);
 }
 
 #[test]

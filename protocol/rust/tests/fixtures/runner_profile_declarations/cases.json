@@ -1,5 +1,5 @@
 {
-  "description": "Install combinations of the speech runtime's two profile packages: the declaration files each leaves in `runner_profiles.d/` beside the packaged `backend.json`, the packages dpkg reports with their files unpacked, and what the backend descriptor reader makes of it. `declarations` maps a file name in `runner_profiles.d/` to the repository file it is a copy of; `null` means the directory does not exist. A case expects either the merged `runner_profiles` ids in order, or a `refusal` with the reader's error variant and the names its message must carry.",
+  "description": "Install combinations of the speech runtime's two profile packages: the declaration files each leaves in `runner_profiles.d/` beside the packaged `backend.json`, the packages dpkg reports as installed, and what the backend descriptor reader makes of it. `declarations` maps a file name in `runner_profiles.d/` to the repository file it is a copy of; `null` means the directory does not exist. A case expects either the merged `runner_profiles` ids in order, or a `refusal` with the reader's error variant and the names its message must carry.",
   "cases": [
     {
       "name": "none",
@@ -105,6 +105,26 @@
         "tensorplate-speech-runtime-base",
         "tensorplate-speech-runtime-cublas",
         "tensorplate-speech-runtime-torch",
+        "tensorplate-speech-runtime-kokoro"
+      ],
+      "refusal": {
+        "variant": "PackageNotInstalled",
+        "names": ["`kokoro`", "`tensorplate-speech-runtime-cuda`", "runner_profiles.d/kokoro.json"]
+      }
+    },
+    {
+      "name": "a_package_of_the_second_profile_is_not_installed",
+      "declarations": {
+        "faster_whisper.json": "packaging/backend-metadata/runner_profiles/faster_whisper.json",
+        "kokoro.json": "packaging/backend-metadata/runner_profiles/kokoro.json"
+      },
+      "installed_packages": [
+        "tensorplate-backend-python-pytorch",
+        "tensorplate-speech-runtime-base",
+        "tensorplate-speech-runtime-cublas",
+        "tensorplate-speech-runtime-torch",
+        "tensorplate-speech-runtime-vad",
+        "tensorplate-speech-runtime-ct2",
         "tensorplate-speech-runtime-kokoro"
       ],
       "refusal": {

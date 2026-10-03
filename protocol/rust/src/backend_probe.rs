@@ -48,6 +48,14 @@ pub enum BackendProbeState {
     /// a runner profile declaration beside it was refused.
     DescriptorMalformed { reason: String },
 
+    /// A runner profile declared for the backend names a package that is
+    /// not installed. `declaration` is the file that declares the profile.
+    RunnerProfilePackageMissing {
+        profile: String,
+        package: String,
+        declaration: String,
+    },
+
     /// Descriptor refers to a TensorPlate runtime range incompatible
     /// with the running runtime.
     RuntimeVersionMismatch {
@@ -137,32 +145,54 @@ pub fn probe_python_pytorch(opts: &ProbeOptions) -> BackendProbeReport {
 /// Probe a backend whose descriptor lives at `descriptor_path`.
 #[must_use]
 pub fn probe_backend(descriptor_path: &Path, opts: &ProbeOptions) -> BackendProbeReport {
-    match BackendDescriptor::read_from(descriptor_path) {
+    report_read(
+        BackendDescriptor::read_from(descriptor_path),
+        descriptor_path,
+        opts,
+    )
+}
+
+/// The report for one read of the descriptor: its probes when it was read,
+/// the state its refusal maps to when it was not.
+fn report_read(
+    read: Result<BackendDescriptor, BackendDescriptorError>,
+    descriptor_path: &Path,
+    opts: &ProbeOptions,
+) -> BackendProbeReport {
+    let unread = |descriptor_path: PathBuf, state| BackendProbeReport {
+        backend_name: descriptor_path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        descriptor_path,
+        state,
+        install_hint: None,
+    };
+    match read {
         Ok(d) => probe_descriptor(&d, descriptor_path.to_path_buf(), opts),
-        Err(BackendDescriptorError::Missing { path }) => BackendProbeReport {
-            backend_name: descriptor_path
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            descriptor_path: PathBuf::from(path),
-            state: BackendProbeState::DescriptorMissing,
-            install_hint: None,
-        },
-        Err(e) => BackendProbeReport {
-            backend_name: descriptor_path
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            descriptor_path: descriptor_path.to_path_buf(),
-            state: BackendProbeState::DescriptorMalformed {
+        Err(BackendDescriptorError::Missing { path }) => {
+            unread(PathBuf::from(path), BackendProbeState::DescriptorMissing)
+        }
+        Err(BackendDescriptorError::PackageNotInstalled {
+            path,
+            profile,
+            package,
+        }) => unread(
+            descriptor_path.to_path_buf(),
+            BackendProbeState::RunnerProfilePackageMissing {
+                profile,
+                package,
+                declaration: path,
+            },
+        ),
+        Err(e) => unread(
+            descriptor_path.to_path_buf(),
+            BackendProbeState::DescriptorMalformed {
                 reason: e.to_string(),
             },
-            install_hint: None,
-        },
+        ),
     }
 }
 
@@ -500,6 +530,53 @@ mod tests {
         let p = td.path().join("backend.json");
         write(&p, "{not json");
         let report = probe_backend(&p, &ProbeOptions::default());
+        assert!(matches!(
+            report.state,
+            BackendProbeState::DescriptorMalformed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_runner_profile_package_that_is_not_installed_is_its_own_state() {
+        // Something to install, not a descriptor to repair: the reason
+        // vocabulary classifies the two apart.
+        let descriptor = Path::new("/usr/share/tensorplate/backends/python_pytorch/backend.json");
+        let declaration =
+            "/usr/share/tensorplate/backends/python_pytorch/runner_profiles.d/kokoro.json";
+        let report = report_read(
+            Err(BackendDescriptorError::PackageNotInstalled {
+                path: declaration.into(),
+                profile: "kokoro".into(),
+                package: "tensorplate-speech-runtime-cuda".into(),
+            }),
+            descriptor,
+            &ProbeOptions::default(),
+        );
+        assert_eq!(report.backend_name, "python_pytorch");
+        assert_eq!(report.descriptor_path, descriptor);
+        assert_eq!(
+            report.state,
+            BackendProbeState::RunnerProfilePackageMissing {
+                profile: "kokoro".into(),
+                package: "tensorplate-speech-runtime-cuda".into(),
+                declaration: declaration.into(),
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&report.state).unwrap()["state"],
+            "runner_profile_package_missing"
+        );
+
+        // Every other refusal of a declaration stays a malformed descriptor.
+        let report = report_read(
+            Err(BackendDescriptorError::DuplicateRunnerProfile {
+                id: "kokoro".into(),
+                first: descriptor.display().to_string(),
+                second: declaration.into(),
+            }),
+            descriptor,
+            &ProbeOptions::default(),
+        );
         assert!(matches!(
             report.state,
             BackendProbeState::DescriptorMalformed { .. }

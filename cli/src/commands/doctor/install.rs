@@ -1077,6 +1077,18 @@ fn runtime_finding(report: &tensorplate_protocol::backend_probe::BackendProbeRep
             format!("backend descriptor invalid: {reason}"),
             None,
         ),
+        S::RunnerProfilePackageMissing {
+            profile, package, ..
+        } => Finding::fail(
+            FindingId::PythonPytorchRuntime,
+            Severity::Critical,
+            format!(
+                "runner profile `{profile}` needs package `{package}`, which is not installed"
+            ),
+            Some(format!(
+                "install {package}, or remove the package that declares `{profile}`"
+            )),
+        ),
         S::RuntimeVersionMismatch {
             runtime_version,
             descriptor_min,

@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
 /// Which OS packages are installed.
@@ -24,21 +25,27 @@ pub trait PackageInventory {
     fn installed(&self, names: &BTreeSet<&str>) -> Result<BTreeSet<String>, String>;
 }
 
-/// The dpkg states in which every file of a package is on disk: `unpacked`
-/// and each state after it.
+/// The dpkg states taken for installed: the package has been configured,
+/// or dpkg is running one of its scripts.
 ///
-/// `installed` alone would refuse a healthy install. The speech runtime
+/// `installed` alone would refuse a healthy install: the speech runtime
 /// restarts the agent from its base package's trigger processing, where
-/// dpkg reports that package `half-configured`, and after a run that only
-/// unpacks, where the new packages are `unpacked`. Each state is recorded
-/// under `tests/fixtures/dpkg_query_status/`.
-pub const DPKG_UNPACKED_STATES: [&str; 5] = [
-    "unpacked",
+/// dpkg reports that package `half-configured`. `unpacked` is left out
+/// because dpkg leaves a package there when it cannot configure it, as
+/// with a dependency that is not met. Each state is recorded under
+/// `tests/fixtures/dpkg_query_status/`.
+pub const DPKG_INSTALLED_STATES: [&str; 4] = [
     "half-configured",
     "triggers-awaited",
     "triggers-pending",
     "installed",
 ];
+
+/// Far above any answer: one short line per package asked about.
+const MAX_OUTPUT_BYTES: u64 = 1 << 20;
+
+/// How long a pipe may stay open after the process that wrote to it exited.
+const PIPE_CLOSE_GRACE: Duration = Duration::from_secs(1);
 
 const DPKG_QUERY_FORMAT: &str = "-f=${Package}\\t${db:Status-Status}\\n";
 
@@ -92,25 +99,44 @@ impl PackageInventory for DpkgInventory {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("cannot run `{program}`: {e}"))?;
+        // Read while waiting: a child blocked on a full pipe never exits.
+        let stdout = read_in_background(child.stdout.take());
+        let stderr = read_in_background(child.stderr.take());
         let status = wait_bounded(&mut child, self.timeout)
             .map_err(|e| format!("`{program}` gave no answer: {e}"))?;
-        let stdout = drain(child.stdout.take());
-        match status.code() {
-            // 1: at least one name matched no package; it is absent from
-            // the output.
-            Some(0 | 1) => {
-                parse_dpkg_status(&stdout, &asked).map_err(|e| format!("`{program}` printed {e}"))
-            }
-            _ => Err(format!(
-                "`{program}` failed ({status}): {}",
-                String::from_utf8_lossy(&drain(child.stderr.take())).trim()
-            )),
-        }
+        let output = |pipe: Receiver<Vec<u8>>| {
+            pipe.recv_timeout(PIPE_CLOSE_GRACE)
+                .ok()
+                .filter(|bytes| (bytes.len() as u64) < MAX_OUTPUT_BYTES)
+                .ok_or_else(|| format!("`{program}` printed more than an answer"))
+        };
+        dpkg_answer(status.code(), &output(stdout)?, &output(stderr)?, &asked)
+            .map_err(|e| format!("`{program}` {e}"))
+    }
+}
+
+/// What a `dpkg-query` exit status and output say about `asked`.
+///
+/// Status 1 is an answer: at least one name matched no package, and such
+/// a name is absent from the output. Any other failure is not.
+fn dpkg_answer(
+    status: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+    asked: &BTreeSet<&str>,
+) -> Result<BTreeSet<String>, String> {
+    match status {
+        Some(0 | 1) => parse_dpkg_status(stdout, asked).map_err(|e| format!("printed {e}")),
+        Some(code) => Err(format!(
+            "failed (exit status {code}): {}",
+            String::from_utf8_lossy(stderr).trim()
+        )),
+        None => Err("failed (killed by a signal)".to_string()),
     }
 }
 
 /// The members of `asked` that `dpkg-query` output reports in one of
-/// [`DPKG_UNPACKED_STATES`].
+/// [`DPKG_INSTALLED_STATES`].
 ///
 /// # Errors
 ///
@@ -126,7 +152,7 @@ pub fn parse_dpkg_status(
             .split_once('\t')
             .filter(|(name, state)| !name.is_empty() && !state.is_empty())
             .ok_or_else(|| format!("a line that is not `<package>\\t<state>`: `{line}`"))?;
-        if asked.contains(name) && DPKG_UNPACKED_STATES.contains(&state) {
+        if asked.contains(name) && DPKG_INSTALLED_STATES.contains(&state) {
             installed.insert(name.to_string());
         }
     }
@@ -164,12 +190,21 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<ExitStatus, Stri
     }
 }
 
-fn drain(pipe: Option<impl Read>) -> Vec<u8> {
-    let mut bytes = Vec::new();
+/// Reads `pipe` to its end on a thread of its own and hands over its first
+/// [`MAX_OUTPUT_BYTES`] when the pipe closes. What follows them is read and
+/// dropped, so the writer is neither blocked nor cut off and the caller
+/// sees a full buffer rather than a shortened answer.
+fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> Receiver<Vec<u8>> {
+    let (sender, receiver) = channel();
     if let Some(mut pipe) = pipe {
-        let _ = pipe.read_to_end(&mut bytes);
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.by_ref().take(MAX_OUTPUT_BYTES).read_to_end(&mut bytes);
+            let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+            let _ = sender.send(bytes);
+        });
     }
-    bytes
+    receiver
 }
 
 #[cfg(test)]
@@ -208,15 +243,14 @@ mod tests {
     }
 
     #[test]
-    fn a_package_is_installed_from_unpacked_onwards() {
+    fn a_package_is_installed_once_dpkg_has_configured_it() {
         assert_eq!(
             installed_in(recorded!("each-state.stdout")),
             [
                 "tprec-base",
                 "tprec-half-configured",
                 "tprec-installed",
-                "tprec-leaf",
-                "tprec-unpacked"
+                "tprec-leaf"
             ]
         );
         assert_eq!(
@@ -226,11 +260,98 @@ mod tests {
                 "tprec-base",
                 "tprec-half-configured",
                 "tprec-installed",
-                "tprec-leaf",
-                "tprec-unpacked"
+                "tprec-leaf"
             ]
         );
         assert!(installed_in(recorded!("nothing-installed.stdout")).is_empty());
+    }
+
+    /// The exit status recorded for `scenario`.
+    fn recorded_status(scenario: &str) -> i32 {
+        std::str::from_utf8(recorded!("exit-codes.txt"))
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix(scenario)?.strip_prefix(' '))
+            .unwrap_or_else(|| panic!("no exit status recorded for {scenario}"))
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_recorded_status_of_1_is_an_answer_that_omits_the_unknown_names() {
+        for (scenario, stdout, stderr) in [
+            (
+                "nothing-installed",
+                recorded!("nothing-installed.stdout"),
+                recorded!("nothing-installed.stderr"),
+            ),
+            (
+                "each-state",
+                recorded!("each-state.stdout"),
+                recorded!("each-state.stderr"),
+            ),
+            (
+                "after-unpack-run",
+                recorded!("after-unpack-run.stdout"),
+                recorded!("after-unpack-run.stderr"),
+            ),
+            (
+                "triggers-deferred",
+                recorded!("triggers-deferred.stdout"),
+                recorded!("triggers-deferred.stderr"),
+            ),
+        ] {
+            let status = recorded_status(scenario);
+            assert_eq!(status, 1, "{scenario}");
+            let asked: BTreeSet<&str> = NAMES.into_iter().collect();
+            let answer = dpkg_answer(Some(status), stdout, stderr, &asked);
+            assert_eq!(answer.unwrap(), parse_dpkg_status(stdout, &asked).unwrap());
+            // dpkg-query names on stderr exactly the names it left out.
+            let printed: BTreeSet<&str> = std::str::from_utf8(stdout)
+                .unwrap()
+                .lines()
+                .map(|line| line.split_once('\t').unwrap().0)
+                .collect();
+            let unknown: BTreeSet<&str> = std::str::from_utf8(stderr)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    line.strip_prefix("dpkg-query: no packages found matching ")
+                        .unwrap_or_else(|| panic!("{scenario}: unexpected stderr `{line}`"))
+                })
+                .collect();
+            let omitted: BTreeSet<&str> = asked.difference(&printed).copied().collect();
+            assert_eq!(unknown, omitted, "{scenario}");
+        }
+        for (scenario, stdout, stderr) in [
+            (
+                "inside-trigger",
+                recorded!("inside-trigger.stdout"),
+                recorded!("inside-trigger.stderr"),
+            ),
+            (
+                "inside-trigger-during-purge",
+                recorded!("inside-trigger-during-purge.stdout"),
+                recorded!("inside-trigger-during-purge.stderr"),
+            ),
+        ] {
+            assert_eq!(recorded_status(scenario), 0, "{scenario}");
+            assert!(stderr.is_empty(), "{scenario}");
+            let asked = BTreeSet::from(["tprec-base", "tprec-leaf"]);
+            assert!(dpkg_answer(Some(0), stdout, stderr, &asked).is_ok());
+        }
+    }
+
+    #[test]
+    fn any_other_status_is_not_an_answer() {
+        let asked = BTreeSet::from(["tprec-leaf"]);
+        let stdout = b"tprec-leaf\tinstalled\n";
+        let err = dpkg_answer(Some(2), stdout, b"database is locked\n", &asked).unwrap_err();
+        assert!(
+            err.contains("exit status 2") && err.contains("database is locked"),
+            "{err}"
+        );
+        assert!(dpkg_answer(None, stdout, b"", &asked).is_err());
     }
 
     #[test]
@@ -247,8 +368,13 @@ mod tests {
                 states.insert(line.split_once('\t').expect("tab").1.to_string());
             }
         }
-        let absent = ["config-files", "half-installed", "not-installed"];
-        let all: BTreeSet<String> = DPKG_UNPACKED_STATES
+        let absent = [
+            "config-files",
+            "half-installed",
+            "not-installed",
+            "unpacked",
+        ];
+        let all: BTreeSet<String> = DPKG_INSTALLED_STATES
             .iter()
             .chain(&absent)
             .map(ToString::to_string)
@@ -273,10 +399,63 @@ mod tests {
     }
 
     #[test]
-    fn packages_count_after_a_run_that_only_unpacks() {
-        let installed = installed_in(recorded!("after-unpack-run.stdout"));
-        assert!(installed.contains(&"tprec-base".to_string()));
-        assert!(installed.contains(&"tprec-leaf".to_string()));
+    fn packages_do_not_count_after_a_run_that_only_unpacks() {
+        // dpkg also leaves a package unpacked when it cannot configure it.
+        let stdout = recorded!("after-unpack-run.stdout");
+        let text = std::str::from_utf8(stdout).unwrap();
+        assert!(text.contains("tprec-base\tunpacked\n") && text.contains("tprec-leaf\tunpacked\n"));
+        assert_eq!(
+            installed_in(stdout),
+            ["tprec-half-configured", "tprec-installed"]
+        );
+    }
+
+    #[test]
+    fn the_package_verifier_checks_the_same_states() {
+        let script = include_str!("../../../test/packaging/verify_speech_runtime_packages.sh");
+        let line = script
+            .lines()
+            .find_map(|line| line.strip_prefix("installed_states='"))
+            .expect("the verifier names the states it accepts");
+        assert_eq!(line.trim_end_matches('\''), DPKG_INSTALLED_STATES.join(" "));
+    }
+
+    #[test]
+    fn output_past_the_cap_is_refused_not_cut_short() {
+        // The asked package's line comes last, past the cap: an answer cut
+        // there would read it as not installed.
+        let dir = tempfile::tempdir().unwrap();
+        let filler = "x".repeat(1024);
+        let program = stub(
+            dir.path(),
+            &format!(
+                "i=0\nwhile [ $i -lt 1050 ]; do printf 'tprec-other\\t{filler}\\n'; i=$((i+1)); done\n\
+                 printf 'tprec-leaf\\tinstalled\\n'"
+            ),
+        );
+        let err = ask(&program, &["tprec-leaf"]).unwrap_err();
+        assert!(err.contains("printed more than an answer"), "{err}");
+    }
+
+    #[test]
+    fn output_larger_than_a_pipe_is_read_while_the_query_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let filler = "x".repeat(1024);
+        let program = stub(
+            dir.path(),
+            &format!(
+                "i=0\nwhile [ $i -lt 300 ]; do echo {filler} >&2; i=$((i+1)); done\n\
+                 i=0\nwhile [ $i -lt 300 ]; do printf 'tprec-other\\t{filler}\\n'; i=$((i+1)); done\n\
+                 printf 'tprec-leaf\\tinstalled\\n'"
+            ),
+        );
+        let started = Instant::now();
+        let installed = ask(&program, &["tprec-leaf"]).unwrap();
+        assert_eq!(installed, BTreeSet::from(["tprec-leaf".to_string()]));
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "waited for the deadline"
+        );
     }
 
     #[test]

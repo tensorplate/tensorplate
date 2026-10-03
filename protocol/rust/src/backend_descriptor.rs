@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::package_inventory::{DpkgInventory, PackageInventory};
 use crate::serde_shape::{
-    deserialize_map_only, deserialize_vec_map_only, is_canonical_snake_identifier,
+    deserialize_map_only, deserialize_some, deserialize_vec_map_only, is_canonical_snake_identifier,
 };
 use crate::SCHEMA_VERSION;
 
@@ -236,17 +236,28 @@ pub struct RunnerProfile {
 
 /// One runner profile declared by the package that installs it: a file
 /// under [`RUNNER_PROFILE_DECLARATION_DIR`]. Mirrors the schema's
-/// `definitions.runner_profile_declaration`.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// `definitions.runner_profile_declaration`. It does not implement
+/// `Deserialize`: [`Self::parse_with_path`] is the only way to one, so no
+/// loader skips its checks.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RunnerProfileDeclaration {
-    #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
     pub schema_version: String,
     /// `backend_name` of the descriptor the profile belongs to.
     pub backend_name: String,
-    #[serde(deserialize_with = "deserialize_map_only")]
     pub runner_profile: RunnerProfile,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunnerProfileDeclarationWire {
+    #[serde(rename = "$schema", default, deserialize_with = "deserialize_some")]
+    schema: Option<String>,
+    schema_version: String,
+    backend_name: String,
+    #[serde(deserialize_with = "deserialize_map_only")]
+    runner_profile: RunnerProfile,
 }
 
 /// Typed errors raised when reading a backend descriptor or one of its
@@ -544,7 +555,13 @@ impl RunnerProfileDeclaration {
                 });
             }
         }
-        let parsed: Self = deserialize_map_only(value).map_err(malformed)?;
+        let wire: RunnerProfileDeclarationWire = deserialize_map_only(value).map_err(malformed)?;
+        let parsed = Self {
+            schema: wire.schema,
+            schema_version: wire.schema_version,
+            backend_name: wire.backend_name,
+            runner_profile: wire.runner_profile,
+        };
         let invalid = |message: String| BackendDescriptorError::Invalid {
             path: path(),
             message,

@@ -384,10 +384,10 @@ note "installing the built packages with dpkg"
 [[ -d /run/systemd/system ]] || die "needs a systemd host: the maintainer scripts skip the restart without one"
 
 # The descriptor reader's question to dpkg, and the states it takes for
-# "the package's files are installed".
+# installed; the reader's own tests hold this line to its list.
 # shellcheck disable=SC2016 # dpkg-query expands these, not the shell.
 status_format='${Package}\t${db:Status-Status}\n'
-unpacked_states='unpacked half-configured triggers-awaited triggers-pending installed'
+installed_states='half-configured triggers-awaited triggers-pending installed'
 
 # The stand-in records each restart it is asked for and, at that moment, the
 # dpkg state of every family package: a restarted agent reads them then.
@@ -418,15 +418,17 @@ installed=1
   die "installing the stand-ins must not restart anything"
 [[ "$(restarts_from -i "${debs[@]}")" == 1 ]] ||
   die "installing the family in one dpkg run must restart the agent exactly once ($(cat "$td/restarts"))"
-# Every package a declaration names has its files unpacked when the agent is
-# restarted, by the reader's reading of dpkg's states, and is installed after.
+# Every package a declaration names reads as installed to the descriptor
+# reader at the moment the agent is restarted, and is installed after.
 for profile in faster_whisper kokoro; do
-  mapfile -t named < <(python3.12 -c \
+  named_list="$(python3.12 -c \
     'import json, sys; print("\n".join(json.load(open(sys.argv[1]))["runner_profile"]["packages"]))' \
-    "${declaration_dir}/${profile}.json")
+    "${declaration_dir}/${profile}.json")" || die "the installed ${profile} declaration does not parse"
+  mapfile -t named <<<"$named_list"
+  [[ -n "$named_list" ]] || die "the ${profile} declaration names no package"
   for package in "${named[@]}"; do
     state="$(awk -F'\t' -v p="$package" '$1 == p {print $2}' "$td/states-at-restart")"
-    [[ " ${unpacked_states} " == *" ${state:-absent} "* ]] ||
+    [[ " ${installed_states} " == *" ${state:-absent} "* ]] ||
       die "${package}, named by the ${profile} declaration, was \"${state:-absent}\" when the agent was restarted"
     [[ "$(dpkg-query -W -f="$status_format" -- "$package")" == "${package}"$'\t'"installed" ]] ||
       die "${package}, named by the ${profile} declaration, is not installed"
@@ -437,7 +439,7 @@ done
 [[ "$(dpkg -S "${declaration_dir}/kokoro.json")" == "${family}-kokoro: ${declaration_dir}/kokoro.json" ]] ||
   die "the kokoro declaration must belong to ${family}-kokoro"
 base_state="$(awk -F'\t' -v p="${family}-base" '$1 == p {print $2}' "$td/states-at-restart")"
-pass "declared packages are unpacked at the restart (base: ${base_state}) and installed after it"
+pass "declared packages read as installed at the restart (base: ${base_state}) and are installed after it"
 [[ -z "$(dpkg --verify "${expected[@]}" 2>&1)" ]] || die "dpkg --verify reports changed or missing files"
 "${env_root}/bin/python" -c 'import tensorplate_pytorch_backend, tpstub_kokoro, espeakng_loader' ||
   die "the installed environment does not import what it ships"
@@ -450,6 +452,14 @@ pass "declared packages are unpacked at the restart (base: ${base_state}) and in
   die "adding a component must restart the agent exactly once"
 [[ -f "${declaration_dir}/faster_whisper.json" && -f "${declaration_dir}/kokoro.json" ]] ||
   die "adding ${family}-ct2 back must restore the faster_whisper declaration"
+[[ "$(restarts_from -r "${family}-kokoro")" == 1 ]] ||
+  die "removing the kokoro package must restart the agent exactly once"
+[[ -f "${declaration_dir}/faster_whisper.json" && ! -e "${declaration_dir}/kokoro.json" ]] ||
+  die "removing ${family}-kokoro must remove the kokoro declaration and leave faster_whisper's"
+[[ "$(restarts_from -i "$(deb_of "${family}-kokoro")")" == 1 ]] ||
+  die "adding the kokoro package must restart the agent exactly once"
+[[ -f "${declaration_dir}/faster_whisper.json" && -f "${declaration_dir}/kokoro.json" ]] ||
+  die "adding ${family}-kokoro back must restore the kokoro declaration"
 remaining=()
 for package in "${expected[@]}"; do [[ "$package" == "$family" ]] || remaining+=("$package"); done
 [[ "$(restarts_from -r "${remaining[@]}")" == 1 ]] ||
