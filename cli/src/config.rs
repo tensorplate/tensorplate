@@ -45,6 +45,11 @@ pub const DEFAULT_LOCAL_AGENT_SOCKET: &str = "/var/run/tensorplate/agent.sock";
 /// Default request timeout for agent calls (milliseconds).
 pub const DEFAULT_AGENT_TIMEOUT_MS: u64 = 30_000;
 
+/// Least request timeout for `deploy` and `rollback` when `--timeout-ms` is
+/// not given (milliseconds). The agent answers them only once the candidate
+/// has warmed or failed, so this must exceed its `worker.warm_timeout_ms`.
+pub const DEFAULT_TRANSACTION_TIMEOUT_MS: u64 = 120_000;
+
 /// Device access profile mode. Mirrors `config/schemas/cli.json`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
