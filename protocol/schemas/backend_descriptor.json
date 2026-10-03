@@ -131,7 +131,7 @@
     },
     "runner_profiles": {
       "type": "array",
-      "description": "Runner profiles this backend package set has installed: the interpreter environment each profile's sidecar runs in, apart from `python.interpreter`. Profiles may share one environment. Optional: a descriptor without it declares no runner profiles, and `python.interpreter` keeps serving the backend's other models. Beyond this schema, readers also require unique `id`s, paths with no `.` or `..` segment, `interpreter` and every `library_search_paths` entry inside `environment_root`, and package names that are not blank.",
+      "description": "Runner profiles this backend package set has installed: the interpreter environment each profile's sidecar runs in, apart from `python.interpreter`. Profiles may share one environment. Optional: a descriptor without it declares no runner profiles, and `python.interpreter` keeps serving the backend's other models. A package that installs a profile without owning this file declares it in a file of its own beside it (`definitions.runner_profile_declaration`); readers append those entries to this list. Beyond this schema, readers also require unique `id`s across the list and every declaration, paths with no `.` or `..` segment, `interpreter` and every `library_search_paths` entry inside `environment_root`, package names that are not blank, and every named package installed.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -181,6 +181,27 @@
     "install_hint": {
       "type": "string",
       "description": "Human-readable hint reported by `tensorplate doctor` when the backend is missing or unrunnable."
+    }
+  },
+  "definitions": {
+    "runner_profile_declaration": {
+      "type": "object",
+      "description": "One runner profile, declared by the package that installs it. A separate document, not part of the descriptor: each file `<backend_name>/runner_profiles.d/*.json` beside `backend.json` holds one. Readers append `runner_profile` to the descriptor's `runner_profiles` and refuse the whole descriptor when a declaration is malformed, names another backend, repeats a profile `id`, or names a package that is not installed. Entries of the directory whose name does not end in `.json` are not declarations and are not read.",
+      "additionalProperties": false,
+      "required": ["schema_version", "backend_name", "runner_profile"],
+      "properties": {
+        "$schema": {
+          "type": "string",
+          "description": "Optional pointer to this definition, for editors. Readers ignore it."
+        },
+        "schema_version": {"type": "string", "const": "0.1"},
+        "backend_name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "`backend_name` of the descriptor this profile belongs to."
+        },
+        "runner_profile": {"$ref": "#/properties/runner_profiles/items"}
+      }
     }
   }
 }

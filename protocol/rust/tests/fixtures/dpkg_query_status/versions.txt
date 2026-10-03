@@ -1,0 +1,2 @@
+Ubuntu 24.04.5 LTS
+Debian dpkg-query package management program query tool version 1.22.6 (amd64).

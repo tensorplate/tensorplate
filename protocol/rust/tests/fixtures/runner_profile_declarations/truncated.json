@@ -1,0 +1,6 @@
+{
+  "schema_version": "0.1",
+  "backend_name": "python_pytorch",
+  "runner_profile": {
+    "id": "faster_whisper",
+    "interpreter": "/usr/lib/tensorplate/speech-runtime/bin/py

@@ -1,0 +1,148 @@
+{
+  "description": "Install combinations of the speech runtime's two profile packages: the declaration files each leaves in `runner_profiles.d/` beside the packaged `backend.json`, the packages dpkg reports with their files unpacked, and what the backend descriptor reader makes of it. `declarations` maps a file name in `runner_profiles.d/` to the repository file it is a copy of; `null` means the directory does not exist. A case expects either the merged `runner_profiles` ids in order, or a `refusal` with the reader's error variant and the names its message must carry.",
+  "cases": [
+    {
+      "name": "none",
+      "declarations": null,
+      "installed_packages": ["tensorplate-backend-python-pytorch"],
+      "runner_profiles": []
+    },
+    {
+      "name": "none_with_an_empty_directory",
+      "declarations": {},
+      "installed_packages": ["tensorplate-backend-python-pytorch"],
+      "runner_profiles": []
+    },
+    {
+      "name": "stt_only",
+      "declarations": {
+        "faster_whisper.json": "packaging/backend-metadata/runner_profiles/faster_whisper.json"
+      },
+      "installed_packages": [
+        "tensorplate-backend-python-pytorch",
+        "tensorplate-speech-runtime-base",
+        "tensorplate-speech-runtime-cublas",
+        "tensorplate-speech-runtime-vad",
+        "tensorplate-speech-runtime-ct2"
+      ],
+      "runner_profiles": ["faster_whisper"]
+    },
+    {
+      "name": "tts_only",
+      "declarations": {
+        "kokoro.json": "packaging/backend-metadata/runner_profiles/kokoro.json"
+      },
+      "installed_packages": [
+        "tensorplate-backend-python-pytorch",
+        "tensorplate-speech-runtime-base",
+        "tensorplate-speech-runtime-cublas",
+        "tensorplate-speech-runtime-cuda",
+        "tensorplate-speech-runtime-torch",
+        "tensorplate-speech-runtime-kokoro"
+      ],
+      "runner_profiles": ["kokoro"]
+    },
+    {
+      "name": "both",
+      "declarations": {
+        "faster_whisper.json": "packaging/backend-metadata/runner_profiles/faster_whisper.json",
+        "kokoro.json": "packaging/backend-metadata/runner_profiles/kokoro.json"
+      },
+      "installed_packages": [
+        "tensorplate-backend-python-pytorch",
+        "tensorplate-speech-runtime-base",
+        "tensorplate-speech-runtime-cublas",
+        "tensorplate-speech-runtime-cuda",
+        "tensorplate-speech-runtime-torch",
+        "tensorplate-speech-runtime-vad",
+        "tensorplate-speech-runtime-ct2",
+        "tensorplate-speech-runtime-kokoro",
+        "tensorplate-speech-runtime"
+      ],
+      "runner_profiles": ["faster_whisper", "kokoro"]
+    },
+    {
+      "name": "a_file_dpkg_is_still_unpacking_is_not_a_declaration",
+      "declarations": {
+        "faster_whisper.json": "packaging/backend-metadata/runner_profiles/faster_whisper.json",
+        "kokoro.json.dpkg-new": "packaging/backend-metadata/runner_profiles/kokoro.json"
+      },
+      "installed_packages": [
+        "tensorplate-backend-python-pytorch",
+        "tensorplate-speech-runtime-base",
+        "tensorplate-speech-runtime-cublas",
+        "tensorplate-speech-runtime-vad",
+        "tensorplate-speech-runtime-ct2"
+      ],
+      "runner_profiles": ["faster_whisper"]
+    },
+    {
+      "name": "duplicate_profile_id",
+      "declarations": {
+        "faster_whisper.json": "packaging/backend-metadata/runner_profiles/faster_whisper.json",
+        "second_faster_whisper.json": "protocol/rust/tests/fixtures/runner_profile_declarations/second_faster_whisper.json"
+      },
+      "installed_packages": [
+        "another-speech-runtime",
+        "tensorplate-backend-python-pytorch",
+        "tensorplate-speech-runtime-base",
+        "tensorplate-speech-runtime-cublas",
+        "tensorplate-speech-runtime-vad",
+        "tensorplate-speech-runtime-ct2"
+      ],
+      "refusal": {
+        "variant": "DuplicateRunnerProfile",
+        "names": ["`faster_whisper`", "runner_profiles.d/faster_whisper.json", "runner_profiles.d/second_faster_whisper.json"]
+      }
+    },
+    {
+      "name": "a_package_of_the_profile_is_not_installed",
+      "declarations": {
+        "kokoro.json": "packaging/backend-metadata/runner_profiles/kokoro.json"
+      },
+      "installed_packages": [
+        "tensorplate-backend-python-pytorch",
+        "tensorplate-speech-runtime-base",
+        "tensorplate-speech-runtime-cublas",
+        "tensorplate-speech-runtime-torch",
+        "tensorplate-speech-runtime-kokoro"
+      ],
+      "refusal": {
+        "variant": "PackageNotInstalled",
+        "names": ["`kokoro`", "`tensorplate-speech-runtime-cuda`", "runner_profiles.d/kokoro.json"]
+      }
+    },
+    {
+      "name": "a_declaration_left_behind_by_a_package_that_is_gone",
+      "declarations": {
+        "faster_whisper.json": "packaging/backend-metadata/runner_profiles/faster_whisper.json"
+      },
+      "installed_packages": ["tensorplate-backend-python-pytorch"],
+      "refusal": {
+        "variant": "PackageNotInstalled",
+        "names": ["`faster_whisper`", "`tensorplate-speech-runtime-base`", "runner_profiles.d/faster_whisper.json"]
+      }
+    },
+    {
+      "name": "malformed_file",
+      "declarations": {
+        "faster_whisper.json": "protocol/rust/tests/fixtures/runner_profile_declarations/truncated.json",
+        "kokoro.json": "packaging/backend-metadata/runner_profiles/kokoro.json"
+      },
+      "installed_packages": [
+        "tensorplate-backend-python-pytorch",
+        "tensorplate-speech-runtime-base",
+        "tensorplate-speech-runtime-cublas",
+        "tensorplate-speech-runtime-cuda",
+        "tensorplate-speech-runtime-torch",
+        "tensorplate-speech-runtime-vad",
+        "tensorplate-speech-runtime-ct2",
+        "tensorplate-speech-runtime-kokoro"
+      ],
+      "refusal": {
+        "variant": "Malformed",
+        "names": ["runner_profiles.d/faster_whisper.json", "invalid JSON"]
+      }
+    }
+  ]
+}

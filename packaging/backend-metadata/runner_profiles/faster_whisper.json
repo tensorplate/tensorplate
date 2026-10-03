@@ -1,0 +1,20 @@
+{
+  "$schema": "https://tensorplate.com/schemas/v0.1/backend_descriptor.json#/definitions/runner_profile_declaration",
+  "schema_version": "0.1",
+  "backend_name": "python_pytorch",
+  "runner_profile": {
+    "id": "faster_whisper",
+    "interpreter": "/usr/lib/tensorplate/speech-runtime/bin/python",
+    "environment_root": "/usr/lib/tensorplate/speech-runtime",
+    "library_search_paths": [
+      "/usr/lib/tensorplate/speech-runtime/lib/python3.12/site-packages/nvidia/cublas/lib"
+    ],
+    "packages": [
+      "tensorplate-speech-runtime-base",
+      "tensorplate-speech-runtime-ct2",
+      "tensorplate-speech-runtime-vad",
+      "tensorplate-speech-runtime-cublas"
+    ],
+    "compute_types": ["float16"]
+  }
+}
