@@ -44,7 +44,8 @@ pub enum BackendProbeState {
     /// package is not installed.
     DescriptorMissing,
 
-    /// Descriptor file exists but failed to parse or violated schema.
+    /// Descriptor file exists but failed to parse or violated schema, or
+    /// a runner profile declaration beside it was refused.
     DescriptorMalformed { reason: String },
 
     /// Descriptor refers to a TensorPlate runtime range incompatible
