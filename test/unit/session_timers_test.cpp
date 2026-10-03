@@ -71,5 +71,41 @@ TEST(SessionTimers, LargeClockJumpReportsEarliestExpiredDeadline) {
   clock.advance(9s);
   EXPECT_EQ(timers.expired(clock.now(), LogicalSessionState::Active), SessionExpiry::Idle);
 }
+
+TEST(SessionTimers, StalledOutputExpiresAfterTheNoProgressLimit) {
+  testing::FakeSchedulerClock clock;
+  SessionTimers timers(SessionLimits::defaults(), clock.now());
+  const auto stalled_since = clock.now() + 1s;
+  EXPECT_EQ(timers.next_deadline(LogicalSessionState::Active, stalled_since), stalled_since + 5s);
+  EXPECT_EQ(timers.next_deadline(LogicalSessionState::Draining, stalled_since), stalled_since + 5s);
+  EXPECT_FALSE(timers.next_deadline(LogicalSessionState::CancelRequested, stalled_since));
+  clock.advance(5'999ms);
+  EXPECT_FALSE(timers.expired(clock.now(), LogicalSessionState::Active, stalled_since));
+  clock.advance(1ms);
+  EXPECT_FALSE(timers.expired(clock.now(), LogicalSessionState::Active));
+  EXPECT_EQ(timers.expired(clock.now(), LogicalSessionState::Active, stalled_since),
+            SessionExpiry::SlowConsumer);
+  EXPECT_EQ(timers.expired(clock.now(), LogicalSessionState::Draining, stalled_since),
+            SessionExpiry::SlowConsumer);
+  EXPECT_FALSE(timers.expired(clock.now(), LogicalSessionState::CancelRequested, stalled_since));
+  EXPECT_FALSE(timers.expired(clock.now(), LogicalSessionState::Failed, stalled_since));
+}
+
+TEST(SessionTimers, EqualDeadlinesReportDurationThenStalledOutputThenHeartbeat) {
+  const auto limits = SessionLimits::create(60s, 1s, 5s, 5s, 1);
+  ASSERT_TRUE(limits);
+  testing::FakeSchedulerClock clock;
+  SessionTimers timers(*limits, clock.now());
+  const auto opened_at = clock.now();
+  clock.advance(5s);
+  EXPECT_EQ(timers.expired(clock.now(), LogicalSessionState::Active, opened_at),
+            SessionExpiry::MaxDuration);
+  const auto longer = SessionLimits::create(60s, 1s, 5s, 6s, 1);
+  ASSERT_TRUE(longer);
+  SessionTimers stalled(*longer, opened_at);
+  EXPECT_EQ(stalled.expired(clock.now(), LogicalSessionState::Active, opened_at),
+            SessionExpiry::SlowConsumer);
+  EXPECT_EQ(stalled.expired(clock.now(), LogicalSessionState::Active), SessionExpiry::Heartbeat);
+}
 }  // namespace
 }  // namespace tensorplate::serving
