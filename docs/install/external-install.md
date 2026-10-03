@@ -96,6 +96,7 @@ Installer flags:
 | `--version VERSION` | Selects the release tag/version. Accepts `0.1.1`, `v0.1.1`, or `v0.1.1-rc.N`. |
 | `--cli-only` | Installs only `tensorplate-common` and `tensorplate-cli` for the host Debian architecture. Skips runtime OS/hardware validation, service enablement, and doctor. |
 | `--with-python-backend` | Also installs `tensorplate-backend-python-pytorch`. |
+| `--with-speech-runtime` | Also installs the [speech runtime packages](./speech-runtime.md) the release publishes for `amd64`, with `tensorplate-backend-python-pytorch`. Ubuntu 24.04 on x86_64 only. Refused when the release publishes none, which is every release so far. |
 | `--yes` / `-y` | Continues without interactive prompts for unattended provisioning. |
 | `--force-os` | Overrides the OS gate. This is unsupported and at your own risk. |
 | `--strict-hardware` | Treats advisory hardware warnings as fatal. |
