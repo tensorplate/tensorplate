@@ -6,8 +6,10 @@
 #include <chrono>
 #include <cstdint>
 #include <future>
+#include <memory>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "tensorplate/scheduler/scheduler_request.hpp"
@@ -20,6 +22,8 @@ using namespace std::chrono_literals;
 static_assert(
     std::is_same_v<decltype(ManagedSessionTransition{}.session_key), SchedulerRequest::SessionKey>);
 
+const SessionBudgets kBudgets = SessionBudgets::for_audio_input(32'000).value();
+
 TEST(SessionManager, CountCapHoldsUntilPhysicalRelease) {
   const auto limits = SessionLimits::create(60s, 10s, 30s, 60min, 2);
   ASSERT_TRUE(limits);
@@ -29,8 +33,8 @@ TEST(SessionManager, CountCapHoldsUntilPhysicalRelease) {
       *limits, 5, clock, [&](const auto& transition) { observed.push_back(transition); }, {},
       false);
   ASSERT_TRUE(manager);
-  const auto first = (*manager)->open(5);
-  const auto second = (*manager)->open(5);
+  const auto first = (*manager)->open(5, kBudgets);
+  const auto second = (*manager)->open(5, kBudgets);
   ASSERT_TRUE(first);
   ASSERT_TRUE(second);
   EXPECT_NE(first->session_key, second->session_key);
@@ -40,7 +44,7 @@ TEST(SessionManager, CountCapHoldsUntilPhysicalRelease) {
   ASSERT_FALSE(cause_missing);
   EXPECT_EQ(cause_missing.error().context, "missing_session_cause");
   EXPECT_EQ((*manager)->state(first->session_key).value(), LogicalSessionState::Active);
-  const auto rejected = (*manager)->open(5);
+  const auto rejected = (*manager)->open(5, kBudgets);
   ASSERT_FALSE(rejected);
   EXPECT_EQ(rejected.error().code, Error::Code::ResourceExhausted);
   EXPECT_EQ(rejected.error().context, "session_count_limit");
@@ -52,7 +56,7 @@ TEST(SessionManager, CountCapHoldsUntilPhysicalRelease) {
   EXPECT_TRUE(cancelled->effects.contains(LogicalSessionEffect::EmitCancelAccepted));
   EXPECT_TRUE(cancelled->effects.contains(LogicalSessionEffect::RequestCleanup));
   EXPECT_EQ((*manager)->held_slots(), 2U);
-  EXPECT_FALSE((*manager)->open(5));
+  EXPECT_FALSE((*manager)->open(5, kBudgets));
 
   const auto released =
       (*manager)->apply(first->session_key, LogicalSessionEvent::ReleaseAcknowledged);
@@ -61,7 +65,7 @@ TEST(SessionManager, CountCapHoldsUntilPhysicalRelease) {
   EXPECT_TRUE(released->effects.contains(LogicalSessionEffect::ReleaseSlot));
   EXPECT_TRUE(released->effects.contains(LogicalSessionEffect::EmitTerminal));
   EXPECT_EQ((*manager)->held_slots(), 1U);
-  EXPECT_TRUE((*manager)->open(5));
+  EXPECT_TRUE((*manager)->open(5, kBudgets));
   EXPECT_EQ(observed.back().state, LogicalSessionState::Active);
 }
 
@@ -81,16 +85,16 @@ TEST(SessionManager, AdmissionHookAndGenerationRejectWithoutTakingSlot) {
       },
       false);
   ASSERT_TRUE(manager);
-  const auto stale = (*manager)->open(6);
+  const auto stale = (*manager)->open(6, kBudgets);
   ASSERT_FALSE(stale);
   EXPECT_EQ(stale.error().context, "stale_generation");
   EXPECT_EQ((*manager)->held_slots(), 0U);
-  const auto memory_rejected = (*manager)->open(7);
+  const auto memory_rejected = (*manager)->open(7, kBudgets);
   ASSERT_FALSE(memory_rejected);
   EXPECT_EQ(memory_rejected.error().context, "memory_quota");
   EXPECT_EQ((*manager)->held_slots(), 0U);
   allow = true;
-  EXPECT_TRUE((*manager)->open(7));
+  EXPECT_TRUE((*manager)->open(7, kBudgets));
   EXPECT_EQ((*manager)->held_slots(), 1U);
 }
 
@@ -103,7 +107,7 @@ TEST(SessionManager, InitializationFailureNeverEmitsReadyAndRetainsCleanupSlot) 
       *limits, 5, clock, [&](const auto& transition) { observed.push_back(transition); }, {},
       false);
   ASSERT_TRUE(manager);
-  const auto failed_open = (*manager)->open(5, [](std::uint64_t) -> Result<void> {
+  const auto failed_open = (*manager)->open(5, kBudgets, [](std::uint64_t) -> Result<void> {
     return unexpected(
         Error::make(Error::Code::ConfigInvalid, "initialization failed", "initialization_failed"));
   });
@@ -115,9 +119,9 @@ TEST(SessionManager, InitializationFailureNeverEmitsReadyAndRetainsCleanupSlot) 
   EXPECT_TRUE(observed[0].effects.contains(LogicalSessionEffect::RequestCleanup));
   EXPECT_TRUE(observed[0].effects.contains(LogicalSessionEffect::EmitTerminal));
   EXPECT_EQ((*manager)->held_slots(), 1U);
-  EXPECT_FALSE((*manager)->open(5));
+  EXPECT_FALSE((*manager)->open(5, kBudgets));
   EXPECT_TRUE((*manager)->apply(observed[0].session_key, LogicalSessionEvent::ReleaseAcknowledged));
-  EXPECT_TRUE((*manager)->open(5));
+  EXPECT_TRUE((*manager)->open(5, kBudgets));
 }
 
 TEST(SessionManager, InitializationPastDeadlineNeverEmitsReady) {
@@ -129,7 +133,7 @@ TEST(SessionManager, InitializationPastDeadlineNeverEmitsReady) {
       *limits, 5, clock, [&](const auto& transition) { observed.push_back(transition); }, {},
       false);
   ASSERT_TRUE(manager);
-  const auto late_open = (*manager)->open(5, [&](std::uint64_t) -> Result<void> {
+  const auto late_open = (*manager)->open(5, kBudgets, [&](std::uint64_t) -> Result<void> {
     clock.advance(2s);
     return {};
   });
@@ -152,7 +156,7 @@ TEST(SessionManager, HeartbeatTimeoutUsesFakeClockAndRetainsCleanupSlot) {
       SessionLimits::defaults(), 5, clock,
       [&](const auto& transition) { observed.push_back(transition); }, {}, false);
   ASSERT_TRUE(manager);
-  const auto opened = (*manager)->open(5);
+  const auto opened = (*manager)->open(5, kBudgets);
   ASSERT_TRUE(opened);
   const auto key = opened->session_key;
   clock.advance(10s);
@@ -181,7 +185,7 @@ TEST(SessionManager, LatePingCannotReviveAnExpiredSession) {
   auto manager = SessionManager::create(
       SessionLimits::defaults(), 5, clock, [](const auto&) {}, {}, false);
   ASSERT_TRUE(manager);
-  const auto opened = (*manager)->open(5);
+  const auto opened = (*manager)->open(5, kBudgets);
   ASSERT_TRUE(opened);
   clock.advance(30s);
   const auto late_ping = (*manager)->apply(opened->session_key, LogicalSessionEvent::Ping);
@@ -199,7 +203,7 @@ TEST(SessionManager, IdleAndMaximumDurationCanExpireIndependently) {
   auto manager = SessionManager::create(
       *limits, 5, clock, [](const auto&) {}, {}, false);
   ASSERT_TRUE(manager);
-  const auto idle_key = (*manager)->open(5)->session_key;
+  const auto idle_key = (*manager)->open(5, kBudgets)->session_key;
   clock.advance(2s);
   const auto idle = (*manager)->sweep_due();
   ASSERT_EQ(idle.size(), 1U);
@@ -211,7 +215,7 @@ TEST(SessionManager, IdleAndMaximumDurationCanExpireIndependently) {
   auto duration_manager = SessionManager::create(
       *long_limits, 5, clock, [](const auto&) {}, {}, false);
   ASSERT_TRUE(duration_manager);
-  const auto duration_key = (*duration_manager)->open(5)->session_key;
+  const auto duration_key = (*duration_manager)->open(5, kBudgets)->session_key;
   clock.advance(6s);
   EXPECT_TRUE((*duration_manager)->apply(duration_key, LogicalSessionEvent::Ping));
   clock.advance(2s);
@@ -227,7 +231,7 @@ TEST(SessionManager, DrainStopsAdmissionAndWaitsForRelease) {
       SessionLimits::defaults(), 5, clock,
       [&](const auto& transition) { observed.push_back(transition); }, {}, false);
   ASSERT_TRUE(manager);
-  const auto opened = (*manager)->open(5);
+  const auto opened = (*manager)->open(5, kBudgets);
   ASSERT_TRUE(opened);
   const auto key = opened->session_key;
   const auto draining = (*manager)->stop_admission_and_drain(
@@ -237,8 +241,8 @@ TEST(SessionManager, DrainStopsAdmissionAndWaitsForRelease) {
   EXPECT_EQ(draining[0].state, LogicalSessionState::Draining);
   EXPECT_FALSE((*manager)->heartbeat_due(key).value());
   EXPECT_FALSE((*manager)->admission_open());
-  EXPECT_EQ((*manager)->open(5).error().context, "admission_closed");
-  const auto ignored_input = (*manager)->apply(key, LogicalSessionEvent::Data);
+  EXPECT_EQ((*manager)->open(5, kBudgets).error().context, "admission_closed");
+  const auto ignored_input = (*manager)->accept_input(key, 640);
   ASSERT_TRUE(ignored_input);
   EXPECT_TRUE(ignored_input->effects.empty());
   EXPECT_EQ((*manager)->state(key).value(), LogicalSessionState::Draining);
@@ -264,7 +268,7 @@ TEST(SessionManager, OwnerReportsAfterDeadlinePreserveTimeoutAndReleaseSlot) {
       SessionLimits::defaults(), 5, clock,
       [&](const auto& transition) { observed.push_back(transition); }, {}, false);
   ASSERT_TRUE(manager);
-  const auto first = (*manager)->open(5);
+  const auto first = (*manager)->open(5, kBudgets);
   ASSERT_TRUE(first);
   EXPECT_TRUE((*manager)->apply(first->session_key, LogicalSessionEvent::Drain));
   clock.advance(60min);
@@ -286,7 +290,7 @@ TEST(SessionManager, OwnerReportsAfterDeadlinePreserveTimeoutAndReleaseSlot) {
       SessionLimits::defaults(), 5, clock,
       [&](const auto& transition) { observed.push_back(transition); }, {}, false);
   ASSERT_TRUE(second_manager);
-  const auto second = (*second_manager)->open(5);
+  const auto second = (*second_manager)->open(5, kBudgets);
   ASSERT_TRUE(second);
   EXPECT_TRUE((*second_manager)->apply(second->session_key, LogicalSessionEvent::Drain));
   EXPECT_TRUE((*second_manager)->apply(second->session_key, LogicalSessionEvent::DrainCompleted));
@@ -311,7 +315,7 @@ TEST(SessionManager, ExpiredEarlyReleaseAckDoesNotFreeSlot) {
       SessionLimits::defaults(), 5, clock,
       [&](const auto& transition) { observed.push_back(transition); }, {}, false);
   ASSERT_TRUE(manager);
-  const auto opened = (*manager)->open(5);
+  const auto opened = (*manager)->open(5, kBudgets);
   ASSERT_TRUE(opened);
   clock.advance(30s);
   const auto early_release =
@@ -336,7 +340,7 @@ TEST(SessionManager, RefusedClientEventFailsAndStillNeedsRelease) {
       SessionLimits::defaults(), 5, clock,
       [&](const auto& transition) { observed.push_back(transition); }, {}, false);
   ASSERT_TRUE(manager);
-  const auto key = (*manager)->open(5)->session_key;
+  const auto key = (*manager)->open(5, kBudgets)->session_key;
   auto pure_machine = LogicalSessionMachine::open(5, 5).value();
   ASSERT_TRUE(pure_machine.apply(LogicalSessionEvent::Admitted));
   const auto expected_refusal = pure_machine.apply(LogicalSessionEvent::Open);
@@ -367,7 +371,7 @@ TEST(SessionManager, DedicatedTimerThreadUsesInjectedClock) {
         }
       });
   ASSERT_TRUE(manager);
-  const auto opened = (*manager)->open(5);
+  const auto opened = (*manager)->open(5, kBudgets);
   ASSERT_TRUE(opened);
   clock.advance(30s);
   (*manager)->notify_clock_advanced();
@@ -375,6 +379,342 @@ TEST(SessionManager, DedicatedTimerThreadUsesInjectedClock) {
   EXPECT_NE(observed_thread.get(), std::this_thread::get_id());
   EXPECT_EQ((*manager)->state(opened->session_key).value(), LogicalSessionState::CancelRequested);
   EXPECT_EQ((*manager)->held_slots(), 1U);
+}
+
+struct FakeBody final : OutputBody {};
+
+OutputItem output_item(OutputKind kind, std::uint64_t bytes) {
+  return OutputItem{kind, bytes, 0, std::make_unique<FakeBody>()};
+}
+
+struct ManagerUnderTest {
+  explicit ManagerUnderTest(SessionManager::TransitionSink extra = {})
+      : manager(SessionManager::create(
+                    SessionLimits::defaults(), 5, clock,
+                    [this, extra = std::move(extra)](const ManagedSessionTransition& transition) {
+                      observed.push_back(transition);
+                      if (extra) {
+                        extra(transition);
+                      }
+                    },
+                    {}, false)
+                    .value()) {}
+
+  testing::FakeSchedulerClock clock;
+  std::vector<ManagedSessionTransition> observed;
+  std::unique_ptr<SessionManager> manager;
+};
+
+TEST(SessionManager, InputWithinCreditIsAcceptedAndAboveItFailsTheSession) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto opened = manager.open(5, kBudgets);
+  ASSERT_TRUE(opened);
+  EXPECT_EQ(opened->status.input_credit_bytes.limit(), 32'000U);
+  EXPECT_EQ(opened->status.output_metadata_bytes.limit(), 16'384U);
+  const auto key = opened->session_key;
+
+  const auto accepted = manager.accept_input(key, 32'000);
+  ASSERT_TRUE(accepted);
+  EXPECT_TRUE(accepted->effects.contains(LogicalSessionEffect::AcceptInput));
+  EXPECT_EQ(accepted->status.state, LogicalSessionState::Active);
+  EXPECT_EQ(accepted->status.input_queue_depth, 1U);
+  EXPECT_EQ(accepted->status.input_credit_bytes.available(), 0U);
+
+  const auto above = manager.accept_input(key, 2);
+  ASSERT_FALSE(above);
+  EXPECT_EQ(above.error().code, Error::Code::ResourceExhausted);
+  EXPECT_EQ(above.error().context, "input_credit_exceeded");
+  const auto& failed = under_test.observed.back();
+  EXPECT_EQ(failed.state, LogicalSessionState::Failed);
+  EXPECT_FALSE(failed.effects.contains(LogicalSessionEffect::AcceptInput));
+  EXPECT_TRUE(failed.effects.contains(LogicalSessionEffect::EmitTerminal));
+  ASSERT_TRUE(failed.cause);
+  EXPECT_EQ(failed.cause->context, "input_credit_exceeded");
+  EXPECT_EQ(failed.status.input_queue_depth, 1U);
+  EXPECT_EQ(manager.held_slots(), 1U);
+}
+
+TEST(SessionManager, EmptyInputFailsTheSession) {
+  ManagerUnderTest under_test;
+  const auto key = under_test.manager->open(5, kBudgets)->session_key;
+  const auto empty = under_test.manager->accept_input(key, 0);
+  ASSERT_FALSE(empty);
+  EXPECT_EQ(empty.error().code, Error::Code::ConfigInvalid);
+  EXPECT_EQ(empty.error().context, "empty_input");
+  EXPECT_EQ(under_test.manager->state(key).value(), LogicalSessionState::Failed);
+}
+
+TEST(SessionManager, DataWithoutItsSizeIsRefusedAndChangesNothing) {
+  ManagerUnderTest under_test;
+  const auto key = under_test.manager->open(5, kBudgets)->session_key;
+  const auto before = under_test.observed.size();
+  const auto unsized = under_test.manager->apply(key, LogicalSessionEvent::Data);
+  ASSERT_FALSE(unsized);
+  EXPECT_EQ(unsized.error().code, Error::Code::ConfigInvalid);
+  EXPECT_EQ(unsized.error().context, "input_without_size");
+  EXPECT_EQ(under_test.manager->state(key).value(), LogicalSessionState::Active);
+  EXPECT_EQ(under_test.observed.size(), before);
+}
+
+TEST(SessionManager, InputTheStateDoesNotAcceptIsNotCharged) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto draining_key = manager.open(5, kBudgets)->session_key;
+  ASSERT_TRUE(manager.apply(draining_key, LogicalSessionEvent::HalfClose));
+  const auto ignored = manager.accept_input(draining_key, 64'000);
+  ASSERT_TRUE(ignored);
+  EXPECT_TRUE(ignored->effects.empty());
+  EXPECT_EQ(manager.status(draining_key)->input_queue_depth, 0U);
+  EXPECT_EQ(manager.status(draining_key)->input_credit_bytes.used(), 0U);
+
+  const auto finalizing_key = manager.open(5, kBudgets)->session_key;
+  ASSERT_TRUE(manager.apply(finalizing_key, LogicalSessionEvent::Finalize));
+  const auto refused = manager.accept_input(finalizing_key, 640);
+  ASSERT_FALSE(refused);
+  EXPECT_EQ(refused.error().context, "illegal_transition");
+  EXPECT_EQ(manager.status(finalizing_key)->state, LogicalSessionState::Failed);
+  EXPECT_EQ(manager.status(finalizing_key)->input_credit_bytes.used(), 0U);
+}
+
+TEST(SessionManager, AudioCreditReturnsAsInputIsConsumed) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto key = manager.open(5, kBudgets)->session_key;
+  ASSERT_TRUE(manager.accept_input(key, 16'000));
+  ASSERT_TRUE(manager.accept_input(key, 16'000));
+  const auto released = manager.release_audio_input(key, 1, 16'000);
+  ASSERT_TRUE(released);
+  EXPECT_EQ(released->input_queue_depth, 1U);
+  EXPECT_EQ(released->input_credit_bytes.used(), 16'000U);
+  EXPECT_EQ(manager.status(key).value(), *released);
+  EXPECT_TRUE(manager.accept_input(key, 16'000));
+}
+
+TEST(SessionManager, TextCreditKeepsTwoWaitingSegmentsAndOneActive) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto budgets = SessionBudgets::for_text_input(48'000).value();
+  const auto opened = manager.open(5, budgets);
+  ASSERT_TRUE(opened);
+  EXPECT_EQ(opened->status.output_pcm_bytes.limit(), 96'000U);
+  const auto key = opened->session_key;
+  ASSERT_TRUE(manager.accept_input(key, 100));
+  ASSERT_TRUE(manager.accept_input(key, 200));
+  const auto started = manager.start_text_segment(key);
+  ASSERT_TRUE(started);
+  EXPECT_EQ(started->input_queue_depth, 2U);
+  EXPECT_EQ(started->input_credit_bytes.used(), 200U);
+  ASSERT_TRUE(manager.accept_input(key, 300));
+  EXPECT_EQ(manager.status(key)->input_queue_depth, 3U);
+  const auto finished = manager.finish_text_segment(key);
+  ASSERT_TRUE(finished);
+  EXPECT_EQ(finished->input_queue_depth, 2U);
+
+  const auto fourth = manager.accept_input(key, 1);
+  ASSERT_FALSE(fourth);
+  EXPECT_EQ(fourth.error().context, "input_credit_exceeded");
+  EXPECT_EQ(manager.state(key).value(), LogicalSessionState::Failed);
+}
+
+TEST(SessionManager, CreditReleaseTheCreditRefusesFailsTheSession) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto key = manager.open(5, kBudgets)->session_key;
+  ASSERT_TRUE(manager.accept_input(key, 640));
+  const auto mismatch = manager.release_audio_input(key, 1, 641);
+  ASSERT_FALSE(mismatch);
+  EXPECT_EQ(mismatch.error().code, Error::Code::Internal);
+  EXPECT_EQ(mismatch.error().context, "input_release_mismatch");
+  EXPECT_EQ(under_test.observed.back().state, LogicalSessionState::Failed);
+  EXPECT_EQ(under_test.observed.back().cause->context, "input_release_mismatch");
+  EXPECT_EQ(manager.status(key)->input_credit_bytes.used(), 640U);
+
+  const auto wrong_kind = manager.start_text_segment(key);
+  ASSERT_FALSE(wrong_kind);
+  EXPECT_EQ(wrong_kind.error().context, "wrong_input_kind");
+  EXPECT_EQ(under_test.observed.back().cause->context, "input_release_mismatch");
+  EXPECT_FALSE(manager.release_audio_input(key + 1, 1, 640));
+}
+
+TEST(SessionManager, UndeliveredOutputEndsTheSessionAfterFiveSecondsWithoutProgress) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  auto& clock = under_test.clock;
+  const auto opened = manager.open(5, SessionBudgets::for_text_input(48'000).value());
+  ASSERT_TRUE(opened);
+  const auto key = opened->session_key;
+  auto& output = *opened->output;
+
+  clock.advance(5s);
+  ASSERT_TRUE(manager.apply(key, LogicalSessionEvent::Ping));
+  EXPECT_TRUE(manager.sweep_due().empty());
+
+  auto first = output_item(OutputKind::Audio, 960);
+  auto second = output_item(OutputKind::Audio, 960);
+  ASSERT_EQ(output.offer(first, clock.now()).value(), OutputOffer::Queued);
+  ASSERT_EQ(output.offer(second, clock.now()).value(), OutputOffer::Queued);
+  const auto sent = output.take();
+  ASSERT_TRUE(sent);
+  clock.advance(4s);
+  ASSERT_TRUE(output.delivered(sent->sequence, clock.now()));
+  clock.advance(4s);
+  ASSERT_TRUE(manager.apply(key, LogicalSessionEvent::Ping));
+  ASSERT_TRUE(manager.apply(key, LogicalSessionEvent::StatusRequest));
+  clock.advance(999ms);
+  EXPECT_TRUE(manager.sweep_due().empty());
+  clock.advance(1ms);
+  const auto stalled = manager.sweep_due();
+  ASSERT_EQ(stalled.size(), 1U);
+  EXPECT_EQ(stalled[0].state, LogicalSessionState::CancelRequested);
+  EXPECT_TRUE(stalled[0].effects.contains(LogicalSessionEffect::SuppressOutput));
+  ASSERT_TRUE(stalled[0].cause);
+  EXPECT_EQ(stalled[0].cause->code, Error::Code::ResourceExhausted);
+  EXPECT_EQ(stalled[0].cause->context, "slow_consumer");
+  EXPECT_EQ(stalled[0].status.output_pcm_bytes.used(), 0U);
+  EXPECT_FALSE(output.take());
+  EXPECT_TRUE(manager.sweep_due().empty());
+  EXPECT_EQ(manager.held_slots(), 1U);
+}
+
+TEST(SessionManager, LatePingCannotReviveASessionWhoseOutputStalled) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto opened = manager.open(5, SessionBudgets::for_text_input(48'000).value());
+  ASSERT_TRUE(opened);
+  auto chunk = output_item(OutputKind::Audio, 960);
+  ASSERT_EQ(opened->output->offer(chunk, under_test.clock.now()).value(), OutputOffer::Queued);
+  under_test.clock.advance(5s);
+  const auto late_ping = manager.apply(opened->session_key, LogicalSessionEvent::Ping);
+  ASSERT_FALSE(late_ping);
+  EXPECT_EQ(late_ping.error().code, Error::Code::ResourceExhausted);
+  EXPECT_EQ(late_ping.error().context, "slow_consumer");
+  EXPECT_EQ(manager.state(opened->session_key).value(), LogicalSessionState::CancelRequested);
+  EXPECT_TRUE(manager.sweep_due().empty());
+}
+
+TEST(SessionManager, DrainingSessionStillEndsWhenItsOutputStalls) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto opened = manager.open(5, SessionBudgets::for_text_input(48'000).value());
+  ASSERT_TRUE(opened);
+  ASSERT_TRUE(manager.apply(opened->session_key, LogicalSessionEvent::HalfClose));
+  auto chunk = output_item(OutputKind::Audio, 960);
+  ASSERT_EQ(opened->output->offer(chunk, under_test.clock.now()).value(), OutputOffer::Queued);
+  under_test.clock.advance(4'999ms);
+  EXPECT_TRUE(manager.sweep_due().empty());
+  under_test.clock.advance(1ms);
+  const auto stalled = manager.sweep_due();
+  ASSERT_EQ(stalled.size(), 1U);
+  EXPECT_EQ(stalled[0].cause->context, "slow_consumer");
+}
+
+TEST(SessionManager, OutputIsSuppressedBeforeTheSinkRunsAndOutlivesTheSlot) {
+  std::vector<OutputOffer> task_offers;
+  std::vector<OutputOffer> terminal_offers;
+  SchedulerClock::TimePoint now;
+  ManagerUnderTest under_test([&](const ManagedSessionTransition& transition) {
+    if (transition.effects.contains(LogicalSessionEffect::SuppressOutput)) {
+      auto late = output_item(OutputKind::Audio, 960);
+      task_offers.push_back(transition.output->offer(late, now).value());
+    }
+    if (transition.effects.contains(LogicalSessionEffect::EmitTerminal)) {
+      auto terminal = output_item(OutputKind::Terminal, 32);
+      terminal_offers.push_back(transition.output->offer(terminal, now).value());
+    }
+  });
+  auto& manager = *under_test.manager;
+  now = under_test.clock.now();
+  const auto opened = manager.open(5, SessionBudgets::for_text_input(48'000).value());
+  ASSERT_TRUE(opened);
+  const auto key = opened->session_key;
+  auto chunk = output_item(OutputKind::Audio, 960);
+  ASSERT_EQ(opened->output->offer(chunk, now).value(), OutputOffer::Queued);
+
+  ASSERT_TRUE(manager.apply(key, LogicalSessionEvent::Cancel));
+  ASSERT_EQ(task_offers.size(), 1U);
+  EXPECT_EQ(task_offers[0], OutputOffer::Suppressed);
+  EXPECT_EQ(opened->output->pcm_usage().used(), 0U);
+
+  ASSERT_TRUE(manager.apply(key, LogicalSessionEvent::ReleaseAcknowledged));
+  EXPECT_EQ(manager.held_slots(), 0U);
+  ASSERT_EQ(terminal_offers.size(), 1U);
+  EXPECT_EQ(terminal_offers[0], OutputOffer::Queued);
+  const auto terminal = opened->output->take();
+  ASSERT_TRUE(terminal);
+  EXPECT_EQ(terminal->item.kind, OutputKind::Terminal);
+  auto after = output_item(OutputKind::Control, 4);
+  EXPECT_EQ(opened->output->offer(after, now).value(), OutputOffer::Closed);
+}
+
+TEST(SessionManager, EndedSessionLeavesATombstoneForSixtySeconds) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto key = manager.open(5, kBudgets)->session_key;
+  EXPECT_FALSE(manager.tombstone(key));
+  ASSERT_TRUE(manager.apply(key, LogicalSessionEvent::Cancel));
+  EXPECT_FALSE(manager.tombstone(key));
+  under_test.clock.advance(3s);
+  ASSERT_TRUE(manager.apply(key, LogicalSessionEvent::ReleaseAcknowledged));
+
+  const auto tombstone = manager.tombstone(key);
+  ASSERT_TRUE(tombstone);
+  EXPECT_EQ(tombstone->session_key, key);
+  EXPECT_EQ(tombstone->generation, 5U);
+  EXPECT_EQ(tombstone->state, LogicalSessionState::Closed);
+  EXPECT_EQ(tombstone->code, Error::Code::Cancelled);
+  EXPECT_EQ(tombstone->reason, "client_cancelled");
+  EXPECT_EQ(tombstone->ended_at, under_test.clock.now());
+
+  const auto late = manager.apply(key, LogicalSessionEvent::FinalizeCompleted);
+  ASSERT_FALSE(late);
+  EXPECT_EQ(late.error().code, Error::Code::NotReady);
+  EXPECT_EQ(late.error().context, "session_ended");
+  EXPECT_EQ(manager.state(key).error().context, "session_ended");
+  EXPECT_EQ(manager.status(key).error().context, "session_ended");
+  EXPECT_EQ(manager.finish_text_segment(key).error().context, "session_ended");
+  EXPECT_EQ(manager.state(key + 1).error().context, "unknown_session");
+
+  under_test.clock.advance(59'999ms);
+  EXPECT_TRUE(manager.tombstone(key));
+  under_test.clock.advance(1ms);
+  EXPECT_FALSE(manager.tombstone(key));
+  EXPECT_EQ(manager.state(key).error().context, "unknown_session");
+}
+
+TEST(SessionManager, FailedSessionLeavesItsTombstoneOnlyAtRelease) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto key = manager.open(5, kBudgets)->session_key;
+  ASSERT_FALSE(manager.accept_input(key, 32'001));
+  EXPECT_FALSE(manager.tombstone(key));
+  ASSERT_TRUE(manager.apply(key, LogicalSessionEvent::ReleaseAcknowledged));
+  const auto tombstone = manager.tombstone(key);
+  ASSERT_TRUE(tombstone);
+  EXPECT_EQ(tombstone->state, LogicalSessionState::Failed);
+  EXPECT_EQ(tombstone->code, Error::Code::ResourceExhausted);
+  EXPECT_EQ(tombstone->reason, "input_credit_exceeded");
+}
+
+TEST(SessionManager, TimerThreadEndsASessionWhoseOutputStalls) {
+  testing::FakeSchedulerClock clock;
+  std::promise<Error> ended;
+  auto cause = ended.get_future();
+  auto manager = SessionManager::create(
+      SessionLimits::defaults(), 5, clock, [&](const ManagedSessionTransition& transition) {
+        if (transition.state == LogicalSessionState::CancelRequested) {
+          ended.set_value(transition.cause.value());
+        }
+      });
+  ASSERT_TRUE(manager);
+  const auto opened = (*manager)->open(5, SessionBudgets::for_text_input(48'000).value());
+  ASSERT_TRUE(opened);
+  auto chunk = output_item(OutputKind::Audio, 960);
+  ASSERT_EQ(opened->output->offer(chunk, clock.now()).value(), OutputOffer::Queued);
+  clock.advance(5s);
+  (*manager)->notify_clock_advanced();
+  ASSERT_EQ(cause.wait_for(1s), std::future_status::ready);
+  EXPECT_EQ(cause.get().context, "slow_consumer");
 }
 }  // namespace
 }  // namespace tensorplate::serving

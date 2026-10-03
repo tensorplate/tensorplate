@@ -36,7 +36,7 @@ TEST(SessionLimits, DefaultsAndInvalidSettingsMatchFixture) {
   EXPECT_EQ(expected->max_sessions(), 2048U);
 
   const auto& invalid = fixture.at("invalid");
-  ASSERT_EQ(invalid.size(), 8U);
+  ASSERT_EQ(invalid.size(), 10U);
   for (std::size_t i = 0; i < invalid.size(); ++i) {
     SCOPED_TRACE(i);
     const auto result = from_fixture(invalid[i]);
