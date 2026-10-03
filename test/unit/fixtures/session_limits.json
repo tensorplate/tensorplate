@@ -14,6 +14,8 @@
     {"idle_timeout_ms": 60000, "heartbeat_interval_ms": 10000, "liveness_timeout_ms": 30000, "max_duration_ms": 0, "max_sessions": 2048},
     {"idle_timeout_ms": 60000, "heartbeat_interval_ms": 10000, "liveness_timeout_ms": 30000, "max_duration_ms": 3600000, "max_sessions": 0},
     {"idle_timeout_ms": 60000, "heartbeat_interval_ms": 10000, "liveness_timeout_ms": 30000, "max_duration_ms": 3600000, "max_sessions": 2049},
-    {"idle_timeout_ms": 60000, "heartbeat_interval_ms": 10000, "liveness_timeout_ms": 30000, "max_duration_ms": 3600001, "max_sessions": 2048}
+    {"idle_timeout_ms": 60000, "heartbeat_interval_ms": 10000, "liveness_timeout_ms": 30000, "max_duration_ms": 3600001, "max_sessions": 2048},
+    {"idle_timeout_ms": 3600001, "heartbeat_interval_ms": 10000, "liveness_timeout_ms": 30000, "max_duration_ms": 3600000, "max_sessions": 2048},
+    {"idle_timeout_ms": 60000, "heartbeat_interval_ms": 10000, "liveness_timeout_ms": 3600001, "max_duration_ms": 3600000, "max_sessions": 2048}
   ]
 }
