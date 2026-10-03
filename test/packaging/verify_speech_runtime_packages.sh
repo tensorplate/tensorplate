@@ -310,6 +310,18 @@ if grep -qE "site-packages/pip(/|-)" "$listing"; then
 fi
 pass "each distribution ships from the package its lock file names"
 
+# A runner profile's package declares the profile beside the backend
+# descriptor; no other file of the family lands under /usr/share/tensorplate.
+declaration_dir=/usr/share/tensorplate/backends/python_pytorch/runner_profiles.d
+declaration_source=packaging/backend-metadata/runner_profiles
+grep -qxF "ct2 .${declaration_dir}/faster_whisper.json" "$listing" ||
+  die "${family}-ct2 must ship the faster_whisper runner profile declaration"
+grep -qxF "kokoro .${declaration_dir}/kokoro.json" "$listing" ||
+  die "${family}-kokoro must ship the kokoro runner profile declaration"
+[[ "$(grep -c ' \./usr/share/tensorplate/' "$listing")" == 2 ]] ||
+  die "the family must ship the two declarations under /usr/share/tensorplate and nothing else"
+pass "each profile package ships its runner profile declaration"
+
 # The installed tree describes its installed location, never the build's.
 root="$td/root"
 mkdir -p "$root"
@@ -320,6 +332,10 @@ done
   die "pyvenv.cfg must name only the distribution interpreter's directory"
 [[ "$(head -1 "${root}${env_root}/bin/tpstub-tool")" == "#!${env_root}/bin/python" ]] ||
   die "console scripts must start the environment's own interpreter"
+for profile in faster_whisper kokoro; do
+  cmp -s "${root}${declaration_dir}/${profile}.json" "${declaration_source}/${profile}.json" ||
+    die "the installed ${profile} declaration is not ${declaration_source}/${profile}.json"
+done
 if grep -rlF -- "$repo_root" "$root" >"$td/leaks" 2>/dev/null; then
   die "files record the build directory: $(head -3 "$td/leaks" | tr '\n' ' ')"
 fi
@@ -367,8 +383,17 @@ note "installing the built packages with dpkg"
   die "refusing to install over the tensorplate packages already on this host"
 [[ -d /run/systemd/system ]] || die "needs a systemd host: the maintainer scripts skip the restart without one"
 
+# The descriptor reader's question to dpkg, and the states it takes for
+# "the package's files are installed".
+# shellcheck disable=SC2016 # dpkg-query expands these, not the shell.
+status_format='${Package}\t${db:Status-Status}\n'
+unpacked_states='unpacked half-configured triggers-awaited triggers-pending installed'
+
+# The stand-in records each restart it is asked for and, at that moment, the
+# dpkg state of every family package: a restarted agent reads them then.
 mkdir -p "$td/bin" "$td/standin/DEBIAN"
-printf '#!/bin/sh\necho "$@" >>%s\n' "$td/restarts" >"$td/bin/deb-systemd-invoke"
+printf '#!/bin/sh\necho "$@" >>%s\ndpkg-query -W -f=%s -- "%s*" >>%s 2>/dev/null\nexit 0\n' \
+  "$td/restarts" "'${status_format}'" "$family" "$td/states-at-restart" >"$td/bin/deb-systemd-invoke"
 chmod +x "$td/bin/deb-systemd-invoke"
 for standin in "tensorplate-serving amd64" "tensorplate-backend-python-pytorch all"; do
   printf 'Package: %s\nVersion: %s\nArchitecture: %s\nMaintainer: stand-in <stand-in@example.invalid>\nDescription: stand-in\n' \
@@ -380,6 +405,7 @@ done
 # how many times that run asked for the agent to be restarted.
 restarts_from() {
   : >"$td/restarts"
+  : >"$td/states-at-restart"
   "${as_root[@]}" env PATH="$td/bin:/usr/sbin:/usr/bin:/sbin:/bin" dpkg "$@" >"$td/dpkg.log" 2>&1 ||
     { tail -15 "$td/dpkg.log" >&2; die "dpkg $1 failed"; }
   grep -cx 'try-restart tensorplate-agent.service' "$td/restarts" || true
@@ -392,20 +418,45 @@ installed=1
   die "installing the stand-ins must not restart anything"
 [[ "$(restarts_from -i "${debs[@]}")" == 1 ]] ||
   die "installing the family in one dpkg run must restart the agent exactly once ($(cat "$td/restarts"))"
+# Every package a declaration names has its files unpacked when the agent is
+# restarted, by the reader's reading of dpkg's states, and is installed after.
+for profile in faster_whisper kokoro; do
+  mapfile -t named < <(python3.12 -c \
+    'import json, sys; print("\n".join(json.load(open(sys.argv[1]))["runner_profile"]["packages"]))' \
+    "${declaration_dir}/${profile}.json")
+  for package in "${named[@]}"; do
+    state="$(awk -F'\t' -v p="$package" '$1 == p {print $2}' "$td/states-at-restart")"
+    [[ " ${unpacked_states} " == *" ${state:-absent} "* ]] ||
+      die "${package}, named by the ${profile} declaration, was \"${state:-absent}\" when the agent was restarted"
+    [[ "$(dpkg-query -W -f="$status_format" -- "$package")" == "${package}"$'\t'"installed" ]] ||
+      die "${package}, named by the ${profile} declaration, is not installed"
+  done
+done
+[[ "$(dpkg -S "${declaration_dir}/faster_whisper.json")" == "${family}-ct2: ${declaration_dir}/faster_whisper.json" ]] ||
+  die "the faster_whisper declaration must belong to ${family}-ct2"
+[[ "$(dpkg -S "${declaration_dir}/kokoro.json")" == "${family}-kokoro: ${declaration_dir}/kokoro.json" ]] ||
+  die "the kokoro declaration must belong to ${family}-kokoro"
+base_state="$(awk -F'\t' -v p="${family}-base" '$1 == p {print $2}' "$td/states-at-restart")"
+pass "declared packages are unpacked at the restart (base: ${base_state}) and installed after it"
 [[ -z "$(dpkg --verify "${expected[@]}" 2>&1)" ]] || die "dpkg --verify reports changed or missing files"
 "${env_root}/bin/python" -c 'import tensorplate_pytorch_backend, tpstub_kokoro, espeakng_loader' ||
   die "the installed environment does not import what it ships"
 [[ -z "$(find "$env_root" -newer "$td/restarts" -type f)" ]] || die "running the environment wrote files into it"
 [[ "$(restarts_from -r "$family" "${family}-ct2")" == 1 ]] ||
   die "removing a component must restart the agent exactly once"
+[[ ! -e "${declaration_dir}/faster_whisper.json" && -f "${declaration_dir}/kokoro.json" ]] ||
+  die "removing ${family}-ct2 must remove the faster_whisper declaration and leave kokoro's"
 [[ "$(restarts_from -i "$(deb_of "${family}-ct2")")" == 1 ]] ||
   die "adding a component must restart the agent exactly once"
+[[ -f "${declaration_dir}/faster_whisper.json" && -f "${declaration_dir}/kokoro.json" ]] ||
+  die "adding ${family}-ct2 back must restore the faster_whisper declaration"
 remaining=()
 for package in "${expected[@]}"; do [[ "$package" == "$family" ]] || remaining+=("$package"); done
 [[ "$(restarts_from -r "${remaining[@]}")" == 1 ]] ||
   die "removing the whole family must restart the agent exactly once"
+[[ ! -e "$declaration_dir" ]] || die "removing the family left ${declaration_dir}"
 [[ "$(restarts_from --purge "${remaining[@]}")" == 0 ]] || die "purging removed packages must not restart the agent"
 [[ ! -e "$env_root" ]] || die "purge left files under ${env_root}"
-pass "dpkg: one agent restart per run, clean verify, nothing written at run time, clean purge"
+pass "dpkg: one agent restart per run, declarations follow their packages, clean verify, nothing written at run time, clean purge"
 
 printf 'verify_speech_runtime_packages: ok (version %s, %d refusals)\n' "$version" "$cases"

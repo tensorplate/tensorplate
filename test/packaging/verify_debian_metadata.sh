@@ -206,8 +206,20 @@ for pkg in ${declared_family}; do
       fail=1
     fi
   done
-  if [ -e "${debian}/${pkg}.install" ]; then
-    echo "FAIL: ${pkg} is staged by the environment builder and must not ship ${pkg}.install" >&2
+  # The environment builder stages the family. The one file it does not is
+  # a runner profile's declaration, installed by that profile's package.
+  case "${pkg}" in
+    "${family}-ct2") declaration=faster_whisper ;;
+    "${family}-kokoro") declaration=kokoro ;;
+    *) declaration="" ;;
+  esac
+  if [ -z "${declaration}" ]; then
+    if [ -e "${debian}/${pkg}.install" ]; then
+      echo "FAIL: ${pkg} is staged by the environment builder and must not ship ${pkg}.install" >&2
+      fail=1
+    fi
+  elif [ "$(cat "${debian}/${pkg}.install" 2>/dev/null)" != "packaging/backend-metadata/runner_profiles/${declaration}.json usr/share/tensorplate/backends/python_pytorch/runner_profiles.d/" ]; then
+    echo "FAIL: ${pkg}.install must install the ${declaration} runner profile declaration and nothing else" >&2
     fail=1
   fi
   for script in preinst postinst prerm postrm; do
@@ -243,12 +255,12 @@ for arm in "postinst triggered" "postrm remove"; do
     fail=1
   fi
 done
-# Each runner profile's package set is the dependency closure of one package,
-# and the descriptor fixture names the same sets.
-if ! python3 - "${debian}/control" "${repo_root}/protocol/rust/tests/fixtures/backend_descriptor_runner_profiles.json" "${family}" <<'PY'
-import json, re, sys
+# Each runner profile's package set is the dependency closure of the package
+# that declares it, and the packaged declaration names that set.
+if ! python3 - "${debian}/control" "${repo_root}/packaging/backend-metadata/runner_profiles" "${family}" <<'PY'
+import json, pathlib, re, sys
 
-control, fixture, family = sys.argv[1:]
+control, declarations, family = sys.argv[1:]
 depends = {}
 for stanza in open(control).read().split("\n\n"):
     name = re.search(r"^Package: (\S+)$", stanza, re.M)
@@ -269,9 +281,15 @@ problems = []
 if "tensorplate-backend-python-pytorch" not in depends[f"{family}-base"]:
     problems.append(f"{family}-base must depend on tensorplate-backend-python-pytorch, which ships the descriptor")
 leaf = {"faster_whisper": f"{family}-ct2", "kokoro": f"{family}-kokoro"}
-profiles = {p["id"]: set(p["packages"]) for p in json.load(open(fixture))["runner_profiles"]}
+profiles = {}
+for path in sorted(pathlib.Path(declarations).glob("*.json")):
+    declared = json.load(open(path))
+    profile = declared["runner_profile"]
+    if declared["backend_name"] != "python_pytorch" or profile["id"] != path.stem:
+        problems.append(f"{path.name} must declare the python_pytorch runner profile it is named for")
+    profiles[profile["id"]] = set(profile["packages"])
 if set(profiles) != set(leaf):
-    problems.append(f"the descriptor fixture's profiles are {sorted(profiles)}")
+    problems.append(f"the packaged declarations' profiles are {sorted(profiles)}")
 for profile, package in leaf.items():
     if closure(package) != profiles.get(profile):
         problems.append(f"{package} and its dependencies are {sorted(closure(package))}; "
