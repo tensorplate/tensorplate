@@ -362,6 +362,28 @@ configs under `worker.serving_config_dir` (default:
 `worker.mode = "mock"` so the transaction coordinator is tested without
 requiring hardware backends.
 
+Each worker's stderr is a pipe the agent copies line by line to its own
+stderr, so under systemd the worker's and the sidecar's log lines are in
+the agent's journal. Nothing is added to them or removed from them.
+
+While it waits for a candidate to warm, the agent also checks whether the
+candidate process has exited. When it has, the deploy (or rollback) fails
+at once instead of at `worker.warm_timeout_ms`:
+
+- If the worker ended its stderr with a startup failure record (see
+  [serving-worker.md](serving-worker.md)), the transaction fails with the
+  record's code and message — a runner that refuses a load as `unsupported`
+  or `oom_error` reaches the operator as that code. The agent waits up to
+  one second for the record after it sees the exit.
+- Otherwise it fails with `load_failed` and the worker's exit status.
+
+Either way the candidate is quarantined, `last_error` carries the same
+code, the active deployment is untouched and no transaction is left in
+flight, so the next `deploy` or `rollback` is accepted. A candidate that
+stays alive without becoming ready still fails at the warm timeout, as
+`not_ready` when it answers `/health` and `inference_failed` when nothing
+listens.
+
 ## Rollback (V01-E08-F06)
 
 Rollback is a transaction, not a file-pointer swap:

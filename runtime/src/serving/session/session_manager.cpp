@@ -10,11 +10,6 @@
 
 namespace tensorplate::serving {
 namespace {
-Error missing_session() {
-  return Error::make(Error::Code::NotReady, "logical session is no longer active",
-                     "unknown_session");
-}
-
 Error expiry_error(SessionExpiry expiry) {
   switch (expiry) {
     case SessionExpiry::Idle:
@@ -25,6 +20,9 @@ Error expiry_error(SessionExpiry expiry) {
     case SessionExpiry::MaxDuration:
       return Error::make(Error::Code::Timeout, "logical session reached maximum duration",
                          "max_duration");
+    case SessionExpiry::SlowConsumer:
+      return Error::make(Error::Code::ResourceExhausted,
+                         "logical session output made no delivery progress", "slow_consumer");
   }
   return Error::make(Error::Code::Internal, "unknown session timeout", "unknown_timeout");
 }
@@ -98,6 +96,7 @@ SessionManager::~SessionManager() {
 }
 
 Result<ManagedSessionTransition> SessionManager::open(std::uint64_t requested_generation,
+                                                      const SessionBudgets& budgets,
                                                       const Initialize& initialize) {
   std::lock_guard serial(serial_mu_);
   ManagedSessionTransition transition;
@@ -128,7 +127,10 @@ Result<ManagedSessionTransition> SessionManager::open(std::uint64_t requested_ge
     }
     const auto key = next_key_++;
     const auto now = clock_.now();
-    auto [it, inserted] = entries_.emplace(key, Entry{*machine, SessionTimers{limits_, now}, {}});
+    auto output = std::make_shared<BoundedOutputQueue>(budgets);
+    auto [it, inserted] = entries_.emplace(
+        key,
+        Entry{*machine, SessionTimers{limits_, now}, InputCredit{budgets}, std::move(output), {}});
     if (!inserted) {
       return unexpected(
           Error::make(Error::Code::Internal, "session key collision", "session_key_collision"));
@@ -140,7 +142,7 @@ Result<ManagedSessionTransition> SessionManager::open(std::uint64_t requested_ge
       }
     }
     if (!initialization_failure) {
-      const auto expiry = it->second.timers.expired(clock_.now(), it->second.machine.state());
+      const auto expiry = expiry_locked(it->second);
       if (expiry) {
         initialization_failure = expiry_error(*expiry);
       }
@@ -173,6 +175,17 @@ Result<ManagedSessionTransition> SessionManager::open(std::uint64_t requested_ge
   return transition;
 }
 
+std::optional<Error> SessionManager::charge_accepted_input(Entry& entry, std::uint64_t bytes) {
+  // Input a draining session ignores is not charged.
+  auto trial = entry.machine;
+  const auto accepted = trial.apply(LogicalSessionEvent::Data);
+  if (!accepted || !accepted->contains(LogicalSessionEffect::AcceptInput)) {
+    return std::nullopt;
+  }
+  const auto charged = entry.credit.charge(bytes);
+  return charged ? std::nullopt : std::optional{charged.error()};
+}
+
 std::optional<ManagedSessionTransition> SessionManager::apply_locked(std::uint64_t key,
                                                                      Entry& entry,
                                                                      LogicalSessionEvent event,
@@ -193,7 +206,11 @@ std::optional<ManagedSessionTransition> SessionManager::apply_locked(std::uint64
     }
   }
   entry.timers.on_client_activity(event, clock_.now());
-  return ManagedSessionTransition{key, after, *effects, entry.cause};
+  if (effects->contains(LogicalSessionEffect::SuppressOutput)) {
+    entry.output->suppress();
+  }
+  const auto status = status_of(entry);
+  return ManagedSessionTransition{key, after, *effects, entry.cause, status, entry.output};
 }
 
 Result<ManagedSessionTransition> SessionManager::apply(std::uint64_t session_key,
@@ -205,6 +222,22 @@ Result<ManagedSessionTransition> SessionManager::apply(std::uint64_t session_key
     return unexpected(Error::make(Error::Code::ConfigInvalid, "missing session failure cause",
                                   "missing_session_cause"));
   }
+  if (event == LogicalSessionEvent::Data) {
+    return unexpected(Error::make(Error::Code::ConfigInvalid, "session input without its size",
+                                  "input_without_size"));
+  }
+  return apply_event(session_key, event, std::move(cause), std::nullopt);
+}
+
+Result<ManagedSessionTransition> SessionManager::accept_input(std::uint64_t session_key,
+                                                              std::uint64_t bytes) {
+  return apply_event(session_key, LogicalSessionEvent::Data, std::nullopt, bytes);
+}
+
+Result<ManagedSessionTransition> SessionManager::apply_event(std::uint64_t session_key,
+                                                             LogicalSessionEvent event,
+                                                             std::optional<Error> cause,
+                                                             std::optional<std::uint64_t> bytes) {
   std::lock_guard serial(serial_mu_);
   const bool from_client = client_event(event);
   std::optional<ManagedSessionTransition> expired_transition;
@@ -214,9 +247,9 @@ Result<ManagedSessionTransition> SessionManager::apply(std::uint64_t session_key
     std::lock_guard guard(mu_);
     const auto it = entries_.find(session_key);
     if (it == entries_.end()) {
-      return unexpected(missing_session());
+      return unexpected(missing_session_locked(session_key));
     }
-    const auto expiry = it->second.timers.expired(clock_.now(), it->second.machine.state());
+    const auto expiry = expiry_locked(it->second);
     if (expiry) {
       if (event == LogicalSessionEvent::ReleaseAcknowledged) {
         auto before_timeout = it->second.machine;
@@ -250,9 +283,17 @@ Result<ManagedSessionTransition> SessionManager::apply(std::uint64_t session_key
   {
     std::lock_guard guard(mu_);
     const auto it = entries_.find(session_key);
-    auto result = apply_locked(session_key, it->second, event, std::move(cause));
-    if (!result) {
-      refusal = refused_event(it->second.machine.state(), event);
+    std::optional<ManagedSessionTransition> result;
+    if (bytes) {
+      refusal = charge_accepted_input(it->second, *bytes);
+    }
+    if (!refusal) {
+      result = apply_locked(session_key, it->second, event, std::move(cause));
+      if (!result) {
+        refusal = refused_event(it->second.machine.state(), event);
+      }
+    }
+    if (refusal) {
       result = apply_locked(session_key, it->second, LogicalSessionEvent::Fail, refusal);
     }
     if (!result) {
@@ -261,6 +302,8 @@ Result<ManagedSessionTransition> SessionManager::apply(std::uint64_t session_key
     }
     transition = *result;
     if (transition.effects.contains(LogicalSessionEffect::ReleaseSlot)) {
+      tombstones_.record(session_key, it->second.machine.generation(), transition.state,
+                         transition.cause, clock_.now());
       entries_.erase(it);
     }
   }
@@ -323,7 +366,7 @@ std::vector<ManagedSessionTransition> SessionManager::sweep_due() {
     {
       std::lock_guard guard(mu_);
       const auto it = entries_.find(key);
-      const auto expiry = it->second.timers.expired(clock_.now(), it->second.machine.state());
+      const auto expiry = expiry_locked(it->second);
       if (!expiry) {
         continue;
       }
@@ -343,6 +386,9 @@ std::vector<ManagedSessionTransition> SessionManager::sweep_due() {
 }
 
 void SessionManager::notify_clock_advanced() noexcept {
+  // The timer holds mu_ from reading the clock until it waits; passing
+  // through mu_ here keeps this wake-up from landing in between and being lost.
+  { const std::lock_guard guard(mu_); }
   cv_.notify_one();
 }
 
@@ -351,7 +397,7 @@ Result<LogicalSessionState> SessionManager::state(std::uint64_t session_key) con
   std::lock_guard guard(mu_);
   const auto it = entries_.find(session_key);
   if (it == entries_.end()) {
-    return unexpected(missing_session());
+    return unexpected(missing_session_locked(session_key));
   }
   return it->second.machine.state();
 }
@@ -361,7 +407,7 @@ Result<bool> SessionManager::heartbeat_due(std::uint64_t session_key) const {
   std::lock_guard guard(mu_);
   const auto it = entries_.find(session_key);
   if (it == entries_.end()) {
-    return unexpected(missing_session());
+    return unexpected(missing_session_locked(session_key));
   }
   const auto state = it->second.machine.state();
   if (state != LogicalSessionState::Active && state != LogicalSessionState::Finalizing) {
@@ -376,9 +422,87 @@ Result<SchedulerClock::Duration> SessionManager::duration_remaining(
   std::lock_guard guard(mu_);
   const auto it = entries_.find(session_key);
   if (it == entries_.end()) {
-    return unexpected(missing_session());
+    return unexpected(missing_session_locked(session_key));
   }
   return it->second.timers.duration_remaining(clock_.now());
+}
+
+Result<LogicalSessionStatus> SessionManager::status(std::uint64_t session_key) const {
+  std::lock_guard serial(serial_mu_);
+  std::lock_guard guard(mu_);
+  const auto it = entries_.find(session_key);
+  if (it == entries_.end()) {
+    return unexpected(missing_session_locked(session_key));
+  }
+  return status_of(it->second);
+}
+
+std::optional<SessionTombstone> SessionManager::tombstone(std::uint64_t session_key) const {
+  std::lock_guard serial(serial_mu_);
+  std::lock_guard guard(mu_);
+  return tombstones_.find(session_key, clock_.now());
+}
+
+Result<LogicalSessionStatus> SessionManager::release_audio_input(std::uint64_t session_key,
+                                                                 std::uint32_t chunks,
+                                                                 std::uint64_t bytes) {
+  return update_credit(session_key, [chunks, bytes](InputCredit& credit) {
+    return credit.release_audio(chunks, bytes);
+  });
+}
+
+Result<LogicalSessionStatus> SessionManager::start_text_segment(std::uint64_t session_key) {
+  return update_credit(session_key, [](InputCredit& credit) { return credit.start_segment(); });
+}
+
+Result<LogicalSessionStatus> SessionManager::finish_text_segment(std::uint64_t session_key) {
+  return update_credit(session_key, [](InputCredit& credit) { return credit.finish_segment(); });
+}
+
+Result<LogicalSessionStatus> SessionManager::update_credit(std::uint64_t session_key,
+                                                           const CreditUpdate& update) {
+  std::lock_guard serial(serial_mu_);
+  std::optional<Error> defect;
+  std::optional<ManagedSessionTransition> failed;
+  LogicalSessionStatus status;
+  {
+    std::lock_guard guard(mu_);
+    const auto it = entries_.find(session_key);
+    if (it == entries_.end()) {
+      return unexpected(missing_session_locked(session_key));
+    }
+    const auto updated = update(it->second.credit);
+    if (!updated) {
+      defect = updated.error();
+      failed = apply_locked(session_key, it->second, LogicalSessionEvent::Fail, defect);
+    }
+    status = status_of(it->second);
+  }
+  if (failed) {
+    cv_.notify_one();
+    emit(*failed);
+  }
+  if (defect) {
+    return unexpected(*defect);
+  }
+  return status;
+}
+
+LogicalSessionStatus SessionManager::status_of(const Entry& entry) {
+  return LogicalSessionStatus{entry.machine.state(), entry.credit.depth(), entry.credit.usage(),
+                              entry.output->pcm_usage(), entry.output->metadata_usage()};
+}
+
+std::optional<SessionExpiry> SessionManager::expiry_locked(const Entry& entry) const {
+  return entry.timers.expired(clock_.now(), entry.machine.state(), entry.output->stalled_since());
+}
+
+Error SessionManager::missing_session_locked(std::uint64_t session_key) const {
+  if (tombstones_.find(session_key, clock_.now())) {
+    return Error::make(Error::Code::NotReady, "logical session has ended", "session_ended");
+  }
+  return Error::make(Error::Code::NotReady, "logical session is no longer active",
+                     "unknown_session");
 }
 
 std::size_t SessionManager::held_slots() const noexcept {
@@ -409,7 +533,8 @@ void SessionManager::run_timer() {
       std::optional<SchedulerClock::TimePoint> next;
       for (const auto& [key, entry] : entries_) {
         (void)key;
-        const auto deadline = entry.timers.next_deadline(entry.machine.state());
+        const auto deadline =
+            entry.timers.next_deadline(entry.machine.state(), entry.output->stalled_since());
         if (deadline && (!next || *deadline < *next)) {
           next = deadline;
         }

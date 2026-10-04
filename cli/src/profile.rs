@@ -83,6 +83,20 @@ pub fn resolve(
     })
 }
 
+impl ResolvedProfile {
+    /// Raise the request timeout to the transaction floor unless the
+    /// operator set `--timeout-ms`, which is honoured as given.
+    #[must_use]
+    pub fn for_transaction(mut self, timeout_override_ms: Option<u64>) -> Self {
+        if timeout_override_ms.is_none() {
+            self.timeout = self.timeout.max(Duration::from_millis(
+                crate::config::DEFAULT_TRANSACTION_TIMEOUT_MS,
+            ));
+        }
+        self
+    }
+}
+
 fn transport_for_profile(name: &str, profile: &ProfileSpec) -> CliResult<Transport> {
     match profile.mode {
         ProfileMode::Local => {
@@ -188,6 +202,31 @@ mod tests {
         let cfg = CliConfig::parse_json(raw).unwrap();
         let r = resolve(&cfg, None, None, None).unwrap();
         assert_eq!(r.timeout, std::time::Duration::from_millis(12_000));
+    }
+
+    #[test]
+    fn transaction_timeout_is_floored_unless_the_operator_set_one() {
+        let floor = std::time::Duration::from_millis(crate::config::DEFAULT_TRANSACTION_TIMEOUT_MS);
+        let raw = |ms: u64| {
+            format!(
+                r#"{{"schema_version":"0.1","timeout_ms":{ms},"default_profile":"r","profiles":{{"r":{{"mode":"url","agent_url":"192.0.2.5:18000"}}}}}}"#
+            )
+        };
+        let cfg = CliConfig::parse_json(&raw(30_000)).unwrap();
+        let r = resolve(&cfg, None, None, None).unwrap();
+        assert_eq!(r.clone().for_transaction(None).timeout, floor);
+        assert_eq!(r.timeout, std::time::Duration::from_millis(30_000));
+
+        let cfg = CliConfig::parse_json(&raw(300_000)).unwrap();
+        let r = resolve(&cfg, None, None, None)
+            .unwrap()
+            .for_transaction(None);
+        assert_eq!(r.timeout, std::time::Duration::from_millis(300_000));
+
+        let r = resolve(&cfg, None, None, Some(500))
+            .unwrap()
+            .for_transaction(Some(500));
+        assert_eq!(r.timeout, std::time::Duration::from_millis(500));
     }
 
     #[test]

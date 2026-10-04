@@ -27,6 +27,32 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   inside protocol 0.1; version constants unchanged). Nothing launches from
   a declared profile yet: the sidecar launcher and doctor's runtime probe
   still use `python.interpreter`. (V030-E01-F01-T04)
+- Logical sessions account for input credit and bound their output. The
+  session manager charges each accepted audio chunk or text segment to
+  the session's credit (one second of unconsumed audio, or two waiting
+  text segments of 8 KiB combined plus one being executed or delivered)
+  and fails a session that exceeds it with `input_credit_exceeded`. A
+  bounded output queue per stream holds two seconds of PCM and 16 KiB of
+  control and transcript metadata, the last 1 KiB of it for lifecycle
+  messages only, counts what the transport still holds, replaces an
+  unsent partial with its newer revision and never drops a final; a
+  session whose output makes no delivery progress for five seconds ends
+  with `slow_consumer`. A released session leaves a tombstone for 60
+  seconds, at most 1,024 per worker, and each lifecycle transition
+  reports the session's state, queue depth and budget use. The manager's
+  clock-advance notification can no longer be lost between the timer's
+  deadline scan and its wait. The current HTTP worker does not create
+  logical sessions. (V030-E04-F01-T02)
+- A serving worker that cannot start now ends its stderr with one JSON
+  record, `worker startup failed`, carrying the typed error code and
+  message of the step that failed; it replaces the two plain-text lines the
+  binary printed. The agent copies each worker's stderr to its own, so the
+  worker's and the sidecar's log lines reach the agent's journal instead of
+  being discarded. (V030-E04-F03-T02)
+- `test/validation/memory_sampling_test.py` now runs in the APT lifecycle
+  workflow's x86 checks job, which builds the sampler example it drives.
+  (V030-E03-F02-T04)
+
 - Recorded on a `g2-standard-8` with one NVIDIA L4, against `v0.3.1-rc.1`:
   two candidate qualification runs of Whisper large-v3-turbo through
   faster-whisper, filed under
@@ -66,6 +92,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- A deploy or rollback whose candidate worker exits while loading now fails
+  as soon as the worker exits instead of at the agent's warm timeout, and
+  with the worker's own code: a runner that refuses the model as
+  `unsupported` or `oom_error` reaches `tensorplate deploy` as that code
+  rather than `inference_failed`. A worker that exits without a startup
+  record fails the deploy as `load_failed` with its exit status. No
+  transaction is left in flight, so a rollback issued right after is
+  accepted. `tensorplate deploy` and `tensorplate rollback` now wait at
+  least 120,000 ms for the agent's answer unless `--timeout-ms` is given,
+  so the default no longer expires at the agent's 30,000 ms warm timeout.
+  (V030-E04-F03-T02)
 - `tools/validation/candidate-qualify.py` gives every deploy and rollback
   a CLI agent timeout (`--agent-timeout-ms`, 120,000 by default) above the
   agent's warm timeout, so a load failure is recorded as the agent answered it and

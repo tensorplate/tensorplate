@@ -61,6 +61,20 @@ listener is opened. The binary's exit codes are:
 | 66   | Listener bind / accept failure. |
 | 70   | Internal error. |
 
+A worker that exits with 64 or 65 ends its stderr with one JSON line, the
+startup failure record, written whether or not `enable_stderr_logs` is
+set:
+
+```json
+{"component":"serving","fields":{"code":"unsupported","message":"..."},"level":"error","message":"worker startup failed","ts_ns":0}
+```
+
+`fields.code` is the typed error of the step that failed, in its wire
+spelling; when a sidecar runner refuses a load it is the runner's code and
+message unchanged. If the record itself cannot be built the worker writes
+the plain line `worker startup failed` instead. The agent reads this line to answer the deploy that
+started the worker (see [agent.md](agent.md#serving-worker-handoff-v01-e08-f05)).
+
 ## Loopback HTTP server
 
 The HTTP server is a small in-tree implementation (see
@@ -230,19 +244,91 @@ ascending `LogicalSessionEffect` order, before applying the next. The
 serving worker does not create logical sessions yet; this is the
 lifecycle the streaming serving modes build on.
 
-`SessionManager` owns those machines and their count reservations. It
-opens only for the worker's generation, admits at most the configured
-count (2,048 by default), and offers an admission check for a separate
-memory quota. An optional bounded initialization step runs after slot
-reservation and before `emit_ready`; failure emits one terminal error
-and holds the slot for physical cleanup. Its sink applies each machine's
-effects in order; the manager serializes event application and sink
-calls across client and timer threads. A slot remains held after cancel,
-failure or drain until `release_acknowledged` produces `release_slot`.
-`stop_admission_and_drain` closes admission, starts each live session's
-drain, and waits for `drain_completed` followed by physical release
-before closure. The manager does not reload a backend or schedule a
-physical job.
+`SessionManager` owns those machines, their count reservations and their
+input credit. It opens only for the worker's generation, admits at most
+the configured count (2,048 by default), and offers an admission check
+for a separate memory quota. An optional bounded initialization step
+runs after slot reservation and before `emit_ready`; failure emits one
+terminal error and holds the slot for physical cleanup. Its sink applies
+each machine's effects in order; the manager serializes event
+application and sink calls across client and timer threads. A slot
+remains held after cancel, failure or drain until `release_acknowledged`
+produces `release_slot`. `stop_admission_and_drain` closes admission,
+starts each live session's drain, and waits for `drain_completed`
+followed by physical release before closure. The manager does not reload
+a backend or schedule a physical job.
+
+Each session is opened with `SessionBudgets`
+(`runtime/src/serving/session/credits.hpp`), derived from the byte rate
+of the audio format negotiated at open. A rate of zero is refused, as is
+one whose window would exceed the largest audio payload of a backend
+job:
+
+| Budget | Audio in, transcripts out | Text in, audio out |
+|---|---|---|
+| Input credit | 1 second of accepted, unconsumed audio | 2 waiting segments of 8 KiB combined, plus 1 being executed or delivered |
+| Output PCM | none | 2 seconds |
+| Output control and transcript metadata | 16 KiB, the last 1 KiB for lifecycle messages only | the same |
+
+**Input credit.** `accept_input` applies `data` for one audio chunk or
+text segment and charges its bytes in the same step, so input is charged
+only when the state accepts it; a drain ignores input without charging
+it. Input above the credit fails the session with
+`input_credit_exceeded`. Audio credit returns as the pipeline consumes
+it (`release_audio_input`). A text segment's waiting credit returns when
+it takes the single active slot (`start_text_segment`), and the slot
+stays occupied until the caller finishes the segment
+(`finish_text_segment`), which it does only once the segment's output
+has been delivered or discarded, not when synthesis ends: at most three
+accepted segments exist at once. A release the credit cannot match is a
+defect in the caller and fails the session.
+
+**Output queue.** Every server message of a stream passes through its
+`BoundedOutputQueue`, which the manager creates at open and hands to the
+sink with each transition. A producer of task output offers an item;
+when its budget has no room the offer answers `full`, the producer keeps
+the item and pauses until output drains, so task output is never dropped
+while the session lives. Task output may fill the metadata budget only
+up to its last 1 KiB, which is kept for lifecycle messages so that a
+backlog of transcripts cannot keep a reply or `CancelAccepted` out. A
+lifecycle reply is answered `full` only when the peer has left the whole
+metadata budget unread; the sink, which cannot wait, does not queue that
+reply. For a live or draining session the no-progress limit below is
+already running; a cancelled session ends with its terminal outcome. The
+stream assigns a message its sequence only when the transport takes it,
+so an unsent partial hypothesis can still be replaced in place by its
+newer revision, and a final supersedes the unsent partial of its
+utterance; a final is never replaced. A lifecycle reply whose newest
+instance says everything can carry a key and is replaced the same way,
+which keeps such replies from accumulating. An item stays charged from
+the offer until the transport confirms its delivery, so what the
+transport holds counts against the same budget. On `suppress_output` the
+manager discards the unsent task output before the sink runs and the
+queue refuses task output from then on, while lifecycle messages still
+pass. The terminal outcome is accepted once, even when the budget is
+full, and nothing is accepted after it. The queue outlives the session's
+slot, because lifecycle messages and the terminal outcome are still
+delivered after release.
+
+**No-progress limit.** The queue keeps a stall clock: it starts when
+output first awaits delivery, moves only when a delivery is confirmed,
+and stops when nothing awaits delivery. Offering more output, a ping or
+a status request does not move it. A live or draining session whose
+clock reaches 5 seconds is aborted with `slow_consumer` by the same
+timer thread that enforces the limits below.
+
+**Status.** Each transition carries a `LogicalSessionStatus`: the state,
+the accepted input items still owned, and the use of the input credit
+and of both output budgets. Output use counts every undelivered byte,
+queued or held by the transport. `SessionManager::status` returns the
+same for a live session.
+
+**Tombstones.** When a slot is released the manager keeps the session's
+key, generation, final state and end cause (its code, and at most 64
+bytes of its reason) for 60 seconds, at most 1,024 per worker with the
+oldest dropped first. A call naming such a session is refused with
+`session_ended`, so a report that raced the release can be told from an
+`unknown_session`.
 
 `SessionLimits` defaults to 60 seconds idle, a 10-second client heartbeat
 cadence, 30 seconds liveness, and a 60-minute absolute duration. Data
@@ -254,7 +340,8 @@ injected monotonic `SchedulerClock`, independent of the serving
 worker's existing request evictor. Unit tests advance
 `FakeSchedulerClock` without sleeping. The current HTTP composition
 root does not instantiate `SessionManager`; the streaming transport
-binding will supply its effect sink and session status budgets.
+binding will supply its effect sink, choose each session's budgets and
+drive its output queue.
 
 States: `opening`, `active`, `finalizing`, `draining`,
 `cancel_requested`, and the terminal `closed` and `failed`. Events come
@@ -341,8 +428,10 @@ How sessions end, and the code their terminal outcome carries:
 |---|---|---|---|
 | Client Cancel | `cancel` | `closed` | `cancelled` |
 | Client half-close | `half_close`, then `drain_completed` and `release_acknowledged` | `closed` | none |
-| Input above the session's credit | `fail` | `failed` | `resource_exhausted` (`input_credit_exceeded`) |
-| Output undelivered past the no-progress limit | `abort` | `closed` | `resource_exhausted` (`slow_consumer`) |
+| Input above the session's credit | `accept_input` (the manager applies `fail`) | `failed` | `resource_exhausted` (`input_credit_exceeded`) |
+| Input item without bytes | `accept_input` (the manager applies `fail`) | `failed` | `config_invalid` (`empty_input`) |
+| Credit release that does not match what is held (a defect) | a release call (the manager applies `fail`) | `failed` | `internal` (`input_release_mismatch`, `segment_stage_violation` or `wrong_input_kind`) |
+| Output undelivered past the no-progress limit | the manager's timer applies `abort` | `closed` | `resource_exhausted` (`slow_consumer`) |
 | Backend process reset or reaped | `backend_reset` | `failed` | `unavailable` (`backend_reset`) |
 | Deployment generation retiring | `drain`, then `abort` at the deadline | `closed` | `unavailable` (`deployment_retired`) |
 | Worker shutting down | `drain`, then `abort` at the deadline | `closed` | `unavailable` (`worker_shutdown`) |

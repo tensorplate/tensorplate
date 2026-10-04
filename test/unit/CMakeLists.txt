@@ -49,6 +49,9 @@ add_executable(tp_test_unit
   session_limits_test.cpp
   session_timers_test.cpp
   session_manager_test.cpp
+  session_credits_test.cpp
+  session_output_queue_test.cpp
+  session_tombstones_test.cpp
 )
 
 target_include_directories(tp_test_unit
