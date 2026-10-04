@@ -161,6 +161,16 @@ pub enum AgentError {
     #[error("worker control failed: {0}")]
     WorkerControl(String),
 
+    /// The candidate serving worker exited while it loaded and reported
+    /// why; `code` is the worker's, passed on unchanged.
+    #[error("serving worker failed to start: {message}")]
+    WorkerStartupFailed { code: ErrorCode, message: String },
+
+    /// The candidate serving worker exited while it loaded without a
+    /// startup failure record; carries its exit status.
+    #[error("serving worker exited while loading ({0}) without reporting why")]
+    WorkerExited(String),
+
     #[error("worker prepare/warm/promote timed out after {0} ms")]
     WorkerTimeout(u64),
 
@@ -202,6 +212,14 @@ impl AgentError {
             AgentError::InsufficientCapacity => (ErrorCode::OomError, true),
             AgentError::Busy(_) | AgentError::WorkerNotReady => (ErrorCode::NotReady, true),
             AgentError::WorkerControl(_) => (ErrorCode::InferenceFailed, true),
+            AgentError::WorkerStartupFailed { code, .. } => (
+                *code,
+                !matches!(
+                    code,
+                    ErrorCode::ConfigInvalid | ErrorCode::Unsupported | ErrorCode::LoadFailed
+                ),
+            ),
+            AgentError::WorkerExited(_) => (ErrorCode::LoadFailed, true),
             AgentError::WorkerTimeout(_) => (ErrorCode::Timeout, true),
             AgentError::Internal(_) | AgentError::Io(_) | AgentError::Serialization(_) => {
                 (ErrorCode::Internal, true)
@@ -267,6 +285,32 @@ mod tests {
     fn worker_timeout_is_typed_timeout() {
         let err = AgentError::WorkerTimeout(5_000);
         assert_eq!(err.code(), ErrorCode::Timeout);
+    }
+
+    #[test]
+    fn worker_startup_failure_keeps_the_workers_code() {
+        for (code, recoverable) in [
+            (ErrorCode::Unsupported, false),
+            (ErrorCode::ConfigInvalid, false),
+            (ErrorCode::LoadFailed, false),
+            (ErrorCode::OomError, true),
+        ] {
+            let r = AgentError::WorkerStartupFailed {
+                code,
+                message: "why".into(),
+            }
+            .to_record();
+            assert_eq!(r.code, code);
+            assert_eq!(r.recoverable, recoverable);
+            assert_eq!(r.message, "serving worker failed to start: why");
+        }
+    }
+
+    #[test]
+    fn worker_exit_without_a_record_is_load_failed() {
+        let r = AgentError::WorkerExited("exit status: 66".into()).to_record();
+        assert_eq!(r.code, ErrorCode::LoadFailed);
+        assert!(r.recoverable);
     }
 
     #[test]

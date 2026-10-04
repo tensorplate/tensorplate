@@ -8,6 +8,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A serving worker that cannot start now ends its stderr with one JSON
+  record, `worker startup failed`, carrying the typed error code and
+  message of the step that failed; it replaces the two plain-text lines the
+  binary printed. The agent copies each worker's stderr to its own, so the
+  worker's and the sidecar's log lines reach the agent's journal instead of
+  being discarded. (V030-E04-F03-T02)
+- `test/validation/memory_sampling_test.py` now runs in the APT lifecycle
+  workflow's x86 checks job, which builds the sampler example it drives.
+  (V030-E03-F02-T04)
+
 - Recorded on a `g2-standard-8` with one NVIDIA L4, against `v0.3.1-rc.1`:
   two candidate qualification runs of Whisper large-v3-turbo through
   faster-whisper, filed under
@@ -47,6 +57,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- A deploy or rollback whose candidate worker exits while loading now fails
+  as soon as the worker exits instead of at the agent's warm timeout, and
+  with the worker's own code: a runner that refuses the model as
+  `unsupported` or `oom_error` reaches `tensorplate deploy` as that code
+  rather than `inference_failed`. A worker that exits without a startup
+  record fails the deploy as `load_failed` with its exit status. No
+  transaction is left in flight, so a rollback issued right after is
+  accepted. `tensorplate deploy` and `tensorplate rollback` now wait at
+  least 120,000 ms for the agent's answer unless `--timeout-ms` is given,
+  so the default no longer expires at the agent's 30,000 ms warm timeout.
+  (V030-E04-F03-T02)
 - `tools/validation/candidate-qualify.py` gives every deploy and rollback
   a CLI agent timeout (`--agent-timeout-ms`, 120,000 by default) above the
   agent's warm timeout, so a load failure is recorded as the agent answered it and

@@ -187,3 +187,29 @@ fn homebrew_cli_config_uses_the_agent_socket_and_structured_log() {
         ))
     );
 }
+
+/// `deploy` and `rollback` are answered only after the candidate warms, so
+/// their default request timeout must outlast the agent's warm timeout —
+/// the schema default and any value a packaged agent config sets.
+#[test]
+fn transaction_timeout_floor_exceeds_every_packaged_warm_timeout() {
+    let floor = tensorplate_cli::config::DEFAULT_TRANSACTION_TIMEOUT_MS;
+    let read = |path: PathBuf| -> serde_json::Value {
+        let raw = fs::read_to_string(path).expect("read");
+        serde_json::from_str(&raw).expect("JSON")
+    };
+
+    let schema = read(repo_root().join("config/schemas/agent.json"));
+    let schema_default = schema["properties"]["worker"]["properties"]["warm_timeout_ms"]["default"]
+        .as_u64()
+        .expect("the agent schema states a warm timeout default");
+    assert!(schema_default < floor, "{schema_default} >= {floor}");
+
+    for name in ["agent.json", "agent.amd64.json"] {
+        let config = read(repo_root().join("packaging/conf").join(name));
+        let warm = config["worker"]["warm_timeout_ms"]
+            .as_u64()
+            .unwrap_or(schema_default);
+        assert!(warm < floor, "{name}: {warm} >= {floor}");
+    }
+}

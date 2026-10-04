@@ -61,6 +61,20 @@ listener is opened. The binary's exit codes are:
 | 66   | Listener bind / accept failure. |
 | 70   | Internal error. |
 
+A worker that exits with 64 or 65 ends its stderr with one JSON line, the
+startup failure record, written whether or not `enable_stderr_logs` is
+set:
+
+```json
+{"component":"serving","fields":{"code":"unsupported","message":"..."},"level":"error","message":"worker startup failed","ts_ns":0}
+```
+
+`fields.code` is the typed error of the step that failed, in its wire
+spelling; when a sidecar runner refuses a load it is the runner's code and
+message unchanged. If the record itself cannot be built the worker writes
+the plain line `worker startup failed` instead. The agent reads this line to answer the deploy that
+started the worker (see [agent.md](agent.md#serving-worker-handoff-v01-e08-f05)).
+
 ## Loopback HTTP server
 
 The HTTP server is a small in-tree implementation (see
