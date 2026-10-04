@@ -38,7 +38,7 @@
       "type": "integer",
       "minimum": 1,
       "default": 30000,
-      "description": "Default request timeout for agent calls. Per-command flags override."
+      "description": "Default request timeout for agent calls. `--timeout-ms` overrides it. `deploy` and `rollback` wait at least 120000 ms unless `--timeout-ms` is given."
     },
     "log_source": {
       "type": "object",
@@ -92,7 +92,7 @@
           "timeout_ms": {
             "type": "integer",
             "minimum": 1,
-            "description": "Per-profile override of the global `timeout_ms`."
+            "description": "Per-profile override of the global `timeout_ms`; the `deploy` and `rollback` floor applies to it too."
           }
         }
       }

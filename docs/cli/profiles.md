@@ -91,6 +91,11 @@ source. v0.1.0 fields in summary:
 }
 ```
 
+`timeout_ms`, global or per profile, is the request timeout for agent
+calls. `deploy` and `rollback` wait at least 120,000 ms whatever it is set
+to, because the agent answers them only after the candidate warms; only an
+explicit `--timeout-ms` sets a shorter wait for those two commands.
+
 ## Modes
 
 | Mode | v0.1.0 |

@@ -16,18 +16,21 @@
 //     matrix where `tensorplate-serving` is not available.
 //   - [`ProcessWorkerControl`]: process-backed implementation that
 //     renders a V01-E07 serving config, starts `tensorplate-serving`,
-//     polls `/health`, and promotes only warmed candidates.
+//     polls `/health`, and promotes only warmed candidates. It forwards
+//     each worker's stderr and answers a candidate that exits while
+//     loading with the worker's own startup failure code.
 //   - [`from_config`]: composition-root selector used by the binary.
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tensorplate_protocol::worker_control::CandidateRef;
+use tensorplate_protocol::ErrorCode;
 
 use crate::config::{AgentConfig, WorkerControlMode};
 use crate::error::{AgentError, AgentResult};
@@ -165,6 +168,86 @@ pub fn from_config(config: &AgentConfig) -> AgentResult<std::sync::Arc<dyn Worke
     }
 }
 
+/// Receives every stderr line of the serving workers this agent starts,
+/// newline included, in the order each worker wrote them.
+pub type WorkerStderrSink = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
+/// A longer stderr line is forwarded in pieces and never read as a record.
+const MAX_STDERR_LINE_BYTES: u64 = 16 * 1024;
+
+/// How long an exited candidate's stderr is given to finish arriving.
+const STDERR_DRAIN_WAIT: Duration = Duration::from_secs(1);
+
+/// The `message` of the record a serving worker ends its stderr with when
+/// it cannot start; `serving_worker/src/main.cpp` writes it.
+const STARTUP_FAILURE_MESSAGE: &str = "worker startup failed";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StartupFailure {
+    code: ErrorCode,
+    message: String,
+}
+
+#[derive(Default)]
+struct WorkerStderr {
+    startup_failure: Option<StartupFailure>,
+    closed: bool,
+}
+
+fn parse_startup_failure(line: &[u8]) -> Option<StartupFailure> {
+    let record: serde_json::Value = serde_json::from_slice(line).ok()?;
+    if record.get("component")?.as_str()? != "serving"
+        || record.get("message")?.as_str()? != STARTUP_FAILURE_MESSAGE
+    {
+        return None;
+    }
+    let fields = record.get("fields")?;
+    Some(StartupFailure {
+        code: serde_json::from_value(fields.get("code")?.clone()).ok()?,
+        message: fields.get("message")?.as_str()?.to_string(),
+    })
+}
+
+/// Copy a worker's stderr to `sink` line by line until it closes, keeping
+/// the startup failure record if one arrives.
+fn forward_stderr(stderr: ChildStderr, sink: WorkerStderrSink, shared: Arc<Mutex<WorkerStderr>>) {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = Vec::new();
+        let mut mid_line = false;
+        loop {
+            line.clear();
+            let read = (&mut reader)
+                .take(MAX_STDERR_LINE_BYTES)
+                .read_until(b'\n', &mut line);
+            if !matches!(read, Ok(n) if n > 0) {
+                break;
+            }
+            // Forwarded before it is read, so a deploy answered from the
+            // record never precedes the record's own line in the journal.
+            sink(&line);
+            let whole_line = !mid_line && line.ends_with(b"\n");
+            mid_line = !line.ends_with(b"\n");
+            if whole_line {
+                if let Some(failure) = parse_startup_failure(&line) {
+                    if let Ok(mut shared) = shared.lock() {
+                        shared.startup_failure = Some(failure);
+                    }
+                }
+            }
+        }
+        if let Ok(mut shared) = shared.lock() {
+            shared.closed = true;
+        }
+    });
+}
+
+fn agent_stderr_sink() -> WorkerStderrSink {
+    Arc::new(|line| {
+        let _ = std::io::stderr().lock().write_all(line);
+    })
+}
+
 #[derive(Clone, Debug)]
 struct ProcessWorkerConfig {
     binary_path: PathBuf,
@@ -183,6 +266,7 @@ struct ProcessWorkerConfig {
 pub struct ProcessWorkerControl {
     config: ProcessWorkerConfig,
     inner: Mutex<ProcessWorkerState>,
+    stderr_sink: WorkerStderrSink,
 }
 
 #[derive(Default)]
@@ -196,6 +280,7 @@ struct RunningWorker {
     port: u16,
     config_path: PathBuf,
     child: Child,
+    stderr: Arc<Mutex<WorkerStderr>>,
 }
 
 impl ProcessWorkerControl {
@@ -227,7 +312,15 @@ impl ProcessWorkerControl {
                 status_poll_interval: Duration::from_millis(agent.worker.status_poll_interval_ms),
             },
             inner: Mutex::new(ProcessWorkerState::default()),
+            stderr_sink: agent_stderr_sink(),
         })
+    }
+
+    /// Send the workers' stderr to `sink` instead of the agent's own stderr.
+    #[must_use]
+    pub fn with_stderr_sink(mut self, sink: WorkerStderrSink) -> Self {
+        self.stderr_sink = sink;
+        self
     }
 
     fn candidate_port_for(&self, state: &ProcessWorkerState) -> u16 {
@@ -296,12 +389,12 @@ impl ProcessWorkerControl {
 
     fn spawn_candidate(&self, candidate: &CandidateRef, port: u16) -> AgentResult<RunningWorker> {
         let (config_path, _) = self.render_config(candidate, port)?;
-        let child = Command::new(&self.config.binary_path)
+        let mut child = Command::new(&self.config.binary_path)
             .arg("--config")
             .arg(&config_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| {
                 AgentError::WorkerControl(format!(
@@ -309,34 +402,63 @@ impl ProcessWorkerControl {
                     self.config.binary_path.display()
                 ))
             })?;
+        let stderr = Arc::new(Mutex::new(WorkerStderr::default()));
+        if let Some(pipe) = child.stderr.take() {
+            forward_stderr(pipe, self.stderr_sink.clone(), stderr.clone());
+        }
         Ok(RunningWorker {
             deployment_id: candidate.deployment_id.clone(),
             port,
             config_path,
             child,
+            stderr,
         })
     }
 
-    fn health(&self, port: u16, timeout: Duration) -> AgentResult<serde_json::Value> {
-        let started = Instant::now();
-        let deadline = started.checked_add(timeout).unwrap_or(started);
-        loop {
-            match get_health_json(&self.config.bind_host, port, timeout) {
-                Ok(v) => return Ok(v),
-                Err(err) if Instant::now() < deadline => {
-                    let sleep = self
-                        .config
-                        .status_poll_interval
-                        .min(deadline.saturating_duration_since(Instant::now()));
-                    if !sleep.is_zero() {
-                        std::thread::sleep(sleep);
-                    }
-                    let _ = err;
-                }
-                Err(err) => return Err(err),
+    /// The typed failure of a candidate that has exited, after reaping it;
+    /// `None` while it is still running.
+    fn candidate_exit(&self) -> AgentResult<Option<AgentError>> {
+        let (status, stderr) = {
+            let mut state = self
+                .inner
+                .lock()
+                .map_err(|e| AgentError::Internal(format!("process worker mutex poisoned: {e}")))?;
+            let Some(candidate) = state.candidate.as_mut() else {
+                return Ok(None);
+            };
+            let Some(status) = candidate.child.try_wait()? else {
+                return Ok(None);
+            };
+            let stderr = candidate.stderr.clone();
+            state.candidate = None;
+            (status, stderr)
+        };
+        Ok(Some(startup_error(status, &stderr)))
+    }
+}
+
+/// What an exited candidate reported, waiting briefly for its last stderr
+/// lines; without a record the exit status is all there is.
+fn startup_error(status: ExitStatus, stderr: &Mutex<WorkerStderr>) -> AgentError {
+    let deadline = Instant::now() + STDERR_DRAIN_WAIT;
+    loop {
+        if let Ok(mut shared) = stderr.lock() {
+            if let Some(failure) = shared.startup_failure.take() {
+                return AgentError::WorkerStartupFailed {
+                    code: failure.code,
+                    message: failure.message,
+                };
+            }
+            if shared.closed {
+                break;
             }
         }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
+    AgentError::WorkerExited(status.to_string())
 }
 
 impl WorkerControl for ProcessWorkerControl {
@@ -386,33 +508,38 @@ impl WorkerControl for ProcessWorkerControl {
         };
         let started = Instant::now();
         let deadline = started.checked_add(timeout).unwrap_or(started);
+        let mut last_error = None;
         loop {
-            if Instant::now() >= deadline {
-                return Ok(WorkerReadiness {
-                    deployment_id: candidate.deployment_id.clone(),
-                    ready: false,
-                });
+            if let Some(exit) = self.candidate_exit()? {
+                return Err(exit);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let health = self.health(port, remaining)?;
-            let state = health
-                .get("state")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown");
-            let model = health
-                .get("active_model_id")
-                .and_then(serde_json::Value::as_str);
-            if state == "ready" && model == Some(candidate.deployment_id.as_str()) {
-                return Ok(WorkerReadiness {
-                    deployment_id: candidate.deployment_id.clone(),
-                    ready: true,
-                });
+            if remaining.is_zero() {
+                return last_error.map_or_else(
+                    || {
+                        Ok(WorkerReadiness {
+                            deployment_id: candidate.deployment_id.clone(),
+                            ready: false,
+                        })
+                    },
+                    Err,
+                );
             }
-            if Instant::now() >= deadline {
-                return Ok(WorkerReadiness {
-                    deployment_id: candidate.deployment_id.clone(),
-                    ready: false,
-                });
+            match get_health_json(&self.config.bind_host, port, remaining) {
+                Ok(health) => {
+                    let state = health.get("state").and_then(serde_json::Value::as_str);
+                    let model = health
+                        .get("active_model_id")
+                        .and_then(serde_json::Value::as_str);
+                    if state == Some("ready") && model == Some(candidate.deployment_id.as_str()) {
+                        return Ok(WorkerReadiness {
+                            deployment_id: candidate.deployment_id.clone(),
+                            ready: true,
+                        });
+                    }
+                    last_error = None;
+                }
+                Err(err) => last_error = Some(err),
             }
             let sleep = self
                 .config
@@ -893,6 +1020,62 @@ mod tests {
         m.prepare("tx", &c, Duration::from_millis(10)).expect("p");
         let r = m.warm("tx", &c, Duration::from_millis(10)).expect("w");
         assert!(!r.ready);
+    }
+
+    #[test]
+    fn startup_failure_is_read_only_from_the_workers_startup_record() {
+        let record = br#"{"component":"serving","fields":{"code":"oom_error","message":"m"},"level":"error","message":"worker startup failed","ts_ns":1}"#;
+        assert_eq!(
+            super::parse_startup_failure(record),
+            Some(super::StartupFailure {
+                code: tensorplate_protocol::ErrorCode::OomError,
+                message: "m".into(),
+            })
+        );
+        for other in [
+            &br#"{"component":"serving","fields":{"code":"oom_error","message":"m"},"level":"error","message":"session load failed"}"#[..],
+            br#"{"component":"sidecar","fields":{"code":"oom_error","message":"m"},"message":"worker startup failed"}"#,
+            br#"{"component":"serving","fields":{"code":"not_a_code","message":"m"},"message":"worker startup failed"}"#,
+            br#"{"component":"serving","fields":{"code":"oom_error"},"message":"worker startup failed"}"#,
+            br#"{"component":"serving","message":"worker startup failed"}"#,
+            b"worker startup failed",
+        ] {
+            assert_eq!(super::parse_startup_failure(other), None);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_overlong_stderr_line_is_forwarded_in_full_and_never_read_as_a_record() {
+        use std::process::{Command, Stdio};
+        use std::sync::{Arc, Mutex};
+
+        let record = r#"{"component":"serving","fields":{"code":"oom_error","message":"m"},"message":"worker startup failed"}"#;
+        let padding = usize::try_from(super::MAX_STDERR_LINE_BYTES).expect("usize");
+        let script = format!(
+            "head -c {padding} /dev/zero | tr '\\0' 'x' >&2; printf '%s\\n' '{record}' >&2"
+        );
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn");
+        let forwarded = Arc::new(Mutex::new(Vec::new()));
+        let sink = forwarded.clone();
+        let shared = Arc::new(Mutex::new(super::WorkerStderr::default()));
+        super::forward_stderr(
+            child.stderr.take().expect("stderr"),
+            Arc::new(move |line: &[u8]| sink.lock().expect("lock").extend_from_slice(line)),
+            shared.clone(),
+        );
+        let status = child.wait().expect("wait");
+
+        let err = super::startup_error(status, &shared);
+        assert!(matches!(err, super::AgentError::WorkerExited(_)), "{err}");
+        let forwarded = forwarded.lock().expect("lock");
+        assert_eq!(forwarded.len(), padding + record.len() + 1);
+        assert!(forwarded.ends_with(format!("{record}\n").as_bytes()));
     }
 
     #[test]

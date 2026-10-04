@@ -33,6 +33,17 @@ target_link_libraries(tp_test_integration
     GTest::gtest_main
 )
 
+# The adapter test runs the serving worker binary against a bundle fixture
+# and compares its stderr with the fixture the agent's deploy tests replay.
+if(TARGET tp_serving_worker)
+  add_dependencies(tp_test_integration tp_serving_worker)
+  target_compile_definitions(tp_test_integration
+    PRIVATE
+      TP_SERVING_WORKER_BINARY="$<TARGET_FILE:tp_serving_worker>"
+      TP_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+  )
+endif()
+
 target_compile_features(tp_test_integration PRIVATE cxx_std_20)
 
 tp_apply_warnings(tp_test_integration)

@@ -42,6 +42,18 @@ Behavior:
    transaction reaches a terminal phase (`active`, `failed`, `rolled_back`)
    or the wait timeout expires.
 
+The agent answers a `deploy` or `rollback` request only once the candidate
+has warmed or failed, which can take as long as its `worker.warm_timeout_ms`
+(30,000 by default). The CLI therefore waits at least 120,000 ms for that
+answer: the configured `timeout_ms` applies when it is larger, and an
+explicit `--timeout-ms` is used as given. A timeout below the agent's warm
+timeout can end the command with exit code `4` while the agent is still
+inside the transaction, and the next command is then refused as busy.
+
+When the candidate's runner refuses the model while loading, the agent
+answers with the runner's typed code (for example `unsupported` or
+`oom_error`) as soon as the candidate worker exits.
+
 Exit codes:
 
 | Code | When |
