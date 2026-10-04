@@ -84,16 +84,20 @@ impl PlatformReason {
     /// The reason a backend probe state carries, or `None` when the
     /// backend is runnable.
     ///
-    /// The distinction this exists to keep: a descriptor that is absent
-    /// means the package is not installed, and every other failure means
-    /// the package IS installed and its runtime is not usable. Collapsing
+    /// The distinction this exists to keep: a descriptor that is absent,
+    /// or a runner profile whose package is absent, means a package is not
+    /// installed, and every other failure means the package IS installed
+    /// and its runtime is not usable. Collapsing
     /// them sends an operator whose PyTorch cannot see its accelerator to
     /// reinstall a package they already have.
     #[must_use]
     pub fn for_backend_probe(state: &BackendProbeState) -> Option<Self> {
         match state {
             BackendProbeState::Runnable => None,
-            BackendProbeState::DescriptorMissing => Some(Self::MissingBackendPackage),
+            BackendProbeState::DescriptorMissing
+            | BackendProbeState::RunnerProfilePackageMissing { .. } => {
+                Some(Self::MissingBackendPackage)
+            }
             // Present but unusable: a malformed descriptor, an absent or
             // wrong-version interpreter, a module or framework that will
             // not import, or a runtime the backend refuses to run under.
@@ -168,6 +172,16 @@ mod tests {
         // Absent descriptor: the package is not installed.
         assert_eq!(
             PlatformReason::for_backend_probe(&S::DescriptorMissing),
+            Some(PlatformReason::MissingBackendPackage)
+        );
+        // A runner profile's package that is absent: also something to
+        // install.
+        assert_eq!(
+            PlatformReason::for_backend_probe(&S::RunnerProfilePackageMissing {
+                profile: String::new(),
+                package: String::new(),
+                declaration: String::new(),
+            }),
             Some(PlatformReason::MissingBackendPackage)
         );
         // Everything else: the package IS installed and its runtime is

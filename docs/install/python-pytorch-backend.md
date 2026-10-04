@@ -39,8 +39,11 @@ each naming the interpreter environment its sidecar runs in, apart from
 `python.interpreter` (profiles may share one), with the environment's root,
 any library directories for the sidecar's shared-library search path, the
 packages that install the profile and the compute types it can load. A descriptor without the list declares no runner profiles, and
-`python.interpreter` keeps serving every model. No package published so far
-declares one.
+`python.interpreter` keeps serving every model. The packaged descriptor lists
+none: a package that installs a profile declares it in a file of its own
+under `runner_profiles.d/` beside the descriptor, and readers merge those
+files into the list (see
+[Runner profile declarations](speech-runtime.md#runner-profile-declarations)).
 
 ## 2. Install PyTorch into the descriptor's interpreter
 

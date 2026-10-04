@@ -48,6 +48,10 @@ talks to it. The base package also depends on
 - Uses the distribution's espeak-ng. The Kokoro package depends on
   `libespeak-ng1` and `espeak-ng-data`, and the environment's
   `espeakng_loader` module returns their paths.
+- Declares the runner profile. `tensorplate-speech-runtime-ct2` and
+  `tensorplate-speech-runtime-kokoro` each install one file beside the
+  backend descriptor; see
+  [Runner profile declarations](#runner-profile-declarations).
 - Restarts a running `tensorplate-agent.service`, because the agent reads the
   installed package set and probes its backends only when it starts. Every
   `dpkg` run that installs, upgrades or removes a package of the family asks
@@ -63,9 +67,67 @@ talks to it. The base package also depends on
   auxiliary models do come inside the wheels: the Silero voice activity
   model in faster-whisper, and spaCy's `en_core_web_sm`, which Kokoro's
   English grapheme-to-phoneme step needs.
-- Nothing selects the environment yet. The backend descriptor declares no
-  runner profile, so the sidecar launcher and `tensorplate doctor` still use
+- Nothing runs in the environment yet. The installed profiles are declared,
+  but the sidecar launcher and `tensorplate doctor`'s runtime probe still use
   the descriptor's `python.interpreter`.
+
+## Runner profile declarations
+
+The backend descriptor,
+`/usr/share/tensorplate/backends/python_pytorch/backend.json`, belongs to
+`tensorplate-backend-python-pytorch` and is the same file on every host, so
+it cannot say which runner profiles are installed. Each profile's package
+says so itself, in a file of its own beside the descriptor:
+
+| Package | Installs |
+| --- | --- |
+| `tensorplate-speech-runtime-ct2` | `/usr/share/tensorplate/backends/python_pytorch/runner_profiles.d/faster_whisper.json` |
+| `tensorplate-speech-runtime-kokoro` | `/usr/share/tensorplate/backends/python_pytorch/runner_profiles.d/kokoro.json` |
+
+A declaration names the backend and holds one `runner_profiles` entry: the
+profile id, its interpreter and environment root, its library search paths,
+the packages that install it and the compute types it can load. The agent and
+`tensorplate doctor` read the descriptor through one reader, which appends
+every `*.json` file of that directory, in file name order, to the
+descriptor's `runner_profiles`. A host with only the `ct2` package therefore
+reads as having `faster_whisper` and not `kokoro`. Other files in the
+directory are not declarations and are not read. Removing a profile's package
+removes its declaration.
+
+The reader refuses the whole descriptor, and with it every `python_pytorch`
+deployment on the host, rather than drop one profile:
+
+| Refused when | Reported as |
+| --- | --- |
+| A declaration is not valid JSON, has an unknown or missing member, another `schema_version`, or a profile that breaks a `runner_profiles` rule | the declaration's path and the fault |
+| A declaration names another backend than the descriptor beside it | the declaration's path and both backend names |
+| Two files declare one profile id, or a declaration repeats a profile the descriptor lists itself | both paths and the id |
+| A profile names a package that is not installed | the declaration's path, the profile and the package |
+| `dpkg-query` is missing, fails or does not answer within five seconds | the descriptor's path and the failure |
+
+A package counts as installed in the dpkg states `installed`,
+`triggers-pending`, `triggers-awaited` and `half-configured`. The last is
+deliberate. The agent is restarted from the base package's own trigger, and
+while that trigger runs dpkg reports the base package as `half-configured`,
+so requiring `installed` would refuse the descriptor at the restart that is
+meant to pick the family up. It is also the state of a package whose own
+post-installation script failed; the family's component packages have no
+such script, and the base package's does nothing when it is configured.
+
+A package that is only `unpacked` does not count. dpkg leaves a package there
+when it cannot configure it, as with a dependency that is not met or a
+`tensorplate-serving` of another version, and after a `dpkg --unpack` that no
+configure run has followed. The descriptor is refused until the packages are
+configured, which restarts the agent again. A host with no declaration is
+never asked about its packages, so nothing changes where the family is not
+installed.
+
+`tensorplate doctor` reports a refusal as a failed `python_pytorch_backend`
+finding that carries the reason. The agent logs it at startup in its
+`backend probe:` line, as `state=RunnerProfilePackageMissing` for a package
+that is not installed and `state=DescriptorMalformed` for every other
+refusal, and refuses `python_pytorch` deployments with the reason
+`missing_backend_package` or `accelerator_runtime_unavailable` respectively.
 
 ## Licenses
 

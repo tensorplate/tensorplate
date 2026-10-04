@@ -1,0 +1,18 @@
+{
+  "$schema": "https://tensorplate.com/schemas/v0.1/backend_descriptor.json#/definitions/runner_profile_declaration",
+  "schema_version": "0.1",
+  "backend_name": "python_pytorch",
+  "runner_profile": {
+    "id": "kokoro",
+    "interpreter": "/usr/lib/tensorplate/speech-runtime/bin/python",
+    "environment_root": "/usr/lib/tensorplate/speech-runtime",
+    "packages": [
+      "tensorplate-speech-runtime-base",
+      "tensorplate-speech-runtime-kokoro",
+      "tensorplate-speech-runtime-torch",
+      "tensorplate-speech-runtime-cublas",
+      "tensorplate-speech-runtime-cuda"
+    ],
+    "compute_types": ["float32"]
+  }
+}

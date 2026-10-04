@@ -183,6 +183,11 @@ fn format_probe_reason(state: &BackendProbeState) -> String {
         BackendProbeState::DescriptorMalformed { reason } => {
             format!("backend descriptor invalid: {reason}")
         }
+        BackendProbeState::RunnerProfilePackageMissing {
+            profile, package, ..
+        } => {
+            format!("runner profile `{profile}` needs package `{package}`, which is not installed")
+        }
         BackendProbeState::RuntimeVersionMismatch {
             runtime_version,
             descriptor_min,
@@ -721,6 +726,47 @@ mod tests {
             Some("accelerator_runtime_unavailable"),
             "an installed-but-unusable runtime is not a missing package"
         );
+    }
+
+    #[test]
+    fn a_runner_profile_package_that_is_not_installed_is_a_missing_package() {
+        use super::verify_with_probes;
+        use std::collections::BTreeMap;
+
+        let bundle = TempDir::new().expect("td");
+        let digest = write_artifact(bundle.path(), "model.engine", b"x");
+        let body = format!(
+            r#"{{"schema_version":"{SCHEMA_VERSION}","name":"smolvla","version":"1","format_version":"0.1","model_class":"vla","backend_hint":"python_pytorch","artifacts":[{{"role":"model","path":"model.engine","digest":"{digest}"}}]}}"#
+        );
+        write_manifest(bundle.path(), &body);
+        let td = TempDir::new().expect("td2");
+        let mut cfg = config(td.path().join("s"), td.path().join("st"));
+        cfg.available_backends.push("python_pytorch".into());
+
+        let mut probes = BTreeMap::new();
+        probes.insert(
+            "python_pytorch".into(),
+            BackendProbeReport {
+                backend_name: "python_pytorch".into(),
+                descriptor_path: PathBuf::from("/usr/share/tensorplate/backends/python_pytorch"),
+                state: BackendProbeState::RunnerProfilePackageMissing {
+                    profile: "kokoro".into(),
+                    package: "tensorplate-speech-runtime-cuda".into(),
+                    declaration: "runner_profiles.d/kokoro.json".into(),
+                },
+                install_hint: None,
+            },
+        );
+
+        let record = verify_with_probes(bundle.path(), &cfg, &probes)
+            .expect_err("a profile with a package missing must refuse the deploy")
+            .to_record();
+        assert_eq!(
+            record.context.as_deref(),
+            Some("missing_backend_package"),
+            "a package to install is not a runtime that will not run"
+        );
+        assert!(record.message.contains("tensorplate-speech-runtime-cuda"));
     }
 
     #[test]

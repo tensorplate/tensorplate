@@ -1,0 +1,8 @@
+tprec-awaiting	triggers-awaited
+tprec-base	triggers-pending
+tprec-config-files	config-files
+tprec-half-configured	half-configured
+tprec-half-installed	half-installed
+tprec-installed	installed
+tprec-leaf	installed
+tprec-unpacked	unpacked

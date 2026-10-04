@@ -1,0 +1,3 @@
+dpkg-query: no packages found matching tprec-removed
+dpkg-query: no packages found matching tprec-purged
+dpkg-query: no packages found matching tprec-never-existed

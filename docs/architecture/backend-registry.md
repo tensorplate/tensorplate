@@ -224,6 +224,55 @@ or rule edits the header and the vectors in the same commit. There is no
 standalone JSON, and a socket transport carries PCM as frame payload bytes,
 not as buffer handles.
 
+## Installed backends and runner profiles
+
+The registry above is what a build of the serving worker can run. What a
+host has *installed* is a separate record on the management plane: a backend
+package ships a descriptor at
+`/usr/share/tensorplate/backends/<backend_name>/backend.json`
+([`protocol/schemas/backend_descriptor.json`](../../protocol/schemas/backend_descriptor.json)),
+and the agent's startup probe and `tensorplate doctor` read it through one
+reader, `BackendDescriptor::read_from` in the protocol crate. No other
+component parses the file.
+
+A runner profile is an environment a sidecar runs in, installed by packages
+other than the one that owns the descriptor. Such a package declares its
+profile in `<backend_name>/runner_profiles.d/<name>.json`, one
+`runner_profile_declaration` document per file, and the reader merges the
+declarations into the descriptor's `runner_profiles`: the descriptor's own
+entries first, then each `*.json` file in file name order. Consumers see only
+the merged list. It is the list `DeploymentDescriptor::derive` takes as the
+installed runner profiles, so a bundle's `runner_profile` resolves exactly
+when a package that declares it is installed. The agent's deploy path does
+not derive a deployment descriptor yet.
+
+The merge fails closed. One refused declaration refuses the descriptor, and
+the backend is then not runnable for any bundle:
+
+| Situation | `BackendDescriptorError` |
+| --- | --- |
+| Declaration unreadable, or its entry not a regular file | `Io` |
+| Declaration is not valid JSON, or has a missing, unknown or mistyped member | `Malformed` |
+| Declaration carries another `schema_version` | `UnsupportedSchemaVersion` |
+| Declared profile breaks a `runner_profiles` rule, or names another backend | `Invalid` |
+| Profile id declared by two sources | `DuplicateRunnerProfile` |
+| Profile names a package that is not installed | `PackageNotInstalled` |
+| The package database cannot be asked | `PackageInventoryUnavailable` |
+
+Installed means dpkg has configured the package or is running one of its
+scripts: the states `installed`, `triggers-pending`, `triggers-awaited` and
+`half-configured`, and not `unpacked`. The reader asks through the
+`PackageInventory` trait; the default implementation runs one bounded
+`dpkg-query` and is not consulted when no runner profile exists, so a host
+without profile packages needs no dpkg.
+[`docs/install/speech-runtime.md`](../install/speech-runtime.md#runner-profile-declarations)
+has the operator's view and the reason for that reading of dpkg's states.
+
+The startup probe reports `PackageNotInstalled` as its own state,
+`runner_profile_package_missing`, which the platform reason vocabulary
+classifies as `missing_backend_package`. Every other refusal above is a
+`descriptor_malformed` probe state and `accelerator_runtime_unavailable`.
+
 ## Non-goals
 
 V01-E05-F01 explicitly does *not* implement:

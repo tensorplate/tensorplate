@@ -8,6 +8,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Runner profile declarations: each speech runtime profile package now says
+  which runner profile it installs. `tensorplate-speech-runtime-ct2` and
+  `tensorplate-speech-runtime-kokoro` each install one declaration under
+  `/usr/share/tensorplate/backends/python_pytorch/runner_profiles.d/`, and
+  the backend descriptor reader shared by the agent and `tensorplate doctor`
+  merges the declarations into the descriptor's `runner_profiles`, so a host
+  with one profile's packages reads as having that profile and no other.
+  The reader refuses the whole descriptor, with a typed error naming the
+  file, when a declaration is malformed or names another backend, when a
+  profile id is declared twice, when a profile names a package that is not
+  installed, or when `dpkg-query` cannot be asked; a host with no runner
+  profile is read as before and dpkg is not consulted. A profile package
+  that is not installed is its own backend probe state,
+  `runner_profile_package_missing`, and refuses a deploy with the reason
+  `missing_backend_package`.
+  `backend_descriptor.json` gains the declaration document (additive change
+  inside protocol 0.1; version constants unchanged). Nothing launches from
+  a declared profile yet: the sidecar launcher and doctor's runtime probe
+  still use `python.interpreter`. (V030-E01-F01-T04)
 - Logical sessions account for input credit and bound their output. The
   session manager charges each accepted audio chunk or text segment to
   the session's credit (one second of unconsumed audio, or two waiting
