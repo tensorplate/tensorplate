@@ -460,12 +460,19 @@ How sessions end, and the code their terminal outcome carries:
 | Input item without bytes | `accept_input` (the manager applies `fail`) | `failed` | `config_invalid` (`empty_input`) |
 | Credit release that does not match what is held (a defect) | a release call (the manager applies `fail`) | `failed` | `internal` (`input_release_mismatch`, `segment_stage_violation` or `wrong_input_kind`) |
 | Output undelivered past the no-progress limit | the manager's timer applies `abort` | `closed` | `resource_exhausted` (`slow_consumer`) |
+| A finalization or a drain not finished by the finalize deadline | the manager's timer applies `abort` | `closed` | `timeout` (`finalize_timeout`) |
 | Backend process reset or reaped | `backend_reset` | `failed` | `unavailable` (`backend_reset`) |
 | Deployment generation retiring | `drain`, then `abort` at the deadline | `closed` | `unavailable` (`deployment_retired`) |
 | Worker shutting down | `drain`, then `abort` at the deadline | `closed` | `unavailable` (`worker_shutdown`) |
-| Stale generation in a later message | `fail` | `failed` | `not_ready` (`stale_generation`) |
+| Stale generation in a later message | `check_generation` (the manager applies `fail`) | `failed` | `not_ready` (`stale_generation`) |
 | Protocol violation | `fail` | `failed` | `not_ready` (`illegal_transition`) |
 | Owner report the state does not permit (a defect) | `fail` | `failed` | `internal` (`unexpected_report`) |
+
+A drain the worker starts is held to the session's finalize deadline like
+any other. When that deadline comes first, the session's end cause is the
+most recent one: a retiring or shutting-down worker's audio session that
+has not drained in 10 seconds closes with `timeout` (`finalize_timeout`),
+not with `unavailable`.
 
 The reason strings are the failure reasons in
 [`failure-reasons.md`](../observability/failure-reasons.md) where one

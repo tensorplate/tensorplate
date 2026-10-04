@@ -749,7 +749,7 @@ TEST(SessionManager, RestartedWorkerKnowsNothingOfEarlierSessions) {
     earlier_output = live->output;
     ASSERT_TRUE(earlier.manager->accept_input(live_key, 640));
     auto transcript = output_item(OutputKind::Result, 48);
-    ASSERT_EQ(earlier_output->offer(transcript, clock.now()).value(), OutputOffer::Queued);
+    ASSERT_EQ(earlier_output->offer(transcript, earlier.clock.now()).value(), OutputOffer::Queued);
     ASSERT_TRUE(earlier.manager->apply(ended_key, LogicalSessionEvent::Cancel));
     ASSERT_TRUE(earlier.manager->apply(ended_key, LogicalSessionEvent::ReleaseAcknowledged));
     ASSERT_TRUE(earlier.manager->tombstone(ended_key));

@@ -131,7 +131,6 @@ class SyntheticSessionHost {
             seen.terminal_cause = transition.cause ? transition.cause->context : std::nullopt;
             break;
           case Effect::StartFinalize:
-            ++finalizations_owed_[transition.session_key];
             reports_.emplace_back(transition.session_key, Event::FinalizeCompleted);
             break;
           case Effect::StartDrain:
@@ -241,14 +240,15 @@ class SyntheticSessionHost {
       }
       const auto [key, event] = reports_.front();
       reports_.pop_front();
-      // The owner reports a finalization complete once it owes no other.
-      if (event == serving::LogicalSessionEvent::FinalizeCompleted &&
-          --finalizations_owed_[key] != 0) {
-        continue;
-      }
       auto* manager = manager_;
       lock.unlock();
-      (void)manager->apply(key, event);
+      // One report completes every finalization owed, so it is sent only
+      // while the session is still finalizing; only this thread ends that.
+      if (event != serving::LogicalSessionEvent::FinalizeCompleted ||
+          manager->state(key).value_or(serving::LogicalSessionState::Closed) ==
+              serving::LogicalSessionState::Finalizing) {
+        (void)manager->apply(key, event);
+      }
       lock.lock();
     }
   }
@@ -274,7 +274,6 @@ class SyntheticSessionHost {
   mutable std::condition_variable cv_;
   serving::SessionManager* manager_ = nullptr;
   std::map<std::uint64_t, Session> sessions_;
-  std::map<std::uint64_t, std::uint32_t> finalizations_owed_;
   std::deque<Report> reports_;
   std::size_t released_ = 0;
   std::uint64_t written_ = 0;

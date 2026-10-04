@@ -44,6 +44,19 @@ struct RealClockWorker {
   std::unique_ptr<SessionManager> manager;
 };
 
+/// Other sessions keeping the manager busy; stopped and joined on every way
+/// out of a round.
+struct Load {
+  ~Load() {
+    stop.store(true);
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
+  std::atomic<bool> stop{false};
+  std::thread thread;
+};
+
 template <typename Predicate>
 bool eventually(Predicate&& holds) {
   const auto give_up = std::chrono::steady_clock::now() + 10s;
@@ -112,9 +125,9 @@ TEST(SessionLifecycleIntegration, CancelIsAcknowledgedWithinOneHundredMillisecon
       sessions.push_back(std::move(*opened));
     }
     // The second half of the sessions is the load: pings and task output.
-    std::atomic<bool> stop_load{false};
-    std::thread load([&] {
-      while (!stop_load.load()) {
+    Load load;
+    load.thread = std::thread([&] {
+      while (!load.stop.load()) {
         for (std::size_t index = kSessionsPerRound; index < sessions.size(); ++index) {
           (void)worker.manager->apply(sessions[index].session_key, Event::Ping);
           OutputItem chunk{OutputKind::Audio, 960, 0, std::make_unique<OutputBody>()};
@@ -146,8 +159,8 @@ TEST(SessionLifecycleIntegration, CancelIsAcknowledgedWithinOneHundredMillisecon
     }
     EXPECT_EQ(worker.manager->held_slots(), sessions.size());
 
-    stop_load.store(true);
-    load.join();
+    load.stop.store(true);
+    load.thread.join();
     worker.host.block_backend(false);
     for (std::size_t index = kSessionsPerRound; index < sessions.size(); ++index) {
       (void)worker.manager->apply(sessions[index].session_key, Event::Cancel);

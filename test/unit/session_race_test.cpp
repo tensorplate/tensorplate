@@ -8,6 +8,8 @@
 #include <future>
 #include <memory>
 #include <random>
+#include <set>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -129,9 +131,11 @@ void expect_one_terminal_outcome(const SyntheticSessionHost::Session& seen) {
 
 /// Starts every actor on one session, each after its own short delay so the
 /// rounds interleave differently, lets the backend release the session and
-/// checks what its stream and peer saw.
+/// checks what its stream and peer saw. Rounds that all end with the same
+/// cause did not race, which fails the test.
 void run_rounds(const SessionBudgets& budgets, const std::vector<Actor>& actors,
                 bool start_peer = false) {
+  std::set<std::string> causes;
   for (std::uint32_t round = 0; round < kRounds; ++round) {
     SCOPED_TRACE(round);
     SyntheticWorker worker(start_peer);
@@ -162,7 +166,9 @@ void run_rounds(const SessionBudgets& budgets, const std::vector<Actor>& actors,
     (void)worker.manager->apply(key, Event::Cancel);
     ASSERT_TRUE(worker.host.wait_released(1, 10s));
     worker.host.read_all();
-    expect_one_terminal_outcome(worker.host.session(key));
+    const auto seen = worker.host.session(key);
+    expect_one_terminal_outcome(seen);
+    causes.insert(seen.terminal_cause.value_or("none"));
     EXPECT_EQ(worker.manager->held_slots(), 0U);
     OutputItem late{OutputKind::Control, 16, 0, std::make_unique<OutputBody>()};
     EXPECT_EQ(opened->output->offer(late, worker.clock.now()).value(), OutputOffer::Closed);
@@ -171,6 +177,7 @@ void run_rounds(const SessionBudgets& budgets, const std::vector<Actor>& actors,
       return;
     }
   }
+  EXPECT_GE(causes.size(), 2U);
 }
 
 const SessionBudgets kAudioIn = SessionBudgets::for_audio_input(32'000).value();

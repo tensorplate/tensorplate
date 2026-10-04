@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -48,12 +49,18 @@ TEST(SessionFinalize, DrainExpiryMatchesFixture) {
   }
 }
 
+// Runs while tests are registered, where an exception would end the binary:
+// an unreadable fixture yields no cases and fails HoldsEveryCase instead.
 std::vector<nlohmann::json> lifecycle_cases() {
-  return load_session_lifecycle_fixture().at("cases").get<std::vector<nlohmann::json>>();
+  try {
+    return load_session_lifecycle_fixture().at("cases").get<std::vector<nlohmann::json>>();
+  } catch (const std::exception&) {
+    return {};
+  }
 }
 
 std::string case_test_name(const ::testing::TestParamInfo<nlohmann::json>& info) {
-  return info.param.at("id").get<std::string>();
+  return info.param.value("id", std::to_string(info.index));
 }
 
 class SessionLifecycleCase : public ::testing::TestWithParam<nlohmann::json> {};
@@ -76,7 +83,7 @@ INSTANTIATE_TEST_SUITE_P(Fixture, SessionLifecycleCase, ::testing::ValuesIn(life
                          case_test_name);
 
 TEST(SessionLifecycleFixture, HoldsEveryCase) {
-  EXPECT_EQ(lifecycle_cases().size(), 27U);
+  EXPECT_EQ(lifecycle_cases().size(), 28U);
 }
 }  // namespace
 }  // namespace tensorplate::serving

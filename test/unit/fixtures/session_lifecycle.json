@@ -389,6 +389,21 @@
       "terminals": 1, "terminal_cause": "deployment_retired"
     },
     {
+      "id": "close_worker_drain_cut_by_deadline",
+      "name": "close: a worker drain not finished by the session's deadline ends with the timeout as its cause",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "event", "event": "drain", "cause": "deployment_retired", "effects": ["start_drain"], "state": "draining"},
+        {"op": "advance", "ms": 9999},
+        {"op": "sweep", "expired": []},
+        {"op": "advance", "ms": 1},
+        {"op": "sweep", "expired": ["finalize_timeout"], "effects": ["suppress_output", "request_cleanup"], "state": "cancel_requested"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed"}
+      ],
+      "terminals": 1, "terminal_cause": "finalize_timeout"
+    },
+    {
       "id": "close_cancel",
       "name": "close: a cancel closes publication at once and holds the slot until release, with no deadline of its own",
       "input": "text", "bytes_per_second": 48000,
