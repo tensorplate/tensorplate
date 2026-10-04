@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <gtest/gtest.h>
 
-#include <cctype>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -54,11 +53,7 @@ std::vector<nlohmann::json> lifecycle_cases() {
 }
 
 std::string case_test_name(const ::testing::TestParamInfo<nlohmann::json>& info) {
-  std::string name;
-  for (const char ch : info.param.at("name").get<std::string>()) {
-    name += std::isalnum(static_cast<unsigned char>(ch)) != 0 ? ch : '_';
-  }
-  return name;
+  return info.param.at("id").get<std::string>();
 }
 
 class SessionLifecycleCase : public ::testing::TestWithParam<nlohmann::json> {};
@@ -66,6 +61,7 @@ class SessionLifecycleCase : public ::testing::TestWithParam<nlohmann::json> {};
 TEST_P(SessionLifecycleCase, ReplaysAgainstTheManager) {
   const auto fixture = load_session_lifecycle_fixture();
   const auto& scenario = GetParam();
+  SCOPED_TRACE(scenario.at("name").get<std::string>());
   testing::SessionLifecycleReplay replay(fixture, scenario);
   replay.run(scenario.at("steps"));
   EXPECT_EQ(replay.stream().terminals_written, scenario.at("terminals").get<std::uint32_t>());

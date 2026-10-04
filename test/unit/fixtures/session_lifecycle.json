@@ -21,6 +21,7 @@
   ],
   "cases": [
     {
+      "id": "audio_finalize_completes_then_next_deadline",
       "name": "audio: a finalize completed inside ten seconds returns to active, and the next one gets its own ten",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -41,6 +42,7 @@
       "terminals": 1, "terminal_cause": "finalize_timeout"
     },
     {
+      "id": "audio_late_message_gets_timeout",
       "name": "audio: a client message after the deadline is answered with the timeout and cannot revive the session",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -54,6 +56,7 @@
       "terminals": 1, "terminal_cause": "finalize_timeout"
     },
     {
+      "id": "audio_endpoint_deadline_not_moved",
       "name": "audio: an automatic endpoint starts the deadline and a later endpoint does not move it",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -71,6 +74,7 @@
       "terminals": 0
     },
     {
+      "id": "audio_half_close_keeps_deadline",
       "name": "audio: a half-close during a finalization keeps the deadline the finalization started",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -86,6 +90,7 @@
       "terminals": 0
     },
     {
+      "id": "audio_drain_done_waits_for_release",
       "name": "audio: a finished drain waits for physical release without this deadline",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -101,6 +106,7 @@
       "terminals": 1, "terminal_cause": null
     },
     {
+      "id": "text_finalize_deadline",
       "name": "text: a synthesis finalize is not held to the ten seconds of a transcript and ends at one hundred and twenty",
       "input": "text", "bytes_per_second": 48000,
       "steps": [
@@ -120,6 +126,7 @@
       "terminals": 0
     },
     {
+      "id": "text_paced_drain_within_deadline",
       "name": "text: two waiting segments and one running, thirty seconds each, drain at the pace of playback inside the deadline",
       "input": "text", "bytes_per_second": 48000,
       "steps": [
@@ -159,6 +166,7 @@
       "terminals": 1, "terminal_cause": null
     },
     {
+      "id": "text_slow_reader_reaches_deadline",
       "name": "text: a reader slower than playback reaches the deadline while still making progress",
       "input": "text", "bytes_per_second": 48000,
       "steps": [
@@ -197,6 +205,7 @@
       "terminals": 1, "terminal_cause": "finalize_timeout"
     },
     {
+      "id": "text_stalled_reader",
       "name": "text: a reader that stops ends the drain after five seconds without a delivery",
       "input": "text", "bytes_per_second": 48000,
       "steps": [
@@ -217,6 +226,7 @@
       "terminals": 0
     },
     {
+      "id": "text_segment_completes_without_finalize",
       "name": "text: an 80 ms segment completes while the synthesis stays open, with no finalize",
       "input": "text", "bytes_per_second": 48000,
       "steps": [
@@ -239,6 +249,7 @@
       "terminals": 0
     },
     {
+      "id": "text_segment_completes_once",
       "name": "text: a segment completes once",
       "input": "text", "bytes_per_second": 48000,
       "steps": [
@@ -256,6 +267,7 @@
       "terminals": 1, "terminal_cause": "segment_stage_violation"
     },
     {
+      "id": "text_cancelled_segment_no_completion",
       "name": "text: a cancelled segment receives no completion",
       "input": "text", "bytes_per_second": 48000,
       "steps": [
@@ -274,6 +286,7 @@
       "terminals": 1, "terminal_cause": "client_cancelled"
     },
     {
+      "id": "text_failed_segment_no_completion",
       "name": "text: a failed segment receives no completion",
       "input": "text", "bytes_per_second": 48000,
       "steps": [
@@ -288,6 +301,7 @@
       "terminals": 1, "terminal_cause": "synthesis_failed"
     },
     {
+      "id": "generation_stale_open",
       "name": "generation: an open naming another generation creates no session",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -297,6 +311,7 @@
       "terminals": 0
     },
     {
+      "id": "generation_current_message",
       "name": "generation: a later message naming the session's generation changes nothing",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -307,6 +322,7 @@
       "terminals": 0
     },
     {
+      "id": "generation_stale_message",
       "name": "generation: a later message naming another generation fails the session, which keeps its slot until release",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -321,6 +337,7 @@
       "terminals": 1, "terminal_cause": "stale_generation"
     },
     {
+      "id": "generation_absent",
       "name": "generation: an absent generation is stale",
       "input": "text", "bytes_per_second": 48000,
       "steps": [
@@ -330,6 +347,7 @@
       "terminals": 1, "terminal_cause": "stale_generation"
     },
     {
+      "id": "generation_stale_after_cancel",
       "name": "generation: a stale message after cancellation is refused and leaves the cancellation's outcome",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -341,6 +359,7 @@
       "terminals": 1, "terminal_cause": "client_cancelled"
     },
     {
+      "id": "close_half_close",
       "name": "close: a half-close completes accepted work and closes without a cause",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -357,6 +376,7 @@
       "terminals": 1, "terminal_cause": null
     },
     {
+      "id": "close_worker_drain",
       "name": "close: a worker drain closes with the worker's cause",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -369,6 +389,7 @@
       "terminals": 1, "terminal_cause": "deployment_retired"
     },
     {
+      "id": "close_cancel",
       "name": "close: a cancel closes publication at once and holds the slot until release, with no deadline of its own",
       "input": "text", "bytes_per_second": 48000,
       "steps": [
@@ -384,6 +405,7 @@
       "terminals": 1, "terminal_cause": "client_cancelled"
     },
     {
+      "id": "close_repeated",
       "name": "close: repeated half-close, cancel and release change nothing after the first",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -400,6 +422,7 @@
       "terminals": 1, "terminal_cause": "client_cancelled"
     },
     {
+      "id": "close_disconnect",
       "name": "close: a transport disconnect abandons accepted work without an acknowledgement",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -411,6 +434,7 @@
       "terminals": 1, "terminal_cause": "transport_closed"
     },
     {
+      "id": "close_backend_reset_in_drain",
       "name": "close: a backend reset during a drain fails the session and the slot waits for the reap",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -423,6 +447,7 @@
       "terminals": 1, "terminal_cause": "backend_reset"
     },
     {
+      "id": "close_backend_reset_after_cancel",
       "name": "close: a backend reset while a cancellation waits for release fails the session once",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -435,6 +460,7 @@
       "terminals": 1, "terminal_cause": "backend_reset"
     },
     {
+      "id": "expiry_heartbeat",
       "name": "expiry: thirty seconds without a ping end a live session",
       "input": "audio", "bytes_per_second": 32000,
       "steps": [
@@ -450,7 +476,8 @@
       "terminals": 1, "terminal_cause": "heartbeat_timeout"
     },
     {
-      "name": "expiry: a session with no data or control for the idle limit ends even while it pings on time",
+      "id": "expiry_idle",
+      "name": "expiry: a session with no data or control for the idle limit ends",
       "input": "audio", "bytes_per_second": 32000,
       "limits": {"idle_timeout_ms": 2000, "heartbeat_interval_ms": 1000, "liveness_timeout_ms": 5000, "max_duration_ms": 60000, "max_sessions": 4},
       "steps": [
