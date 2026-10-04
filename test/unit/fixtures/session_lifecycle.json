@@ -1,0 +1,466 @@
+{
+  "generation": 5,
+  "finalize_deadlines": {
+    "audio_ms": 10000,
+    "text_ms": 120000
+  },
+  "drain_expiry": [
+    {"input": "text", "elapsed_ms": 30000, "output_pending": true, "output_idle_ms": 20, "expect": "none"},
+    {"input": "text", "elapsed_ms": 105000, "output_pending": true, "output_idle_ms": 20, "expect": "none"},
+    {"input": "text", "elapsed_ms": 6000, "output_pending": true, "output_idle_ms": 5000, "expect": "slow_consumer"},
+    {"input": "text", "elapsed_ms": 120000, "output_pending": true, "output_idle_ms": 20, "expect": "finalize_timeout"},
+    {"input": "text", "elapsed_ms": 4000, "output_pending": false, "expect": "none"},
+    {"input": "text", "elapsed_ms": 10000, "output_pending": false, "expect": "none"},
+    {"input": "text", "elapsed_ms": 119999, "output_pending": true, "output_idle_ms": 20, "expect": "none"},
+    {"input": "text", "elapsed_ms": 120000, "output_pending": false, "expect": "finalize_timeout"},
+    {"input": "text", "elapsed_ms": 120000, "output_pending": true, "output_idle_ms": 5000, "expect": "finalize_timeout"},
+    {"input": "audio", "elapsed_ms": 9999, "output_pending": false, "expect": "none"},
+    {"input": "audio", "elapsed_ms": 10000, "output_pending": false, "expect": "finalize_timeout"},
+    {"input": "audio", "elapsed_ms": 10000, "output_pending": true, "output_idle_ms": 20, "expect": "finalize_timeout"},
+    {"input": "audio", "elapsed_ms": 6000, "output_pending": true, "output_idle_ms": 5000, "expect": "slow_consumer"}
+  ],
+  "cases": [
+    {
+      "name": "audio: a finalize completed inside ten seconds returns to active, and the next one gets its own ten",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5, "effects": ["emit_ready"], "state": "active"},
+        {"op": "event", "event": "finalize", "effects": ["start_finalize"], "state": "finalizing"},
+        {"op": "advance", "ms": 9999},
+        {"op": "sweep", "expired": []},
+        {"op": "event", "event": "finalize_completed", "effects": [], "state": "active"},
+        {"op": "advance", "ms": 5001},
+        {"op": "sweep", "expired": []},
+        {"op": "event", "event": "finalize", "effects": ["start_finalize"], "state": "finalizing"},
+        {"op": "advance", "ms": 9999},
+        {"op": "sweep", "expired": []},
+        {"op": "advance", "ms": 1},
+        {"op": "sweep", "expired": ["finalize_timeout"], "effects": ["suppress_output", "request_cleanup"], "state": "cancel_requested"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed"}
+      ],
+      "terminals": 1, "terminal_cause": "finalize_timeout"
+    },
+    {
+      "name": "audio: a client message after the deadline is answered with the timeout and cannot revive the session",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "event", "event": "finalize", "state": "finalizing"},
+        {"op": "advance", "ms": 10000},
+        {"op": "event", "event": "ping", "expect": "finalize_timeout", "effects": ["suppress_output", "request_cleanup"], "state": "cancel_requested"},
+        {"op": "event", "event": "finalize_completed", "effects": [], "state": "cancel_requested"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed"}
+      ],
+      "terminals": 1, "terminal_cause": "finalize_timeout"
+    },
+    {
+      "name": "audio: an automatic endpoint starts the deadline and a later endpoint does not move it",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "input", "bytes": 3200, "effects": ["accept_input"]},
+        {"op": "event", "event": "automatic_endpoint", "effects": ["start_finalize"], "state": "finalizing"},
+        {"op": "advance", "ms": 6000},
+        {"op": "input", "bytes": 3200, "effects": ["accept_input"]},
+        {"op": "event", "event": "automatic_endpoint", "effects": ["start_finalize"], "state": "finalizing"},
+        {"op": "advance", "ms": 3999},
+        {"op": "sweep", "expired": []},
+        {"op": "advance", "ms": 1},
+        {"op": "sweep", "expired": ["finalize_timeout"], "state": "cancel_requested"}
+      ],
+      "terminals": 0
+    },
+    {
+      "name": "audio: a half-close during a finalization keeps the deadline the finalization started",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "event", "event": "finalize", "state": "finalizing"},
+        {"op": "advance", "ms": 6000},
+        {"op": "event", "event": "half_close", "effects": ["start_drain"], "state": "draining"},
+        {"op": "advance", "ms": 3999},
+        {"op": "sweep", "expired": []},
+        {"op": "advance", "ms": 1},
+        {"op": "sweep", "expired": ["finalize_timeout"], "state": "cancel_requested"}
+      ],
+      "terminals": 0
+    },
+    {
+      "name": "audio: a finished drain waits for physical release without this deadline",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "event", "event": "half_close", "effects": ["start_drain"], "state": "draining"},
+        {"op": "advance", "ms": 9000},
+        {"op": "event", "event": "drain_completed", "effects": ["request_cleanup"], "state": "draining", "held_slots": 1},
+        {"op": "advance", "ms": 30000},
+        {"op": "event", "event": "ping", "effects": ["emit_reply"], "state": "draining"},
+        {"op": "sweep", "expired": []},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed", "held_slots": 0}
+      ],
+      "terminals": 1, "terminal_cause": null
+    },
+    {
+      "name": "text: a synthesis finalize is not held to the ten seconds of a transcript and ends at one hundred and twenty",
+      "input": "text", "bytes_per_second": 48000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "input", "bytes": 64, "effects": ["accept_input"]},
+        {"op": "start_segment"},
+        {"op": "event", "event": "finalize", "effects": ["start_finalize"], "state": "finalizing"},
+        {"op": "repeat", "times": 11, "steps": [
+          {"op": "advance", "ms": 10000},
+          {"op": "event", "event": "ping", "effects": ["emit_reply"], "state": "finalizing"}
+        ]},
+        {"op": "advance", "ms": 9999},
+        {"op": "sweep", "expired": []},
+        {"op": "advance", "ms": 1},
+        {"op": "sweep", "expired": ["finalize_timeout"], "state": "cancel_requested"}
+      ],
+      "terminals": 0
+    },
+    {
+      "name": "text: two waiting segments and one running, thirty seconds each, drain at the pace of playback inside the deadline",
+      "input": "text", "bytes_per_second": 48000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "input", "bytes": 64},
+        {"op": "start_segment"},
+        {"op": "input", "bytes": 64},
+        {"op": "input", "bytes": 64, "depth": 3},
+        {"op": "event", "event": "half_close", "effects": ["start_drain"], "state": "draining"},
+        {"op": "repeat", "times": 2, "steps": [
+          {"op": "advance", "ms": 5000},
+          {"op": "repeat", "times": 30, "steps": [
+            {"op": "offer", "kind": "audio", "bytes": 48000, "expect": "queued"},
+            {"op": "advance", "ms": 1000},
+            {"op": "deliver", "items": 1}
+          ]},
+          {"op": "offer", "kind": "result", "bytes": 24, "expect": "queued"},
+          {"op": "deliver", "items": 1},
+          {"op": "finish_segment"},
+          {"op": "start_segment"}
+        ]},
+        {"op": "advance", "ms": 5000},
+        {"op": "repeat", "times": 30, "steps": [
+          {"op": "offer", "kind": "audio", "bytes": 48000, "expect": "queued"},
+          {"op": "advance", "ms": 1000},
+          {"op": "deliver", "items": 1}
+        ]},
+        {"op": "offer", "kind": "result", "bytes": 24, "expect": "queued"},
+        {"op": "deliver", "items": 1},
+        {"op": "finish_segment", "depth": 0},
+        {"op": "sweep", "expired": []},
+        {"op": "event", "event": "drain_completed", "effects": ["request_cleanup"], "state": "draining"},
+        {"op": "advance", "ms": 20000},
+        {"op": "sweep", "expired": []},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed"}
+      ],
+      "terminals": 1, "terminal_cause": null
+    },
+    {
+      "name": "text: a reader slower than playback reaches the deadline while still making progress",
+      "input": "text", "bytes_per_second": 48000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "input", "bytes": 64},
+        {"op": "start_segment"},
+        {"op": "input", "bytes": 64},
+        {"op": "input", "bytes": 64},
+        {"op": "event", "event": "half_close", "state": "draining"},
+        {"op": "repeat", "times": 2, "steps": [
+          {"op": "advance", "ms": 5000},
+          {"op": "repeat", "times": 30, "steps": [
+            {"op": "offer", "kind": "audio", "bytes": 48000, "expect": "queued"},
+            {"op": "advance", "ms": 1250},
+            {"op": "deliver", "items": 1}
+          ]},
+          {"op": "offer", "kind": "result", "bytes": 24, "expect": "queued"},
+          {"op": "deliver", "items": 1},
+          {"op": "finish_segment"},
+          {"op": "start_segment"}
+        ]},
+        {"op": "advance", "ms": 5000},
+        {"op": "repeat", "times": 23, "steps": [
+          {"op": "offer", "kind": "audio", "bytes": 48000, "expect": "queued"},
+          {"op": "advance", "ms": 1250},
+          {"op": "deliver", "items": 1}
+        ]},
+        {"op": "sweep", "expired": []},
+        {"op": "offer", "kind": "audio", "bytes": 48000, "expect": "queued"},
+        {"op": "advance", "ms": 1250},
+        {"op": "deliver", "items": 1},
+        {"op": "sweep", "expired": ["finalize_timeout"], "effects": ["suppress_output", "request_cleanup"], "state": "cancel_requested"},
+        {"op": "offer", "kind": "audio", "bytes": 48000, "expect": "suppressed"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed"}
+      ],
+      "terminals": 1, "terminal_cause": "finalize_timeout"
+    },
+    {
+      "name": "text: a reader that stops ends the drain after five seconds without a delivery",
+      "input": "text", "bytes_per_second": 48000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "input", "bytes": 64},
+        {"op": "start_segment"},
+        {"op": "event", "event": "half_close", "state": "draining"},
+        {"op": "advance", "ms": 5000},
+        {"op": "offer", "kind": "audio", "bytes": 48000, "expect": "queued"},
+        {"op": "advance", "ms": 1000},
+        {"op": "deliver", "items": 1},
+        {"op": "offer", "kind": "audio", "bytes": 48000, "expect": "queued"},
+        {"op": "advance", "ms": 4999},
+        {"op": "sweep", "expired": []},
+        {"op": "advance", "ms": 1},
+        {"op": "sweep", "expired": ["slow_consumer"], "state": "cancel_requested"}
+      ],
+      "terminals": 0
+    },
+    {
+      "name": "text: an 80 ms segment completes while the synthesis stays open, with no finalize",
+      "input": "text", "bytes_per_second": 48000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "input", "bytes": 64, "effects": ["accept_input"], "depth": 1},
+        {"op": "start_segment", "depth": 1},
+        {"op": "repeat", "times": 4, "steps": [
+          {"op": "offer", "kind": "audio", "bytes": 960, "expect": "queued"}
+        ]},
+        {"op": "offer", "kind": "result", "bytes": 24, "expect": "queued"},
+        {"op": "deliver", "items": 5},
+        {"op": "finish_segment", "depth": 0, "effects": [], "state": "active"},
+        {"op": "repeat", "times": 13, "steps": [
+          {"op": "advance", "ms": 10000},
+          {"op": "event", "event": "ping", "effects": ["emit_reply"], "state": "active"}
+        ]},
+        {"op": "sweep", "expired": []},
+        {"op": "input", "bytes": 64, "effects": ["accept_input"], "state": "active"}
+      ],
+      "terminals": 0
+    },
+    {
+      "name": "text: a segment completes once",
+      "input": "text", "bytes_per_second": 48000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "input", "bytes": 64},
+        {"op": "start_segment"},
+        {"op": "offer", "kind": "audio", "bytes": 960, "expect": "queued"},
+        {"op": "offer", "kind": "result", "bytes": 24, "expect": "queued"},
+        {"op": "deliver", "items": 2},
+        {"op": "finish_segment", "depth": 0},
+        {"op": "finish_segment", "expect": "segment_stage_violation", "effects": ["suppress_output", "request_cleanup", "emit_terminal"], "state": "failed", "held_slots": 1},
+        {"op": "offer", "kind": "result", "bytes": 24, "expect": "closed"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot"], "state": "failed", "held_slots": 0}
+      ],
+      "terminals": 1, "terminal_cause": "segment_stage_violation"
+    },
+    {
+      "name": "text: a cancelled segment receives no completion",
+      "input": "text", "bytes_per_second": 48000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "input", "bytes": 64},
+        {"op": "start_segment"},
+        {"op": "offer", "kind": "audio", "bytes": 960, "expect": "queued"},
+        {"op": "offer", "kind": "audio", "bytes": 960, "expect": "queued"},
+        {"op": "event", "event": "cancel", "effects": ["suppress_output", "emit_cancel_accepted", "request_cleanup"], "state": "cancel_requested"},
+        {"op": "offer", "kind": "audio", "bytes": 960, "expect": "suppressed"},
+        {"op": "offer", "kind": "result", "bytes": 24, "expect": "suppressed"},
+        {"op": "finish_segment", "depth": 0, "effects": [], "state": "cancel_requested"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed"},
+        {"op": "offer", "kind": "control", "bytes": 16, "expect": "closed"}
+      ],
+      "terminals": 1, "terminal_cause": "client_cancelled"
+    },
+    {
+      "name": "text: a failed segment receives no completion",
+      "input": "text", "bytes_per_second": 48000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "input", "bytes": 64},
+        {"op": "start_segment"},
+        {"op": "offer", "kind": "audio", "bytes": 960, "expect": "queued"},
+        {"op": "event", "event": "fail", "cause": "synthesis_failed", "effects": ["suppress_output", "request_cleanup", "emit_terminal"], "state": "failed"},
+        {"op": "offer", "kind": "result", "bytes": 24, "expect": "closed"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot"], "state": "failed"}
+      ],
+      "terminals": 1, "terminal_cause": "synthesis_failed"
+    },
+    {
+      "name": "generation: an open naming another generation creates no session",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 4, "expect": "stale_generation", "effects": [], "held_slots": 0},
+        {"op": "open", "generation": 0, "expect": "stale_generation", "effects": [], "held_slots": 0}
+      ],
+      "terminals": 0
+    },
+    {
+      "name": "generation: a later message naming the session's generation changes nothing",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "generation", "generation": 5, "effects": [], "state": "active"},
+        {"op": "input", "bytes": 3200, "effects": ["accept_input"], "state": "active"}
+      ],
+      "terminals": 0
+    },
+    {
+      "name": "generation: a later message naming another generation fails the session, which keeps its slot until release",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "generation", "generation": 6, "expect": "stale_generation", "effects": ["suppress_output", "request_cleanup", "emit_terminal"], "state": "failed", "held_slots": 1},
+        {"op": "generation", "generation": 6, "expect": "stale_generation", "effects": [], "state": "failed"},
+        {"op": "generation", "generation": 5, "effects": [], "state": "failed"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot"], "state": "failed", "held_slots": 0},
+        {"op": "generation", "generation": 6, "expect": "session_ended", "effects": []},
+        {"op": "generation", "generation": 5, "expect": "session_ended", "effects": []}
+      ],
+      "terminals": 1, "terminal_cause": "stale_generation"
+    },
+    {
+      "name": "generation: an absent generation is stale",
+      "input": "text", "bytes_per_second": 48000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "generation", "generation": 0, "expect": "stale_generation", "effects": ["suppress_output", "request_cleanup", "emit_terminal"], "state": "failed"}
+      ],
+      "terminals": 1, "terminal_cause": "stale_generation"
+    },
+    {
+      "name": "generation: a stale message after cancellation is refused and leaves the cancellation's outcome",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "event", "event": "cancel", "effects": ["suppress_output", "emit_cancel_accepted", "request_cleanup"], "state": "cancel_requested"},
+        {"op": "generation", "generation": 4, "expect": "stale_generation", "effects": [], "state": "cancel_requested"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed"}
+      ],
+      "terminals": 1, "terminal_cause": "client_cancelled"
+    },
+    {
+      "name": "close: a half-close completes accepted work and closes without a cause",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "input", "bytes": 3200, "effects": ["accept_input"], "depth": 1},
+        {"op": "event", "event": "half_close", "effects": ["start_drain"], "state": "draining"},
+        {"op": "input", "bytes": 3200, "effects": [], "depth": 1, "state": "draining"},
+        {"op": "release_audio", "chunks": 1, "bytes": 3200, "depth": 0},
+        {"op": "offer", "kind": "result", "bytes": 48, "expect": "queued"},
+        {"op": "deliver", "items": 1},
+        {"op": "event", "event": "drain_completed", "effects": ["request_cleanup"], "state": "draining", "held_slots": 1},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed", "held_slots": 0}
+      ],
+      "terminals": 1, "terminal_cause": null
+    },
+    {
+      "name": "close: a worker drain closes with the worker's cause",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "event", "event": "drain", "cause": "deployment_retired", "effects": ["start_drain"], "state": "draining"},
+        {"op": "event", "event": "half_close", "effects": [], "state": "draining"},
+        {"op": "event", "event": "drain_completed", "effects": ["request_cleanup"], "state": "draining"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed"}
+      ],
+      "terminals": 1, "terminal_cause": "deployment_retired"
+    },
+    {
+      "name": "close: a cancel closes publication at once and holds the slot until release, with no deadline of its own",
+      "input": "text", "bytes_per_second": 48000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "offer", "kind": "audio", "bytes": 960, "expect": "queued"},
+        {"op": "event", "event": "cancel", "effects": ["suppress_output", "emit_cancel_accepted", "request_cleanup"], "state": "cancel_requested", "held_slots": 1},
+        {"op": "offer", "kind": "audio", "bytes": 960, "expect": "suppressed"},
+        {"op": "advance", "ms": 3600000},
+        {"op": "sweep", "expired": [], "held_slots": 1},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed", "held_slots": 0},
+        {"op": "offer", "kind": "control", "bytes": 16, "expect": "closed"}
+      ],
+      "terminals": 1, "terminal_cause": "client_cancelled"
+    },
+    {
+      "name": "close: repeated half-close, cancel and release change nothing after the first",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "event", "event": "half_close", "effects": ["start_drain"], "state": "draining"},
+        {"op": "event", "event": "half_close", "effects": [], "state": "draining"},
+        {"op": "event", "event": "cancel", "effects": ["suppress_output", "emit_cancel_accepted", "request_cleanup"], "state": "cancel_requested"},
+        {"op": "event", "event": "cancel", "effects": [], "state": "cancel_requested"},
+        {"op": "event", "event": "half_close", "effects": [], "state": "cancel_requested"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed"},
+        {"op": "event", "event": "release_acknowledged", "expect": "session_ended", "effects": [], "state": "closed"},
+        {"op": "event", "event": "cancel", "expect": "session_ended", "effects": [], "state": "closed"}
+      ],
+      "terminals": 1, "terminal_cause": "client_cancelled"
+    },
+    {
+      "name": "close: a transport disconnect abandons accepted work without an acknowledgement",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "input", "bytes": 3200},
+        {"op": "event", "event": "abort", "cause": "transport_closed", "effects": ["suppress_output", "request_cleanup"], "state": "cancel_requested"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed"}
+      ],
+      "terminals": 1, "terminal_cause": "transport_closed"
+    },
+    {
+      "name": "close: a backend reset during a drain fails the session and the slot waits for the reap",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "event", "event": "half_close", "state": "draining"},
+        {"op": "event", "event": "backend_reset", "cause": "backend_reset", "effects": ["suppress_output", "request_cleanup", "emit_terminal"], "state": "failed", "held_slots": 1},
+        {"op": "event", "event": "drain_completed", "effects": [], "state": "failed"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot"], "state": "failed", "held_slots": 0}
+      ],
+      "terminals": 1, "terminal_cause": "backend_reset"
+    },
+    {
+      "name": "close: a backend reset while a cancellation waits for release fails the session once",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "event", "event": "cancel", "effects": ["suppress_output", "emit_cancel_accepted", "request_cleanup"], "state": "cancel_requested"},
+        {"op": "event", "event": "backend_reset", "cause": "backend_reset", "effects": ["emit_terminal"], "state": "failed", "held_slots": 1},
+        {"op": "event", "event": "backend_reset", "cause": "backend_reset", "effects": [], "state": "failed"},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot"], "state": "failed", "held_slots": 0}
+      ],
+      "terminals": 1, "terminal_cause": "backend_reset"
+    },
+    {
+      "name": "expiry: thirty seconds without a ping end a live session",
+      "input": "audio", "bytes_per_second": 32000,
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "advance", "ms": 20000},
+        {"op": "event", "event": "status_request", "effects": ["emit_reply"], "state": "active"},
+        {"op": "advance", "ms": 9999},
+        {"op": "sweep", "expired": []},
+        {"op": "advance", "ms": 1},
+        {"op": "sweep", "expired": ["heartbeat_timeout"], "effects": ["suppress_output", "request_cleanup"], "state": "cancel_requested", "held_slots": 1},
+        {"op": "event", "event": "release_acknowledged", "effects": ["release_slot", "emit_terminal"], "state": "closed", "held_slots": 0}
+      ],
+      "terminals": 1, "terminal_cause": "heartbeat_timeout"
+    },
+    {
+      "name": "expiry: a session with no data or control for the idle limit ends even while it pings on time",
+      "input": "audio", "bytes_per_second": 32000,
+      "limits": {"idle_timeout_ms": 2000, "heartbeat_interval_ms": 1000, "liveness_timeout_ms": 5000, "max_duration_ms": 60000, "max_sessions": 4},
+      "steps": [
+        {"op": "open", "generation": 5},
+        {"op": "advance", "ms": 1999},
+        {"op": "sweep", "expired": []},
+        {"op": "advance", "ms": 1},
+        {"op": "sweep", "expired": ["idle_timeout"], "state": "cancel_requested"}
+      ],
+      "terminals": 0
+    }
+  ]
+}
