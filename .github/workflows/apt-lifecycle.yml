@@ -220,6 +220,7 @@ jobs:
             gnupg \
             python3.12 \
             python3.12-venv \
+            python3-yaml \
             libespeak-ng1 \
             espeak-ng-data
 
@@ -229,6 +230,14 @@ jobs:
         env:
           CI: 'true'
         run: test/packaging/verify_speech_runtime_packages.sh
+
+      # The release workflow's speech runtime job runs only on a dispatch
+      # that asks for it, so its steps are run here on every change.
+      - name: Release workflow's speech runtime job, from stub wheels
+        shell: bash
+        env:
+          CI: 'true'
+        run: test/packaging/verify_speech_runtime_release_job.sh
 
   harness-checks:
     name: lifecycle harness verifiers

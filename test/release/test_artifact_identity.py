@@ -27,6 +27,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -155,6 +156,17 @@ SECONDARY_PACKAGES = (
     "tensorplate-cli",
     "tensorplate",
 )
+
+
+def shell_array(path: Path, name: str) -> list[str]:
+    """The words of a `readonly NAME=( ... )` block in a shell script."""
+    block = re.search(rf"(?ms)^readonly {name}=\(\n(.*?)^\)", path.read_text())
+    if block is None:
+        raise AssertionError(f"{path.name} declares no {name}")
+    return block.group(1).split()
+
+
+SPEECH_RUNTIME_PACKAGES = tuple(shell_array(RELEASE_DRIVER, "SPEECH_RUNTIME_PACKAGES"))
 
 
 @dataclass(frozen=True)

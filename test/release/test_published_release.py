@@ -38,12 +38,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_artifact_identity import (  # noqa: E402
     RELEASE_DRIVER,
     REPO_ROOT,
+    SPEECH_RUNTIME_PACKAGES,
     github_served_name,
     identity_args,
     init_fixture_repo,
     make_release_set,
     run_command,
     run_release_staging,
+    write_fixture_package,
 )
 
 INSTALLER = REPO_ROOT / "packaging/scripts/install.sh"
@@ -119,6 +121,8 @@ if "update" in args:
     sys.exit(0)
 if "install" not in args:
     sys.exit(f"apt-get stand-in: unexpected {args!r}")
+with open(os.environ["FAKE_APT_CALLS"], "a") as calls:
+    calls.write("install\n")
 with open(os.environ["FAKE_APT_LOG"], "a") as log:
     for arg in args:
         if not arg.startswith("./"):
@@ -243,6 +247,7 @@ class PublishedReleaseInstallTests(unittest.TestCase):
             "FAKE_RELEASE_URL_PREFIX": RELEASE_URL_PREFIX,
             "FAKE_CURL_LOG": str(curl_log),
             "FAKE_APT_LOG": str(apt_log),
+            "FAKE_APT_CALLS": str(run_dir / "apt-calls.log"),
         }
         result = subprocess.run(
             ["bash", "-c", INSTALL_RUNNER, "bash", str(INSTALLER), str(run_dir / "install-lib.sh"),
@@ -358,6 +363,85 @@ class PublishedReleaseInstallTests(unittest.TestCase):
         )
         self.assertEqual(apt_log, [])
 
+
+    # --- the speech runtime opt-in ------------------------------------------
+
+    def _publish_with_speech_runtime(self) -> list[str]:
+        """Add the family to the candidate and publish it; what the opt-in
+        must hand apt-get on an amd64 host."""
+        version = f"{self.fixture.deb_version}-1"
+        built = [
+            write_fixture_package(self.fixture.built, package, version, "amd64",
+                                  "speech runtime fixture")
+            for package in SPEECH_RUNTIME_PACKAGES
+        ]
+        staged = run_release_staging(self.fixture.artifacts, self.fixture.deb_version, built)
+        self.assertEqual(staged.returncode, 0, staged.stdout + staged.stderr)
+        made = run_command(
+            ("bash", str(RELEASE_DRIVER), "manifest", *identity_args(self.fixture),
+             "--with-speech-runtime"), cwd=self.repo)
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        publish_to_github(self.fixture.artifacts, self.github / self.fixture.tag)
+        wanted = (*RUNTIME_PACKAGES, "tensorplate-backend-python-pytorch",
+                  *SPEECH_RUNTIME_PACKAGES)
+        return sorted(
+            f"{artifact['file']} {artifact['sha256']}"
+            for artifact in json.loads(self.fixture.manifest.read_text())["artifacts"]
+            if artifact.get("package") in wanted
+            and artifact.get("architecture") in ("amd64", "all")
+        )
+
+    def _sources(self) -> tuple[tuple[str, tuple[str, ...]], ...]:
+        return (
+            ("local", ("--local-artifacts", str(self.fixture.artifacts))),
+            ("network", ("--version", "v0.2.1-rc.1")),
+        )
+
+    def test_the_speech_runtime_opt_in_installs_the_family_a_release_publishes(self) -> None:
+        expected = self._publish_with_speech_runtime()
+        self.assertEqual(len(expected), len(RUNTIME_PACKAGES) + 1 + len(SPEECH_RUNTIME_PACKAGES))
+        for source, args in self._sources():
+            with self.subTest(source=source):
+                run = f"speech-{source}"
+                result, _, apt_log = self._install(
+                    "amd64", *args, "--with-speech-runtime", run=run)
+                self.assertEqual(result.returncode, 0, f"{result.stdout}\n{result.stderr}")
+                self.assertEqual(sorted(apt_log), expected)
+                # One transaction: apt resolves the family against the core set.
+                self.assertEqual(_lines(self.root / run / "apt-calls.log"), ["install"])
+                self.assertIn("Installed the speech runtime packages", result.stdout)
+        # Without the option the same release installs the core runtime only.
+        result, _, apt_log = self._install(
+            "amd64", "--local-artifacts", str(self.fixture.artifacts), run="speech-unasked")
+        self._assert_installed(result, apt_log, "amd64")
+        self.assertNotIn("speech runtime", result.stdout)
+
+    def test_the_speech_runtime_opt_in_is_refused_by_a_release_without_the_family(self) -> None:
+        publish_to_github(self.fixture.artifacts, self.github / self.fixture.tag)
+        for source, args in self._sources():
+            with self.subTest(source=source):
+                run = f"no-family-{source}"
+                result, _, apt_log = self._install(
+                    "amd64", *args, "--with-speech-runtime", run=run)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(apt_log, [])
+                self.assertFalse((self.root / run / "apt-calls.log").exists())
+                self.assertNotIn("install complete", result.stdout)
+                # Said once, by name, and the install stops there.
+                self.assertEqual(result.stderr.count(
+                    "v0.2.1-rc.1 does not publish the speech runtime packages "
+                    "for architecture amd64"), 1, result.stderr)
+                self.assertIn("nothing was installed", result.stderr)
+                self.assertNotIn("with SHA256SUMS", result.stdout)
+
+    def test_the_speech_runtime_opt_in_is_refused_on_an_arm64_host(self) -> None:
+        self._publish_with_speech_runtime()
+        result, curl_log, apt_log = self._install(
+            "arm64", "--local-artifacts", str(self.fixture.artifacts),
+            "--with-speech-runtime", run="speech-arm64")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual((curl_log, apt_log), ([], []))
+        self.assertIn("--with-speech-runtime needs an amd64 host", result.stderr)
 
 
 def _dpkg_available() -> bool:

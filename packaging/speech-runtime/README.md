@@ -37,6 +37,17 @@ TP_SPEECH_RUNTIME_WHEELHOUSE=/var/tmp/speech-wheelhouse \
 The profile builds the family and nothing else; without it the family is not
 built. The package build itself reads only the wheelhouse.
 
+The packages take their version from `packaging/debian/changelog`, and each
+depends on `tensorplate-serving` at exactly that version. To build for a
+release candidate rather than the version the tree carries, stage the
+candidate's package version before the build:
+
+```bash
+tools/release/stage-debian-changelog.sh 0.3.1~rc.1
+```
+
+The script edits the changelog in the working tree; the edit is not committed.
+
 ## Changing the lock
 
 Every pin is a candidate until the release freezes its model set. To move
