@@ -8,6 +8,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Logical sessions account for input credit and bound their output. The
+  session manager charges each accepted audio chunk or text segment to
+  the session's credit (one second of unconsumed audio, or two waiting
+  text segments of 8 KiB combined plus one being executed or delivered)
+  and fails a session that exceeds it with `input_credit_exceeded`. A
+  bounded output queue per stream holds two seconds of PCM and 16 KiB of
+  control and transcript metadata, the last 1 KiB of it for lifecycle
+  messages only, counts what the transport still holds, replaces an
+  unsent partial with its newer revision and never drops a final; a
+  session whose output makes no delivery progress for five seconds ends
+  with `slow_consumer`. A released session leaves a tombstone for 60
+  seconds, at most 1,024 per worker, and each lifecycle transition
+  reports the session's state, queue depth and budget use. The manager's
+  clock-advance notification can no longer be lost between the timer's
+  deadline scan and its wait. The current HTTP worker does not create
+  logical sessions. (V030-E04-F01-T02)
 - A serving worker that cannot start now ends its stderr with one JSON
   record, `worker startup failed`, carrying the typed error code and
   message of the step that failed; it replaces the two plain-text lines the

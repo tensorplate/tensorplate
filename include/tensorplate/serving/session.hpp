@@ -407,9 +407,11 @@ struct LogicalSessionStatus {
   /// Accepted, not yet consumed input bytes, as received, against the input
   /// credit.
   LogicalSessionUsage input_credit_bytes;
-  /// Queued, unsent PCM output bytes against the output audio budget.
+  /// Undelivered PCM output bytes, queued or held by the transport, against
+  /// the output audio budget.
   LogicalSessionUsage output_pcm_bytes;
-  /// Queued, unsent control and transcript metadata bytes against its budget.
+  /// Undelivered control and transcript metadata bytes, queued or held by the
+  /// transport, against its budget.
   LogicalSessionUsage output_metadata_bytes;
 
   friend constexpr bool operator==(const LogicalSessionStatus& lhs,

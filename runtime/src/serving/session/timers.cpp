@@ -3,6 +3,8 @@
 
 #include <algorithm>
 
+#include "serving/session/credits.hpp"
+
 namespace tensorplate::serving {
 
 SessionTimers::SessionTimers(SessionLimits limits, SchedulerClock::TimePoint opened_at) noexcept
@@ -32,42 +34,46 @@ bool SessionTimers::heartbeat_due(SchedulerClock::TimePoint now) const noexcept 
   return now >= last_heartbeat_at_ + limits_.heartbeat_interval();
 }
 
-std::optional<SessionExpiry> SessionTimers::expired(SchedulerClock::TimePoint now,
-                                                    LogicalSessionState state) const noexcept {
+std::optional<SessionTimers::Deadline> SessionTimers::earliest(
+    LogicalSessionState state,
+    std::optional<SchedulerClock::TimePoint> output_stalled_since) const noexcept {
   if (state == LogicalSessionState::Closed || state == LogicalSessionState::Failed ||
       state == LogicalSessionState::CancelRequested) {
     return std::nullopt;
   }
-  const auto maximum = opened_at_ + limits_.max_duration();
-  if (state == LogicalSessionState::Draining) {
-    return now >= maximum ? std::optional{SessionExpiry::MaxDuration} : std::nullopt;
+  // Ties go to the deadline listed first.
+  Deadline first{opened_at_ + limits_.max_duration(), SessionExpiry::MaxDuration};
+  const auto consider = [&first](SchedulerClock::TimePoint at, SessionExpiry expiry) {
+    if (at < first.at) {
+      first = Deadline{at, expiry};
+    }
+  };
+  if (output_stalled_since) {
+    consider(*output_stalled_since + SessionBudgets::kOutputNoProgressTimeout,
+             SessionExpiry::SlowConsumer);
   }
-  const auto heartbeat = last_heartbeat_at_ + limits_.liveness_timeout();
-  const auto idle = last_activity_at_ + limits_.idle_timeout();
-  if (now < std::min({maximum, heartbeat, idle})) {
+  if (state != LogicalSessionState::Draining) {
+    consider(last_heartbeat_at_ + limits_.liveness_timeout(), SessionExpiry::Heartbeat);
+    consider(last_activity_at_ + limits_.idle_timeout(), SessionExpiry::Idle);
+  }
+  return first;
+}
+
+std::optional<SessionExpiry> SessionTimers::expired(
+    SchedulerClock::TimePoint now, LogicalSessionState state,
+    std::optional<SchedulerClock::TimePoint> output_stalled_since) const noexcept {
+  const auto first = earliest(state, output_stalled_since);
+  if (!first || now < first->at) {
     return std::nullopt;
   }
-  if (maximum <= heartbeat && maximum <= idle) {
-    return SessionExpiry::MaxDuration;
-  }
-  if (heartbeat <= idle) {
-    return SessionExpiry::Heartbeat;
-  }
-  return SessionExpiry::Idle;
+  return first->expiry;
 }
 
 std::optional<SchedulerClock::TimePoint> SessionTimers::next_deadline(
-    LogicalSessionState state) const noexcept {
-  if (state == LogicalSessionState::Closed || state == LogicalSessionState::Failed ||
-      state == LogicalSessionState::CancelRequested) {
-    return std::nullopt;
-  }
-  auto next = opened_at_ + limits_.max_duration();
-  if (state != LogicalSessionState::Draining) {
-    next = std::min(next, last_activity_at_ + limits_.idle_timeout());
-    next = std::min(next, last_heartbeat_at_ + limits_.liveness_timeout());
-  }
-  return next;
+    LogicalSessionState state,
+    std::optional<SchedulerClock::TimePoint> output_stalled_since) const noexcept {
+  const auto first = earliest(state, output_stalled_since);
+  return first ? std::optional{first->at} : std::nullopt;
 }
 
 SchedulerClock::Duration SessionTimers::duration_remaining(

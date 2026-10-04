@@ -1,0 +1,365 @@
+{
+  "limits": {
+    "input_audio_ms": 1000,
+    "input_text_segments": 2,
+    "input_text_bytes": 8192,
+    "active_text_segments": 1,
+    "output_pcm_ms": 2000,
+    "output_metadata_bytes": 16384,
+    "output_control_reserve_bytes": 1024,
+    "output_no_progress_ms": 5000,
+    "tombstone_capacity": 1024,
+    "tombstone_lifetime_ms": 60000,
+    "tombstone_reason_bytes": 64
+  },
+  "budgets": [
+    {"input": "audio", "bytes_per_second": 32000, "input_credit_bytes": 32000, "waiting_items": 0, "active_items": 0, "output_pcm_bytes": 0, "output_metadata_bytes": 16384},
+    {"input": "audio", "bytes_per_second": 8000, "input_credit_bytes": 8000, "waiting_items": 0, "active_items": 0, "output_pcm_bytes": 0, "output_metadata_bytes": 16384},
+    {"input": "audio", "bytes_per_second": 960000, "input_credit_bytes": 960000, "waiting_items": 0, "active_items": 0, "output_pcm_bytes": 0, "output_metadata_bytes": 16384},
+    {"input": "text", "bytes_per_second": 48000, "input_credit_bytes": 8192, "waiting_items": 2, "active_items": 1, "output_pcm_bytes": 96000, "output_metadata_bytes": 16384},
+    {"input": "text", "bytes_per_second": 720000, "input_credit_bytes": 8192, "waiting_items": 2, "active_items": 1, "output_pcm_bytes": 1440000, "output_metadata_bytes": 16384}
+  ],
+  "invalid_budgets": [
+    {"input": "audio", "bytes_per_second": 0},
+    {"input": "audio", "bytes_per_second": 960001},
+    {"input": "text", "bytes_per_second": 0},
+    {"input": "text", "bytes_per_second": 720001}
+  ],
+  "credit_cases": [
+    {
+      "name": "audio: one second is accepted and one more sample is not",
+      "budget": {"input": "audio", "bytes_per_second": 32000},
+      "steps": [
+        {"op": "charge", "bytes": 16000, "expect": "ok", "depth": 1, "used": 16000},
+        {"op": "charge", "bytes": 16000, "expect": "ok", "depth": 2, "used": 32000},
+        {"op": "charge", "bytes": 2, "expect": "input_credit_exceeded", "depth": 2, "used": 32000}
+      ]
+    },
+    {
+      "name": "audio: credit returns as input is consumed, whole chunks or part of one",
+      "budget": {"input": "audio", "bytes_per_second": 32000},
+      "steps": [
+        {"op": "charge", "bytes": 640, "expect": "ok", "depth": 1, "used": 640},
+        {"op": "charge", "bytes": 640, "expect": "ok", "depth": 2, "used": 1280},
+        {"op": "release_audio", "chunks": 1, "bytes": 640, "expect": "ok", "depth": 1, "used": 640},
+        {"op": "release_audio", "chunks": 0, "bytes": 320, "expect": "ok", "depth": 1, "used": 320},
+        {"op": "charge", "bytes": 31680, "expect": "ok", "depth": 2, "used": 32000},
+        {"op": "charge", "bytes": 1, "expect": "input_credit_exceeded", "depth": 2, "used": 32000},
+        {"op": "release_audio", "chunks": 2, "bytes": 32000, "expect": "ok", "depth": 0, "used": 0},
+        {"op": "charge", "bytes": 32000, "expect": "ok", "depth": 1, "used": 32000}
+      ]
+    },
+    {
+      "name": "audio: a release that does not match what is held changes nothing",
+      "budget": {"input": "audio", "bytes_per_second": 32000},
+      "steps": [
+        {"op": "charge", "bytes": 640, "expect": "ok", "depth": 1, "used": 640},
+        {"op": "release_audio", "chunks": 2, "bytes": 640, "expect": "input_release_mismatch", "depth": 1, "used": 640},
+        {"op": "release_audio", "chunks": 1, "bytes": 641, "expect": "input_release_mismatch", "depth": 1, "used": 640},
+        {"op": "release_audio", "chunks": 1, "bytes": 320, "expect": "input_release_mismatch", "depth": 1, "used": 640},
+        {"op": "release_audio", "chunks": 0, "bytes": 640, "expect": "input_release_mismatch", "depth": 1, "used": 640},
+        {"op": "release_audio", "chunks": 0, "bytes": 0, "expect": "input_release_mismatch", "depth": 1, "used": 640},
+        {"op": "release_audio", "chunks": 1, "bytes": 640, "expect": "ok", "depth": 0, "used": 0}
+      ]
+    },
+    {
+      "name": "audio: an empty chunk and the text stages are refused",
+      "budget": {"input": "audio", "bytes_per_second": 8000},
+      "steps": [
+        {"op": "charge", "bytes": 0, "expect": "empty_input", "depth": 0, "used": 0},
+        {"op": "charge", "bytes": 160, "expect": "ok", "depth": 1, "used": 160},
+        {"op": "start_segment", "expect": "wrong_input_kind", "depth": 1, "used": 160},
+        {"op": "finish_segment", "expect": "wrong_input_kind", "depth": 1, "used": 160}
+      ]
+    },
+    {
+      "name": "text: two waiting segments of 8 KiB combined",
+      "budget": {"input": "text", "bytes_per_second": 48000},
+      "steps": [
+        {"op": "charge", "bytes": 4096, "expect": "ok", "depth": 1, "used": 4096},
+        {"op": "charge", "bytes": 4096, "expect": "ok", "depth": 2, "used": 8192},
+        {"op": "charge", "bytes": 1, "expect": "input_credit_exceeded", "depth": 2, "used": 8192}
+      ]
+    },
+    {
+      "name": "text: the byte limit binds with one segment waiting",
+      "budget": {"input": "text", "bytes_per_second": 48000},
+      "steps": [
+        {"op": "charge", "bytes": 8192, "expect": "ok", "depth": 1, "used": 8192},
+        {"op": "charge", "bytes": 1, "expect": "input_credit_exceeded", "depth": 1, "used": 8192}
+      ]
+    },
+    {
+      "name": "text: the count limit binds with bytes to spare",
+      "budget": {"input": "text", "bytes_per_second": 48000},
+      "steps": [
+        {"op": "charge", "bytes": 1, "expect": "ok", "depth": 1, "used": 1},
+        {"op": "charge", "bytes": 1, "expect": "ok", "depth": 2, "used": 2},
+        {"op": "charge", "bytes": 1, "expect": "input_credit_exceeded", "depth": 2, "used": 2}
+      ]
+    },
+    {
+      "name": "text: two waiting plus one active, and the active slot is held until its segment is finished",
+      "budget": {"input": "text", "bytes_per_second": 48000},
+      "steps": [
+        {"op": "charge", "bytes": 100, "expect": "ok", "depth": 1, "used": 100},
+        {"op": "charge", "bytes": 200, "expect": "ok", "depth": 2, "used": 300},
+        {"op": "start_segment", "expect": "ok", "depth": 2, "used": 200},
+        {"op": "charge", "bytes": 300, "expect": "ok", "depth": 3, "used": 500},
+        {"op": "charge", "bytes": 1, "expect": "input_credit_exceeded", "depth": 3, "used": 500},
+        {"op": "start_segment", "expect": "segment_stage_violation", "depth": 3, "used": 500},
+        {"op": "finish_segment", "expect": "ok", "depth": 2, "used": 500},
+        {"op": "charge", "bytes": 1, "expect": "input_credit_exceeded", "depth": 2, "used": 500},
+        {"op": "start_segment", "expect": "ok", "depth": 2, "used": 300},
+        {"op": "charge", "bytes": 400, "expect": "ok", "depth": 3, "used": 700},
+        {"op": "finish_segment", "expect": "ok", "depth": 2, "used": 700},
+        {"op": "start_segment", "expect": "ok", "depth": 2, "used": 400},
+        {"op": "finish_segment", "expect": "ok", "depth": 1, "used": 400},
+        {"op": "start_segment", "expect": "ok", "depth": 1, "used": 0},
+        {"op": "finish_segment", "expect": "ok", "depth": 0, "used": 0},
+        {"op": "finish_segment", "expect": "segment_stage_violation", "depth": 0, "used": 0},
+        {"op": "start_segment", "expect": "segment_stage_violation", "depth": 0, "used": 0}
+      ]
+    },
+    {
+      "name": "text: an empty segment and the audio release are refused",
+      "budget": {"input": "text", "bytes_per_second": 48000},
+      "steps": [
+        {"op": "charge", "bytes": 0, "expect": "empty_input", "depth": 0, "used": 0},
+        {"op": "charge", "bytes": 10, "expect": "ok", "depth": 1, "used": 10},
+        {"op": "release_audio", "chunks": 1, "bytes": 10, "expect": "wrong_input_kind", "depth": 1, "used": 10}
+      ]
+    }
+  ],
+  "output_cases": [
+    {
+      "name": "two seconds of PCM, counting what the transport still holds",
+      "budget": {"input": "text", "bytes_per_second": 48000},
+      "steps": [
+        {"op": "offer", "kind": "audio", "bytes": 48000, "id": "a1", "expect": "queued", "pcm_used": 48000},
+        {"op": "offer", "kind": "audio", "bytes": 48000, "id": "a2", "expect": "queued", "pcm_used": 96000},
+        {"op": "offer", "kind": "audio", "bytes": 960, "id": "a3", "expect": "full", "pcm_used": 96000},
+        {"op": "take", "id": "a1", "sequence": 1, "pcm_used": 96000},
+        {"op": "offer", "kind": "audio", "bytes": 960, "id": "a3", "expect": "full", "pcm_used": 96000},
+        {"op": "delivered", "sequence": 1, "expect": "ok", "pcm_used": 48000},
+        {"op": "offer", "kind": "audio", "bytes": 960, "id": "a3", "expect": "queued", "pcm_used": 48960},
+        {"op": "offer", "kind": "audio", "bytes": 96001, "id": "a4", "expect": "output_item_too_large", "pcm_used": 48960}
+      ]
+    },
+    {
+      "name": "16 KiB of metadata whose last kilobyte only lifecycle messages may use, and no PCM budget in an audio-input session",
+      "budget": {"input": "audio", "bytes_per_second": 32000},
+      "steps": [
+        {"op": "offer", "kind": "result", "bytes": 8192, "id": "r1", "expect": "queued", "metadata_used": 8192},
+        {"op": "offer", "kind": "result", "bytes": 7168, "id": "r2", "expect": "queued", "metadata_used": 15360},
+        {"op": "offer", "kind": "result", "bytes": 1, "id": "r3", "expect": "full", "metadata_used": 15360},
+        {"op": "offer", "kind": "partial", "key": 9, "bytes": 1, "id": "p1", "expect": "full", "metadata_used": 15360},
+        {"op": "offer", "kind": "control", "bytes": 1000, "id": "c1", "expect": "queued", "metadata_used": 16360},
+        {"op": "offer", "kind": "control", "bytes": 25, "id": "c2", "expect": "full", "metadata_used": 16360},
+        {"op": "offer", "kind": "control", "bytes": 24, "id": "c2", "expect": "queued", "metadata_used": 16384},
+        {"op": "offer", "kind": "control", "bytes": 1, "id": "c3", "expect": "full", "metadata_used": 16384},
+        {"op": "offer", "kind": "result", "bytes": 15361, "id": "r4", "expect": "output_item_too_large", "metadata_used": 16384},
+        {"op": "offer", "kind": "partial", "key": 9, "bytes": 15361, "id": "p2", "expect": "output_item_too_large", "metadata_used": 16384},
+        {"op": "offer", "kind": "control", "bytes": 16385, "id": "c4", "expect": "output_item_too_large", "metadata_used": 16384},
+        {"op": "offer", "kind": "audio", "bytes": 2, "id": "a1", "expect": "output_item_too_large", "pcm_used": 0}
+      ]
+    },
+    {
+      "name": "lifecycle messages that fill the budget leave task output waiting, not refused for good",
+      "budget": {"input": "audio", "bytes_per_second": 32000},
+      "steps": [
+        {"op": "offer", "kind": "control", "bytes": 16000, "id": "c1", "expect": "queued", "metadata_used": 16000},
+        {"op": "offer", "kind": "result", "bytes": 100, "id": "r1", "expect": "full", "metadata_used": 16000},
+        {"op": "take", "id": "c1", "sequence": 1, "metadata_used": 16000},
+        {"op": "delivered", "sequence": 1, "expect": "ok", "metadata_used": 0},
+        {"op": "offer", "kind": "result", "bytes": 100, "id": "r1", "expect": "queued", "metadata_used": 100}
+      ]
+    },
+    {
+      "name": "a keyed lifecycle reply is replaced in place by its newer one; an unkeyed one never is",
+      "budget": {"input": "audio", "bytes_per_second": 32000},
+      "steps": [
+        {"op": "offer", "kind": "control", "key": 1, "bytes": 20, "id": "a1", "expect": "queued", "metadata_used": 20},
+        {"op": "offer", "kind": "control", "key": 2, "bytes": 10, "id": "s1", "expect": "queued", "metadata_used": 30},
+        {"op": "offer", "kind": "partial", "key": 1, "bytes": 5, "id": "p1", "expect": "queued", "metadata_used": 35},
+        {"op": "offer", "kind": "control", "key": 1, "bytes": 30, "id": "a2", "expect": "replaced", "metadata_used": 45},
+        {"op": "offer", "kind": "result", "key": 1, "bytes": 7, "id": "f1", "expect": "queued", "metadata_used": 47},
+        {"op": "offer", "kind": "control", "bytes": 5, "id": "u1", "expect": "queued", "metadata_used": 52},
+        {"op": "offer", "kind": "control", "bytes": 5, "id": "u2", "expect": "queued", "metadata_used": 57},
+        {"op": "take", "id": "a2", "sequence": 1},
+        {"op": "offer", "kind": "control", "key": 1, "bytes": 30, "id": "a3", "expect": "queued", "metadata_used": 87},
+        {"op": "take", "id": "s1", "sequence": 2},
+        {"op": "take", "id": "f1", "sequence": 3},
+        {"op": "take", "id": "u1", "sequence": 4},
+        {"op": "take", "id": "u2", "sequence": 5},
+        {"op": "take", "id": "a3", "sequence": 6},
+        {"op": "take", "empty": true}
+      ]
+    },
+    {
+      "name": "an unsent partial is replaced in place; a sequenced one is not",
+      "budget": {"input": "audio", "bytes_per_second": 32000},
+      "steps": [
+        {"op": "offer", "kind": "partial", "key": 7, "bytes": 100, "id": "p1", "expect": "queued", "metadata_used": 100},
+        {"op": "offer", "kind": "partial", "key": 7, "bytes": 300, "id": "p2", "expect": "replaced", "metadata_used": 300},
+        {"op": "offer", "kind": "control", "bytes": 10, "id": "c1", "expect": "queued", "metadata_used": 310},
+        {"op": "offer", "kind": "partial", "key": 8, "bytes": 20, "id": "q1", "expect": "queued", "metadata_used": 330},
+        {"op": "offer", "kind": "partial", "key": 7, "bytes": 50, "id": "p3", "expect": "replaced", "metadata_used": 80},
+        {"op": "take", "id": "p3", "sequence": 1, "metadata_used": 80},
+        {"op": "offer", "kind": "partial", "key": 7, "bytes": 60, "id": "p4", "expect": "queued", "metadata_used": 140},
+        {"op": "take", "id": "c1", "sequence": 2},
+        {"op": "take", "id": "q1", "sequence": 3},
+        {"op": "take", "id": "p4", "sequence": 4},
+        {"op": "take", "empty": true}
+      ]
+    },
+    {
+      "name": "a replacement that does not fit leaves the queue unchanged",
+      "budget": {"input": "audio", "bytes_per_second": 32000},
+      "steps": [
+        {"op": "offer", "kind": "result", "bytes": 15000, "id": "r1", "expect": "queued", "metadata_used": 15000},
+        {"op": "offer", "kind": "partial", "key": 1, "bytes": 300, "id": "p1", "expect": "queued", "metadata_used": 15300},
+        {"op": "offer", "kind": "partial", "key": 1, "bytes": 361, "id": "p2", "expect": "full", "metadata_used": 15300},
+        {"op": "offer", "kind": "partial", "key": 1, "bytes": 360, "id": "p3", "expect": "replaced", "metadata_used": 15360},
+        {"op": "take", "id": "r1", "sequence": 1},
+        {"op": "take", "id": "p3", "sequence": 2}
+      ]
+    },
+    {
+      "name": "a replacement no larger than what it replaces fits even while lifecycle messages use the reserve",
+      "budget": {"input": "audio", "bytes_per_second": 32000},
+      "steps": [
+        {"op": "offer", "kind": "result", "bytes": 15000, "id": "r1", "expect": "queued", "metadata_used": 15000},
+        {"op": "offer", "kind": "partial", "key": 1, "bytes": 300, "id": "p1", "expect": "queued", "metadata_used": 15300},
+        {"op": "offer", "kind": "control", "bytes": 1000, "id": "c1", "expect": "queued", "metadata_used": 16300},
+        {"op": "offer", "kind": "partial", "key": 1, "bytes": 301, "id": "p2", "expect": "full", "metadata_used": 16300},
+        {"op": "offer", "kind": "partial", "key": 1, "bytes": 300, "id": "p3", "expect": "replaced", "metadata_used": 16300},
+        {"op": "offer", "kind": "partial", "key": 1, "bytes": 200, "id": "p4", "expect": "replaced", "metadata_used": 16200},
+        {"op": "offer", "kind": "result", "key": 1, "bytes": 201, "id": "f1", "expect": "full", "metadata_used": 16200},
+        {"op": "offer", "kind": "result", "key": 1, "bytes": 100, "id": "f2", "expect": "queued", "metadata_used": 16100},
+        {"op": "take", "id": "r1", "sequence": 1},
+        {"op": "take", "id": "c1", "sequence": 2},
+        {"op": "take", "id": "f2", "sequence": 3},
+        {"op": "take", "empty": true}
+      ]
+    },
+    {
+      "name": "a final supersedes its unsent partial and is never replaced or dropped",
+      "budget": {"input": "audio", "bytes_per_second": 32000},
+      "steps": [
+        {"op": "offer", "kind": "partial", "key": 3, "bytes": 8000, "id": "p1", "expect": "queued", "metadata_used": 8000},
+        {"op": "offer", "kind": "result", "key": 0, "bytes": 40, "id": "e1", "expect": "queued", "metadata_used": 8040},
+        {"op": "offer", "kind": "result", "key": 3, "bytes": 9000, "id": "f1", "expect": "queued", "metadata_used": 9040},
+        {"op": "offer", "kind": "partial", "key": 3, "bytes": 100, "id": "p2", "expect": "queued", "metadata_used": 9140},
+        {"op": "offer", "kind": "result", "key": 3, "bytes": 7400, "id": "f2", "expect": "full", "metadata_used": 9140},
+        {"op": "take", "id": "e1", "sequence": 1},
+        {"op": "take", "id": "f1", "sequence": 2},
+        {"op": "delivered", "sequence": 1, "expect": "ok", "metadata_used": 9100},
+        {"op": "delivered", "sequence": 2, "expect": "ok", "metadata_used": 100},
+        {"op": "offer", "kind": "result", "key": 3, "bytes": 7400, "id": "f2", "expect": "queued", "metadata_used": 7400},
+        {"op": "take", "id": "f2", "sequence": 3},
+        {"op": "take", "empty": true}
+      ]
+    },
+    {
+      "name": "suppression discards unsent task output and keeps lifecycle messages",
+      "budget": {"input": "text", "bytes_per_second": 48000},
+      "steps": [
+        {"op": "offer", "kind": "audio", "bytes": 960, "id": "a1", "expect": "queued", "pcm_used": 960},
+        {"op": "offer", "kind": "audio", "bytes": 960, "id": "a2", "expect": "queued", "pcm_used": 1920},
+        {"op": "offer", "kind": "control", "bytes": 12, "id": "c1", "expect": "queued", "metadata_used": 12},
+        {"op": "offer", "kind": "result", "bytes": 30, "id": "r1", "expect": "queued", "metadata_used": 42},
+        {"op": "offer", "kind": "partial", "key": 2, "bytes": 8, "id": "p1", "expect": "queued", "metadata_used": 50},
+        {"op": "take", "id": "a1", "sequence": 1, "pcm_used": 1920},
+        {"op": "suppress", "pcm_used": 960, "metadata_used": 12},
+        {"op": "offer", "kind": "audio", "bytes": 960, "id": "a3", "expect": "suppressed", "pcm_used": 960},
+        {"op": "offer", "kind": "partial", "key": 2, "bytes": 8, "id": "p2", "expect": "suppressed", "metadata_used": 12},
+        {"op": "offer", "kind": "result", "bytes": 30, "id": "r2", "expect": "suppressed", "metadata_used": 12},
+        {"op": "offer", "kind": "control", "bytes": 5, "id": "c2", "expect": "queued", "metadata_used": 17},
+        {"op": "take", "id": "c1", "sequence": 2},
+        {"op": "take", "id": "c2", "sequence": 3},
+        {"op": "take", "empty": true},
+        {"op": "delivered", "sequence": 1, "expect": "ok", "pcm_used": 0, "metadata_used": 17}
+      ]
+    },
+    {
+      "name": "the terminal outcome is accepted once, even when the budget is full, and closes the queue",
+      "budget": {"input": "audio", "bytes_per_second": 32000},
+      "steps": [
+        {"op": "offer", "kind": "control", "bytes": 16384, "id": "c1", "expect": "queued", "metadata_used": 16384},
+        {"op": "offer", "kind": "terminal", "bytes": 16385, "id": "t0", "expect": "output_item_too_large", "metadata_used": 16384},
+        {"op": "offer", "kind": "terminal", "bytes": 16384, "id": "t1", "expect": "queued", "metadata_used": 16384},
+        {"op": "offer", "kind": "terminal", "bytes": 200, "id": "t2", "expect": "closed", "metadata_used": 16384},
+        {"op": "offer", "kind": "control", "bytes": 1, "id": "c2", "expect": "closed", "metadata_used": 16384},
+        {"op": "offer", "kind": "result", "bytes": 1, "id": "r1", "expect": "closed", "metadata_used": 16384},
+        {"op": "take", "id": "c1", "sequence": 1},
+        {"op": "take", "id": "t1", "sequence": 2},
+        {"op": "take", "empty": true},
+        {"op": "delivered", "sequence": 1, "expect": "ok", "metadata_used": 0},
+        {"op": "delivered", "sequence": 2, "expect": "ok", "metadata_used": 0},
+        {"op": "offer", "kind": "control", "bytes": 1, "id": "c3", "expect": "closed", "metadata_used": 0}
+      ]
+    },
+    {
+      "name": "the stall clock starts when output first awaits delivery and moves only on delivery",
+      "budget": {"input": "text", "bytes_per_second": 48000},
+      "steps": [
+        {"op": "offer", "at_ms": 0, "kind": "audio", "bytes": 960, "id": "a1", "expect": "queued", "stalled_since_ms": 0},
+        {"op": "offer", "at_ms": 1000, "kind": "audio", "bytes": 960, "id": "a2", "expect": "queued", "stalled_since_ms": 0},
+        {"op": "take", "id": "a1", "sequence": 1, "stalled_since_ms": 0},
+        {"op": "delivered", "at_ms": 3000, "sequence": 1, "expect": "ok", "stalled_since_ms": 3000},
+        {"op": "offer", "at_ms": 3500, "kind": "control", "bytes": 4, "id": "c1", "expect": "queued", "stalled_since_ms": 3000},
+        {"op": "take", "id": "a2", "sequence": 2, "stalled_since_ms": 3000},
+        {"op": "take", "id": "c1", "sequence": 3, "stalled_since_ms": 3000},
+        {"op": "delivered", "at_ms": 4500, "sequence": 2, "expect": "ok", "stalled_since_ms": 4500},
+        {"op": "delivered", "at_ms": 4600, "sequence": 3, "expect": "ok", "stalled_since_ms": null},
+        {"op": "offer", "at_ms": 9000, "kind": "audio", "bytes": 960, "id": "a3", "expect": "queued", "stalled_since_ms": 9000},
+        {"op": "offer", "at_ms": 9100, "kind": "audio", "bytes": 96000, "id": "a4", "expect": "full", "stalled_since_ms": 9000},
+        {"op": "suppress", "stalled_since_ms": null}
+      ]
+    },
+    {
+      "name": "suppression keeps the stall clock while the transport still holds output",
+      "budget": {"input": "text", "bytes_per_second": 48000},
+      "steps": [
+        {"op": "offer", "at_ms": 100, "kind": "audio", "bytes": 960, "id": "a1", "expect": "queued", "stalled_since_ms": 100},
+        {"op": "take", "id": "a1", "sequence": 1, "stalled_since_ms": 100},
+        {"op": "suppress", "stalled_since_ms": 100},
+        {"op": "offer", "at_ms": 200, "kind": "terminal", "bytes": 20, "id": "t1", "expect": "queued", "stalled_since_ms": 100},
+        {"op": "delivered", "at_ms": 300, "sequence": 1, "expect": "ok", "stalled_since_ms": 300},
+        {"op": "take", "id": "t1", "sequence": 2, "stalled_since_ms": 300},
+        {"op": "delivered", "at_ms": 400, "sequence": 2, "expect": "ok", "stalled_since_ms": null}
+      ]
+    },
+    {
+      "name": "delivery is confirmed in sequence order",
+      "budget": {"input": "text", "bytes_per_second": 48000},
+      "steps": [
+        {"op": "delivered", "sequence": 1, "expect": "delivery_out_of_order"},
+        {"op": "offer", "kind": "audio", "bytes": 960, "id": "a1", "expect": "queued", "pcm_used": 960},
+        {"op": "offer", "kind": "audio", "bytes": 960, "id": "a2", "expect": "queued", "pcm_used": 1920},
+        {"op": "delivered", "sequence": 1, "expect": "delivery_out_of_order", "pcm_used": 1920},
+        {"op": "take", "id": "a1", "sequence": 1},
+        {"op": "take", "id": "a2", "sequence": 2},
+        {"op": "delivered", "sequence": 2, "expect": "delivery_out_of_order", "pcm_used": 1920},
+        {"op": "delivered", "sequence": 1, "expect": "ok", "pcm_used": 960},
+        {"op": "delivered", "sequence": 1, "expect": "delivery_out_of_order", "pcm_used": 960},
+        {"op": "delivered", "sequence": 2, "expect": "ok", "pcm_used": 0},
+        {"op": "delivered", "sequence": 3, "expect": "delivery_out_of_order", "pcm_used": 0}
+      ]
+    },
+    {
+      "name": "an item without bytes, or a partial without its utterance, is refused",
+      "budget": {"input": "text", "bytes_per_second": 48000},
+      "steps": [
+        {"op": "offer", "kind": "audio", "bytes": 0, "id": "a1", "expect": "invalid_output_item", "pcm_used": 0},
+        {"op": "offer", "kind": "control", "bytes": 0, "id": "c1", "expect": "invalid_output_item", "metadata_used": 0},
+        {"op": "offer", "kind": "partial", "key": 0, "bytes": 10, "id": "p1", "expect": "invalid_output_item", "metadata_used": 0},
+        {"op": "offer", "kind": "audio", "key": 4, "bytes": 960, "id": "a2", "expect": "invalid_output_item", "pcm_used": 0},
+        {"op": "offer", "kind": "terminal", "key": 4, "bytes": 20, "id": "t1", "expect": "invalid_output_item", "metadata_used": 0},
+        {"op": "take", "empty": true},
+        {"op": "offer", "kind": "terminal", "bytes": 20, "id": "t2", "expect": "queued", "metadata_used": 0}
+      ]
+    }
+  ]
+}

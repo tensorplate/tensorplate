@@ -68,6 +68,8 @@ set(_tp_runtime_sources
   src/serving/session/state_machine.cpp
   src/serving/session/limits.cpp
   src/serving/session/timers.cpp
+  src/serving/session/credits.cpp
+  src/serving/session/output_queue.cpp
   src/serving/session/session_manager.cpp
 )
 
