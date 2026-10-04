@@ -732,6 +732,54 @@ TEST(SessionManager, StaleGenerationOnAnExpiredSessionLeavesTheTimeoutAsItsCause
   EXPECT_TRUE(manager.sweep_due().empty());
 }
 
+TEST(SessionManager, RestartedWorkerKnowsNothingOfEarlierSessions) {
+  testing::FakeSchedulerClock clock;
+  std::vector<ManagedSessionTransition> replayed;
+  std::shared_ptr<BoundedOutputQueue> earlier_output;
+  std::uint64_t live_key = 0;
+  std::uint64_t ended_key = 0;
+  {
+    ManagerUnderTest earlier;
+    const auto live = earlier.manager->open(5, kBudgets);
+    const auto ended = earlier.manager->open(5, kBudgets);
+    ASSERT_TRUE(live);
+    ASSERT_TRUE(ended);
+    live_key = live->session_key;
+    ended_key = ended->session_key;
+    earlier_output = live->output;
+    ASSERT_TRUE(earlier.manager->accept_input(live_key, 640));
+    auto transcript = output_item(OutputKind::Result, 48);
+    ASSERT_EQ(earlier_output->offer(transcript, clock.now()).value(), OutputOffer::Queued);
+    ASSERT_TRUE(earlier.manager->apply(ended_key, LogicalSessionEvent::Cancel));
+    ASSERT_TRUE(earlier.manager->apply(ended_key, LogicalSessionEvent::ReleaseAcknowledged));
+    ASSERT_TRUE(earlier.manager->tombstone(ended_key));
+  }
+  auto restarted = SessionManager::create(
+      SessionLimits::defaults(), 5, clock,
+      [&](const auto& transition) { replayed.push_back(transition); }, {}, false);
+  ASSERT_TRUE(restarted);
+  EXPECT_EQ((*restarted)->held_slots(), 0U);
+  for (const auto key : {live_key, ended_key}) {
+    EXPECT_EQ((*restarted)->state(key).error().context, "unknown_session");
+    EXPECT_EQ((*restarted)->check_generation(key, 5).error().context, "unknown_session");
+    EXPECT_EQ((*restarted)->apply(key, LogicalSessionEvent::Ping).error().context,
+              "unknown_session");
+    EXPECT_FALSE((*restarted)->tombstone(key));
+  }
+  EXPECT_TRUE(replayed.empty());
+
+  // A new session may reuse an earlier key; it starts with nothing of it.
+  const auto fresh = (*restarted)->open(5, kBudgets);
+  ASSERT_TRUE(fresh);
+  EXPECT_EQ(fresh->session_key, live_key);
+  EXPECT_NE(fresh->output, earlier_output);
+  EXPECT_EQ(fresh->status.input_queue_depth, 0U);
+  EXPECT_EQ(fresh->status.output_metadata_bytes.used(), 0U);
+  EXPECT_FALSE(fresh->output->take());
+  ASSERT_EQ(replayed.size(), 1U);
+  EXPECT_TRUE(replayed[0].effects.contains(LogicalSessionEffect::EmitReady));
+}
+
 TEST(SessionManager, TimerThreadEndsASessionAtItsFinalizeDeadline) {
   testing::FakeSchedulerClock clock;
   std::promise<Error> ended;

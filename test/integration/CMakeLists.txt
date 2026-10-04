@@ -20,11 +20,14 @@ add_executable(tp_test_integration
   # Header-size limit is enforced before a completed header block is
   # accepted, including the read chunk that carries the terminator.
   http_header_limit_test.cpp
+  # Logical-session lifecycle and cancel acknowledgement on the real clock.
+  session_lifecycle_test.cpp
 )
 
 target_include_directories(tp_test_integration
   PRIVATE
     ${CMAKE_SOURCE_DIR}/test/mocks
+    ${CMAKE_SOURCE_DIR}/runtime/src
 )
 
 target_link_libraries(tp_test_integration
