@@ -3,12 +3,17 @@
 
 #include <algorithm>
 
-#include "serving/session/credits.hpp"
-
 namespace tensorplate::serving {
+namespace {
+bool owes_completion(LogicalSessionState state) noexcept {
+  return state == LogicalSessionState::Finalizing || state == LogicalSessionState::Draining;
+}
+}  // namespace
 
-SessionTimers::SessionTimers(SessionLimits limits, SchedulerClock::TimePoint opened_at) noexcept
+SessionTimers::SessionTimers(SessionLimits limits, SessionInputKind input_kind,
+                             SchedulerClock::TimePoint opened_at) noexcept
     : limits_(limits),
+      finalize_deadline_(finalize_deadline(input_kind)),
       opened_at_(opened_at),
       last_activity_at_(opened_at),
       last_heartbeat_at_(opened_at) {}
@@ -30,6 +35,18 @@ void SessionTimers::on_client_activity(LogicalSessionEvent event,
   }
 }
 
+void SessionTimers::on_transition(LogicalSessionState before, LogicalSessionEvent event,
+                                  LogicalSessionState after,
+                                  SchedulerClock::TimePoint now) noexcept {
+  // A completed drain still reads as draining while release is awaited;
+  // that wait is the backend's to bound.
+  if (!owes_completion(after) || event == LogicalSessionEvent::DrainCompleted) {
+    finalize_started_at_.reset();
+  } else if (!owes_completion(before)) {
+    finalize_started_at_ = now;
+  }
+}
+
 bool SessionTimers::heartbeat_due(SchedulerClock::TimePoint now) const noexcept {
   return now >= last_heartbeat_at_ + limits_.heartbeat_interval();
 }
@@ -48,6 +65,9 @@ std::optional<SessionTimers::Deadline> SessionTimers::earliest(
       first = Deadline{at, expiry};
     }
   };
+  if (finalize_started_at_) {
+    consider(*finalize_started_at_ + finalize_deadline_, SessionExpiry::FinalizeDeadline);
+  }
   if (output_stalled_since) {
     consider(*output_stalled_since + SessionBudgets::kOutputNoProgressTimeout,
              SessionExpiry::SlowConsumer);

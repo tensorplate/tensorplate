@@ -213,6 +213,9 @@ class SessionLifecycleReplay {
     } else if (op == "release_audio") {
       outcome = outcome_of(manager_->release_audio_input(
           key_, step.at("chunks").get<std::uint32_t>(), step.at("bytes").get<std::uint64_t>()));
+    } else if (op == "generation") {
+      outcome =
+          outcome_of(manager_->check_generation(key_, step.at("generation").get<std::uint64_t>()));
     } else if (op == "offer") {
       const auto kind = kind_from(step.at("kind").get<std::string>());
       if (!kind || !output_) {

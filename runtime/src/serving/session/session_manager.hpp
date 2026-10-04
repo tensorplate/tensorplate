@@ -74,6 +74,10 @@ class SessionManager {
                                                                  std::uint64_t bytes);
   [[nodiscard]] Result<LogicalSessionStatus> start_text_segment(std::uint64_t session_key);
   [[nodiscard]] Result<LogicalSessionStatus> finish_text_segment(std::uint64_t session_key);
+  /// Checks the deployment generation a later client message or a backend
+  /// report names. One that is not the session's fails the session with
+  /// `stale_generation`; the caller discards the message either way.
+  [[nodiscard]] Result<void> check_generation(std::uint64_t session_key, std::uint64_t generation);
   [[nodiscard]] std::vector<ManagedSessionTransition> stop_admission_and_drain(Error cause);
   [[nodiscard]] std::vector<ManagedSessionTransition> sweep_due();
   void notify_clock_advanced() noexcept;
