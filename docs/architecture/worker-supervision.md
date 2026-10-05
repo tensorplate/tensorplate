@@ -284,13 +284,18 @@ durable state write. Those actions belong to the member registry.
 library handles descriptor duplication to fd 0 without an unsafe pre-exec hook.
 Dropping the command immediately after spawn closes the parent's child-end copy;
 the returned agent end remains open until the client is dropped. Dropping the
-client signals and joins its thread, then closes the socket. The worker-side
-startup code must relocate fd 0 to a private close-on-exec slot before launching
-threads or sidecars. Linux tests check that exactly the agent end remains in the
+client signals and joins its thread, then closes the socket. The serving worker
+relocates fd 0 to a private close-on-exec descriptor before it starts a thread
+or a sidecar, but only when its config names `deployment.generation`: a
+launcher that passes the socket renders the generation in the same config, and
+a config with a generation and no socket on fd 0 is a worker that refuses to
+start. Linux tests check that exactly the agent end remains in the
 parent and worker exit produces EOF.
 
 Neither `ProcessWorkerControl` nor `WorkerSupervisor` currently uses this client
-or spawn helper. Production wiring belongs to registry/server integration;
-sibling/sidecar descriptor isolation and dispatcher TSAN remain server-side
-integration checks. The synthetic peer tests exercise the published golden
+or spawn helper, and neither renders a generation, so the workers they start
+have no control channel. Production wiring belongs to registry/server
+integration. The serving worker's side is described in
+`docs/architecture/serving-worker.md` ("Control channel"); descriptor isolation
+between sibling workers remains an integration check. The synthetic peer tests exercise the published golden
 frames and a blocked backend without claiming production interoperability.

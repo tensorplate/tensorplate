@@ -76,8 +76,17 @@ using SidecarLauncher = std::function<Result<SidecarHandle>(const SidecarLaunchR
 
 /// Default launcher: fork+exec the Python interpreter with the runner
 /// module. The child connects to the socket the parent has bound;
-/// the parent accepts the connection in `SidecarProcess::start`.
+/// the parent accepts the connection in `SidecarProcess::start`. The
+/// child is started with descriptors 0, 1 and 2 only.
 [[nodiscard]] SidecarLauncher default_fork_exec_launcher();
+
+namespace detail {
+/// Closes every descriptor above stderr and below `descriptor_limit`; with
+/// `try_close_range` it first asks the kernel to close all of them at once.
+/// It only makes system calls, so the launcher can run it between fork and
+/// exec. Declared here for tests.
+void close_inherited_descriptors(int descriptor_limit, bool try_close_range) noexcept;
+}  // namespace detail
 
 /// Owns one sidecar process and its connected socket.
 class SidecarProcess {

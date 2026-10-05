@@ -67,6 +67,12 @@
       "properties": {
         "use_mock_session": {"type": "boolean", "default": true},
         "endpoint": {"type": "string", "default": "default"},
+        "generation": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991,
+          "description": "Deployment generation this worker serves as a member. With it the worker takes the agent's control socket from fd 0 and does not start without one, and endpoint names the deployment. Without it the worker has no control channel."
+        },
         "backend": {"type": "string", "default": "mock"},
         "model": {
           "type": "object",

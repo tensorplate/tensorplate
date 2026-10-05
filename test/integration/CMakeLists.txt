@@ -22,6 +22,8 @@ add_executable(tp_test_integration
   http_header_limit_test.cpp
   # Logical-session lifecycle and cancel acknowledgement on the real clock.
   session_lifecycle_test.cpp
+  # The worker binary and the control descriptor it inherits as fd 0.
+  control_descriptor_test.cpp
 )
 
 target_include_directories(tp_test_integration

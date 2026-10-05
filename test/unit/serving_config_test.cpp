@@ -138,6 +138,68 @@ TEST(ServingConfig, RunnerProfileThatIsNotANonEmptyStringIsRefused) {
   }
 }
 
+TEST(ServingConfig, DeploymentGenerationIsOptionalAndRoundTrips) {
+  const auto without = ServingConfig::parse_json(R"({"schema_version":"0.1"})");
+  ASSERT_TRUE(without.has_value());
+  EXPECT_FALSE(without->deployment.generation.has_value());
+  EXPECT_EQ(without->to_json().find("generation"), std::string::npos);
+
+  const auto with = ServingConfig::parse_json(
+      R"({"schema_version":"0.1","deployment":{"endpoint":"speech-en","generation":7}})");
+  ASSERT_TRUE(with.has_value()) << with.error().message;
+  EXPECT_EQ(with->deployment.generation, std::optional<std::uint64_t>{7});
+  const auto again = ServingConfig::parse_json(with->to_json());
+  ASSERT_TRUE(again.has_value());
+  EXPECT_EQ(again->deployment.generation, std::optional<std::uint64_t>{7});
+
+  const auto largest = ServingConfig::parse_json(
+      R"({"schema_version":"0.1","deployment":{"generation":9007199254740991}})");
+  ASSERT_TRUE(largest.has_value());
+  EXPECT_EQ(largest->deployment.generation, std::optional<std::uint64_t>{9007199254740991ULL});
+}
+
+TEST(ServingConfig, DeploymentGenerationMustBeAPositiveSafeInteger) {
+  for (const char* generation :
+       {"0", "-1", "1.5", "\"7\"", "null", "true", "9007199254740992", "[7]"}) {
+    SCOPED_TRACE(generation);
+    const auto parsed = ServingConfig::parse_json(
+        std::string{R"({"schema_version":"0.1","deployment":{"generation":)"} + generation + "}}");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, Error::Code::ConfigInvalid);
+  }
+  ServingConfig config;
+  config.deployment.generation = 0;
+  EXPECT_EQ(config.validate().error().code, Error::Code::ConfigInvalid);
+  config.deployment.generation = (std::uint64_t{1} << 53U);
+  EXPECT_EQ(config.validate().error().code, Error::Code::ConfigInvalid);
+  config.deployment.generation = 1;
+  EXPECT_TRUE(config.validate().has_value());
+}
+
+TEST(ServingConfig, MemberEndpointMustBeADeploymentId) {
+  ServingConfig config;
+  config.deployment.generation = 7;
+  for (const char* endpoint : {"default", "speech-en", "whisper.large_v3-turbo", "A1"}) {
+    config.deployment.endpoint = endpoint;
+    EXPECT_TRUE(config.validate().has_value()) << endpoint;
+  }
+  for (const std::string& endpoint :
+       {std::string{"bad name"}, std::string{"a/b"}, std::string{"."}, std::string{".."},
+        std::string{"caf\xC3\xA9"}, std::string(129, 'a')}) {
+    config.deployment.endpoint = endpoint;
+    const auto validated = config.validate();
+    ASSERT_FALSE(validated.has_value()) << endpoint;
+    EXPECT_EQ(validated.error().code, Error::Code::ConfigInvalid);
+  }
+  // Without a generation the endpoint stays free-form.
+  config.deployment.generation.reset();
+  config.deployment.endpoint = "bad name";
+  EXPECT_TRUE(config.validate().has_value());
+  config.deployment.endpoint = std::string(128, 'a');
+  config.deployment.generation = 7;
+  EXPECT_TRUE(config.validate().has_value());
+}
+
 TEST(ServingConfig, HealthAndMetricsModeNames) {
   EXPECT_EQ(to_string(HealthMode::LocalJson), "local_json");
   EXPECT_EQ(to_string(MetricsMode::PrometheusText), "prometheus_text");

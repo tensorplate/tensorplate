@@ -13,7 +13,9 @@ supervision; the agent (V01-E08) owns those concerns and starts the
 worker with a validated config. The worker:
 
 1. Loads its config, validates it, and wires up runtime components
-   in one explicit composition root (V01-E07-F01).
+   in one explicit composition root (V01-E07-F01). A member of a
+   deployment generation first takes the agent's control socket from
+   fd 0 (see "Control channel").
 2. Opens a loopback-only HTTP/1.1 listener (V01-E07-F02).
 3. Routes `/infer`, `/policy/infer`, `/policy/result/<id>`,
    `/policy/cancel/<id>`, `/health`, and `/metrics` requests
@@ -232,6 +234,66 @@ Draining → Stopped):
 
 ASAN-clean: the buffer manager reports zero active buffers after
 shutdown in the V01-E07-F08 integration tests.
+
+## Control channel
+
+A serving config may name the deployment generation its worker serves
+(`deployment.generation`, an integer from 1 to 2^53 - 1). A worker
+with a generation is a member the agent controls, and the agent passes
+it one end of a socket pair as fd 0. A config without one, which is
+what the agent writes today, starts a worker with no control channel
+and fd 0 is not touched.
+
+**Taking the descriptor.** `ServingWorker::create` takes the socket
+before it builds anything, while the process has one thread and no
+child (`take_inherited_control_socket`,
+`runtime/src/serving/control_channel.hpp`). The config is validated
+first, and a member's `deployment.endpoint` must be a deployment id (1
+to 128 of letters, digits, `.`, `_` and `-`), because it is the name the
+worker answers by. fd 0 must be a connected stream socket of the local
+family. It is duplicated to a private descriptor above stderr
+that is close-on-exec from its first instant, and fd 0 is reopened on
+`/dev/null`: the sidecar inherits fd 0, so the socket must not stay
+there. A member whose fd 0 is anything else, or whose agent has already
+closed its end, does not start: `create` returns `unavailable`
+(`control_descriptor_absent` or `control_peer_closed`), the binary ends
+its stderr with the startup record and exits with the load-error
+status, and no listener was ever opened.
+
+**The control thread.** `ControlChannel` starts next, before the model
+loads, so that the agent's polls are answered during a long load. It is
+the only code that reads the socket, and it never calls into an
+execution session: a backend job that does not return cannot delay an
+answer. Requests are `worker_control.json` frames, one JSON object per
+line, at most 65,536 bytes each. A request that names another
+deployment or generation is answered `member_mismatch` with this
+worker's member and goes no further. `ledger_status` and the other five
+operations are answered through `ControlTarget`, whose methods return
+at once. The worker's target implements none of them yet: it reports an
+empty ledger and refuses `admission_fence`, `activate`, `retire`,
+`quota_assign` and `pressure_directive` as `unsupported`, so the agent
+is never told that an operation took effect. An answer the wire format
+refuses is sent as an `error`. A complete frame that does not decode is
+skipped; a line longer than the frame limit ends the channel, and so
+does a response the agent does not take within one second.
+
+**Contact.** The agent is in contact from the start. Three seconds
+without a decodable request is loss of contact, which the next request
+ends; a closed channel is loss of contact for good. While contact is
+lost `ControlChannel::admission` refuses with `unavailable`
+(`control_contact_lost` or `control_channel_closed`). Nothing consumes
+it yet: it is the admission check logical sessions will use, and
+sessions already admitted are not affected. Losing the agent does not
+stop a worker that is serving. A worker whose channel ended while it was
+being built does not start serving: `start` returns `unavailable`
+(`control_channel_closed`) and opens no listener.
+
+**The sidecar's descriptors.** The Python sidecar launcher closes every
+descriptor above stderr between `fork` and `exec` (`close_range`, or a
+scan when the kernel has none), and the sidecar's environment is built
+before `fork`: a member has a thread by then, so the child makes system
+calls only. The sidecar connects to its transport socket by path, so it
+needs nothing the worker holds.
 
 ## Logical sessions
 

@@ -33,12 +33,14 @@
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/model_spec.hpp"
+#include "tensorplate/ipc/worker_control.hpp"
 #include "tensorplate/scheduler/scheduler.hpp"
 #include "tensorplate/serving/config.hpp"
 #include "tensorplate/serving/metrics.hpp"
 #include "tensorplate/serving/serialization.hpp"
 #include "tensorplate/serving/worker.hpp"
 
+#include "control_socket_harness.hpp"
 #include "serving_http_client.hpp"
 
 namespace {
@@ -92,6 +94,31 @@ class GatedSession final : public ExecutionSession {
     gate_->cv.notify_all();
     gate_->cv.wait(lock, [this] { return gate_->open; });
     return unexpected(Error::Code::InferenceFailed, "gated fixture produces no outputs");
+  }
+
+ private:
+  std::shared_ptr<InferGate> gate_;
+};
+
+/// Loads only once its gate opens.
+class SlowLoadSession final : public ExecutionSession {
+ public:
+  SlowLoadSession(ExecutionSessionRuntimeHooks hooks, std::shared_ptr<InferGate> gate)
+      : ExecutionSession(hooks), gate_(std::move(gate)) {}
+
+  [[nodiscard]] std::string_view backend_name() const noexcept override { return "slow_load"; }
+
+ protected:
+  Result<void> do_load(const ModelSpec& /*spec*/) override {
+    std::unique_lock<std::mutex> lock(gate_->mutex);
+    gate_->entered = true;
+    gate_->cv.notify_all();
+    gate_->cv.wait(lock, [this] { return gate_->open; });
+    return Result<void>{};
+  }
+  Result<void> do_prime() override { return Result<void>{}; }
+  Result<std::vector<NamedOutput>> do_infer(const InferRequest& /*request*/) override {
+    return unexpected(Error::Code::InferenceFailed, "slow-load fixture produces no outputs");
   }
 
  private:
@@ -339,6 +366,222 @@ TEST(ServingE2E, MetricsKeepCountingACancelledRequestPhysicallyUntilItReturns) {
   const auto after = gauges();
   EXPECT_EQ(after.at("scheduler_in_flight_physical"), 0);
   EXPECT_EQ(after.at("scheduler_in_flight_physical_cancelled"), 0);
+}
+
+// The control thread is not the dispatcher: a job that never returns does not
+// delay an answer to the agent.
+TEST(ServingE2E, ControlRequestIsAnsweredWithinASecondWhileABackendJobBlocks) {
+  auto gate = std::make_shared<InferGate>();
+  BackendRegistry registry;
+  auto capability = BackendCapability::create("gated", {PrecisionHint::Auto});
+  ASSERT_TRUE(capability.has_value()) << capability.error().message;
+  ASSERT_TRUE(registry
+                  .register_backend(BackendEntry{
+                      "gated",
+                      capability.value(),
+                      [gate](ExecutionSessionRuntimeHooks hooks)
+                          -> Result<std::unique_ptr<ExecutionSession>> {
+                        return std::unique_ptr<ExecutionSession>(new GatedSession(hooks, gate));
+                      },
+                  })
+                  .has_value());
+  auto cfg = default_test_config();
+  cfg.deployment.use_mock_session = false;
+  cfg.deployment.backend = "gated";
+  cfg.deployment.endpoint = "gated-member";
+  cfg.deployment.generation = 7;
+  cfg.deployment.model =
+      ModelSpec::create("gated-model", ModelClass::Custom, "fixture://gated", "gated").value();
+
+  // The worker end reaches the worker as fd 0, the way the agent passes it.
+  auto pair = ControlSocketPair::create();
+  const StdinReplaced as_the_agent_passes_it(pair.worker.get());
+  pair.worker.reset();
+  auto h = ServingHarness::start(std::move(cfg), registry);
+
+  std::thread caller([port = h.port] {
+    HttpClient c("127.0.0.1", port);
+    (void)c.post("/infer", make_infer_body("held"));
+  });
+  struct OpenAndJoin {
+    InferGate& gate;
+    std::thread& caller;
+    ~OpenAndJoin() {
+      gate.release();
+      if (caller.joinable()) {
+        caller.join();
+      }
+    }
+  } open_and_join{*gate, caller};
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    ASSERT_TRUE(gate->cv.wait_for(lock, std::chrono::seconds{10}, [&] { return gate->entered; }));
+  }
+
+  ipc::WorkerControlRequest request;
+  request.transaction_id = "runtime";
+  request.correlation_id = "while-blocked";
+  request.op = ipc::WorkerControlOp::LedgerStatus;
+  request.member = ipc::WorkerMember{"gated-member", 7};
+  const auto frame = ipc::encode_worker_control_request(request);
+  ASSERT_TRUE(frame.has_value()) << frame.error().message;
+  const auto asked_at = std::chrono::steady_clock::now();
+  ASSERT_TRUE(send_frame(pair.agent.get(), *frame));
+  std::string reply;
+  ASSERT_EQ(read_frame(pair.agent.get(), std::chrono::seconds{1}, reply), FrameRead::Frame);
+  EXPECT_LT(std::chrono::steady_clock::now() - asked_at, std::chrono::seconds{1});
+  const auto response = ipc::decode_worker_control_response(reply);
+  ASSERT_TRUE(response.has_value()) << response.error().message;
+  EXPECT_TRUE(ipc::worker_control_answers(*response, request).has_value());
+  EXPECT_EQ(response->status, ipc::WorkerControlStatus::Ok);
+  EXPECT_TRUE(response->ledger.has_value());
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    EXPECT_FALSE(gate->open);
+  }
+}
+
+// The agent treats a member that does not answer for ten seconds as failed,
+// so a member answers from the moment it has its socket, not from the
+// moment its model is loaded.
+TEST(ServingE2E, ControlRequestIsAnsweredWhileTheModelLoads) {
+  auto gate = std::make_shared<InferGate>();
+  BackendRegistry registry;
+  auto capability = BackendCapability::create("slow_load", {PrecisionHint::Auto});
+  ASSERT_TRUE(capability.has_value()) << capability.error().message;
+  ASSERT_TRUE(registry
+                  .register_backend(BackendEntry{
+                      "slow_load",
+                      capability.value(),
+                      [gate](ExecutionSessionRuntimeHooks hooks)
+                          -> Result<std::unique_ptr<ExecutionSession>> {
+                        return std::unique_ptr<ExecutionSession>(new SlowLoadSession(hooks, gate));
+                      },
+                  })
+                  .has_value());
+  auto cfg = default_test_config();
+  cfg.deployment.use_mock_session = false;
+  cfg.deployment.backend = "slow_load";
+  cfg.deployment.endpoint = "loading-member";
+  cfg.deployment.generation = 3;
+  cfg.deployment.model =
+      ModelSpec::create("slow-model", ModelClass::Custom, "fixture://slow", "slow_load").value();
+
+  auto pair = ControlSocketPair::create();
+  const StdinReplaced as_the_agent_passes_it(pair.worker.get());
+  pair.worker.reset();
+
+  std::unique_ptr<ServingWorker> worker;
+  std::thread creator([&] {
+    auto created = ServingWorker::create(std::move(cfg), registry);
+    if (created) {
+      worker = std::move(created).value();
+    }
+  });
+  struct OpenAndJoin {
+    InferGate& gate;
+    std::thread& creator;
+    ~OpenAndJoin() {
+      gate.release();
+      if (creator.joinable()) {
+        creator.join();
+      }
+    }
+  } open_and_join{*gate, creator};
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    ASSERT_TRUE(gate->cv.wait_for(lock, std::chrono::seconds{10}, [&] { return gate->entered; }));
+  }
+
+  ipc::WorkerControlRequest request;
+  request.transaction_id = "runtime";
+  request.correlation_id = "while-loading";
+  request.op = ipc::WorkerControlOp::LedgerStatus;
+  request.member = ipc::WorkerMember{"loading-member", 3};
+  ASSERT_TRUE(send_frame(pair.agent.get(), ipc::encode_worker_control_request(request).value()));
+  std::string reply;
+  ASSERT_EQ(read_frame(pair.agent.get(), std::chrono::seconds{1}, reply), FrameRead::Frame);
+  const auto response = ipc::decode_worker_control_response(reply);
+  ASSERT_TRUE(response.has_value()) << response.error().message;
+  EXPECT_TRUE(ipc::worker_control_answers(*response, request).has_value());
+  EXPECT_EQ(response->status, ipc::WorkerControlStatus::Ok);
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    EXPECT_FALSE(gate->open);
+  }
+  gate->release();
+  creator.join();
+  EXPECT_NE(worker, nullptr);
+}
+
+// fd 0 is taken only for a config that could be served.
+TEST(ServingE2E, MemberConfigThatDoesNotValidateLeavesFdZeroAlone) {
+  auto cfg = default_test_config();
+  cfg.deployment.endpoint = "not a deployment id";
+  cfg.deployment.generation = 4;
+  auto pair = ControlSocketPair::create();
+  const StdinReplaced as_the_agent_passes_it(pair.worker.get());
+  const auto passed = inode_of(pair.worker.get());
+  pair.worker.reset();
+
+  const auto created = ServingWorker::create(std::move(cfg));
+  ASSERT_FALSE(created.has_value());
+  EXPECT_EQ(created.error().code, Error::Code::ConfigInvalid);
+  EXPECT_EQ(inode_of(STDIN_FILENO), passed);
+}
+
+// A member whose agent goes away while it is being built has no control
+// channel when it would start to serve, so it does not.
+TEST(ServingE2E, MemberWhoseControlChannelEndsWhileItLoadsDoesNotStartServing) {
+  auto gate = std::make_shared<InferGate>();
+  BackendRegistry registry;
+  auto capability = BackendCapability::create("slow_load", {PrecisionHint::Auto});
+  ASSERT_TRUE(capability.has_value()) << capability.error().message;
+  ASSERT_TRUE(registry
+                  .register_backend(BackendEntry{
+                      "slow_load",
+                      capability.value(),
+                      [gate](ExecutionSessionRuntimeHooks hooks)
+                          -> Result<std::unique_ptr<ExecutionSession>> {
+                        return std::unique_ptr<ExecutionSession>(new SlowLoadSession(hooks, gate));
+                      },
+                  })
+                  .has_value());
+  auto cfg = default_test_config();
+  cfg.deployment.use_mock_session = false;
+  cfg.deployment.backend = "slow_load";
+  cfg.deployment.endpoint = "abandoned-member";
+  cfg.deployment.generation = 4;
+  cfg.deployment.model =
+      ModelSpec::create("slow-model", ModelClass::Custom, "fixture://slow", "slow_load").value();
+
+  auto pair = ControlSocketPair::create();
+  const StdinReplaced as_the_agent_passes_it(pair.worker.get());
+  pair.worker.reset();
+
+  std::unique_ptr<ServingWorker> worker;
+  std::thread creator([&] {
+    auto created = ServingWorker::create(std::move(cfg), registry);
+    if (created) {
+      worker = std::move(created).value();
+    }
+  });
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    ASSERT_TRUE(gate->cv.wait_for(lock, std::chrono::seconds{10}, [&] { return gate->entered; }));
+  }
+  pair.agent.reset();
+  // The worker's end reads the close before the load is allowed to finish.
+  std::this_thread::sleep_for(std::chrono::milliseconds{100});
+  gate->release();
+  creator.join();
+  ASSERT_NE(worker, nullptr);
+
+  const auto started = worker->start();
+  ASSERT_FALSE(started.has_value());
+  EXPECT_EQ(started.error().code, Error::Code::Unavailable);
+  EXPECT_EQ(started.error().context, "control_channel_closed");
+  EXPECT_EQ(worker->bound_port(), 0);
 }
 
 TEST(ServingE2E, ReservedSchedulerPolicyIsRefusedWhenTheWorkerIsBuilt) {

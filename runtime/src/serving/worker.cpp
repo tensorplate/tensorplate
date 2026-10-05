@@ -20,6 +20,7 @@
 #include "tensorplate/backend/registry.hpp"
 #include "tensorplate/buffer/buffer_manager.hpp"
 #include "tensorplate/http/http_server.hpp"
+#include "tensorplate/ipc/worker_control.hpp"
 #include "tensorplate/scheduler/factory.hpp"
 #include "tensorplate/scheduler/scheduler.hpp"
 #include "tensorplate/serving/async_policy.hpp"
@@ -30,6 +31,7 @@
 #include "tensorplate/serving/shutdown.hpp"
 #include "tensorplate/version.hpp"
 
+#include "serving/control_channel.hpp"
 #include "serving/mock_session.hpp"
 
 namespace tensorplate {
@@ -109,7 +111,11 @@ struct ServingWorker::Impl {
   std::atomic<bool> stop_workers{false};
   std::mutex stop_mutex;
   ServingExitCode exit_code = ServingExitCode::Ok;
+  // Declared last: the control thread stops before anything it could reach.
+  serving::UnimplementedControlTarget control_target;
+  std::unique_ptr<serving::ControlChannel> control;
 
+  Result<void> attach_control();
   Result<void> build();
   Result<void> start_listener();
   // Dispatcher / evictor only call into the owned `unique_ptr` members, so
@@ -119,6 +125,30 @@ struct ServingWorker::Impl {
   void evictor_loop();     // NOLINT(readability-make-member-function-const)
   void run_drain();
 };
+
+Result<void> ServingWorker::Impl::attach_control() {
+  if (!config.deployment.generation) {
+    return Result<void>{};
+  }
+  // fd 0 is taken only for a config that could be served.
+  if (auto v = config.validate(); !v) {
+    return v;
+  }
+  // The agent polls the channel while the model loads, so the control
+  // thread is the first one this process starts.
+  auto socket = serving::take_inherited_control_socket();
+  if (!socket) {
+    return unexpected(socket.error());
+  }
+  auto channel = serving::ControlChannel::start(
+      std::move(socket).value(),
+      ipc::WorkerMember{config.deployment.endpoint, *config.deployment.generation}, control_target);
+  if (!channel) {
+    return unexpected(channel.error());
+  }
+  control = std::move(channel).value();
+  return Result<void>{};
+}
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Result<void> ServingWorker::Impl::build() {
@@ -433,6 +463,9 @@ ServingWorker::~ServingWorker() {
 Result<std::unique_ptr<ServingWorker>> ServingWorker::create(ServingConfig config) {
   auto impl = std::make_unique<Impl>();
   impl->config = std::move(config);
+  if (auto r = impl->attach_control(); !r) {
+    return unexpected(r.error());
+  }
   if (auto r = impl->build(); !r) {
     return unexpected(r.error());
   }
@@ -444,6 +477,9 @@ Result<std::unique_ptr<ServingWorker>> ServingWorker::create(ServingConfig confi
   auto impl = std::make_unique<Impl>();
   impl->config = std::move(config);
   impl->registry = &backend_registry;
+  if (auto r = impl->attach_control(); !r) {
+    return unexpected(r.error());
+  }
   if (auto r = impl->build(); !r) {
     return unexpected(r.error());
   }
@@ -456,6 +492,13 @@ Result<void> ServingWorker::start() {
   }
   if (impl_->started.exchange(true)) {
     return Result<void>{};
+  }
+  if (impl_->control && impl_->control->closed()) {
+    // The agent went away while the worker was built: nothing is published.
+    impl_->started.store(false);
+    return unexpected(Error::make(Error::Code::Unavailable,
+                                  "the control channel ended before the worker could serve",
+                                  "control_channel_closed"));
   }
   if (auto r = impl_->start_listener(); !r) {
     impl_->started.store(false);
