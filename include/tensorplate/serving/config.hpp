@@ -11,8 +11,7 @@
 // Defaults are conservative: loopback binding, 16 MiB request cap, 8 s
 // request timeout, 32 KiB header cap, FIFO scheduler with deadline-
 // aware admission, and a 5 s drain on shutdown. Production callers
-// should still validate against `protocol/schemas/
-// serving_worker_config.json`.
+// should still validate against `config/schemas/serving_worker.json`.
 //
 // The config does **not** carry hardware-specific knobs (no CUDA
 // device id, no TensorRT engine paths). Those belong to the bundle
@@ -181,6 +180,13 @@ struct AsyncPolicyConfig {
   std::size_t max_pending = 256;
 };
 
+/// Optional streaming transport settings, mirroring the streaming JSON object.
+struct StreamingConfig {
+  /// Opt in to streaming support. False by default; true requires a build
+  /// with TP_ENABLE_STREAMING_GRPC. No stream listener is implemented yet.
+  bool enabled = false;
+};
+
 /// Full serving worker runtime configuration. Validated by
 /// `ServingConfig::validate()`; the composition root calls validate
 /// before constructing any runtime components.
@@ -189,6 +195,7 @@ struct ServingConfig {
   /// rejects unknown values with `Error::Code::Unsupported`.
   std::string schema_version = "0.1";
 
+  StreamingConfig streaming;
   BindConfig bind;
   HttpLimits http;
   SchedulerConfig scheduler;
@@ -209,13 +216,13 @@ struct ServingConfig {
   ///     less than zero, missing model spec when use_mock_session
   ///     is false, etc.
   ///   - Unsupported: non-loopback bind without opt-in, unknown
-  ///     schema_version.
+  ///     schema_version, streaming enabled without compiled support.
   [[nodiscard]] Result<void> validate() const;
 
   /// Convenience: parse a JSON document into a ServingConfig.
   ///
   /// The string must conform to
-  /// `protocol/schemas/serving_worker_config.json`. Validation runs
+  /// `config/schemas/serving_worker.json`. Validation runs
   /// after parsing so missing required fields surface the same
   /// `ConfigInvalid` errors as a programmatic configuration.
   [[nodiscard]] static Result<ServingConfig> parse_json(std::string_view text);

@@ -8,6 +8,17 @@
   "required": ["schema_version"],
   "properties": {
     "schema_version": {"type": "string", "const": "0.1"},
+    "streaming": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to streaming support. A build without TP_ENABLE_STREAMING_GRPC refuses true with unsupported. The stream listener is not implemented yet."
+        }
+      }
+    },
     "bind": {
       "type": "object",
       "additionalProperties": false,

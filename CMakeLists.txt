@@ -83,6 +83,7 @@ option(TP_WARNINGS_AS_ERRORS
 
 include(cmake/features/warnings.cmake)
 include(cmake/features/sanitizers.cmake)
+include(cmake/features/streaming_grpc.cmake)
 
 # Subprojects. Order encodes downward-only layer dependencies.
 add_subdirectory(runtime)
@@ -106,6 +107,7 @@ message(STATUS "  build type        : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  C++ standard      : ${CMAKE_CXX_STANDARD}")
 message(STATUS "  tests             : ${TP_BUILD_TESTS}")
 message(STATUS "  serving worker    : ${TP_BUILD_SERVING_WORKER}")
+message(STATUS "  streaming gRPC    : ${TP_ENABLE_STREAMING_GRPC}")
 message(STATUS "  examples          : ${TP_BUILD_EXAMPLES}")
 message(STATUS "  sanitizers (A/U)  : ${TP_ENABLE_SANITIZERS}")
 message(STATUS "  sanitizer (TSAN)  : ${TP_ENABLE_TSAN}")

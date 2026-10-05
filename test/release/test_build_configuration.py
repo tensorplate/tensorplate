@@ -95,6 +95,7 @@ ARM64_SNAPSHOT_ARGS = [
     "-DTP_ENABLE_TENSORRT=ON",
     "-DTP_REQUIRE_TENSORRT_SDK=ON",
     "-DTP_ENABLE_LIBTORCH=OFF",
+    "-DTP_ENABLE_STREAMING_GRPC=OFF",
     "-DTP_ENABLE_PYTHON_PYTORCH_SIDECAR=ON",
 ]
 
@@ -362,9 +363,9 @@ class BuilderFixture(unittest.TestCase):
 
 
 class BuildConfigurationTests(BuilderFixture):
-    # -- arm64 is unchanged --------------------------------------------------
+    # -- arm64 pins its release defaults ------------------------------------
 
-    def test_arm64_snapshot_configure_is_unchanged(self) -> None:
+    def test_arm64_snapshot_pins_configure_arguments(self) -> None:
         result = self.run_builder(self.artifact_paths(), arch="arm64")
         call = self.assert_reached_configure(result)
         self.assertEqual(call["args"], ARM64_SNAPSHOT_ARGS)
@@ -436,6 +437,13 @@ class BuildConfigurationTests(BuilderFixture):
         self.assertIsNotNone(release["CC"])
         self.assertIsNotNone(release["CXX"])
         self.assertEqual((builder["CC"], builder["CXX"]), (release["CC"], release["CXX"]))
+
+    def test_release_workflow_explicitly_disables_streaming(self) -> None:
+        release = self.run_release_step()
+        streaming_args = [
+            arg for arg in release["args"] if arg.startswith("-DTP_ENABLE_STREAMING_GRPC=")
+        ]
+        self.assertEqual(streaming_args, ["-DTP_ENABLE_STREAMING_GRPC=OFF"])
 
     def test_release_workflow_pins_a_dwarf_version_dwz_can_read(self) -> None:
         # jammy's dwz (0.14) cannot read DWARF 5's .debug_addr section and

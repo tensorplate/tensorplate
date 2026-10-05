@@ -22,6 +22,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Optional static gRPC/protobuf build dependencies from a pinned vcpkg baseline,
+  with a default-disabled `streaming.enabled` config gate, mirrored by C++
+  `StreamingConfig`, and a typed refusal when the build lacks streaming support.
+  Automatic discovery defaults OFF for missing,
+  shared or non-vcpkg dependencies; explicit ON retains configure errors.
+  ARM64 and AMD64 release builds explicitly disable the feature.
+  (V030-E04-F02-T04)
+
 - The sidecar launcher starts a bundle that names a runner profile in that
   profile's installed environment. The agent writes the manifest's
   `runner_profile` into the worker's model configuration

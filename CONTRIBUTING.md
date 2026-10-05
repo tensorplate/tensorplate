@@ -157,7 +157,10 @@ ctest --test-dir build-tsan --output-on-failure -L T1
 Some hosts need address-space randomization off for sanitized binaries; see
 [`docs/contributing/local-validation.md`](docs/contributing/local-validation.md).
 
-`vcpkg.json` declares the C++ dependency baseline (currently GoogleTest).
+`vcpkg.json` pins the C++ dependency baseline (GoogleTest and nlohmann-json),
+with optional gRPC/protobuf dependencies in its `streaming-grpc` feature.
+See [`cmake/features/README.md`](cmake/features/README.md) for the static
+streaming build and its feature-OFF configuration.
 Adapter SDKs (TensorRT, PyTorch/LibTorch, CUDA) are not vendored; they are picked
 up from the host environment when the corresponding `cmake/modules/Find*`
 support lands.

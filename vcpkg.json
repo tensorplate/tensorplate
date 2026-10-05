@@ -2,6 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "tensorplate",
   "version-string": "0.3.1",
+  "builtin-baseline": "f907dc21e0e8699955b002d0fe7673de5db55fab",
   "description": "TensorPlate inference platform.",
   "homepage": "https://github.com/tensorplate/tensorplate",
   "license": "Apache-2.0",
@@ -11,6 +12,10 @@
     "nlohmann-json"
   ],
   "features": {
+    "streaming-grpc": {
+      "description": "Static gRPC/protobuf transport and matching code generators for streams.",
+      "dependencies": ["grpc", "protobuf"]
+    },
     "tensorrt-adapter": {
       "description": "Build the TensorRT backend adapter (system-provided TensorRT, not vendored).",
       "dependencies": []
