@@ -39,6 +39,7 @@ use crate::profile::ResolvedProfile;
 
 pub mod finding;
 pub mod install;
+mod runner_profiles;
 
 use finding::{Finding, FindingId, FindingStatus, Severity};
 

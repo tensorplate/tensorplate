@@ -16,17 +16,24 @@
 // non-Linux hosts: a missing path on macOS dev hosts becomes a
 // `skipped` finding, not a `fail`, so workspace CI still passes.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use tensorplate_platform::PlatformRegistry;
+use tensorplate_protocol::backend_descriptor::{BackendDescriptor, BackendDescriptorError};
+use tensorplate_protocol::backend_probe::{
+    probe_backend_with_inventory, BackendProbeReport, ProbeOptions,
+};
 use tensorplate_protocol::install_paths::{
     self, AGENT_CONFIG_PATH, BACKEND_DESCRIPTOR_DIR, CLI_CONFIG_PATH, OBSERVABILITY_CONFIG_PATH,
     PLATFORM_REGISTRY_DIR, PYTHON_PYTORCH_BACKEND_DESCRIPTOR, SERVING_BINARY_PATH,
     SERVING_WORKER_CONFIG_PATH,
 };
+use tensorplate_protocol::package_inventory::{DpkgInventory, PackageInventory};
 
 use super::finding::{Finding, FindingId, Severity};
+use super::runner_profiles::{self, AgentEnvironment, AGENT_ENVIRONMENT_FILE};
 
 /// Inputs to the install probes. The CLI main builds the default; tests
 /// inject a stub `prefix` so the probes run against a tempdir.
@@ -94,7 +101,7 @@ pub fn run(opts: &InstallProbeOptions) -> Vec<Finding> {
         ));
     }
     out.extend(probe_platform_registry(opts));
-    out.extend(probe_python_pytorch_backend(opts));
+    out.extend(python_pytorch_findings(opts, PackageSource::Dpkg));
     out.extend(probe_optional_runtimes(opts));
     out
 }
@@ -952,11 +959,53 @@ fn find_unit(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     None
 }
 
-fn probe_python_pytorch_backend(opts: &InstallProbeOptions) -> Vec<Finding> {
+/// Where doctor learns which OS packages are installed, and at what version.
+#[derive(Clone, Copy, Debug)]
+pub enum PackageSource<'a> {
+    /// dpkg's database.
+    Dpkg,
+    /// Package name to version, for an install tree staged under a prefix.
+    Staged(&'a BTreeMap<String, String>),
+}
+
+impl PackageInventory for PackageSource<'_> {
+    fn installed(&self, names: &BTreeSet<&str>) -> Result<BTreeSet<String>, String> {
+        match self {
+            Self::Dpkg => DpkgInventory::default().installed(names),
+            Self::Staged(packages) => Ok(names
+                .iter()
+                .filter(|name| packages.contains_key(**name))
+                .map(|name| (*name).to_string())
+                .collect()),
+        }
+    }
+}
+
+impl PackageSource<'_> {
+    fn versions<'n>(&self, names: impl Iterator<Item = &'n String>) -> BTreeMap<String, String> {
+        match self {
+            Self::Staged(packages) => (*packages).clone(),
+            Self::Dpkg => names
+                .filter_map(|name| match query_dpkg_package(name) {
+                    DpkgPackageState::Installed(version) => Some((name.clone(), version)),
+                    DpkgPackageState::Missing | DpkgPackageState::Unavailable(_) => None,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The backend descriptor finding, the runtime finding and the runner
+/// profile findings, which all read one descriptor.
+#[must_use]
+pub fn python_pytorch_findings(
+    opts: &InstallProbeOptions,
+    packages: PackageSource<'_>,
+) -> Vec<Finding> {
     let descriptor = match python_backend_descriptor_path(opts) {
         Ok(descriptor) => descriptor,
         Err(err) => {
-            return vec![
+            let mut out = vec![
                 Finding::fail(
                     FindingId::PythonPytorchBackend,
                     Severity::Critical,
@@ -973,10 +1022,12 @@ fn probe_python_pytorch_backend(opts: &InstallProbeOptions) -> Vec<Finding> {
                     None,
                 ),
             ];
+            out.extend(runner_profiles::skipped("backend descriptor path invalid"));
+            return out;
         }
     };
     if !descriptor.exists() {
-        return vec![
+        let mut out = vec![
             Finding::missing(
                 FindingId::PythonPytorchBackend,
                 Severity::Info,
@@ -996,14 +1047,14 @@ fn probe_python_pytorch_backend(opts: &InstallProbeOptions) -> Vec<Finding> {
                 None,
             ),
         ];
+        out.extend(runner_profiles::skipped("backend descriptor absent"));
+        return out;
     }
     // Read the descriptor and report a single backend finding + a
     // separate runtime finding so operators can distinguish "backend
     // installed" from "PyTorch importable".
-    let parsed =
-        tensorplate_protocol::backend_descriptor::BackendDescriptor::read_from(&descriptor);
     let mut out = Vec::new();
-    match parsed {
+    match BackendDescriptor::read_with_inventory(&descriptor, &packages) {
         Ok(d) => {
             out.push(Finding::ok(
                 FindingId::PythonPytorchBackend,
@@ -1015,15 +1066,16 @@ fn probe_python_pytorch_backend(opts: &InstallProbeOptions) -> Vec<Finding> {
                 None,
             ));
             if opts.probe_backends {
-                let report = probe_backend_runtime(&descriptor);
-                out.push(runtime_finding(&report));
+                out.extend(probed_findings(opts, &descriptor, &d, packages));
             } else {
+                let disabled = "backend runtime probe disabled on this host";
                 out.push(Finding::skipped(
                     FindingId::PythonPytorchRuntime,
                     Severity::Info,
-                    "backend runtime probe disabled on this host (use `--probe-backends` on a target)",
+                    format!("{disabled} (use `--probe-backends` on a target)"),
                     None,
                 ));
+                out.extend(runner_profiles::skipped(disabled));
             }
         }
         Err(err) => {
@@ -1031,10 +1083,7 @@ fn probe_python_pytorch_backend(opts: &InstallProbeOptions) -> Vec<Finding> {
                 FindingId::PythonPytorchBackend,
                 Severity::Critical,
                 format!("Python/PyTorch backend descriptor invalid: {err}"),
-                Some(
-                    "compare against protocol/schemas/backend_descriptor.json or reinstall tensorplate-backend-python-pytorch"
-                        .into(),
-                ),
+                Some(descriptor_refusal_hint(&err, &descriptor)),
             ));
             out.push(Finding::skipped(
                 FindingId::PythonPytorchRuntime,
@@ -1042,23 +1091,114 @@ fn probe_python_pytorch_backend(opts: &InstallProbeOptions) -> Vec<Finding> {
                 "skipped: backend descriptor invalid",
                 None,
             ));
+            out.extend(runner_profiles::skipped("backend descriptor invalid"));
         }
     }
     out
 }
 
-fn probe_backend_runtime(
-    descriptor: &Path,
-) -> tensorplate_protocol::backend_probe::BackendProbeReport {
-    tensorplate_protocol::backend_probe::probe_backend(
-        descriptor,
-        &tensorplate_protocol::backend_probe::ProbeOptions::default(),
-    )
+/// What to do about a refused descriptor: a fault in a runner profile
+/// declaration belongs to the package that installs that file, not to the
+/// backend package.
+fn descriptor_refusal_hint(err: &BackendDescriptorError, descriptor: &Path) -> String {
+    use BackendDescriptorError as E;
+    let own = "compare against protocol/schemas/backend_descriptor.json or reinstall tensorplate-backend-python-pytorch";
+    let declaration = |path: &str| {
+        format!("reinstall the package that installs `{path}` (`dpkg -S {path}` names it), then restart tensorplate-agent")
+    };
+    match err {
+        E::PackageNotInstalled {
+            profile, package, ..
+        } => format!(
+            "install {package}, or remove the package that declares `{profile}`, then restart tensorplate-agent"
+        ),
+        E::DuplicateRunnerProfile { first, second, .. } => format!(
+            "two files declare the profile: `dpkg -S {first} {second}` names their packages; remove one, then restart tensorplate-agent"
+        ),
+        E::PackageInventoryUnavailable { .. } => {
+            "the installed packages could not be read: check that `dpkg-query -W` runs for this user".into()
+        }
+        E::Missing { path }
+        | E::Io { path, .. }
+        | E::Malformed { path, .. }
+        | E::UnsupportedSchemaVersion { path, .. }
+        | E::Invalid { path, .. } => {
+            if Path::new(path) == descriptor {
+                own.into()
+            } else {
+                declaration(path)
+            }
+        }
+    }
 }
 
-fn runtime_finding(report: &tensorplate_protocol::backend_probe::BackendProbeReport) -> Finding {
+/// The findings that run the descriptor's interpreters.
+fn probed_findings(
+    opts: &InstallProbeOptions,
+    descriptor: &Path,
+    parsed: &BackendDescriptor,
+    packages: PackageSource<'_>,
+) -> Vec<Finding> {
+    let probe = ProbeOptions {
+        staged_root: opts.prefix.clone(),
+        ..ProbeOptions::default()
+    };
+    let report = probe_backend_with_inventory(descriptor, &probe, &packages);
+    let agent_environment = AgentEnvironment::read(&prefixed(opts, AGENT_ENVIRONMENT_FILE));
+    let mut runtime = runtime_finding(&report);
+    if let Some(note) = runner_profiles::own_interpreter_override(parsed, &agent_environment) {
+        runtime.message.push_str(&note);
+    }
+    let mut out = vec![runtime];
+    if parsed.runner_profiles.is_empty() {
+        out.extend(runner_profiles::skipped("no runner profile is installed"));
+    } else if report.runner_profiles.is_empty() {
+        out.extend(runner_profiles::skipped(
+            "the backend is refused before any interpreter runs (see python_pytorch_runtime)",
+        ));
+    } else {
+        let versions = packages.versions(
+            report
+                .runner_profiles
+                .iter()
+                .flat_map(|probe| &probe.profile.packages),
+        );
+        let descriptor_dir = descriptor
+            .parent()
+            .and_then(Path::parent)
+            .map(|dir| match &opts.prefix {
+                Some(prefix) => Path::new("/").join(dir.strip_prefix(prefix).unwrap_or(dir)),
+                None => dir.to_path_buf(),
+            })
+            .unwrap_or_default();
+        let mountinfo = std::fs::read_to_string(prefixed(opts, "/proc/self/mountinfo")).ok();
+        out.extend(runner_profiles::findings(&runner_profiles::Inputs {
+            report: &report,
+            probe: &probe,
+            versions: &versions,
+            agent_environment: &agent_environment,
+            descriptor_dir: &descriptor_dir,
+            systemd: !opts.skip_systemd,
+            mountinfo: mountinfo.as_deref(),
+        }));
+    }
+    out
+}
+
+fn runtime_finding(report: &BackendProbeReport) -> Finding {
     use tensorplate_protocol::backend_probe::BackendProbeState as S;
     match &report.state {
+        // Not a defect where a runner profile is installed: only a bundle
+        // that names none runs in the descriptor's own interpreter.
+        S::PytorchMissing { detail } if !report.runner_profiles.is_empty() => Finding::missing(
+            FindingId::PythonPytorchRuntime,
+            Severity::Info,
+            format!(
+                "PyTorch is not importable in the descriptor's own interpreter ({}): a bundle that names no runner profile is refused; one that names an installed profile runs in that profile's interpreter (see `runner_profiles`)",
+                detail.lines().last().unwrap_or_default()
+            ),
+            report.install_hint.clone(),
+        ),
         S::Runnable => Finding::ok(
             FindingId::PythonPytorchRuntime,
             Severity::Info,
