@@ -2,9 +2,10 @@
 """Real sidecar runner with file-gated fixture load/unload for signal tests."""
 
 import os
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
+from typing import Any
 
 from tensorplate_pytorch_backend import runner
 from tensorplate_pytorch_backend.backends.fixture import FixtureBackend
@@ -24,7 +25,7 @@ def gate(stage: str) -> None:
 class GatedBackend(FixtureBackend):
     """Keep a real lifecycle operation in progress until the test signals it."""
 
-    def load(self, model_spec: dict) -> None:
+    def load(self, model_spec: dict[str, Any]) -> None:
         gate("load")
         super().load(model_spec)
 

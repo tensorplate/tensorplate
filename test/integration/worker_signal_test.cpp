@@ -152,6 +152,7 @@ TEST_P(WorkerSignal, SignalDuringLoadIsRetained) {
   EXPECT_FALSE(worker.wait_exit(100ms).has_value());
   release("load");
   expect_clean_exit(worker);
+  EXPECT_EQ(worker.stderr_text().find("http server bound"), std::string::npos);
 }
 
 TEST_P(WorkerSignal, SecondSignalDuringShutdownDoesNotReenter) {
