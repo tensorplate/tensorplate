@@ -18,7 +18,7 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -191,6 +191,31 @@ fn assert_typed_load_failure(fixture: &str, code: ErrorCode, message: &str) {
     assert_eq!(snap.quarantined[0].deployment_id, deployment_id);
     assert_eq!(snap.quarantined[0].error.code, code);
     assert_eq!(snap.last_error.expect("last_error").code, code);
+}
+
+#[test]
+fn the_health_stub_reads_a_request_that_arrives_in_two_writes() {
+    let health = HealthPort::listen();
+    let mut stream = TcpStream::connect(("127.0.0.1", health.port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    stream
+        .write_all(b"GET /health HTTP/1.1\r\n")
+        .expect("write request line");
+    std::thread::sleep(Duration::from_millis(200));
+    stream
+        .write_all(b"Host: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .expect("write headers");
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("read response");
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    let reset = stream.take_error().expect("socket error");
+    assert!(
+        reset.is_none(),
+        "the stub closed before the headers arrived and the connection was reset: {reset:?}"
+    );
 }
 
 #[test]
