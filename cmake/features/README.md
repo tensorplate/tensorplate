@@ -1,10 +1,12 @@
 # Streaming dependencies
 
-`TP_ENABLE_STREAMING_GRPC` defaults ON when `find_package(gRPC CONFIG QUIET)`
-finds gRPC, and OFF otherwise. Explicit OFF skips discovery. Explicit ON
-requires the `streaming-grpc` manifest feature from the `builtin-baseline`
-commit in `vcpkg.json`; distribution gRPC/protobuf packages are not supported
-for this feature.
+`TP_ENABLE_STREAMING_GRPC` defaults ON only when discovery validates the
+pinned static vcpkg gRPC, protobuf and OpenSSL archives. Missing dependencies,
+shared libraries or non-vcpkg installations default OFF with a status line
+explaining why. Explicit OFF skips discovery. Explicit ON treats any failed
+validation as a configure error and requires the `streaming-grpc` manifest
+feature from the `builtin-baseline` commit in `vcpkg.json`; distribution
+gRPC/protobuf packages are not supported for this feature.
 
 ```sh
 cmake -S . -B build -G Ninja \
@@ -39,8 +41,9 @@ stream listener. Unary HTTP and sidecar UDS keep their existing transports.
 
 Hosted C++ tests enable the feature; adapter-shell tests explicitly disable
 it and check both the typed refusal and unary serving. The cold dependency
-build has a 120-minute job budget. Release jobs do not enable streaming yet.
-Before they do, their binary caches must be populated for the pinned baseline,
+build has a 120-minute job budget. Release builds explicitly set
+`TP_ENABLE_STREAMING_GRPC=OFF` on both ARM64 and AMD64.
+Before release enablement, binary caches must be populated for the pinned baseline,
 compiler and triplet, and the worker SBOM and vulnerability disposition must
 cover the static native closure, including OpenSSL. The current supply-chain
 workflow audits Rust and Python dependencies only.
