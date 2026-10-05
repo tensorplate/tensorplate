@@ -55,3 +55,15 @@ fn a_request_split_across_two_writes_is_read_whole_before_the_answer() {
     );
     assert_eq!(serving.requests(), vec![[head.as_bytes(), BODY].concat()]);
 }
+
+#[test]
+fn a_client_that_never_sends_its_body_is_refused_after_the_read_timeout() {
+    let serving = ServingStub::start_with_read_timeout("{}", Duration::from_millis(200));
+    let mut stream = connect(&serving);
+    let head = request_head(BODY.len());
+    stream.write_all(head.as_bytes()).expect("write head");
+
+    let response = read_response(&mut stream);
+    assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
+    assert_eq!(serving.requests(), vec![head.into_bytes()]);
+}

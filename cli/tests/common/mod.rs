@@ -23,7 +23,7 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::Command;
@@ -155,7 +155,11 @@ fn handle_connection(
     let _ = writer.flush();
 }
 
-/// Minimal stub serving worker. Responds with a single canned HTTP body.
+/// How long [`ServingStub::start`] waits for the next bytes of a request.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Minimal stub serving worker. Answers each whole request with a single
+/// canned HTTP body, and a request that ends or stalls early with a 400.
 pub struct ServingStub {
     pub addr: String,
     stop: Arc<AtomicBool>,
@@ -165,6 +169,11 @@ pub struct ServingStub {
 
 impl ServingStub {
     pub fn start(response_body: &str) -> Self {
+        Self::start_with_read_timeout(response_body, REQUEST_READ_TIMEOUT)
+    }
+
+    /// [`ServingStub::start`] with a chosen wait for a request's next bytes.
+    pub fn start_with_read_timeout(response_body: &str, read_timeout: Duration) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
         listener.set_nonblocking(true).expect("nonblocking");
@@ -178,13 +187,16 @@ impl ServingStub {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let _ = stream.set_nonblocking(false);
-                        let mut buf = vec![0u8; 8 * 1024];
-                        if let Ok(n) = stream.read(&mut buf) {
-                            log_thread.lock().expect("lock").push(buf[..n].to_vec());
-                        }
-                        let body = response.as_bytes();
+                        let _ = stream.set_read_timeout(Some(read_timeout));
+                        let (request, whole) = read_http_request(&mut stream);
+                        log_thread.lock().expect("lock").push(request);
+                        let (status, body) = if whole {
+                            ("200 OK", response.as_bytes())
+                        } else {
+                            ("400 Bad Request", &b""[..])
+                        };
                         let head = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             body.len()
                         );
                         let _ = stream.write_all(head.as_bytes());
@@ -226,6 +238,38 @@ impl Drop for ServingStub {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// Reads one HTTP request and says whether all of it arrived. Answering
+/// and closing with request bytes still unread makes the kernel reset the
+/// connection under the client.
+fn read_http_request(stream: &mut TcpStream) -> (Vec<u8>, bool) {
+    let mut request = Vec::new();
+    let mut chunk = [0u8; 8 * 1024];
+    let mut length = None;
+    loop {
+        length = length.or_else(|| request_length(&request));
+        if length.is_some_and(|length| request.len() >= length) {
+            return (request, true);
+        }
+        match stream.read(&mut chunk) {
+            Ok(n) if n > 0 => request.extend_from_slice(&chunk[..n]),
+            _ => return (request, false),
+        }
+    }
+}
+
+/// Length of a request through its `Content-Length` body, once the blank
+/// line that ends its head is in `bytes`.
+fn request_length(bytes: &[u8]) -> Option<usize> {
+    let head_len = bytes.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
+    let body_len = String::from_utf8_lossy(&bytes[..head_len])
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    Some(head_len + body_len)
 }
 
 /// Run the `tensorplate` binary with the supplied args against `socket`.
