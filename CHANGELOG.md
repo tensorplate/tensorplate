@@ -11,6 +11,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - Run serving-worker SIGINT/SIGTERM shutdown on the main thread, retaining
   signals during model load and avoiding signal-handler locks, allocation,
   and repeated shutdown entry. (V030-E04-F03-T02)
+- The stub serving worker the CLI integration tests share reads a whole
+  request, the head through its blank line and then the `Content-Length`
+  body, before it answers. It did one 8 KiB read, so a request whose head
+  and body arrived as two segments could be answered and closed with the
+  body still unread; the kernel then reset the connection and a
+  `tensorplate infer` test failed now and then with "Connection reset by
+  peer". The health stub in the agent's deploy tests reads its request head
+  the same way. Test code only; nothing that ships changes.
 
 ### Added
 
@@ -204,17 +212,6 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   not as the CLI's own `timeout`, and its teardown retries a rollback the
   agent refuses as `busy` for up to `--teardown-busy-wait-ms` (60,000 by
   default). (V030-E01-F02-T03)
-
-### Fixed
-
-- The stub serving worker the CLI integration tests share reads a whole
-  request, the head through its blank line and then the `Content-Length`
-  body, before it answers. It did one 8 KiB read, so a request whose head
-  and body arrived as two segments could be answered and closed with the
-  body still unread; the kernel then reset the connection and a
-  `tensorplate infer` test failed now and then with "Connection reset by
-  peer". The health stub in the agent's deploy tests reads its request head
-  the same way. Test code only; nothing that ships changes.
 
 ## [0.3.1] - 2026-10-01
 
