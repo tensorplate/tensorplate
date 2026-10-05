@@ -231,7 +231,7 @@ TEST(SessionManager, DrainStopsAdmissionAndWaitsForRelease) {
       SessionLimits::defaults(), 5, clock,
       [&](const auto& transition) { observed.push_back(transition); }, {}, false);
   ASSERT_TRUE(manager);
-  const auto opened = (*manager)->open(5, kBudgets);
+  const auto opened = (*manager)->open(5, SessionBudgets::for_text_input(48'000).value());
   ASSERT_TRUE(opened);
   const auto key = opened->session_key;
   const auto draining = (*manager)->stop_admission_and_drain(
@@ -277,13 +277,13 @@ TEST(SessionManager, OwnerReportsAfterDeadlinePreserveTimeoutAndReleaseSlot) {
   ASSERT_TRUE(late_drain);
   EXPECT_EQ(late_drain->state, LogicalSessionState::CancelRequested);
   ASSERT_TRUE(late_drain->cause);
-  EXPECT_EQ(late_drain->cause->context, "max_duration");
+  EXPECT_EQ(late_drain->cause->context, "finalize_timeout");
   EXPECT_EQ((*manager)->held_slots(), 1U);
   const auto first_release =
       (*manager)->apply(first->session_key, LogicalSessionEvent::ReleaseAcknowledged);
   ASSERT_TRUE(first_release);
   EXPECT_EQ(first_release->state, LogicalSessionState::Closed);
-  EXPECT_EQ(first_release->cause->context, "max_duration");
+  EXPECT_EQ(first_release->cause->context, "finalize_timeout");
   EXPECT_EQ((*manager)->held_slots(), 0U);
 
   auto second_manager = SessionManager::create(
@@ -694,6 +694,174 @@ TEST(SessionManager, FailedSessionLeavesItsTombstoneOnlyAtRelease) {
   EXPECT_EQ(tombstone->state, LogicalSessionState::Failed);
   EXPECT_EQ(tombstone->code, Error::Code::ResourceExhausted);
   EXPECT_EQ(tombstone->reason, "input_credit_exceeded");
+}
+
+TEST(SessionManager, GenerationOfALaterMessageIsCheckedAgainstTheSession) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto unknown = manager.check_generation(99, 5);
+  ASSERT_FALSE(unknown);
+  EXPECT_EQ(unknown.error().context, "unknown_session");
+  const auto opened = manager.open(5, kBudgets);
+  ASSERT_TRUE(opened);
+  EXPECT_TRUE(manager.check_generation(opened->session_key, 5));
+  ASSERT_EQ(under_test.observed.size(), 1U);
+  const auto stale = manager.check_generation(opened->session_key, 6);
+  ASSERT_FALSE(stale);
+  EXPECT_EQ(stale.error().code, Error::Code::NotReady);
+  EXPECT_EQ(stale.error().context, "stale_generation");
+  ASSERT_EQ(under_test.observed.size(), 2U);
+  EXPECT_EQ(under_test.observed[1].state, LogicalSessionState::Failed);
+  ASSERT_TRUE(under_test.observed[1].cause);
+  EXPECT_EQ(under_test.observed[1].cause->context, "stale_generation");
+  EXPECT_EQ(manager.held_slots(), 1U);
+}
+
+TEST(SessionManager, StaleGenerationOnAnExpiredSessionLeavesTheTimeoutAsItsCause) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto opened = manager.open(5, kBudgets);
+  ASSERT_TRUE(opened);
+  under_test.clock.advance(30s);
+  const auto stale = manager.check_generation(opened->session_key, 4);
+  ASSERT_FALSE(stale);
+  EXPECT_EQ(stale.error().context, "stale_generation");
+  ASSERT_EQ(under_test.observed.size(), 2U);
+  EXPECT_EQ(under_test.observed[1].state, LogicalSessionState::CancelRequested);
+  EXPECT_EQ(under_test.observed[1].cause.value().context, "heartbeat_timeout");
+  EXPECT_TRUE(manager.sweep_due().empty());
+}
+
+TEST(SessionManager, WorkerDrainCutByItsDeadlineKeepsTheDrainCause) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto swept_session = manager.open(5, kBudgets);
+  const auto messaged_session = manager.open(5, kBudgets);
+  ASSERT_TRUE(swept_session);
+  ASSERT_TRUE(messaged_session);
+  const auto draining = manager.stop_admission_and_drain(
+      Error::make(Error::Code::Unavailable, "deployment retiring", "deployment_retired"));
+  ASSERT_EQ(draining.size(), 2U);
+  under_test.clock.advance(10s);
+
+  // A client message that finds the deadline passed is answered with the cause.
+  const auto late = manager.apply(messaged_session->session_key, LogicalSessionEvent::Ping);
+  ASSERT_FALSE(late);
+  EXPECT_EQ(late.error().code, Error::Code::Unavailable);
+  EXPECT_EQ(late.error().context, "deployment_retired");
+
+  const auto swept = manager.sweep_due();
+  ASSERT_EQ(swept.size(), 1U);
+  EXPECT_EQ(swept[0].session_key, swept_session->session_key);
+  for (const auto key : {swept_session->session_key, messaged_session->session_key}) {
+    EXPECT_EQ(manager.state(key).value(), LogicalSessionState::CancelRequested);
+    const auto closed = manager.apply(key, LogicalSessionEvent::ReleaseAcknowledged);
+    ASSERT_TRUE(closed);
+    ASSERT_TRUE(closed->cause);
+    EXPECT_EQ(closed->cause->code, Error::Code::Unavailable);
+    EXPECT_EQ(closed->cause->context, "deployment_retired");
+  }
+}
+
+TEST(SessionManager, WorkerDrainEndedByAnotherLimitReportsThatLimit) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto opened = manager.open(5, SessionBudgets::for_text_input(48'000).value());
+  ASSERT_TRUE(opened);
+  ASSERT_EQ(manager
+                .stop_admission_and_drain(Error::make(Error::Code::Unavailable,
+                                                      "worker shutting down", "worker_shutdown"))
+                .size(),
+            1U);
+  auto chunk = output_item(OutputKind::Audio, 960);
+  ASSERT_EQ(opened->output->offer(chunk, under_test.clock.now()).value(), OutputOffer::Queued);
+  under_test.clock.advance(5s);
+  const auto stalled = manager.sweep_due();
+  ASSERT_EQ(stalled.size(), 1U);
+  EXPECT_EQ(stalled[0].cause.value().context, "slow_consumer");
+}
+
+TEST(SessionManager, ClientDrainCutByItsDeadlineEndsAsATimeout) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto opened = manager.open(5, kBudgets);
+  ASSERT_TRUE(opened);
+  ASSERT_TRUE(manager.apply(opened->session_key, LogicalSessionEvent::HalfClose));
+  under_test.clock.advance(10s);
+  const auto cut = manager.sweep_due();
+  ASSERT_EQ(cut.size(), 1U);
+  EXPECT_EQ(cut[0].cause.value().code, Error::Code::Timeout);
+  EXPECT_EQ(cut[0].cause.value().context, "finalize_timeout");
+}
+
+TEST(SessionManager, RestartedWorkerKnowsNothingOfEarlierSessions) {
+  testing::FakeSchedulerClock clock;
+  std::vector<ManagedSessionTransition> replayed;
+  std::shared_ptr<BoundedOutputQueue> earlier_output;
+  std::uint64_t live_key = 0;
+  std::uint64_t ended_key = 0;
+  {
+    ManagerUnderTest earlier;
+    const auto live = earlier.manager->open(5, kBudgets);
+    const auto ended = earlier.manager->open(5, kBudgets);
+    ASSERT_TRUE(live);
+    ASSERT_TRUE(ended);
+    live_key = live->session_key;
+    ended_key = ended->session_key;
+    earlier_output = live->output;
+    ASSERT_TRUE(earlier.manager->accept_input(live_key, 640));
+    auto transcript = output_item(OutputKind::Result, 48);
+    ASSERT_EQ(earlier_output->offer(transcript, earlier.clock.now()).value(), OutputOffer::Queued);
+    ASSERT_TRUE(earlier.manager->apply(ended_key, LogicalSessionEvent::Cancel));
+    ASSERT_TRUE(earlier.manager->apply(ended_key, LogicalSessionEvent::ReleaseAcknowledged));
+    ASSERT_TRUE(earlier.manager->tombstone(ended_key));
+  }
+  auto restarted = SessionManager::create(
+      SessionLimits::defaults(), 5, clock,
+      [&](const auto& transition) { replayed.push_back(transition); }, {}, false);
+  ASSERT_TRUE(restarted);
+  EXPECT_EQ((*restarted)->held_slots(), 0U);
+  for (const auto key : {live_key, ended_key}) {
+    EXPECT_EQ((*restarted)->state(key).error().context, "unknown_session");
+    EXPECT_EQ((*restarted)->check_generation(key, 5).error().context, "unknown_session");
+    EXPECT_EQ((*restarted)->apply(key, LogicalSessionEvent::Ping).error().context,
+              "unknown_session");
+    EXPECT_FALSE((*restarted)->tombstone(key));
+  }
+  EXPECT_TRUE(replayed.empty());
+
+  // A new session may reuse an earlier key; it starts with nothing of it.
+  const auto fresh = (*restarted)->open(5, kBudgets);
+  ASSERT_TRUE(fresh);
+  EXPECT_EQ(fresh->session_key, live_key);
+  EXPECT_NE(fresh->output, earlier_output);
+  EXPECT_EQ(fresh->status.input_queue_depth, 0U);
+  EXPECT_EQ(fresh->status.output_metadata_bytes.used(), 0U);
+  EXPECT_FALSE(fresh->output->take());
+  ASSERT_EQ(replayed.size(), 1U);
+  EXPECT_TRUE(replayed[0].effects.contains(LogicalSessionEffect::EmitReady));
+}
+
+TEST(SessionManager, TimerThreadEndsASessionAtItsFinalizeDeadline) {
+  testing::FakeSchedulerClock clock;
+  std::promise<Error> ended;
+  auto cause = ended.get_future();
+  auto manager = SessionManager::create(
+      SessionLimits::defaults(), 5, clock, [&](const ManagedSessionTransition& transition) {
+        if (transition.state == LogicalSessionState::CancelRequested) {
+          ended.set_value(transition.cause.value());
+        }
+      });
+  ASSERT_TRUE(manager);
+  const auto opened = (*manager)->open(5, kBudgets);
+  ASSERT_TRUE(opened);
+  ASSERT_TRUE((*manager)->apply(opened->session_key, LogicalSessionEvent::Finalize));
+  clock.advance(10s);
+  (*manager)->notify_clock_advanced();
+  ASSERT_EQ(cause.wait_for(1s), std::future_status::ready);
+  const auto error = cause.get();
+  EXPECT_EQ(error.code, Error::Code::Timeout);
+  EXPECT_EQ(error.context, "finalize_timeout");
 }
 
 TEST(SessionManager, TimerThreadEndsASessionWhoseOutputStalls) {

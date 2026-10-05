@@ -43,6 +43,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   clock-advance notification can no longer be lost between the timer's
   deadline scan and its wait. The current HTTP worker does not create
   logical sessions. (V030-E04-F01-T02)
+- Logical sessions bound how long a finalization or a drain may take, by
+  what the session takes as input: ten seconds to finish a transcript for
+  audio input, two minutes to synthesize and deliver accepted text. The
+  deadline starts when a session first owes a finalization or a drain,
+  stops when it is active again or its drain has completed, and is not
+  moved by delivery progress, a further finalization or a half-close; a
+  session that reaches it ends with `finalize_timeout` through the cancel
+  path, except that a drain the worker started keeps its own cause
+  (`deployment_retired` or `worker_shutdown`). The five-second no-progress limit still ends a stalled reader
+  sooner, and the wait for the backend's release after a completed drain
+  is not counted. `SessionManager::check_generation` checks the
+  deployment generation a later message or backend report names and
+  fails the session with `stale_generation` when it is another one.
+  `test/unit/fixtures/session_lifecycle.json` holds these rules, the
+  ways a session closes and its expiry as step-by-step cases that the
+  unit tests replay; race tests and a real-clock integration test check
+  that a session ends in exactly one terminal outcome with no output
+  after it, and that a cancel is acknowledged within 100 ms at P99 while
+  the backend is busy. The current HTTP worker does not create logical
+  sessions. (V030-E04-F01-T03)
 - A serving worker that cannot start now ends its stderr with one JSON
   record, `worker startup failed`, carrying the typed error code and
   message of the step that failed; it replaces the two plain-text lines the

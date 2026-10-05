@@ -23,6 +23,10 @@ Error expiry_error(SessionExpiry expiry) {
     case SessionExpiry::SlowConsumer:
       return Error::make(Error::Code::ResourceExhausted,
                          "logical session output made no delivery progress", "slow_consumer");
+    case SessionExpiry::FinalizeDeadline:
+      return Error::make(Error::Code::Timeout,
+                         "logical session did not finish finalizing or draining in time",
+                         "finalize_timeout");
   }
   return Error::make(Error::Code::Internal, "unknown session timeout", "unknown_timeout");
 }
@@ -128,9 +132,12 @@ Result<ManagedSessionTransition> SessionManager::open(std::uint64_t requested_ge
     const auto key = next_key_++;
     const auto now = clock_.now();
     auto output = std::make_shared<BoundedOutputQueue>(budgets);
-    auto [it, inserted] = entries_.emplace(
-        key,
-        Entry{*machine, SessionTimers{limits_, now}, InputCredit{budgets}, std::move(output), {}});
+    auto [it, inserted] =
+        entries_.emplace(key, Entry{*machine,
+                                    SessionTimers{limits_, budgets.input_kind(), now},
+                                    InputCredit{budgets},
+                                    std::move(output),
+                                    {}});
     if (!inserted) {
       return unexpected(
           Error::make(Error::Code::Internal, "session key collision", "session_key_collision"));
@@ -205,7 +212,9 @@ std::optional<ManagedSessionTransition> SessionManager::apply_locked(std::uint64
       entry.cause = Error::make(Error::Code::Cancelled, "session cancelled", "client_cancelled");
     }
   }
-  entry.timers.on_client_activity(event, clock_.now());
+  const auto now = clock_.now();
+  entry.timers.on_client_activity(event, now);
+  entry.timers.on_transition(before, event, after, now);
   if (effects->contains(LogicalSessionEffect::SuppressOutput)) {
     entry.output->suppress();
   }
@@ -258,7 +267,7 @@ Result<ManagedSessionTransition> SessionManager::apply_event(std::uint64_t sessi
           early_release_refusal = accepted.error();
         }
       }
-      timeout_refusal = expiry_error(*expiry);
+      timeout_refusal = expiry_cause(it->second, *expiry);
       expired_transition =
           apply_locked(session_key, it->second, LogicalSessionEvent::Abort, timeout_refusal);
       if (!expired_transition) {
@@ -313,6 +322,27 @@ Result<ManagedSessionTransition> SessionManager::apply_event(std::uint64_t sessi
     return unexpected(*refusal);
   }
   return transition;
+}
+
+Result<void> SessionManager::check_generation(std::uint64_t session_key, std::uint64_t generation) {
+  std::optional<Error> stale;
+  {
+    std::lock_guard serial(serial_mu_);
+    std::lock_guard guard(mu_);
+    const auto it = entries_.find(session_key);
+    if (it == entries_.end()) {
+      return unexpected(missing_session_locked(session_key));
+    }
+    const auto checked = it->second.machine.check_generation(generation);
+    if (checked) {
+      return {};
+    }
+    stale = checked.error();
+  }
+  // Fail changes nothing once the outcome is fixed or the slot is gone; the
+  // message is stale either way.
+  (void)apply_event(session_key, LogicalSessionEvent::Fail, stale, std::nullopt);
+  return unexpected(*stale);
 }
 
 std::vector<ManagedSessionTransition> SessionManager::stop_admission_and_drain(Error cause) {
@@ -370,8 +400,8 @@ std::vector<ManagedSessionTransition> SessionManager::sweep_due() {
       if (!expiry) {
         continue;
       }
-      auto result =
-          apply_locked(key, it->second, LogicalSessionEvent::Abort, expiry_error(*expiry));
+      auto result = apply_locked(key, it->second, LogicalSessionEvent::Abort,
+                                 expiry_cause(it->second, *expiry));
       if (result) {
         transition = *result;
       }
@@ -491,6 +521,16 @@ Result<LogicalSessionStatus> SessionManager::update_credit(std::uint64_t session
 LogicalSessionStatus SessionManager::status_of(const Entry& entry) {
   return LogicalSessionStatus{entry.machine.state(), entry.credit.depth(), entry.credit.usage(),
                               entry.output->pcm_usage(), entry.output->metadata_usage()};
+}
+
+Error SessionManager::expiry_cause(const Entry& entry, SessionExpiry expiry) {
+  // While the finalize deadline runs, a session has a cause only if a drain
+  // brought one: the worker's. It says why the session ends, so that a
+  // client reopens elsewhere; the deadline only decides when.
+  if (expiry == SessionExpiry::FinalizeDeadline && entry.cause) {
+    return *entry.cause;
+  }
+  return expiry_error(expiry);
 }
 
 std::optional<SessionExpiry> SessionManager::expiry_locked(const Entry& entry) const {

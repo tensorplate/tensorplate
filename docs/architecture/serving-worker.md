@@ -330,12 +330,41 @@ oldest dropped first. A call naming such a session is refused with
 `session_ended`, so a report that raced the release can be told from an
 `unknown_session`.
 
+**Finalize deadline.** A session may owe a finalization or a drain only
+for a bounded time, set by what it takes as input: 10 seconds for audio
+input, where a transcript is finished, and 120 seconds for text input,
+where accepted segments are synthesized and delivered (two waiting and
+one running, at most 30 seconds of audio each, at the pace of playback).
+The deadline starts when an accepted event first leaves the session in
+`finalizing` or `draining`, and stops when the session is `active` again
+or `drain_completed` is applied. Nothing in between moves it: not a
+delivery, a further automatic endpoint, a client Finalize taking over,
+or a half-close during a finalization. A session that reaches it is
+aborted through the cancel path like the other timeouts, with
+`finalize_timeout` or, for a drain the worker started, with that drain's
+own cause. The no-progress limit above is separate and ends a stalled
+reader sooner. Once a drain has completed, the session waits for the
+backend to acknowledge release without this deadline; bounding that wait
+belongs to backend cleanup.
+
+**Generation of later messages.** `open` refuses a generation other than
+the worker's. For a later client message or a backend report,
+`check_generation` compares the generation it names with the session's:
+a different one, zero for an absent field included, fails the session
+with `stale_generation` and the caller discards the message. After the
+outcome is fixed the check is still refused but changes nothing.
+
+`test/unit/fixtures/session_lifecycle.json` holds the deadline rows and
+step-by-step lifecycle cases (deadlines, generation, segment completion,
+the ways a session closes, expiry) that the unit tests replay against
+the manager; a transport binding can replay the same cases.
+
 `SessionLimits` defaults to 60 seconds idle, a 10-second client heartbeat
 cadence, 30 seconds liveness, and a 60-minute absolute duration. Data
 and client control refresh idle activity; only `ping` refreshes heartbeat
 liveness. Draining suspends idle and heartbeat expiry so accepted work
 can finish after the client write-half-closes; the absolute duration
-still applies. A dedicated timer thread finds due sessions using the
+and the finalize deadline still apply. A dedicated timer thread finds due sessions using the
 injected monotonic `SchedulerClock`, independent of the serving
 worker's existing request evictor. Unit tests advance
 `FakeSchedulerClock` without sleeping. The current HTTP composition
@@ -432,12 +461,23 @@ How sessions end, and the code their terminal outcome carries:
 | Input item without bytes | `accept_input` (the manager applies `fail`) | `failed` | `config_invalid` (`empty_input`) |
 | Credit release that does not match what is held (a defect) | a release call (the manager applies `fail`) | `failed` | `internal` (`input_release_mismatch`, `segment_stage_violation` or `wrong_input_kind`) |
 | Output undelivered past the no-progress limit | the manager's timer applies `abort` | `closed` | `resource_exhausted` (`slow_consumer`) |
+| A finalization or a client's drain not finished by the finalize deadline | the manager's timer applies `abort` | `closed` | `timeout` (`finalize_timeout`) |
 | Backend process reset or reaped | `backend_reset` | `failed` | `unavailable` (`backend_reset`) |
 | Deployment generation retiring | `drain`, then `abort` at the deadline | `closed` | `unavailable` (`deployment_retired`) |
 | Worker shutting down | `drain`, then `abort` at the deadline | `closed` | `unavailable` (`worker_shutdown`) |
-| Stale generation in a later message | `fail` | `failed` | `not_ready` (`stale_generation`) |
+| Stale generation in a later message | `check_generation` (the manager applies `fail`) | `failed` | `not_ready` (`stale_generation`) |
 | Protocol violation | `fail` | `failed` | `not_ready` (`illegal_transition`) |
 | Owner report the state does not permit (a defect) | `fail` | `failed` | `internal` (`unexpected_report`) |
+
+A drain the worker starts is held to the session's finalize deadline like
+any other, and keeps its own end cause when that deadline cuts it: a
+retiring or shutting-down worker's audio session that has not drained in
+10 seconds closes with `unavailable` (`deployment_retired` or
+`worker_shutdown`), so that its client knows to reopen elsewhere. The
+deadline decides when such a session ends, not why. A drain the client
+started, and any finalization, ends with `timeout` (`finalize_timeout`).
+Another limit that ends a worker's drain first, such as the no-progress
+limit, reports itself.
 
 The reason strings are the failure reasons in
 [`failure-reasons.md`](../observability/failure-reasons.md) where one
