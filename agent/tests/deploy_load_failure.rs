@@ -63,8 +63,7 @@ impl HealthPort {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
-                let mut request = [0_u8; 512];
-                let _ = stream.read(&mut request);
+                read_request_head(&mut stream);
                 let body = serde_json::json!({
                     "state": "ready",
                     "active_model_id": *answer.lock().expect("lock"),
@@ -82,6 +81,20 @@ impl HealthPort {
 
     fn serve(&self, deployment_id: &str) {
         *self.serving.lock().expect("lock") = deployment_id.to_string();
+    }
+}
+
+/// Reads through the blank line that ends a request head, so the close
+/// after the answer is not a reset over unread bytes.
+fn read_request_head(stream: &mut TcpStream) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut head = Vec::new();
+    let mut chunk = [0_u8; 512];
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        match stream.read(&mut chunk) {
+            Ok(n) if n > 0 => head.extend_from_slice(&chunk[..n]),
+            _ => break,
+        }
     }
 }
 
