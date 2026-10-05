@@ -88,6 +88,39 @@ fn infer_with_serving_url_flag_does_not_call_agent() {
 }
 
 #[test]
+fn infer_posts_an_input_larger_than_one_socket_read_whole() {
+    let stub = AgentStub::start();
+    let serving = ServingStub::start(
+        r#"{"schema_version":"0.1","status":"success","request_id":"r-1","outputs":[]}"#,
+    );
+    let td = tempfile::tempdir().unwrap();
+    let input = td.path().join("input.json");
+    let body = format!(r#"{{"inputs":[],"padding":"{}"}}"#, "x".repeat(64 * 1024));
+    std::fs::write(&input, &body).unwrap();
+    let (code, _stdout, stderr) = run_cli(
+        &stub.socket,
+        &[
+            "--output",
+            "json",
+            "infer",
+            "--input",
+            input.to_str().unwrap(),
+            "--serving-url",
+            &serving.url(),
+        ],
+    );
+    assert_eq!(code, 0, "stderr was: {stderr}");
+    let requests = serving.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].ends_with(body.as_bytes()),
+        "the stub recorded {} bytes of a request with a {}-byte body",
+        requests[0].len(),
+        body.len()
+    );
+}
+
+#[test]
 fn infer_falls_back_to_agent_discovered_endpoint_when_no_overrides() {
     let stub = AgentStub::start();
     stub.enqueue(active_deployment_response());

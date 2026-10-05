@@ -18,7 +18,7 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -63,8 +63,7 @@ impl HealthPort {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
-                let mut request = [0_u8; 512];
-                let _ = stream.read(&mut request);
+                read_request_head(&mut stream);
                 let body = serde_json::json!({
                     "state": "ready",
                     "active_model_id": *answer.lock().expect("lock"),
@@ -82,6 +81,22 @@ impl HealthPort {
 
     fn serve(&self, deployment_id: &str) {
         *self.serving.lock().expect("lock") = deployment_id.to_string();
+    }
+}
+
+/// Reads through the blank line that ends a request head, so the close
+/// after the answer is not a reset over unread bytes.
+fn read_request_head(stream: &mut TcpStream) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let mut head = Vec::new();
+    let mut chunk = [0_u8; 512];
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        match stream.read(&mut chunk) {
+            Ok(n) if n > 0 => head.extend_from_slice(&chunk[..n]),
+            _ => break,
+        }
     }
 }
 
@@ -191,6 +206,54 @@ fn assert_typed_load_failure(fixture: &str, code: ErrorCode, message: &str) {
     assert_eq!(snap.quarantined[0].deployment_id, deployment_id);
     assert_eq!(snap.quarantined[0].error.code, code);
     assert_eq!(snap.last_error.expect("last_error").code, code);
+}
+
+fn connect_to(health: &HealthPort) -> TcpStream {
+    let stream = TcpStream::connect(("127.0.0.1", health.port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    stream
+}
+
+fn read_response(stream: &mut TcpStream) -> String {
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("read response");
+    response
+}
+
+#[test]
+fn the_health_stub_reads_a_request_that_arrives_in_two_writes() {
+    let health = HealthPort::listen();
+    let mut stream = connect_to(&health);
+    stream
+        .write_all(b"GET /health HTTP/1.1\r\n")
+        .expect("write request line");
+    std::thread::sleep(Duration::from_millis(200));
+    stream
+        .write_all(b"Host: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .expect("write headers");
+
+    let response = read_response(&mut stream);
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    let reset = stream.take_error().expect("socket error");
+    assert!(
+        reset.is_none(),
+        "the stub closed before the headers arrived and the connection was reset: {reset:?}"
+    );
+}
+
+#[test]
+fn a_client_that_sends_nothing_does_not_hold_the_health_stub() {
+    let health = HealthPort::listen();
+    let _silent = connect_to(&health);
+    let mut stream = connect_to(&health);
+    stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .expect("write request");
+
+    let response = read_response(&mut stream);
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
 }
 
 #[test]
