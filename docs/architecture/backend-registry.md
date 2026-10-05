@@ -232,8 +232,10 @@ package ships a descriptor at
 `/usr/share/tensorplate/backends/<backend_name>/backend.json`
 ([`protocol/schemas/backend_descriptor.json`](../../protocol/schemas/backend_descriptor.json)),
 and the agent's startup probe and `tensorplate doctor` read it through one
-reader, `BackendDescriptor::read_from` in the protocol crate. No other
-component parses the file.
+reader, `BackendDescriptor::read_from` in the protocol crate. The serving
+worker's sidecar launcher reads one part of it, the runner profile list, with
+a reader of its own ([below](#launching-a-runner-profiles-sidecar)); nothing
+else parses the file.
 
 A runner profile is an environment a sidecar runs in, installed by packages
 other than the one that owns the descriptor. Such a package declares its
@@ -272,6 +274,70 @@ The startup probe reports `PackageNotInstalled` as its own state,
 `runner_profile_package_missing`, which the platform reason vocabulary
 classifies as `missing_backend_package`. Every other refusal above is a
 `descriptor_malformed` probe state and `accelerator_runtime_unavailable`.
+
+### Launching a runner profile's sidecar
+
+A bundle that names a `runner_profile` is served by a sidecar started in
+that profile's environment, and nowhere else. The name travels in three
+steps:
+
+1. The agent reads it from the staged bundle's manifest when it renders the
+   worker's configuration and writes it as `deployment.model.runner_profile`
+   ([`config/schemas/serving_worker.json`](../../config/schemas/serving_worker.json)).
+   A bundle that names none gets no such member. A staged bundle whose
+   manifest cannot be read fails the prepare; no configuration is written.
+2. The worker carries it on the model's `ModelSpec` as `runner_profile()`.
+   A member that is present and not a non-empty string is a configuration
+   error. The `model_spec` message to the sidecar does not carry it.
+3. At load, the `python_pytorch` adapter reads the installed descriptor's
+   merged `runner_profiles` (the descriptor directory is
+   `TP_BACKEND_DESCRIPTOR_DIR` when set, as for the agent) and starts the
+   sidecar from the entry with that id.
+
+The sidecar's `argv[0]` is the entry's `interpreter`. Its environment is the
+worker's, with three variables set:
+
+| Variable | Value | Why |
+| --- | --- | --- |
+| `LD_LIBRARY_PATH` | The entry's `library_search_paths`, joined with `:`; empty when it has none | Libraries the profile loads by name resolve to its own copies. A value the worker inherited does not reach the sidecar. |
+| `ORT_DISABLE_TELEMETRY` | `1` | With it unset, the onnxruntime 1.30 the speech runtime locks was observed resolving a telemetry host and attempting connections to it within about ten seconds of import. |
+| `TMPDIR` | The worker's temporary directory: the first of `TMPDIR`, `TMP`, `TEMP` and `TEMPDIR` in its environment, otherwise `/tmp` | Named explicitly because the profile writes and loads a shared library there. |
+
+There is no fallback for such a model. `TP_PYTHON_PYTORCH_EXECUTABLE`,
+`TP_TEST_PYTHON_EXE`, `TP_TEST_PYTHON` and `PATH` select the interpreter only
+for a model that names no runner profile, which is launched as before. The
+load is refused before any process starts, with a fixed message that names
+neither the profile nor a path:
+
+| Situation | `Error::Code` |
+| --- | --- |
+| `TP_BACKEND_DESCRIPTOR_DIR` is relative; the descriptor or a declaration cannot be read or breaks a rule above; an id is declared twice; a search path contains `:` or `;` | `ConfigInvalid` |
+| No installed entry has the model's runner profile id | `Unsupported` |
+| The entry's interpreter is not an executable file | `Unavailable` |
+| The temporary directory is not a directory the worker can write to and search, or its filesystem is mounted `noexec` | `Unavailable` |
+
+The launcher applies the declaration and `runner_profiles` rules of the
+table above to every entry, and refuses the whole list on one fault, as the
+Rust reader does. The two readers run the same documents in their tests
+(`protocol/rust/tests/fixtures/runner_profile_declarations/`), a repeated
+JSON key, a byte order mark and bytes after a NUL among them. They are not
+the same reader, and differ in three ways:
+
+- The launcher does not ask the package database. That check is the agent's,
+  whose probe refuses every deploy for the backend while a declared package
+  is missing.
+- Of the descriptor itself the launcher reads `backend_name`,
+  `schema_version` and `runner_profiles`. The Rust reader also validates the
+  package, interpreter, sidecar and capability members, so a descriptor it
+  refuses for one of those is still read by a worker started without the
+  agent.
+- The launcher refuses a NUL inside `interpreter`, `environment_root` or a
+  search path, which would end the path early where it is handed to the
+  system. The Rust reader accepts one.
+
+The sidecar still inherits the rest of the worker's environment, including
+any `PYTHONPATH`, and the profile's interpreter is started without Python's
+isolated mode.
 
 ## Non-goals
 

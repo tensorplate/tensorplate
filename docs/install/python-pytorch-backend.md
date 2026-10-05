@@ -27,7 +27,7 @@ This installs:
 | `/usr/lib/tensorplate/backends/python_pytorch/` | Sidecar Python package source. |
 | `/usr/lib/python3/dist-packages/tensorplate_pytorch_backend.pth` | Makes the sidecar package importable from the descriptor's `/usr/bin/python3`. |
 | `/usr/bin/tensorplate-backend-python-pytorch` | Console entrypoint wrapper for direct diagnostics. |
-| `/usr/share/tensorplate/backends/python_pytorch/backend.json` | Backend descriptor read by `tensorplate doctor` and the agent. |
+| `/usr/share/tensorplate/backends/python_pytorch/backend.json` | Backend descriptor read by `tensorplate doctor` and the agent, and, for its runner profiles, by the serving worker's sidecar launcher. |
 | `/usr/share/doc/tensorplate-backend-python-pytorch/` | README mirror. |
 
 The descriptor is intentionally a separate file so doctor probes do not
@@ -376,7 +376,7 @@ so they are applied at process start.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TP_PYTHON_PYTORCH_EXECUTABLE` | `/usr/bin/python3` (from descriptor) | Interpreter the sidecar is launched with. Override when running from a virtualenv (e.g. the release validation venv). Falls back to `TP_TEST_PYTHON_EXE` then `TP_TEST_PYTHON` for the C++ test fixtures. |
+| `TP_PYTHON_PYTORCH_EXECUTABLE` | `/usr/bin/python3` (from descriptor) | Interpreter the sidecar is launched with. Override when running from a virtualenv (e.g. the release validation venv). Falls back to `TP_TEST_PYTHON_EXE` then `TP_TEST_PYTHON` for the C++ test fixtures. Not consulted for a bundle that names a `runner_profile`: its sidecar runs under the interpreter the installed profile declares (see [Launching a runner profile's sidecar](../architecture/backend-registry.md#launching-a-runner-profiles-sidecar)). |
 | `TP_PYTHON_PYTORCH_DEFAULT_BACKEND` | `fixture` | Selects the in-process backend factory. Set to `smolvla` to enable the LeRobot SmolVLA path. |
 | `TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS` | `15000` | Deadline for sidecar `start`/`load`/`prime`/`unload` exchanges. Increase on cold-cache or HuggingFace-download-heavy startups (90000 has been tested for Orin SmolVLA). |
 | `TP_PYTHON_PYTORCH_INFER_TIMEOUT_MS` | `30000` | Per-request inference deadline (clamped by the caller's deadline). |

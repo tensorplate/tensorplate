@@ -8,6 +8,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The sidecar launcher starts a bundle that names a runner profile in that
+  profile's installed environment. The agent writes the manifest's
+  `runner_profile` into the worker's model configuration
+  (`deployment.model.runner_profile`, a new optional member of
+  `config/schemas/serving_worker.json`), `ModelSpec` carries it as
+  `runner_profile()`, and the `python_pytorch` adapter resolves it against
+  the installed backend descriptor's `runner_profiles`, declarations
+  included. The sidecar's `argv[0]` is the declared interpreter, and its
+  environment gets the profile's library search path as `LD_LIBRARY_PATH`,
+  `ORT_DISABLE_TELEMETRY=1` and an explicit `TMPDIR`. For such a bundle
+  `TP_PYTHON_PYTORCH_EXECUTABLE`, `TP_TEST_PYTHON_EXE`, `TP_TEST_PYTHON` and
+  `PATH` are not consulted, and there is no fallback: a profile no installed
+  package declares is refused as `unsupported`, an unreadable or invalid
+  descriptor or declaration as `config_invalid`, and an interpreter that is
+  not an executable file or a temporary directory that is not writable and
+  searchable or is mounted `noexec` as `unavailable`, each before any process
+  starts. A
+  bundle that names no runner profile is launched as before.
+  `tensorplate doctor`'s runtime probe still uses `python.interpreter`.
+  (V030-E01-F01-T04)
 - Runner profile declarations: each speech runtime profile package now says
   which runner profile it installs. `tensorplate-speech-runtime-ct2` and
   `tensorplate-speech-runtime-kokoro` each install one declaration under
@@ -24,9 +44,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `runner_profile_package_missing`, and refuses a deploy with the reason
   `missing_backend_package`.
   `backend_descriptor.json` gains the declaration document (additive change
-  inside protocol 0.1; version constants unchanged). Nothing launches from
-  a declared profile yet: the sidecar launcher and doctor's runtime probe
-  still use `python.interpreter`. (V030-E01-F01-T04)
+  inside protocol 0.1; version constants unchanged). Doctor's runtime probe
+  still uses `python.interpreter`. (V030-E01-F01-T04)
 - Logical sessions account for input credit and bound their output. The
   session manager charges each accepted audio chunk or text segment to
   the session's credit (one second of unconsumed audio, or two waiting

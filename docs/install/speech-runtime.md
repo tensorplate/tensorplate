@@ -76,9 +76,30 @@ release so far.
   auxiliary models do come inside the wheels: the Silero voice activity
   model in faster-whisper, and spaCy's `en_core_web_sm`, which Kokoro's
   English grapheme-to-phoneme step needs.
-- Nothing runs in the environment yet. The installed profiles are declared,
-  but the sidecar launcher and `tensorplate doctor`'s runtime probe still use
-  the descriptor's `python.interpreter`.
+- It does not change how `tensorplate doctor` probes the backend: the
+  runtime probe still uses the descriptor's `python.interpreter`, so PyTorch
+  must still be importable there.
+
+## What runs in it
+
+A bundle whose manifest names a `runner_profile` is served by a sidecar
+started with that profile's declared interpreter,
+`/usr/lib/tensorplate/speech-runtime/bin/python`, with the profile's library
+search path, `ORT_DISABLE_TELEMETRY=1` and the worker's temporary directory
+in its environment. `TP_PYTHON_PYTORCH_EXECUTABLE` and `PATH` are not
+consulted for such a bundle, and a profile that no installed package
+declares refuses the deploy instead of falling back to another interpreter.
+A bundle that names no runner profile is launched as before. The mechanism
+and its refusals are in
+[`backend-registry.md`](../architecture/backend-registry.md#launching-a-runner-profiles-sidecar).
+
+The temporary directory must be writable and on a filesystem that allows
+execution, or the deploy is refused as `unavailable`. It is the first of
+`TMPDIR`, `TMP`, `TEMP` and `TEMPDIR` set in the agent's environment, and
+otherwise `/tmp`, which under the packaged unit is the unit's private one.
+On a host whose `/tmp` is mounted `noexec`, set `TMPDIR` in the agent's
+environment to a directory the agent can write to on a filesystem that
+allows execution.
 
 ## Runner profile declarations
 
@@ -98,7 +119,9 @@ profile id, its interpreter and environment root, its library search paths,
 the packages that install it and the compute types it can load. The agent and
 `tensorplate doctor` read the descriptor through one reader, which appends
 every `*.json` file of that directory, in file name order, to the
-descriptor's `runner_profiles`. A host with only the `ct2` package therefore
+descriptor's `runner_profiles`. The serving worker's sidecar launcher reads
+the same files, by the same rules, when it starts a bundle that names a
+runner profile. A host with only the `ct2` package therefore
 reads as having `faster_whisper` and not `kokoro`. Other files in the
 directory are not declarations and are not read. Removing a profile's package
 removes its declaration.

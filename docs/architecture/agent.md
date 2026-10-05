@@ -358,7 +358,11 @@ The process-backed implementation is selected with
 `worker.serving_binary_path`. The agent writes per-candidate serving
 configs under `worker.serving_config_dir` (default:
 `<state_dir>/worker-configs`), starts the worker on loopback, and polls
-`/health` until the candidate reports `ready`. Host CI and unit tests use
+`/health` until the candidate reports `ready`. The config's model block
+carries the `runner_profile` the staged bundle's manifest names, when it
+names one; the worker's sidecar launcher resolves it (see
+[`backend-registry.md`](backend-registry.md#launching-a-runner-profiles-sidecar)).
+Host CI and unit tests use
 `worker.mode = "mock"` so the transaction coordinator is tested without
 requiring hardware backends.
 

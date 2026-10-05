@@ -42,7 +42,9 @@ The `ServingWorker::create(config)` factory builds, in this order:
 3. `ExecutionSession`. When `deployment.use_mock_session` is true,
    the in-process `MockServingSession` is constructed; otherwise the
    registry resolves `deployment.model.backend_hint` and the worker
-   calls `load` + `prime`.
+   calls `load` + `prime`. `deployment.model.runner_profile`, when
+   present, reaches the backend on the `ModelSpec`; the `python_pytorch`
+   adapter starts its sidecar in that installed profile's environment.
 4. `InferScheduler` through `make_scheduler` (V01-E06), with the
    system steady-clock and a scheduler-event sink that mirrors
    metrics and health.
