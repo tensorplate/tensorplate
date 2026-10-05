@@ -18,7 +18,8 @@ jobs:
   build-test:
     name: build + T1 (${{ matrix.preset }})
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    # A cold streaming dependency build includes gRPC, protobuf and OpenSSL.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -108,6 +109,9 @@ jobs:
             -DTP_WARNINGS_AS_ERRORS=ON \
             -DTP_ENABLE_SANITIZERS=${{ matrix.sanitizers }} \
             -DTP_ENABLE_TSAN=${{ matrix.tsan }} \
+            -DTP_ENABLE_STREAMING_GRPC=ON \
+            -DVCPKG_MANIFEST_FEATURES=streaming-grpc \
+            -DVCPKG_TARGET_TRIPLET=x64-linux \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
 
@@ -203,6 +207,7 @@ jobs:
             -DTP_ENABLE_SANITIZERS=OFF \
             -DTP_ENABLE_TENSORRT=ON \
             -DTP_ENABLE_LIBTORCH=ON \
+            -DTP_ENABLE_STREAMING_GRPC=OFF \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
 
@@ -211,6 +216,12 @@ jobs:
 
       - name: T1 adapter-shell unit tests
         run: ctest --test-dir build --output-on-failure -L T1
+
+      - name: Streaming missing-feature refusal and unary serving
+        run: |
+          ctest --test-dir build --output-on-failure --no-tests=error \
+            -R 'ServingConfig.StreamingRequiresCompiledFeature|ServingConfig.StreamingDisabledByDefault'
+          ctest --test-dir build --output-on-failure --no-tests=error -L T2
 
   format:
     name: clang-format
