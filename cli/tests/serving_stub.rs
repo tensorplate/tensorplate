@@ -69,3 +69,31 @@ fn a_client_that_never_sends_its_body_is_refused_after_the_read_timeout() {
     assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
     assert_eq!(serving.requests(), vec![head.into_bytes()]);
 }
+
+#[test]
+fn a_request_without_a_length_header_is_answered_at_the_end_of_its_head() {
+    let serving = ServingStub::start("{}");
+    let mut stream = connect(&serving);
+    let head = "GET /health HTTP/1.1\r\nhost: stub\r\n\r\n";
+    stream.write_all(head.as_bytes()).expect("write head");
+
+    let response = read_response(&mut stream);
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    assert_eq!(serving.requests(), vec![head.as_bytes().to_vec()]);
+}
+
+#[test]
+fn a_length_header_that_is_not_a_length_is_refused() {
+    let serving = ServingStub::start("{}");
+    for length in ["abc", "-1", "18446744073709551615"] {
+        let mut stream = connect(&serving);
+        let head = format!("POST /infer HTTP/1.1\r\ncontent-length: {length}\r\n\r\n");
+        stream.write_all(head.as_bytes()).expect("write head");
+
+        let response = read_response(&mut stream);
+        assert!(
+            response.starts_with("HTTP/1.1 400 "),
+            "{length}: {response}"
+        );
+    }
+}

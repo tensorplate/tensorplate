@@ -87,7 +87,9 @@ impl HealthPort {
 /// Reads through the blank line that ends a request head, so the close
 /// after the answer is not a reset over unread bytes.
 fn read_request_head(stream: &mut TcpStream) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
     let mut head = Vec::new();
     let mut chunk = [0_u8; 512];
     while !head.windows(4).any(|window| window == b"\r\n\r\n") {

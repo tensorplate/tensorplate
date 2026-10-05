@@ -187,7 +187,9 @@ impl ServingStub {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let _ = stream.set_nonblocking(false);
-                        let _ = stream.set_read_timeout(Some(read_timeout));
+                        stream
+                            .set_read_timeout(Some(read_timeout))
+                            .expect("read timeout");
                         let (request, whole) = read_http_request(&mut stream);
                         log_thread.lock().expect("lock").push(request);
                         let (status, body) = if whole {
@@ -246,11 +248,16 @@ impl Drop for ServingStub {
 fn read_http_request(stream: &mut TcpStream) -> (Vec<u8>, bool) {
     let mut request = Vec::new();
     let mut chunk = [0u8; 8 * 1024];
-    let mut length = None;
     loop {
-        length = length.or_else(|| request_length(&request));
-        if length.is_some_and(|length| request.len() >= length) {
-            return (request, true);
+        let head_end = request.windows(4).position(|window| window == b"\r\n\r\n");
+        if let Some(head_len) = head_end.map(|at| at + 4) {
+            let length =
+                declared_body_len(&request[..head_len]).and_then(|body| head_len.checked_add(body));
+            match length {
+                Some(length) if request.len() >= length => return (request, true),
+                Some(_) => {}
+                None => return (request, false),
+            }
         }
         match stream.read(&mut chunk) {
             Ok(n) if n > 0 => request.extend_from_slice(&chunk[..n]),
@@ -259,17 +266,18 @@ fn read_http_request(stream: &mut TcpStream) -> (Vec<u8>, bool) {
     }
 }
 
-/// Length of a request through its `Content-Length` body, once the blank
-/// line that ends its head is in `bytes`.
-fn request_length(bytes: &[u8]) -> Option<usize> {
-    let head_len = bytes.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
-    let body_len = String::from_utf8_lossy(&bytes[..head_len])
+/// Body bytes a request head declares: zero without a `Content-Length`,
+/// `None` when the header is there and is not a length.
+fn declared_body_len(head: &[u8]) -> Option<usize> {
+    let head = String::from_utf8_lossy(head);
+    let declared = head
         .lines()
         .filter_map(|line| line.split_once(':'))
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    Some(head_len + body_len)
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"));
+    match declared {
+        Some((_, value)) => value.trim().parse().ok(),
+        None => Some(0),
+    }
 }
 
 /// Run the `tensorplate` binary with the supplied args against `socket`.
