@@ -55,6 +55,7 @@ add_executable(tp_test_unit
   session_tombstones_test.cpp
   session_finalize_test.cpp
   session_race_test.cpp
+  control_channel_test.cpp
 )
 
 target_include_directories(tp_test_unit

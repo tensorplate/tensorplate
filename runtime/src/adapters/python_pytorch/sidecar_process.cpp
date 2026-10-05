@@ -4,10 +4,12 @@
 
 #include "sidecar_process.hpp"
 
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
@@ -18,11 +20,16 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/ipc/unix_socket.hpp"
+
+// POSIX leaves the declaration of the environment to the program.
+// NOLINTNEXTLINE(readability-redundant-declaration,cppcoreguidelines-avoid-non-const-global-variables)
+extern char** environ;
 
 namespace tensorplate::adapters::python_pytorch {
 
@@ -203,14 +210,58 @@ bool sidecar_is_alive(SidecarHandle& h) noexcept {
   }
 }
 
+/// Upper bound of the fallback scan when the descriptor limit is unknown or huge.
+constexpr int kMaxDescriptorScan = 65'536;
+
+/// The process environment with `overrides` (NAME=value entries) applied.
+/// Built before fork: the child of a process with threads must not allocate.
+std::vector<std::string> merged_environment(const std::vector<std::string>& overrides) {
+  const auto name_of = [](std::string_view entry) { return entry.substr(0, entry.find('=')); };
+  std::vector<std::string> merged;
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-bounds-pointer-arithmetic)
+  for (char** entry = environ; entry != nullptr && *entry != nullptr; ++entry) {
+    const std::string_view inherited{*entry};
+    const bool overridden =
+        std::any_of(overrides.begin(), overrides.end(), [&](const std::string& override_entry) {
+          return name_of(override_entry) == name_of(inherited);
+        });
+    if (!overridden) {
+      merged.emplace_back(inherited);
+    }
+  }
+  merged.insert(merged.end(), overrides.begin(), overrides.end());
+  return merged;
+}
+
 }  // namespace
+
+namespace detail {
+void close_inherited_descriptors(int descriptor_limit, bool try_close_range) noexcept {
+#if defined(__linux__) && defined(SYS_close_range)
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+  if (try_close_range && ::syscall(SYS_close_range, STDERR_FILENO + 1, ~0U, 0U) == 0) {
+    return;
+  }
+#else
+  (void)try_close_range;
+#endif
+  for (int fd = STDERR_FILENO + 1; fd < descriptor_limit; ++fd) {
+    ::close(fd);
+  }
+}
+}  // namespace detail
 
 SidecarLauncher default_fork_exec_launcher() {
   return [](const SidecarLaunchRequest& req) -> Result<SidecarHandle> {
     // Build argv before forking; after fork() we cannot allocate.
     std::vector<std::string> argv_storage = build_argv_storage(req);
     std::vector<char*> argv = argv_pointers(argv_storage);
-    std::vector<std::string> env_storage = req.environment;
+    std::vector<std::string> env_storage = merged_environment(req.environment);
+    std::vector<char*> envp = argv_pointers(env_storage);
+    const long open_max = ::sysconf(_SC_OPEN_MAX);
+    const int descriptor_limit = open_max > 0 && open_max < kMaxDescriptorScan
+                                     ? static_cast<int>(open_max)
+                                     : kMaxDescriptorScan;
 
     const pid_t pid = ::fork();
     if (pid < 0) {
@@ -218,11 +269,11 @@ SidecarLauncher default_fork_exec_launcher() {
                                     std::string("fork failed: ") + std::strerror(errno)));
     }
     if (pid == 0) {
-      // Child. Apply env overrides, then exec; the storage above stays
-      // alive until execvp replaces the address space.
-      for (auto& e : env_storage) {
-        ::putenv(e.data());
-      }
+      // Child of a process that may have threads: system calls and plain
+      // stores only. The storage above stays alive until execvp replaces
+      // the address space.
+      detail::close_inherited_descriptors(descriptor_limit, true);
+      environ = envp.data();
       ::execvp(req.python_exe.c_str(), argv.data());
       std::_Exit(127);
     }

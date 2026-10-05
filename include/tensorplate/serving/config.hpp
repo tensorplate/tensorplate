@@ -63,6 +63,14 @@ struct ActiveDeploymentConfig {
   /// Endpoint name surfaced by `/health` and used by /infer routing.
   /// Defaults to "default".
   std::string endpoint = "default";
+
+  /// Deployment generation this worker serves, when the agent started it
+  /// as a member of one. Never zero. A worker with a generation takes the
+  /// agent's control socket from fd 0 in `ServingWorker::create` and does
+  /// not start without it; `endpoint` then names the deployment and must
+  /// be 1 to 128 of letters, digits, '.', '_' and '-'. Unset, which is the
+  /// default, the worker has no control channel.
+  std::optional<std::uint64_t> generation;
 };
 
 /// Health response mode. v0.1.0 supports a single "local_json"

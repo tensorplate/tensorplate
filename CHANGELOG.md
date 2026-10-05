@@ -28,6 +28,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   bundle that names no runner profile is launched as before.
   `tensorplate doctor`'s runtime probe still uses `python.interpreter`.
   (V030-E01-F01-T04)
+- The serving worker can be controlled by the agent over an inherited
+  socket. A serving config may name the deployment generation its worker
+  serves (`deployment.generation`); such a worker takes the agent's
+  control socket from fd 0 before it builds anything, moves it to a
+  private close-on-exec descriptor, reopens fd 0 on `/dev/null`, and
+  refuses to start (`unavailable`, with the usual startup record) when
+  fd 0 holds no connected local stream socket or the agent's end is
+  closed; its `deployment.endpoint` must then be a deployment id. It
+  then answers `worker_control` requests on a thread of its own, also
+  while the model loads or a backend job blocks: `ledger_status` with an
+  empty ledger, a request for another member with `member_mismatch`, and
+  the other five operations as `unsupported` until they are implemented.
+  Three seconds without a request, or a closed channel, is loss of
+  contact and closes the admission check that logical sessions will use;
+  the worker itself keeps running. A config without a generation, which
+  is what the agent writes today, starts a worker exactly as before. The
+  Python sidecar launcher now closes every descriptor above stderr before
+  `exec`, so a sidecar is started with nothing its worker holds, and
+  builds the sidecar's environment before `fork`.
+  (V030-E04-F01-T04)
 - Runner profile declarations: each speech runtime profile package now says
   which runner profile it installs. `tensorplate-speech-runtime-ct2` and
   `tensorplate-speech-runtime-kokoro` each install one declaration under

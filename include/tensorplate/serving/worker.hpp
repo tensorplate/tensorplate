@@ -75,6 +75,13 @@ class ServingWorker {
   /// On failure, returns the typed error from validation or component
   /// initialization. The returned worker is not yet listening; call
   /// `start()` to open the HTTP listener.
+  ///
+  /// A config with `deployment.generation` makes the worker a member the
+  /// agent controls: this call first takes the control socket from fd 0,
+  /// leaving fd 0 on /dev/null, and answers the agent from then on. Call it
+  /// before the process starts a thread or a child. Without a connected
+  /// stream socket on fd 0 it returns `Error::Code::Unavailable` and
+  /// nothing is built.
   [[nodiscard]] static Result<std::unique_ptr<ServingWorker>> create(ServingConfig config);
 
   /// Alternate factory that accepts a caller-owned `BackendRegistry`.

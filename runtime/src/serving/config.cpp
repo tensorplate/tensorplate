@@ -16,6 +16,20 @@
 namespace tensorplate {
 
 namespace {
+/// What the control protocol accepts as a member's deployment id.
+bool names_a_deployment(std::string_view id) noexcept {
+  constexpr std::size_t kMaxBytes = 128;
+  if (id.empty() || id.size() > kMaxBytes || id == "." || id == "..") {
+    return false;
+  }
+  return std::all_of(id.begin(), id.end(), [](unsigned char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
+           c == '_' || c == '-';
+  });
+}
+
+/// Largest generation every reader of the control protocol represents exactly.
+constexpr std::uint64_t kMaxGeneration = (std::uint64_t{1} << 53U) - 1;
 
 constexpr std::array<std::pair<HealthMode, std::string_view>, 2> kHealthModeNames{{
     {HealthMode::LocalJson, "local_json"},
@@ -139,6 +153,16 @@ Result<void> ServingConfig::validate() const {
   if (!deployment.use_mock_session && !deployment.model.has_value()) {
     return unexpected(Error::Code::ConfigInvalid,
                       "serving config: deployment.model required when use_mock_session=false");
+  }
+  if (deployment.generation &&
+      (*deployment.generation == 0 || *deployment.generation > kMaxGeneration)) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "serving config: deployment.generation must be in [1, 2^53 - 1]");
+  }
+  if (deployment.generation && !names_a_deployment(deployment.endpoint)) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "serving config: with deployment.generation, deployment.endpoint must be "
+                      "a deployment id: 1 to 128 of letters, digits, '.', '_' and '-'");
   }
   return Result<void>{};
 }
@@ -273,6 +297,18 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
       cfg.deployment.backend = value_or_default<std::string>(d, "backend", cfg.deployment.backend);
       cfg.deployment.endpoint =
           value_or_default<std::string>(d, "endpoint", cfg.deployment.endpoint);
+      if (d.contains("generation")) {
+        // Present-null and anything but an integer are refused here, and
+        // validate() holds the range, so that a member is never started as
+        // a worker without control.
+        const auto& generation = d["generation"];
+        if (!generation.is_number_unsigned()) {
+          return unexpected(Error::Code::ConfigInvalid,
+                            "serving config: deployment.generation must be an integer in "
+                            "[1, 2^53 - 1]");
+        }
+        cfg.deployment.generation = generation.get<std::uint64_t>();
+      }
       if (d.contains("model") && d["model"].is_object()) {
         const auto& m = d["model"];
         if (!m.contains("model_id") || !m.contains("model_class") || !m.contains("artifact_path") ||
@@ -360,6 +396,9 @@ std::string ServingConfig::to_json() const {
   dep["use_mock_session"] = deployment.use_mock_session;
   dep["backend"] = deployment.backend;
   dep["endpoint"] = deployment.endpoint;
+  if (deployment.generation) {
+    dep["generation"] = *deployment.generation;
+  }
   if (deployment.model.has_value()) {
     const auto& m = *deployment.model;
     dep["model"] = {

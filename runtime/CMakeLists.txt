@@ -64,6 +64,7 @@ set(_tp_runtime_sources
   src/serving/pipeline.cpp
   src/serving/router.cpp
   src/serving/worker.cpp
+  src/serving/control_channel.cpp
   # Logical-session lifecycle: a pure state machine with no timers or I/O.
   src/serving/session/state_machine.cpp
   src/serving/session/limits.cpp
