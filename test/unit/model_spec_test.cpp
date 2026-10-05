@@ -107,6 +107,26 @@ TEST(ModelSpec, RejectsPresentButEmptyProfileId) {
   EXPECT_EQ(r.error().code, Error::Code::ConfigInvalid);
 }
 
+TEST(ModelSpec, RunnerProfileIsUnsetUnlessGiven) {
+  auto without = ModelSpec::create("id", ModelClass::Speech, "p", "python_pytorch");
+  ASSERT_TRUE(without.has_value());
+  EXPECT_FALSE(without.value().runner_profile().has_value());
+
+  auto with = ModelSpec::create("id", ModelClass::Speech, "p", "python_pytorch",
+                                PrecisionHint::Auto, std::nullopt, "faster_whisper");
+  ASSERT_TRUE(with.has_value());
+  EXPECT_EQ(with.value().runner_profile(), std::optional<std::string>{"faster_whisper"});
+  EXPECT_FALSE(with.value().profile_id().has_value());
+  EXPECT_NE(with.value(), without.value());
+}
+
+TEST(ModelSpec, RejectsEmptyRunnerProfile) {
+  auto r = ModelSpec::create("id", ModelClass::Speech, "p", "python_pytorch", PrecisionHint::Auto,
+                             std::nullopt, std::string{});
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, Error::Code::ConfigInvalid);
+}
+
 TEST(ModelSpec, EqualityComparesAllFields) {
   auto a = ModelSpec::create("id", ModelClass::Vision, "p", "tensorrt", PrecisionHint::Fp16, {});
   auto b = ModelSpec::create("id", ModelClass::Vision, "p", "tensorrt", PrecisionHint::Fp16, {});

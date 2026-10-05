@@ -36,8 +36,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use tensorplate_protocol::bundle::{
-    evaluate_compatibility, parse_bundle, BackendCapabilityView, BackendProfile, BundleDescriptor,
-    CompatibilityViolation, DeviceContext, ParseError,
+    evaluate_compatibility, parse_bundle, parse_bundle_with, BackendCapabilityView, BackendProfile,
+    BundleDescriptor, CompatibilityViolation, DeviceContext, ParseError, ParseOptions,
 };
 use tensorplate_protocol::bundle_manifest::BundleManifest;
 
@@ -103,6 +103,23 @@ pub(crate) fn model_artifact_relative_path(bundle_path: &Path) -> AgentResult<St
     descriptor
         .model_artifact_relative_path()
         .ok_or_else(|| AgentError::BundleManifest("manifest missing model artifact".into()))
+}
+
+/// The runner profile the staged bundle at `bundle_path` selects, if its
+/// manifest names one. Reads the manifest only: the artifacts were verified
+/// when the bundle was staged.
+///
+/// # Errors
+///
+/// Returns [`AgentError::BundleMissing`] when the staged directory is gone,
+/// and [`AgentError::BundleManifest`] when the manifest is missing,
+/// malformed, or does not validate.
+pub(crate) fn staged_runner_profile(bundle_path: &Path) -> AgentResult<Option<String>> {
+    let options = ParseOptions {
+        verify_artifact_digests: false,
+    };
+    let descriptor = parse_bundle_with(bundle_path, options).map_err(parse_error_to_agent_error)?;
+    Ok(descriptor.manifest.profile.and_then(|p| p.runner_profile))
 }
 
 /// Verify the bundle at `bundle_path` against the agent config.

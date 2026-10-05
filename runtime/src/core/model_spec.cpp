@@ -76,7 +76,8 @@ std::optional<PrecisionHint> precision_hint_from_string(std::string_view name) n
 Result<ModelSpec> ModelSpec::create(std::string model_id, ModelClass model_class,
                                     std::string artifact_path, std::string backend_hint,
                                     PrecisionHint precision_hint,
-                                    std::optional<std::string> profile_id) {
+                                    std::optional<std::string> profile_id,
+                                    std::optional<std::string> runner_profile) {
   if (model_id.empty()) {
     return unexpected(Error::Code::ConfigInvalid, "ModelSpec.model_id must be non-empty");
   }
@@ -90,6 +91,10 @@ Result<ModelSpec> ModelSpec::create(std::string model_id, ModelClass model_class
     return unexpected(Error::Code::ConfigInvalid,
                       "ModelSpec.profile_id, if present, must be non-empty");
   }
+  if (runner_profile.has_value() && runner_profile->empty()) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "ModelSpec.runner_profile, if present, must be non-empty");
+  }
 
   ModelSpec spec;
   spec.model_id_ = std::move(model_id);
@@ -98,6 +103,7 @@ Result<ModelSpec> ModelSpec::create(std::string model_id, ModelClass model_class
   spec.backend_hint_ = std::move(backend_hint);
   spec.precision_hint_ = precision_hint;
   spec.profile_id_ = std::move(profile_id);
+  spec.runner_profile_ = std::move(runner_profile);
   return spec;
 }
 

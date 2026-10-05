@@ -36,6 +36,10 @@ target_link_libraries(tp_test_integration
     GTest::gtest_main
 )
 
+# Lets the adapter test stage the packaged backend descriptor and read
+# bundle fixtures from the source tree.
+target_compile_definitions(tp_test_integration PRIVATE TP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
 # The adapter test runs the serving worker binary against a bundle fixture
 # and compares its stderr with the fixture the agent's deploy tests replay.
 if(TARGET tp_serving_worker)
@@ -43,7 +47,6 @@ if(TARGET tp_serving_worker)
   target_compile_definitions(tp_test_integration
     PRIVATE
       TP_SERVING_WORKER_BINARY="$<TARGET_FILE:tp_serving_worker>"
-      TP_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
   )
 endif()
 

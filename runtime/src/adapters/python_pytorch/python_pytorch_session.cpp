@@ -11,12 +11,14 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -36,6 +38,7 @@
 #include "tensorplate/ipc/sidecar_codec.hpp"
 #include "tensorplate/ipc/unix_socket.hpp"
 
+#include "runner_profile.hpp"
 #include "sidecar_process.hpp"
 
 namespace tensorplate::adapters::python_pytorch {
@@ -302,9 +305,12 @@ class PythonPytorchSession final : public ExecutionSession {
     if (process_) {
       return unexpected(Error::Code::Internal, "python_pytorch session already loaded");
     }
-    SidecarLaunchRequest req;
-    req.python_exe = config_.python_exe;
-    auto proc_r = SidecarProcess::start(req, launcher_, deadline_from_now(config_.startup_timeout));
+    auto req = launch_request(spec);
+    if (!req.has_value()) {
+      return unexpected(req.error());
+    }
+    auto proc_r =
+        SidecarProcess::start(req.value(), launcher_, deadline_from_now(config_.startup_timeout));
     if (!proc_r.has_value()) {
       return unexpected(proc_r.error());
     }
@@ -383,6 +389,32 @@ class PythonPytorchSession final : public ExecutionSession {
   }
 
  private:
+  // A deployment that selects a runner profile runs where the descriptor
+  // says or not at all: `config_.python_exe` and PATH are not a fallback.
+  Result<SidecarLaunchRequest> launch_request(const ModelSpec& spec) const {
+    const std::optional<std::string>& runner_profile = spec.runner_profile();
+    if (!runner_profile.has_value()) {
+      SidecarLaunchRequest req;
+      req.python_exe = config_.python_exe;
+      return req;
+    }
+    std::filesystem::path descriptor = config_.descriptor_path;
+    if (descriptor.empty()) {
+      auto installed = installed_descriptor_path();
+      if (!installed.has_value()) {
+        return unexpected(installed.error());
+      }
+      descriptor = std::move(installed).value();
+    }
+    auto environment = read_runner_environment(descriptor, *runner_profile);
+    if (!environment.has_value()) {
+      return unexpected(environment.error());
+    }
+    std::error_code ec;
+    auto temp_dir = std::filesystem::temp_directory_path(ec);
+    return runner_launch_request(environment.value(), ec ? std::filesystem::path{} : temp_dir);
+  }
+
   Result<json> exchange(const json& request_header, const std::vector<std::byte>& payload,
                         ipc::UnixSocket::TimePoint deadline, const std::string& expected_kind,
                         Error::Code default_error_code) {
@@ -597,6 +629,13 @@ class PythonPytorchSession final : public ExecutionSession {
   std::vector<std::byte> last_payload_;
 };
 
+std::unique_ptr<ExecutionSession> make_python_pytorch_session(ExecutionSessionRuntimeHooks hooks,
+                                                              PythonPytorchConfig config,
+                                                              SidecarLauncher launcher) {
+  return std::unique_ptr<ExecutionSession>(
+      new PythonPytorchSession(hooks, std::move(config), std::move(launcher)));
+}
+
 }  // namespace tensorplate::adapters::python_pytorch
 
 namespace tensorplate {
@@ -605,8 +644,8 @@ Result<void> register_python_pytorch_backend(BackendRegistry& registry) {
   using adapters::python_pytorch::default_fork_exec_launcher;
   using adapters::python_pytorch::kBackendName;
   using adapters::python_pytorch::make_python_pytorch_capability;
+  using adapters::python_pytorch::make_python_pytorch_session;
   using adapters::python_pytorch::PythonPytorchConfig;
-  using adapters::python_pytorch::PythonPytorchSession;
   return registry.register_backend(BackendEntry{
       std::string(kBackendName),
       make_python_pytorch_capability(),
@@ -619,8 +658,7 @@ Result<void> register_python_pytorch_backend(BackendRegistry& registry) {
             "TP_PYTHON_PYTORCH_INFER_TIMEOUT_MS", config.infer_timeout);
         config.health_timeout = adapters::python_pytorch::configured_duration_ms(
             "TP_PYTHON_PYTORCH_HEALTH_TIMEOUT_MS", config.health_timeout);
-        return std::unique_ptr<ExecutionSession>(
-            new PythonPytorchSession(hooks, std::move(config), default_fork_exec_launcher()));
+        return make_python_pytorch_session(hooks, std::move(config), default_fork_exec_launcher());
       },
   });
 }
