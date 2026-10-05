@@ -45,7 +45,7 @@ pub const DPKG_INSTALLED_STATES: [&str; 4] = [
 const MAX_OUTPUT_BYTES: u64 = 1 << 20;
 
 /// How long a pipe may stay open after the process that wrote to it exited.
-const PIPE_CLOSE_GRACE: Duration = Duration::from_secs(1);
+pub(crate) const PIPE_CLOSE_GRACE: Duration = Duration::from_secs(1);
 
 const DPKG_QUERY_FORMAT: &str = "-f=${Package}\\t${db:Status-Status}\\n";
 
@@ -172,7 +172,7 @@ fn is_package_name(name: &str) -> bool {
 
 /// Wait for `child` to exit. Past `timeout` it is killed and reaped, so no
 /// caller hangs on a package database that does not answer.
-fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<ExitStatus, String> {
+pub(crate) fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<ExitStatus, String> {
     let deadline = Instant::now() + timeout;
     loop {
         let failure = match child.try_wait() {
@@ -194,7 +194,7 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<ExitStatus, Stri
 /// [`MAX_OUTPUT_BYTES`] when the pipe closes. What follows them is read and
 /// dropped, so the writer is neither blocked nor cut off and the caller
 /// sees a full buffer rather than a shortened answer.
-fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> Receiver<Vec<u8>> {
+pub(crate) fn read_in_background(pipe: Option<impl Read + Send + 'static>) -> Receiver<Vec<u8>> {
     let (sender, receiver) = channel();
     if let Some(mut pipe) = pipe {
         std::thread::spawn(move || {

@@ -10,4 +10,5 @@
 
 pub use tensorplate_protocol::backend_probe::{
     probe_backend, probe_python_pytorch, BackendProbeReport, BackendProbeState, ProbeOptions,
+    RunnerProfileProbe, ServingState,
 };

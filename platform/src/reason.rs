@@ -11,7 +11,7 @@
 // verdict for a readable multi-device answer without renaming another cause.
 
 use serde::{Deserialize, Serialize};
-use tensorplate_protocol::backend_probe::BackendProbeState;
+use tensorplate_protocol::backend_probe::{BackendProbeState, ServingState};
 
 /// Why a detected platform is not a supported combination.
 ///
@@ -113,6 +113,17 @@ impl PlatformReason {
         }
     }
 
+    /// The reason a bundle is refused for the state that decides it. A
+    /// runner profile no installed package declares is a package to
+    /// install, like an absent descriptor.
+    #[must_use]
+    pub fn for_serving_state(state: ServingState<'_>) -> Option<Self> {
+        match state {
+            ServingState::Probed(state) => Self::for_backend_probe(state),
+            ServingState::RunnerProfileNotInstalled => Some(Self::MissingBackendPackage),
+        }
+    }
+
     /// Stable serialized name (snake_case). The exhaustive match makes a
     /// newly added reason a compile error here rather than a silently
     /// unspelled one.
@@ -164,6 +175,24 @@ mod tests {
         spellings.sort_unstable();
         spellings.dedup();
         assert_eq!(spellings.len(), 11, "reason spellings must be distinct");
+    }
+
+    #[test]
+    fn a_bundle_is_classified_by_the_state_that_decides_it() {
+        use tensorplate_protocol::backend_probe::{BackendProbeState as S, ServingState};
+        assert_eq!(
+            PlatformReason::for_serving_state(ServingState::RunnerProfileNotInstalled),
+            Some(PlatformReason::MissingBackendPackage)
+        );
+        let no_torch = S::PytorchMissing {
+            detail: String::new(),
+        };
+        for state in [S::Runnable, S::DescriptorMissing, no_torch] {
+            assert_eq!(
+                PlatformReason::for_serving_state(ServingState::Probed(&state)),
+                PlatformReason::for_backend_probe(&state)
+            );
+        }
     }
 
     #[test]
