@@ -50,7 +50,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   stops when it is active again or its drain has completed, and is not
   moved by delivery progress, a further finalization or a half-close; a
   session that reaches it ends with `finalize_timeout` through the cancel
-  path. The five-second no-progress limit still ends a stalled reader
+  path, except that a drain the worker started keeps its own cause
+  (`deployment_retired` or `worker_shutdown`). The five-second no-progress limit still ends a stalled reader
   sooner, and the wait for the backend's release after a completed drain
   is not counted. `SessionManager::check_generation` checks the
   deployment generation a later message or backend report names and

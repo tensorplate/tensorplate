@@ -122,6 +122,9 @@ class SessionManager {
   [[nodiscard]] Result<LogicalSessionStatus> update_credit(std::uint64_t session_key,
                                                            const CreditUpdate& update);
   [[nodiscard]] std::optional<SessionExpiry> expiry_locked(const Entry& entry) const;
+  /// The cause an expired session ends with: the timeout's, except that a
+  /// drain carrying its own cause keeps it when its finalize deadline cuts it.
+  [[nodiscard]] static Error expiry_cause(const Entry& entry, SessionExpiry expiry);
   [[nodiscard]] static LogicalSessionStatus status_of(const Entry& entry);
   [[nodiscard]] Error missing_session_locked(std::uint64_t session_key) const;
   void emit(const ManagedSessionTransition& transition) const;

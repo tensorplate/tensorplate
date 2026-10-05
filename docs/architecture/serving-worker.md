@@ -340,8 +340,9 @@ The deadline starts when an accepted event first leaves the session in
 or `drain_completed` is applied. Nothing in between moves it: not a
 delivery, a further automatic endpoint, a client Finalize taking over,
 or a half-close during a finalization. A session that reaches it is
-aborted with `finalize_timeout`, through the cancel path like the other
-timeouts. The no-progress limit above is separate and ends a stalled
+aborted through the cancel path like the other timeouts, with
+`finalize_timeout` or, for a drain the worker started, with that drain's
+own cause. The no-progress limit above is separate and ends a stalled
 reader sooner. Once a drain has completed, the session waits for the
 backend to acknowledge release without this deadline; bounding that wait
 belongs to backend cleanup.
@@ -460,7 +461,7 @@ How sessions end, and the code their terminal outcome carries:
 | Input item without bytes | `accept_input` (the manager applies `fail`) | `failed` | `config_invalid` (`empty_input`) |
 | Credit release that does not match what is held (a defect) | a release call (the manager applies `fail`) | `failed` | `internal` (`input_release_mismatch`, `segment_stage_violation` or `wrong_input_kind`) |
 | Output undelivered past the no-progress limit | the manager's timer applies `abort` | `closed` | `resource_exhausted` (`slow_consumer`) |
-| A finalization or a drain not finished by the finalize deadline | the manager's timer applies `abort` | `closed` | `timeout` (`finalize_timeout`) |
+| A finalization or a client's drain not finished by the finalize deadline | the manager's timer applies `abort` | `closed` | `timeout` (`finalize_timeout`) |
 | Backend process reset or reaped | `backend_reset` | `failed` | `unavailable` (`backend_reset`) |
 | Deployment generation retiring | `drain`, then `abort` at the deadline | `closed` | `unavailable` (`deployment_retired`) |
 | Worker shutting down | `drain`, then `abort` at the deadline | `closed` | `unavailable` (`worker_shutdown`) |
@@ -469,10 +470,14 @@ How sessions end, and the code their terminal outcome carries:
 | Owner report the state does not permit (a defect) | `fail` | `failed` | `internal` (`unexpected_report`) |
 
 A drain the worker starts is held to the session's finalize deadline like
-any other. When that deadline comes first, the session's end cause is the
-most recent one: a retiring or shutting-down worker's audio session that
-has not drained in 10 seconds closes with `timeout` (`finalize_timeout`),
-not with `unavailable`.
+any other, and keeps its own end cause when that deadline cuts it: a
+retiring or shutting-down worker's audio session that has not drained in
+10 seconds closes with `unavailable` (`deployment_retired` or
+`worker_shutdown`), so that its client knows to reopen elsewhere. The
+deadline decides when such a session ends, not why. A drain the client
+started, and any finalization, ends with `timeout` (`finalize_timeout`).
+Another limit that ends a worker's drain first, such as the no-progress
+limit, reports itself.
 
 The reason strings are the failure reasons in
 [`failure-reasons.md`](../observability/failure-reasons.md) where one

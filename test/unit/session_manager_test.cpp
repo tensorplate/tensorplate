@@ -732,6 +732,68 @@ TEST(SessionManager, StaleGenerationOnAnExpiredSessionLeavesTheTimeoutAsItsCause
   EXPECT_TRUE(manager.sweep_due().empty());
 }
 
+TEST(SessionManager, WorkerDrainCutByItsDeadlineKeepsTheDrainCause) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto swept_session = manager.open(5, kBudgets);
+  const auto messaged_session = manager.open(5, kBudgets);
+  ASSERT_TRUE(swept_session);
+  ASSERT_TRUE(messaged_session);
+  const auto draining = manager.stop_admission_and_drain(
+      Error::make(Error::Code::Unavailable, "deployment retiring", "deployment_retired"));
+  ASSERT_EQ(draining.size(), 2U);
+  under_test.clock.advance(10s);
+
+  // A client message that finds the deadline passed is answered with the cause.
+  const auto late = manager.apply(messaged_session->session_key, LogicalSessionEvent::Ping);
+  ASSERT_FALSE(late);
+  EXPECT_EQ(late.error().code, Error::Code::Unavailable);
+  EXPECT_EQ(late.error().context, "deployment_retired");
+
+  const auto swept = manager.sweep_due();
+  ASSERT_EQ(swept.size(), 1U);
+  EXPECT_EQ(swept[0].session_key, swept_session->session_key);
+  for (const auto key : {swept_session->session_key, messaged_session->session_key}) {
+    EXPECT_EQ(manager.state(key).value(), LogicalSessionState::CancelRequested);
+    const auto closed = manager.apply(key, LogicalSessionEvent::ReleaseAcknowledged);
+    ASSERT_TRUE(closed);
+    ASSERT_TRUE(closed->cause);
+    EXPECT_EQ(closed->cause->code, Error::Code::Unavailable);
+    EXPECT_EQ(closed->cause->context, "deployment_retired");
+  }
+}
+
+TEST(SessionManager, WorkerDrainEndedByAnotherLimitReportsThatLimit) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto opened = manager.open(5, SessionBudgets::for_text_input(48'000).value());
+  ASSERT_TRUE(opened);
+  ASSERT_EQ(manager
+                .stop_admission_and_drain(Error::make(Error::Code::Unavailable,
+                                                      "worker shutting down", "worker_shutdown"))
+                .size(),
+            1U);
+  auto chunk = output_item(OutputKind::Audio, 960);
+  ASSERT_EQ(opened->output->offer(chunk, under_test.clock.now()).value(), OutputOffer::Queued);
+  under_test.clock.advance(5s);
+  const auto stalled = manager.sweep_due();
+  ASSERT_EQ(stalled.size(), 1U);
+  EXPECT_EQ(stalled[0].cause.value().context, "slow_consumer");
+}
+
+TEST(SessionManager, ClientDrainCutByItsDeadlineEndsAsATimeout) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  const auto opened = manager.open(5, kBudgets);
+  ASSERT_TRUE(opened);
+  ASSERT_TRUE(manager.apply(opened->session_key, LogicalSessionEvent::HalfClose));
+  under_test.clock.advance(10s);
+  const auto cut = manager.sweep_due();
+  ASSERT_EQ(cut.size(), 1U);
+  EXPECT_EQ(cut[0].cause.value().code, Error::Code::Timeout);
+  EXPECT_EQ(cut[0].cause.value().context, "finalize_timeout");
+}
+
 TEST(SessionManager, RestartedWorkerKnowsNothingOfEarlierSessions) {
   testing::FakeSchedulerClock clock;
   std::vector<ManagedSessionTransition> replayed;

@@ -267,7 +267,7 @@ Result<ManagedSessionTransition> SessionManager::apply_event(std::uint64_t sessi
           early_release_refusal = accepted.error();
         }
       }
-      timeout_refusal = expiry_error(*expiry);
+      timeout_refusal = expiry_cause(it->second, *expiry);
       expired_transition =
           apply_locked(session_key, it->second, LogicalSessionEvent::Abort, timeout_refusal);
       if (!expired_transition) {
@@ -400,8 +400,8 @@ std::vector<ManagedSessionTransition> SessionManager::sweep_due() {
       if (!expiry) {
         continue;
       }
-      auto result =
-          apply_locked(key, it->second, LogicalSessionEvent::Abort, expiry_error(*expiry));
+      auto result = apply_locked(key, it->second, LogicalSessionEvent::Abort,
+                                 expiry_cause(it->second, *expiry));
       if (result) {
         transition = *result;
       }
@@ -521,6 +521,16 @@ Result<LogicalSessionStatus> SessionManager::update_credit(std::uint64_t session
 LogicalSessionStatus SessionManager::status_of(const Entry& entry) {
   return LogicalSessionStatus{entry.machine.state(), entry.credit.depth(), entry.credit.usage(),
                               entry.output->pcm_usage(), entry.output->metadata_usage()};
+}
+
+Error SessionManager::expiry_cause(const Entry& entry, SessionExpiry expiry) {
+  // While the finalize deadline runs, a session has a cause only if a drain
+  // brought one: the worker's. It says why the session ends, so that a
+  // client reopens elsewhere; the deadline only decides when.
+  if (expiry == SessionExpiry::FinalizeDeadline && entry.cause) {
+    return *entry.cause;
+  }
+  return expiry_error(expiry);
 }
 
 std::optional<SessionExpiry> SessionManager::expiry_locked(const Entry& entry) const {
