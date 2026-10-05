@@ -24,6 +24,7 @@ add_executable(tp_test_integration
   session_lifecycle_test.cpp
   # The worker binary and the control descriptor it inherits as fd 0.
   control_descriptor_test.cpp
+  worker_signal_test.cpp
 )
 
 target_include_directories(tp_test_integration

@@ -214,6 +214,23 @@ Latency histograms use the same bucket boundaries everywhere:
 
 ## Graceful shutdown
 
+The binary installs SIGINT/SIGTERM handlers before creating the worker.
+Each handler only writes the signal number to a nonblocking self-pipe and
+preserves `errno`; it never touches the worker, allocates, logs, or locks.
+The main thread waits on that pipe after `start()`, then calls
+`shutdown("SIGINT" | "SIGTERM")` and `stop()` in ordinary thread context.
+A second signal during shutdown cannot re-enter either call. SIGPIPE
+remains ignored through worker teardown.
+
+The pipe retains a signal received while the model loads. After a successful
+load, the main thread shuts down without opening the listener if a signal
+is already queued. Load failures retain their typed startup failure record
+and exit status. The pipe is close-on-exec, lives above the standard
+descriptors, and outlives the worker and its threads. The control channel's
+teardown order is unchanged: its thread stops before the components it may
+reach are destroyed. Library callers can still use `serve_forever()` and
+request shutdown from an ordinary thread.
+
 Shutdown flows through `ShutdownController` (Running → Stopping →
 Draining → Stopped):
 

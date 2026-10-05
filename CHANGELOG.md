@@ -6,6 +6,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- Run serving-worker SIGINT/SIGTERM shutdown on the main thread, retaining
+  signals during model load and avoiding signal-handler locks, allocation,
+  and repeated shutdown entry. (V030-E04-F03-T02)
+
 ### Added
 
 - The sidecar launcher starts a bundle that names a runner profile in that

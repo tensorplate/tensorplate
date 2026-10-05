@@ -524,10 +524,8 @@ ServingExitCode ServingWorker::serve_forever() {
 }
 
 void ServingWorker::shutdown(std::string_view reason) noexcept {
-  // The public shutdown method is noexcept so signal handlers and agent
-  // RPC paths can call it without unwinding. Swallow exceptions from
-  // logging / string construction so the shutdown intent always reaches
-  // the controller.
+  // Logging and controller locks require ordinary thread context, never a
+  // signal handler. Exceptions must not escape the shutdown caller.
   try {
     if (!impl_) {
       return;
