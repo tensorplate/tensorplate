@@ -84,7 +84,12 @@
               "type": "string",
               "enum": ["auto", "fp32", "fp16", "bfloat16", "int8", "int4"]
             },
-            "profile_id": {"type": "string", "minLength": 1}
+            "profile_id": {"type": "string", "minLength": 1},
+            "runner_profile": {
+              "type": "string",
+              "pattern": "^[a-z0-9]+(_[a-z0-9]+)*$",
+              "description": "Installed runner profile the deployment's bundle selects, by its id in the backend descriptor's `runner_profiles`. Absent when the bundle selects none."
+            }
           }
         }
       }

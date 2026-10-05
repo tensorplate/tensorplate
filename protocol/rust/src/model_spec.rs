@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // V01-E02-F02: Rust mirror of `protocol/schemas/model_spec.json` and the C++
-// `tensorplate::ModelSpec` value object.
+// `tensorplate::ModelSpec` value object, whose `runner_profile` the schema
+// and this mirror do not carry.
 
 use serde::{Deserialize, Serialize};
 

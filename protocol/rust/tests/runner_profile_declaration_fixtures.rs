@@ -42,6 +42,7 @@ const MERGED: &str = "protocol/rust/tests/fixtures/backend_descriptor_runner_pro
 const CASES: &str = "protocol/rust/tests/fixtures/runner_profile_declarations/cases.json";
 const SECOND: &str =
     "protocol/rust/tests/fixtures/runner_profile_declarations/second_faster_whisper.json";
+const RULE_CASES: &str = "protocol/rust/tests/fixtures/runner_profile_declarations/rule_cases.json";
 const STT: &str = "packaging/backend-metadata/runner_profiles/faster_whisper.json";
 const TTS: &str = "packaging/backend-metadata/runner_profiles/kokoro.json";
 
@@ -419,6 +420,36 @@ impl PackageInventory for Unconditional {
     fn installed(&self, names: &BTreeSet<&str>) -> Result<BTreeSet<String>, String> {
         Ok(names.iter().map(ToString::to_string).collect())
     }
+}
+
+/// The sidecar launcher has a reader of its own for these files and runs
+/// the same cases: what one reader accepts, the other must.
+#[test]
+fn every_rule_case_is_accepted_or_refused_as_it_says() {
+    let cases = read_json(RULE_CASES);
+    let cases = cases["cases"].as_array().expect("cases");
+    let mut accepted = 0;
+    for case in cases {
+        let name = case["name"].as_str().expect("name");
+        let (_root, path) = install(BASE, &json!({}));
+        let file = path
+            .with_file_name(RUNNER_PROFILE_DECLARATION_DIR)
+            .join("case.json");
+        let text = match case.get("text") {
+            Some(text) => text.as_str().expect("text").to_owned(),
+            None => case["declaration"].to_string(),
+        };
+        std::fs::write(&file, text).expect("declaration");
+
+        let read = BackendDescriptor::read_with_inventory(&path, &Unconditional);
+
+        let expected = case["accepted"].as_bool().expect("accepted");
+        let outcome = read.as_ref().map(ids).map_err(ToString::to_string);
+        assert_eq!(read.is_ok(), expected, "{name}: {outcome:?}");
+        accepted += usize::from(expected);
+    }
+    // The launcher's test pins the same two counts.
+    assert_eq!((accepted, cases.len() - accepted), (10, 55));
 }
 
 #[test]

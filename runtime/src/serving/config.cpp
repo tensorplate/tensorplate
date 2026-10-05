@@ -296,9 +296,18 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
         if (m.contains("profile_id") && m["profile_id"].is_string()) {
           profile = m["profile_id"].get<std::string>();
         }
-        auto spec_r = ModelSpec::create(m["model_id"].get<std::string>(), mc_r.value(),
-                                        m["artifact_path"].get<std::string>(),
-                                        m["backend_hint"].get<std::string>(), precision, profile);
+        std::optional<std::string> runner_profile;
+        if (m.contains("runner_profile")) {
+          // Not skipped when mistyped: the model would load in the default environment.
+          if (!m["runner_profile"].is_string()) {
+            return unexpected(Error::Code::ConfigInvalid,
+                              "serving config: deployment.model.runner_profile must be a string");
+          }
+          runner_profile = m["runner_profile"].get<std::string>();
+        }
+        auto spec_r = ModelSpec::create(
+            m["model_id"].get<std::string>(), mc_r.value(), m["artifact_path"].get<std::string>(),
+            m["backend_hint"].get<std::string>(), precision, profile, std::move(runner_profile));
         if (!spec_r) {
           return unexpected(spec_r.error());
         }
@@ -362,6 +371,9 @@ std::string ServingConfig::to_json() const {
     };
     if (m.profile_id().has_value()) {
       dep["model"]["profile_id"] = *m.profile_id();
+    }
+    if (const auto& runner_profile = m.runner_profile(); runner_profile.has_value()) {
+      dep["model"]["runner_profile"] = *runner_profile;
     }
   }
   root["deployment"] = std::move(dep);

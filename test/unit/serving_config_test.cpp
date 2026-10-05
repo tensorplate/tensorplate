@@ -101,6 +101,43 @@ TEST(ServingConfig, ToJsonRoundtrip) {
   EXPECT_EQ(re.value().async_policy.max_pending, 7U);
 }
 
+std::string config_with_model(const std::string& extra_model_fields) {
+  return R"({"schema_version": "0.1", "deployment": {"use_mock_session": false,
+    "endpoint": "stt", "backend": "python_pytorch", "model": {"model_id": "stt",
+    "model_class": "speech", "artifact_path": "/bundle/entry.json",
+    "backend_hint": "python_pytorch")" +
+         extra_model_fields + "}}}";
+}
+
+TEST(ServingConfig, RunnerProfileReachesTheModelSpecAndSurvivesARoundtrip) {
+  auto r = ServingConfig::parse_json(config_with_model(R"(, "runner_profile": "faster_whisper")"));
+  ASSERT_TRUE(r) << r.error().message;
+  ASSERT_TRUE(r.value().deployment.model.has_value());
+  EXPECT_EQ(r.value().deployment.model->runner_profile(),
+            std::optional<std::string>{"faster_whisper"});
+
+  auto again = ServingConfig::parse_json(r.value().to_json());
+  ASSERT_TRUE(again) << again.error().message;
+  EXPECT_EQ(again.value().deployment.model, r.value().deployment.model);
+}
+
+TEST(ServingConfig, ModelWithoutRunnerProfileHasNone) {
+  auto r = ServingConfig::parse_json(config_with_model(""));
+  ASSERT_TRUE(r) << r.error().message;
+  EXPECT_FALSE(r.value().deployment.model->runner_profile().has_value());
+  EXPECT_EQ(r.value().to_json().find("runner_profile"), std::string::npos);
+}
+
+TEST(ServingConfig, RunnerProfileThatIsNotANonEmptyStringIsRefused) {
+  for (const char* value : {"null", "7", "[\"kokoro\"]", "\"\""}) {
+    SCOPED_TRACE(value);
+    auto r =
+        ServingConfig::parse_json(config_with_model(std::string{", \"runner_profile\": "} + value));
+    ASSERT_FALSE(r);
+    EXPECT_EQ(r.error().code, Error::Code::ConfigInvalid);
+  }
+}
+
 TEST(ServingConfig, HealthAndMetricsModeNames) {
   EXPECT_EQ(to_string(HealthMode::LocalJson), "local_json");
   EXPECT_EQ(to_string(MetricsMode::PrometheusText), "prometheus_text");
