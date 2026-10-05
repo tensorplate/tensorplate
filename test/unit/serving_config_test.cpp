@@ -29,10 +29,10 @@ TEST(ServingConfig, StreamingDisabledByDefault) {
     SCOPED_TRACE(text);
     const auto parsed = ServingConfig::parse_json(text);
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_FALSE(parsed->streaming_enabled);
+    EXPECT_FALSE(parsed->streaming.enabled);
     EXPECT_EQ(parsed->to_json().find("streaming"), std::string::npos);
   }
-  EXPECT_FALSE(ServingConfig{}.streaming_enabled);
+  EXPECT_FALSE(ServingConfig{}.streaming.enabled);
 }
 
 TEST(ServingConfig, StreamingSchemaDeclaresOptionalBoolean) {
@@ -44,7 +44,7 @@ TEST(ServingConfig, StreamingSchemaDeclaresOptionalBoolean) {
   EXPECT_EQ(streaming.at("additionalProperties"), false);
   const auto& enabled = streaming.at("properties").at("enabled");
   EXPECT_EQ(enabled.at("type"), "boolean");
-  EXPECT_EQ(enabled.at("default"), ServingConfig{}.streaming_enabled);
+  EXPECT_EQ(enabled.at("default"), ServingConfig{}.streaming.enabled);
   EXPECT_EQ(streaming.at("properties").size(), 1U);
   EXPECT_FALSE(streaming.contains("required"));
   for (const auto& required : schema.at("required")) {
@@ -54,17 +54,17 @@ TEST(ServingConfig, StreamingSchemaDeclaresOptionalBoolean) {
 
 TEST(ServingConfig, StreamingRequiresCompiledFeature) {
   ServingConfig config;
-  config.streaming_enabled = true;
+  config.streaming.enabled = true;
   const auto validated = config.validate();
   const auto parsed =
       ServingConfig::parse_json(R"({"schema_version":"0.1","streaming":{"enabled":true}})");
 #if TP_ENABLE_STREAMING_GRPC
   ASSERT_TRUE(validated.has_value());
   ASSERT_TRUE(parsed.has_value());
-  EXPECT_TRUE(parsed->streaming_enabled);
+  EXPECT_TRUE(parsed->streaming.enabled);
   const auto again = ServingConfig::parse_json(parsed->to_json());
   ASSERT_TRUE(again.has_value());
-  EXPECT_TRUE(again->streaming_enabled);
+  EXPECT_TRUE(again->streaming.enabled);
 #else
   ASSERT_FALSE(validated.has_value());
   EXPECT_EQ(validated.error().code, Error::Code::Unsupported);

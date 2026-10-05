@@ -35,7 +35,9 @@ Source: the ports and triplets at the
 
 For a build with no streaming dependencies, omit `VCPKG_MANIFEST_FEATURES`
 and set `-DTP_ENABLE_STREAMING_GRPC=OFF`. Worker config `streaming.enabled`
-defaults to false; setting it to true in that build returns `unsupported`.
+defaults to false, mirrored by C++ `ServingConfig::streaming` of type
+`StreamingConfig` with `bool enabled = false`. Setting it to true in that
+build returns `unsupported`.
 The feature currently prepares dependencies and config validation, with no
 stream listener. Unary HTTP and sidecar UDS keep their existing transports.
 

@@ -180,6 +180,13 @@ struct AsyncPolicyConfig {
   std::size_t max_pending = 256;
 };
 
+/// Optional streaming transport settings, mirroring the streaming JSON object.
+struct StreamingConfig {
+  /// Opt in to streaming support. False by default; true requires a build
+  /// with TP_ENABLE_STREAMING_GRPC. No stream listener is implemented yet.
+  bool enabled = false;
+};
+
 /// Full serving worker runtime configuration. Validated by
 /// `ServingConfig::validate()`; the composition root calls validate
 /// before constructing any runtime components.
@@ -188,10 +195,7 @@ struct ServingConfig {
   /// rejects unknown values with `Error::Code::Unsupported`.
   std::string schema_version = "0.1";
 
-  /// Opt in to streaming support. False by default; true requires a build
-  /// with TP_ENABLE_STREAMING_GRPC. No stream listener is implemented yet.
-  bool streaming_enabled = false;
-
+  StreamingConfig streaming;
   BindConfig bind;
   HttpLimits http;
   SchedulerConfig scheduler;

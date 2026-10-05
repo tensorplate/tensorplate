@@ -96,7 +96,7 @@ std::optional<MetricsMode> metrics_mode_from_string(std::string_view name) noexc
 
 Result<void> ServingConfig::validate() const {
 #if !TP_ENABLE_STREAMING_GRPC
-  if (streaming_enabled) {
+  if (streaming.enabled) {
     return unexpected(Error::Code::Unsupported,
                       "serving config: streaming.enabled requires TP_ENABLE_STREAMING_GRPC");
   }
@@ -228,7 +228,7 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
         return unexpected(Error::Code::ConfigInvalid,
                           "serving config: streaming accepts only a boolean enabled field");
       }
-      cfg.streaming_enabled = streaming.value("enabled", false);
+      cfg.streaming.enabled = streaming.value("enabled", false);
     }
 
     if (root.contains("bind") && root["bind"].is_object()) {
@@ -380,7 +380,7 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
 std::string ServingConfig::to_json() const {
   json root;
   root["schema_version"] = schema_version;
-  if (streaming_enabled) {
+  if (streaming.enabled) {
     root["streaming"] = {{"enabled", true}};
   }
   root["bind"] = {
