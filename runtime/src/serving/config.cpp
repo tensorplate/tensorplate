@@ -95,6 +95,12 @@ std::optional<MetricsMode> metrics_mode_from_string(std::string_view name) noexc
 }
 
 Result<void> ServingConfig::validate() const {
+#if !TP_ENABLE_STREAMING_GRPC
+  if (streaming_enabled) {
+    return unexpected(Error::Code::Unsupported,
+                      "serving config: streaming.enabled requires TP_ENABLE_STREAMING_GRPC");
+  }
+#endif
   if (schema_version != "0.1") {
     return unexpected(
         Error::Code::Unsupported,
@@ -213,6 +219,17 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
   ServingConfig cfg;
   try {
     cfg.schema_version = value_or_default<std::string>(root, "schema_version", "0.1");
+
+    if (root.contains("streaming")) {
+      const auto& streaming = root.at("streaming");
+      if (!streaming.is_object() ||
+          (streaming.contains("enabled") && !streaming.at("enabled").is_boolean()) ||
+          streaming.size() > static_cast<std::size_t>(streaming.contains("enabled"))) {
+        return unexpected(Error::Code::ConfigInvalid,
+                          "serving config: streaming accepts only a boolean enabled field");
+      }
+      cfg.streaming_enabled = streaming.value("enabled", false);
+    }
 
     if (root.contains("bind") && root["bind"].is_object()) {
       const auto& b = root["bind"];
@@ -363,6 +380,9 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
 std::string ServingConfig::to_json() const {
   json root;
   root["schema_version"] = schema_version;
+  if (streaming_enabled) {
+    root["streaming"] = {{"enabled", true}};
+  }
   root["bind"] = {
       {"host", bind.host}, {"port", bind.port}, {"allow_non_loopback", bind.allow_non_loopback}};
   root["http"] = {{"max_body_bytes", http.max_body_bytes},

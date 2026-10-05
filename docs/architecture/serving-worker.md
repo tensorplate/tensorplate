@@ -36,6 +36,19 @@ deployments rely on the agent for any remote exposure decisions.
 
 ## Composition root
 
+The optional `TP_ENABLE_STREAMING_GRPC` build feature links the pinned static
+gRPC/protobuf dependencies privately through `tp_runtime`. Configure defaults
+it ON when gRPC is installed and OFF otherwise; an explicit ON fails without
+the vcpkg feature or with shared libraries. The build setup is documented in
+[`cmake/features/README.md`](../../cmake/features/README.md).
+
+`streaming.enabled` in the worker config defaults to false. A true value in
+a feature-OFF build returns `unsupported` before runtime construction. Null,
+non-boolean values and unknown keys in `streaming` return `config_invalid`.
+Disabled configs serialize without the optional block, preserving the existing
+agent-rendered config shape. This is dependency and config preparation only:
+the worker does not yet create a gRPC listener, even in a feature-ON build.
+
 The `ServingWorker::create(config)` factory builds, in this order:
 
 1. `BufferManager` (V01-E03), sized to `config.buffer.capacity_bytes`.

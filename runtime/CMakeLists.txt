@@ -119,6 +119,12 @@ target_link_libraries(tp_runtime PUBLIC nlohmann_json::nlohmann_json)
 find_package(Threads REQUIRED)
 target_link_libraries(tp_runtime PUBLIC Threads::Threads)
 
+target_compile_definitions(tp_runtime PRIVATE
+  TP_ENABLE_STREAMING_GRPC=$<BOOL:${TP_ENABLE_STREAMING_GRPC}>)
+if(TP_ENABLE_STREAMING_GRPC)
+  target_link_libraries(tp_runtime PRIVATE gRPC::grpc++)
+endif()
+
 if(TP_ENABLE_TENSORRT)
   target_compile_definitions(tp_runtime PUBLIC TP_ENABLE_TENSORRT=1)
   # Probe for the TensorRT and CUDA SDKs. When both are usable, expose

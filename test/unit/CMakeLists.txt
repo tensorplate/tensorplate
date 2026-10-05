@@ -73,6 +73,8 @@ target_link_libraries(tp_test_unit
 
 # Lets schema drift tests read protocol/schemas/ from the source tree.
 target_compile_definitions(tp_test_unit PRIVATE TP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_compile_definitions(tp_test_unit PRIVATE
+  TP_ENABLE_STREAMING_GRPC=$<BOOL:${TP_ENABLE_STREAMING_GRPC}>)
 
 target_compile_features(tp_test_unit PRIVATE cxx_std_20)
 

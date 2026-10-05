@@ -15,6 +15,12 @@ add_test(NAME cmake.sanitizer_options
           -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/sanitizer_options_test.cmake)
 set_tests_properties(cmake.sanitizer_options PROPERTIES LABELS "T1")
 
+add_test(NAME cmake.streaming_grpc_options
+  COMMAND ${CMAKE_COMMAND}
+          -DSTREAMING_CMAKE=${PROJECT_SOURCE_DIR}/cmake/features/streaming_grpc.cmake
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/streaming_grpc_options_test.cmake)
+set_tests_properties(cmake.streaming_grpc_options PROPERTIES LABELS "T1")
+
 # GoogleTest is provided by vcpkg (see vcpkg.json) for T1/T2.
 find_package(GTest CONFIG QUIET)
 

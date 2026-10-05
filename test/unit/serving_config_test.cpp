@@ -5,6 +5,8 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 #include "tensorplate/serving/config.hpp"
 
@@ -18,6 +20,71 @@ TEST(ServingConfig, DefaultsValidate) {
   EXPECT_EQ(cfg.bind.host, "127.0.0.1");
   EXPECT_EQ(cfg.scheduler.policy, "fifo");
   EXPECT_EQ(cfg.metrics_mode, MetricsMode::PrometheusText);
+}
+
+TEST(ServingConfig, StreamingDisabledByDefault) {
+  for (const char* text :
+       {R"({"schema_version":"0.1"})", R"({"schema_version":"0.1","streaming":{}})",
+        R"({"schema_version":"0.1","streaming":{"enabled":false}})"}) {
+    SCOPED_TRACE(text);
+    const auto parsed = ServingConfig::parse_json(text);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_FALSE(parsed->streaming_enabled);
+    EXPECT_EQ(parsed->to_json().find("streaming"), std::string::npos);
+  }
+  EXPECT_FALSE(ServingConfig{}.streaming_enabled);
+}
+
+TEST(ServingConfig, StreamingSchemaDeclaresOptionalBoolean) {
+  std::ifstream input{std::string{TP_SOURCE_DIR} + "/config/schemas/serving_worker.json"};
+  ASSERT_TRUE(input.is_open());
+  const auto schema = nlohmann::json::parse(input);
+  const auto& streaming = schema.at("properties").at("streaming");
+  EXPECT_EQ(streaming.at("type"), "object");
+  EXPECT_EQ(streaming.at("additionalProperties"), false);
+  const auto& enabled = streaming.at("properties").at("enabled");
+  EXPECT_EQ(enabled.at("type"), "boolean");
+  EXPECT_EQ(enabled.at("default"), ServingConfig{}.streaming_enabled);
+  EXPECT_EQ(streaming.at("properties").size(), 1U);
+  EXPECT_FALSE(streaming.contains("required"));
+  for (const auto& required : schema.at("required")) {
+    EXPECT_NE(required, "streaming");
+  }
+}
+
+TEST(ServingConfig, StreamingRequiresCompiledFeature) {
+  ServingConfig config;
+  config.streaming_enabled = true;
+  const auto validated = config.validate();
+  const auto parsed =
+      ServingConfig::parse_json(R"({"schema_version":"0.1","streaming":{"enabled":true}})");
+#if TP_ENABLE_STREAMING_GRPC
+  ASSERT_TRUE(validated.has_value());
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_TRUE(parsed->streaming_enabled);
+  const auto again = ServingConfig::parse_json(parsed->to_json());
+  ASSERT_TRUE(again.has_value());
+  EXPECT_TRUE(again->streaming_enabled);
+#else
+  ASSERT_FALSE(validated.has_value());
+  EXPECT_EQ(validated.error().code, Error::Code::Unsupported);
+  ASSERT_FALSE(parsed.has_value());
+  EXPECT_EQ(parsed.error().code, Error::Code::Unsupported);
+  EXPECT_NE(parsed.error().message.find("TP_ENABLE_STREAMING_GRPC"), std::string::npos);
+#endif
+}
+
+TEST(ServingConfig, StreamingRejectsMalformedConfiguration) {
+  for (const char* value : {"null", "true", "[]", "7", R"("on")", R"({"enabled":null})",
+                            R"({"enabled":1})", R"({"enabled":"true"})", R"({"enabled":[]})",
+                            R"({"enable":true})", R"({"enabled":false,"extra":1})"}) {
+    SCOPED_TRACE(value);
+    const auto parsed = ServingConfig::parse_json(
+        std::string{R"({"schema_version":"0.1","streaming":)"} + value + "}");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, Error::Code::ConfigInvalid);
+    EXPECT_NE(parsed.error().message.find("streaming accepts only"), std::string::npos);
+  }
 }
 
 TEST(ServingConfig, AcceptsIPv6LoopbackLiteral) {

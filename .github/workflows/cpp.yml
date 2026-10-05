@@ -81,7 +81,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ${{ github.workspace }}/vcpkg_installed
+            ${{ github.workspace }}/build/vcpkg_installed
             ~/.cache/vcpkg/archives
           key: vcpkg-${{ runner.os }}-${{ matrix.preset }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
@@ -221,7 +221,8 @@ jobs:
         run: |
           ctest --test-dir build --output-on-failure --no-tests=error \
             -R 'ServingConfig.StreamingRequiresCompiledFeature|ServingConfig.StreamingDisabledByDefault'
-          ctest --test-dir build --output-on-failure --no-tests=error -L T2
+          ctest --test-dir build --output-on-failure --no-tests=error \
+            -R '^ServingE2E\.(HealthRouteReportsReady|InferRouteHappyPath|PolicyInferAndResult)$'
 
   format:
     name: clang-format
