@@ -360,7 +360,7 @@ impl ProcessWorkerControl {
                     .to_string()
             },
         );
-        let config = serde_json::json!({
+        let mut config = serde_json::json!({
             "schema_version": tensorplate_protocol::SCHEMA_VERSION,
             "bind": {
                 "host": self.config.bind_host,
@@ -383,6 +383,11 @@ impl ProcessWorkerControl {
                 }
             }
         });
+        if let Some(profile) =
+            crate::bundle::staged_runner_profile(Path::new(&candidate.staged_path))?
+        {
+            config["deployment"]["model"]["runner_profile"] = profile.into();
+        }
         fs::write(&path, serde_json::to_vec_pretty(&config)?)?;
         Ok((path, config))
     }
@@ -1078,19 +1083,95 @@ mod tests {
         assert!(forwarded.ends_with(format!("{record}\n").as_bytes()));
     }
 
+    /// A candidate staged at one of the repository's bundle fixtures.
+    fn staged(id: &str, bundle: &str) -> CandidateRef {
+        let staged_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../test/models/bundles")
+            .join(bundle);
+        CandidateRef {
+            staged_path: staged_path.display().to_string(),
+            ..candidate(id)
+        }
+    }
+
     #[test]
     fn process_worker_renders_serving_config_for_candidate() {
         let td = TempDir::new().expect("td");
         let cfg = process_config(td.path());
         let worker = ProcessWorkerControl::new(&cfg).expect("worker");
-        let c = candidate("deploy-1");
+        let c = staged("deploy-1", "v0_1/x86_fixture_smoke");
         let (path, rendered) = worker.render_config(&c, 18080).expect("render");
         assert!(path.is_file());
         assert_eq!(rendered["deployment"]["model"]["model_id"], "deploy-1");
         assert_eq!(
             rendered["deployment"]["model"]["artifact_path"],
-            "/staging/deploy-1/model.bin"
+            format!("{}/model.bin", c.staged_path)
         );
         assert_eq!(rendered["bind"]["port"], 18080);
+    }
+
+    #[test]
+    fn process_worker_renders_the_runner_profile_the_staged_bundle_selects() {
+        let td = TempDir::new().expect("td");
+        let worker = ProcessWorkerControl::new(&process_config(td.path())).expect("worker");
+        for (bundle, expected) in [
+            ("v0_2/speech_stt_streaming", Some("faster_whisper")),
+            ("v0_2/speech_tts_streaming", Some("kokoro")),
+            ("v0_1/x86_fixture_smoke", None),
+            // Read without hashing: its artifact does not match its digest.
+            ("v0_1/invalid_corrupt_artifact", None),
+        ] {
+            let (path, rendered) = worker
+                .render_config(&staged("deploy-1", bundle), 18080)
+                .expect("render");
+            let model = rendered["deployment"]["model"].as_object().expect("model");
+            assert_eq!(
+                model.get("runner_profile").and_then(|v| v.as_str()),
+                expected,
+                "{bundle}"
+            );
+            assert_eq!(model.contains_key("runner_profile"), expected.is_some());
+            let written: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).expect("read")).expect("json");
+            assert_eq!(written, rendered, "{bundle}");
+        }
+    }
+
+    #[test]
+    fn process_worker_renders_nothing_for_a_staged_bundle_it_cannot_read() {
+        let td = TempDir::new().expect("td");
+        let worker = ProcessWorkerControl::new(&process_config(td.path())).expect("worker");
+        let staged_at = |name: &str, manifest: Option<&str>| {
+            let dir = td.path().join(name);
+            std::fs::create_dir(&dir).expect("staged directory");
+            if let Some(text) = manifest {
+                std::fs::write(dir.join("manifest.json"), text).expect("manifest");
+            }
+            CandidateRef {
+                staged_path: dir.display().to_string(),
+                ..candidate("deploy-1")
+            }
+        };
+
+        let gone = worker.render_config(&candidate("deploy-1"), 18080);
+        assert!(
+            matches!(gone, Err(super::AgentError::BundleMissing(_))),
+            "{gone:?}"
+        );
+        // Never read as a bundle that names no profile.
+        for (name, manifest) in [
+            ("no-manifest", None),
+            ("truncated", Some("{")),
+            ("not-a-manifest", Some("{}")),
+        ] {
+            let refused = worker.render_config(&staged_at(name, manifest), 18080);
+            assert!(
+                matches!(refused, Err(super::AgentError::BundleManifest(_))),
+                "{name}: {refused:?}"
+            );
+        }
+
+        let rendered = std::fs::read_dir(&worker.config.config_dir).expect("config directory");
+        assert_eq!(rendered.count(), 0);
     }
 }
