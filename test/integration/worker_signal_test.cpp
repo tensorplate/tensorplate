@@ -137,7 +137,7 @@ TEST_P(WorkerSignal, ReadyWorkerExitsCleanly) {
   auto worker = launch();
   ASSERT_TRUE(await_log(worker, "http server bound")) << worker.stderr_text();
   ASSERT_EQ(::kill(worker.pid(), SIGPIPE), 0);
-  EXPECT_FALSE(worker.wait_exit(30ms).has_value());
+  ASSERT_FALSE(worker.wait_exit(30ms).has_value()) << worker.stderr_text();
   ASSERT_EQ(::kill(worker.pid(), std::get<1>(GetParam())), 0);
   expect_clean_exit(worker);
 }

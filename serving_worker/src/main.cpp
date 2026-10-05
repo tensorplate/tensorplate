@@ -53,8 +53,10 @@ class SignalWakeup {
   SignalWakeup& operator=(const SignalWakeup&) = delete;
 
   ~SignalWakeup() {
-    for (std::size_t i = 0; i < installed_; ++i) {
-      ::sigaction(kSignals[i], &previous_[i], nullptr);
+    for (const auto& signal : handlers_) {
+      if (signal.installed) {
+        ::sigaction(signal.number, &signal.previous, nullptr);
+      }
     }
     for (const int fd : pipe_) {
       if (fd >= 0) {
@@ -71,6 +73,7 @@ class SignalWakeup {
     for (auto& fd : pipe_) {
       // Even a process started with closed standard descriptors keeps this
       // pipe private, so a sidecar cannot inherit an end as stdin or stderr.
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): POSIX descriptor operation.
       const int moved = ::fcntl(fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
       if (moved < 0) {
         return tensorplate::unexpected(tensorplate::Error::Code::Internal,
@@ -78,6 +81,7 @@ class SignalWakeup {
       }
       ::close(fd);
       fd = moved;
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): POSIX descriptor operation.
       if (::fcntl(fd, F_SETFL, O_NONBLOCK) != 0) {
         return tensorplate::unexpected(tensorplate::Error::Code::Internal,
                                        "serving worker: cannot make signal pipe nonblocking");
@@ -89,13 +93,13 @@ class SignalWakeup {
     ::sigaddset(&action.sa_mask, SIGINT);
     ::sigaddset(&action.sa_mask, SIGTERM);
     action.sa_flags = SA_RESTART;
-    for (const int signal : kSignals) {
-      action.sa_handler = signal == SIGPIPE ? SIG_IGN : handle_signal;
-      if (::sigaction(signal, &action, &previous_[installed_]) != 0) {
+    for (auto& signal : handlers_) {
+      action.sa_handler = signal.number == SIGPIPE ? SIG_IGN : handle_signal;
+      if (::sigaction(signal.number, &action, &signal.previous) != 0) {
         return tensorplate::unexpected(tensorplate::Error::Code::Internal,
                                        "serving worker: cannot install signal handler");
       }
-      ++installed_;
+      signal.installed = true;
     }
     return {};
   }
@@ -124,10 +128,13 @@ class SignalWakeup {
   }
 
  private:
-  static constexpr std::array<int, 3> kSignals{SIGINT, SIGTERM, SIGPIPE};
+  struct SavedHandler {
+    int number;
+    struct sigaction previous {};
+    bool installed = false;
+  };
+  std::array<SavedHandler, 3> handlers_{{{SIGINT}, {SIGTERM}, {SIGPIPE}}};
   std::array<int, 2> pipe_{-1, -1};
-  std::array<struct sigaction, kSignals.size()> previous_{};
-  std::size_t installed_ = 0;
 };
 
 tensorplate::ServingExitCode run_until_signal(tensorplate::ServingWorker& worker,
@@ -257,7 +264,7 @@ tensorplate::Result<tensorplate::ServingConfig> load_config_from_args(int argc, 
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv) try {
   for (int i = 1; i < argc; ++i) {
     std::string_view a = argv[i];
     if (a == "--version") {
@@ -292,4 +299,8 @@ int main(int argc, char** argv) {
   auto worker = std::move(worker_r).value();
   const auto code = run_until_signal(*worker, signals);
   return static_cast<int>(code);
+} catch (...) {
+  // The process boundary must still report a failure if allocation fails.
+  std::fputs("worker failed unexpectedly\n", stderr);
+  return static_cast<int>(tensorplate::ServingExitCode::Internal);
 }
