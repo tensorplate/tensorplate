@@ -28,6 +28,7 @@ TEST(PythonPytorchAdapter, FeatureFlagDisabled) {
 #include <unistd.h>
 
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +41,7 @@ TEST(PythonPytorchAdapter, FeatureFlagDisabled) {
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -300,6 +302,119 @@ TEST_F(PythonPytorchAdapterFixture, LoadErrorsCarryNoPathOrProfileName) {
   }
 }
 
+// Sets a variable for one test and puts back what it found.
+class ScopedEnv {
+ public:
+  ScopedEnv(const char* name, const std::string& value) : name_(name) {
+    if (const char* old = std::getenv(name); old != nullptr) {
+      saved_ = old;
+      had_value_ = true;
+    }
+    setenv(name, value.c_str(), 1);
+  }
+  ScopedEnv(const ScopedEnv&) = delete;
+  ScopedEnv& operator=(const ScopedEnv&) = delete;
+  ~ScopedEnv() {
+    if (had_value_) {
+      setenv(name_, saved_.c_str(), 1);
+    } else {
+      unsetenv(name_);
+    }
+  }
+
+ private:
+  const char* name_;
+  std::string saved_;
+  bool had_value_ = false;
+};
+
+std::string read_text(const std::filesystem::path& path) {
+  std::ifstream in(path);
+  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+// The packaged descriptor and the packaged `faster_whisper` declaration as
+// an install leaves them under `dir`, with the profile's environment moved
+// under `dir` too. Its interpreter writes how it was started to
+// `dir/started` and then runs the test's Python.
+std::filesystem::path install_faster_whisper_profile(const std::filesystem::path& dir) {
+  const std::filesystem::path source{TP_SOURCE_DIR};
+  const auto backend = dir / "backends" / "python_pytorch";
+  const auto environment_root = dir / "speech-runtime";
+  std::filesystem::create_directories(backend / "runner_profiles.d");
+  std::filesystem::create_directories(environment_root / "bin");
+  std::filesystem::copy_file(source / "packaging/backend-metadata/python_pytorch.json",
+                             backend / "backend.json");
+  std::string declaration =
+      read_text(source / "packaging/backend-metadata/runner_profiles/faster_whisper.json");
+  const std::string packaged_root = "/usr/lib/tensorplate/speech-runtime";
+  for (auto at = declaration.find(packaged_root); at != std::string::npos;
+       at = declaration.find(packaged_root, at + environment_root.string().size())) {
+    declaration.replace(at, packaged_root.size(), environment_root.string());
+  }
+  { std::ofstream(backend / "runner_profiles.d" / "faster_whisper.json") << declaration; }
+
+  const auto interpreter = environment_root / "bin" / "python";
+  {
+    std::ofstream script(interpreter);
+    script
+        << "#!/bin/sh\n"
+        << "printf '%s\\n' \"$0\" \"$LD_LIBRARY_PATH\" \"$ORT_DISABLE_TELEMETRY\" \"$TMPDIR\" > '"
+        << (dir / "started").string() << "'\n"
+        << "exec '" << locate_python() << "' \"$@\"\n";
+  }
+  std::filesystem::permissions(interpreter, std::filesystem::perms::owner_all);
+  return interpreter;
+}
+
+std::vector<std::string> lines_of(const std::filesystem::path& path) {
+  std::ifstream in(path);
+  std::vector<std::string> lines;
+  for (std::string line; std::getline(in, line);) {
+    lines.push_back(line);
+  }
+  return lines;
+}
+
+// Through the registered backend and a real process: a model that selects a
+// runner profile is served by the interpreter the installed descriptor
+// declares, while the variable that names one for other models points at a
+// file that does not exist.
+TEST_F(PythonPytorchAdapterFixture, RunnerProfileIsServedByTheDescriptorsInterpreter) {
+  const ScratchDir scratch{std::filesystem::temp_directory_path() /
+                           ("tp-runner-profile-" + std::to_string(::getpid()))};
+  const auto& dir = scratch.path;
+  std::filesystem::remove_all(dir);
+  const auto interpreter = install_faster_whisper_profile(dir);
+  const ScopedEnv descriptors{"TP_BACKEND_DESCRIPTOR_DIR", (dir / "backends").string()};
+  const ScopedEnv other{"TP_PYTHON_PYTORCH_EXECUTABLE", (dir / "no-such-python").string()};
+  std::filesystem::create_directories(dir / "tmp");
+  const ScopedEnv worker_tmp{"TMPDIR", (dir / "tmp").string()};
+
+  BackendRegistry reg;
+  ASSERT_TRUE(register_builtin_backends(reg).has_value());
+  auto manager = make_manager();
+  ExecutionSessionRuntimeHooks hooks{};
+  hooks.buffer_manager = manager.get();
+  auto session = reg.create_session("python_pytorch", hooks).value();
+  auto spec = ModelSpec::create("fixture", ModelClass::Vla, "/dev/null", "python_pytorch",
+                                PrecisionHint::Auto, std::nullopt, "faster_whisper")
+                  .value();
+
+  auto load_r = session->load(spec);
+  ASSERT_TRUE(load_r.has_value()) << load_r.error().message;
+  EXPECT_TRUE(session->prime().has_value());
+  EXPECT_TRUE(session->unload().has_value());
+
+  EXPECT_EQ(lines_of(dir / "started"),
+            (std::vector<std::string>{
+                interpreter.string(),
+                (dir / "speech-runtime/lib/python3.12/site-packages/nvidia/cublas/lib").string(),
+                "1",
+                (dir / "tmp").string(),
+            }));
+}
+
 #ifdef TP_SERVING_WORKER_BINARY
 
 struct WorkerRun {
@@ -332,6 +447,81 @@ nlohmann::json last_record(const std::string& text) {
     record.erase("ts_ns");
   }
   return record;
+}
+
+// run_serving_worker for a worker that must refuse to start: one still
+// running at `limit` is killed with its children and reported as -1, where
+// waiting on it would never return.
+WorkerRun run_serving_worker_within(std::chrono::seconds limit, const std::string& arguments,
+                                    const std::filesystem::path& dir) {
+  const std::filesystem::path stderr_file = dir / "worker-stderr.txt";
+  const std::string command = std::string{"exec '"} + TP_SERVING_WORKER_BINARY + "' " + arguments;
+  const pid_t pid = ::fork();
+  if (pid == 0) {
+    ::setpgid(0, 0);
+    const int fd = ::open(stderr_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0 || ::dup2(fd, STDERR_FILENO) < 0) {
+      std::_Exit(126);
+    }
+    ::execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
+    std::_Exit(127);
+  }
+  int status = 0;
+  bool exited = false;
+  const auto deadline = std::chrono::steady_clock::now() + limit;
+  while (pid > 0 && !exited && std::chrono::steady_clock::now() < deadline) {
+    exited = ::waitpid(pid, &status, WNOHANG) == pid;
+    if (!exited) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+  }
+  if (pid > 0 && !exited) {
+    ::kill(-pid, SIGKILL);
+    ::waitpid(pid, &status, 0);
+  }
+  std::ifstream in(stderr_file);
+  return {exited && WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+          {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()}};
+}
+
+// From the worker's configuration to its last stderr line: a model whose
+// runner profile no installed package declares is refused with a typed code
+// before any sidecar starts, although the environment names an interpreter.
+TEST_F(PythonPytorchAdapterFixture, WorkerRefusesARunnerProfileThatIsNotInstalled) {
+  const ScratchDir scratch{std::filesystem::temp_directory_path() /
+                           ("tp-worker-runner-profile-" + std::to_string(::getpid()))};
+  const auto& dir = scratch.path;
+  std::filesystem::remove_all(dir);
+  install_faster_whisper_profile(dir);
+  const ScopedEnv descriptors{"TP_BACKEND_DESCRIPTOR_DIR", (dir / "backends").string()};
+
+  nlohmann::json config;
+  config["schema_version"] = "0.1";
+  config["bind"] = {{"host", "127.0.0.1"}, {"port", 0}, {"allow_non_loopback", false}};
+  config["enable_stderr_logs"] = true;
+  config["deployment"] = {{"use_mock_session", false},
+                          {"endpoint", "tts"},
+                          {"backend", "python_pytorch"},
+                          {"model",
+                           {{"model_id", "tts"},
+                            {"model_class", "speech"},
+                            {"artifact_path", "/dev/null"},
+                            {"backend_hint", "python_pytorch"},
+                            {"precision_hint", "auto"},
+                            {"runner_profile", "kokoro"}}}};
+  const auto config_path = dir / "serving.json";
+  { std::ofstream(config_path) << config.dump(); }
+
+  const auto run = run_serving_worker_within(std::chrono::seconds{30},
+                                             "--config '" + config_path.string() + "'", dir);
+
+  ASSERT_EQ(run.exit_status, 65) << run.stderr_text;
+  const auto record = last_record(run.stderr_text);
+  ASSERT_TRUE(record.is_object()) << run.stderr_text;
+  EXPECT_EQ(record["message"], "worker startup failed");
+  EXPECT_EQ(record["fields"]["code"], "unsupported");
+  EXPECT_EQ(record["fields"]["message"], "runner profile is not installed");
+  EXPECT_FALSE(std::filesystem::exists(dir / "started"));
 }
 
 // The stderr the agent's deploy tests replay is what this worker writes: a

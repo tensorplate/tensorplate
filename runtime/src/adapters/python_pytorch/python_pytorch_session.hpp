@@ -12,6 +12,7 @@
 #pragma once
 
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -22,6 +23,8 @@
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/result.hpp"
 
+#include "sidecar_process.hpp"
+
 namespace tensorplate::adapters::python_pytorch {
 
 inline constexpr std::string_view kBackendName = "python_pytorch";
@@ -29,13 +32,22 @@ inline constexpr std::string_view kBackendName = "python_pytorch";
 /// Adapter configuration tunables. Defaults are chosen for the v0.1.0
 /// SmolVLA validation flow on Jetson Orin Nano 8GB Super.
 struct PythonPytorchConfig {
+  /// Interpreter for a deployment that selects no runner profile.
   std::string python_exe = "python3";
+  /// Backend descriptor a deployment's runner profile is resolved against;
+  /// empty selects the installed one.
+  std::filesystem::path descriptor_path;
   std::chrono::milliseconds startup_timeout{std::chrono::seconds{15}};
   std::chrono::milliseconds infer_timeout{std::chrono::seconds{30}};
   std::chrono::milliseconds health_timeout{std::chrono::seconds{2}};
 };
 
 [[nodiscard]] BackendCapability make_python_pytorch_capability();
+
+/// A session that starts its sidecar through `launcher`. The registered
+/// backend passes the fork+exec launcher.
+[[nodiscard]] std::unique_ptr<ExecutionSession> make_python_pytorch_session(
+    ExecutionSessionRuntimeHooks hooks, PythonPytorchConfig config, SidecarLauncher launcher);
 
 }  // namespace tensorplate::adapters::python_pytorch
 
