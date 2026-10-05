@@ -16,9 +16,11 @@ use common::ServingStub;
 
 const BODY: &[u8] = br#"{"inputs":[]}"#;
 
+/// The length header is lower case here; the CLI's own requests, in the
+/// other suites, send it capitalised.
 fn request_head(content_length: usize) -> String {
     format!(
-        "POST /infer HTTP/1.1\r\nHost: stub\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
+        "POST /infer HTTP/1.1\r\nhost: stub\r\ncontent-length: {content_length}\r\nconnection: close\r\n\r\n"
     )
 }
 
