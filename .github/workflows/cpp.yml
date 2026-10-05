@@ -19,7 +19,7 @@ jobs:
     name: build + T1 (${{ matrix.preset }})
     runs-on: ubuntu-22.04
     # A cold streaming dependency build includes gRPC, protobuf and OpenSSL.
-    timeout-minutes: 90
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:

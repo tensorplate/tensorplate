@@ -39,7 +39,7 @@ stream listener. Unary HTTP and sidecar UDS keep their existing transports.
 
 Hosted C++ tests enable the feature; adapter-shell tests explicitly disable
 it and check both the typed refusal and unary serving. The cold dependency
-build has a 90-minute job budget. Release jobs do not enable streaming yet.
+build has a 120-minute job budget. Release jobs do not enable streaming yet.
 Before they do, their binary caches must be populated for the pinned baseline,
 compiler and triplet, and the worker SBOM and vulnerability disposition must
 cover the static native closure, including OpenSSL. The current supply-chain
