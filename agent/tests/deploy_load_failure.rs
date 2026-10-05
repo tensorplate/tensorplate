@@ -87,7 +87,7 @@ impl HealthPort {
 /// Reads through the blank line that ends a request head, so the close
 /// after the answer is not a reset over unread bytes.
 fn read_request_head(stream: &mut TcpStream) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut head = Vec::new();
     let mut chunk = [0_u8; 512];
     while !head.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -206,13 +206,24 @@ fn assert_typed_load_failure(fixture: &str, code: ErrorCode, message: &str) {
     assert_eq!(snap.last_error.expect("last_error").code, code);
 }
 
-#[test]
-fn the_health_stub_reads_a_request_that_arrives_in_two_writes() {
-    let health = HealthPort::listen();
-    let mut stream = TcpStream::connect(("127.0.0.1", health.port)).expect("connect");
+fn connect_to(health: &HealthPort) -> TcpStream {
+    let stream = TcpStream::connect(("127.0.0.1", health.port)).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("read timeout");
+    stream
+}
+
+fn read_response(stream: &mut TcpStream) -> String {
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("read response");
+    response
+}
+
+#[test]
+fn the_health_stub_reads_a_request_that_arrives_in_two_writes() {
+    let health = HealthPort::listen();
+    let mut stream = connect_to(&health);
     stream
         .write_all(b"GET /health HTTP/1.1\r\n")
         .expect("write request line");
@@ -221,14 +232,26 @@ fn the_health_stub_reads_a_request_that_arrives_in_two_writes() {
         .write_all(b"Host: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .expect("write headers");
 
-    let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read response");
+    let response = read_response(&mut stream);
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     let reset = stream.take_error().expect("socket error");
     assert!(
         reset.is_none(),
         "the stub closed before the headers arrived and the connection was reset: {reset:?}"
     );
+}
+
+#[test]
+fn a_client_that_sends_nothing_does_not_hold_the_health_stub() {
+    let health = HealthPort::listen();
+    let _silent = connect_to(&health);
+    let mut stream = connect_to(&health);
+    stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .expect("write request");
+
+    let response = read_response(&mut stream);
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
 }
 
 #[test]
