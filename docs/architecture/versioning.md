@@ -20,6 +20,13 @@ mismatches surface as typed errors instead of undefined behavior.
 These surfaces evolve at independent cadences. A runtime patch release does
 not imply a protocol or bundle bump, and vice versa.
 
+The draft stream session envelope
+(`protocol/proto/tensorplate/stream/v1/session.proto`) is none of the four.
+It is protobuf, its API major is its package name, and it is outside the
+protocol version: adding it changed no JSON contract and no version
+constant. See
+[`protocol/README.md`](../../protocol/README.md#streaming-session-envelope).
+
 ## Where the constants live
 
 - C++: [`include/tensorplate/version.hpp`](../../include/tensorplate/version.hpp)
@@ -172,7 +179,11 @@ schema files: `protocol/rust/tests/schema_enum_drift.rs` compares every
 schema copy of the error-code enum, and the `failure_reason.json` enums,
 with the Rust enums; `test/unit/error_test.cpp` compares the C++ names
 with `error.json`; and each Python package has a test that does the same
-for its constants. `test/unit/scheduler_schema_test.cpp` holds the three
+for its constants. In builds with `TP_ENABLE_STREAMING_GRPC`,
+`test/contract/stream_envelope_conformance_test.cpp` compares the draft
+stream session envelope's `ErrorCode` and `FailureReason` enums with
+`error.json` and the `reason` enum of `failure_reason.json`.
+`test/unit/scheduler_schema_test.cpp` holds the three
 schema copies of the scheduler policy enum to each other and to the policy
 registry, `SchedulerMetrics` to `scheduler_metrics.json`, and the serving
 exporter's in-flight gauges to the names `serving_metrics.json` gives them.

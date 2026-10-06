@@ -1,0 +1,404 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// DRAFT, not frozen: protocol/README.md ("Streaming session envelope") says
+// what may still change.
+//
+// One Session call carries one logical session. Each direction numbers its
+// events from 1 without gaps. The client's first event is Open. A refused Open
+// creates no session: the call ends with its status and no event. A session
+// sends Ready first. A session that ends before it is ready sends SessionClosed
+// alone: failed, or closed with reason `client_cancelled` after a Cancel.
+// SessionClosed is always its last event.
+//
+// A field number is never reused: a deleted field stays reserved. A receiver
+// ignores a field it does not know and refuses an event whose body, or an Open
+// whose mode, it does not know.
+
+syntax = "proto3";
+
+package tensorplate.stream.v1;
+
+service SessionService {
+  // Ordered in both directions. Closing the sending half drains accepted work
+  // and then closes the session; cancelling the call abandons it. A session is
+  // never resumed or replayed on another call.
+  rpc Session(stream ClientEvent) returns (stream ServerEvent);
+}
+
+// The `code` values of protocol/schemas/error.json: the same names in the same
+// order, numbered from 1.
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_CONFIG_INVALID = 1;
+  ERROR_CODE_LOAD_FAILED = 2;
+  ERROR_CODE_NOT_READY = 3;
+  ERROR_CODE_SHAPE_MISMATCH = 4;
+  ERROR_CODE_UNSUPPORTED = 5;
+  ERROR_CODE_OOM_ERROR = 6;
+  ERROR_CODE_TIMEOUT = 7;
+  ERROR_CODE_INFERENCE_FAILED = 8;
+  ERROR_CODE_INTERNAL = 9;
+  ERROR_CODE_CANCELLED = 10;
+  ERROR_CODE_UNAVAILABLE = 11;
+  ERROR_CODE_RESOURCE_EXHAUSTED = 12;
+}
+
+// The `reason` values of protocol/schemas/failure_reason.json: the same names
+// in the same order, numbered from 1.
+enum FailureReason {
+  FAILURE_REASON_UNSPECIFIED = 0;
+  FAILURE_REASON_CONFIG_INVALID = 1;
+  FAILURE_REASON_BUNDLE_SCHEMA_INVALID = 2;
+  FAILURE_REASON_BUNDLE_INTEGRITY_FAILED = 3;
+  FAILURE_REASON_UNSUPPORTED_RUNTIME = 4;
+  FAILURE_REASON_UNSUPPORTED_HARDWARE = 5;
+  FAILURE_REASON_BACKEND_UNAVAILABLE = 6;
+  FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY = 7;
+  FAILURE_REASON_SHAPE_MISMATCH = 8;
+  FAILURE_REASON_OOM = 9;
+  FAILURE_REASON_TIMEOUT = 10;
+  FAILURE_REASON_DEADLINE_MISSED = 11;
+  FAILURE_REASON_SIDECAR_STARTUP_FAILED = 12;
+  FAILURE_REASON_SIDECAR_MALFORMED_RESPONSE = 13;
+  FAILURE_REASON_SIDECAR_PROCESS_EXIT = 14;
+  FAILURE_REASON_WORKER_NOT_READY = 15;
+  FAILURE_REASON_WORKER_EXIT = 16;
+  FAILURE_REASON_WORKER_CRASH_LOOP = 17;
+  FAILURE_REASON_NO_HEARTBEAT = 18;
+  FAILURE_REASON_PERMISSION_DENIED = 19;
+  FAILURE_REASON_INTERNAL = 20;
+  FAILURE_REASON_INPUT_CREDIT_EXCEEDED = 21;
+  FAILURE_REASON_SLOW_CONSUMER = 22;
+  FAILURE_REASON_BACKEND_RESET = 23;
+  FAILURE_REASON_DEPLOYMENT_RETIRED = 24;
+  FAILURE_REASON_WORKER_SHUTDOWN = 25;
+}
+
+// The lifecycle states of tensorplate::serving::LogicalSessionState: the same
+// names in the same order, numbered from 1.
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_OPENING = 1;
+  SESSION_STATE_ACTIVE = 2;
+  SESSION_STATE_FINALIZING = 3;
+  SESSION_STATE_DRAINING = 4;
+  SESSION_STATE_CANCEL_REQUESTED = 5;
+  SESSION_STATE_CLOSED = 6;
+  SESSION_STATE_FAILED = 7;
+}
+
+enum SessionMode {
+  SESSION_MODE_UNSPECIFIED = 0;
+  // Audio in, transcripts out.
+  SESSION_MODE_STT_STREAMING = 1;
+  // Text segments in, audio out.
+  SESSION_MODE_TTS_STREAMING = 2;
+}
+
+enum AudioEncoding {
+  AUDIO_ENCODING_UNSPECIFIED = 0;
+  // Signed 16-bit little-endian PCM.
+  AUDIO_ENCODING_PCM_S16LE = 1;
+  // G.711 mu-law, one byte per sample.
+  AUDIO_ENCODING_MULAW = 2;
+}
+
+enum EndpointReason {
+  ENDPOINT_REASON_UNSPECIFIED = 0;
+  ENDPOINT_REASON_SILENCE = 1;
+  ENDPOINT_REASON_CLIENT_FINALIZE = 2;
+  // The utterance reached its maximum length and was split.
+  ENDPOINT_REASON_DURATION_LIMIT = 3;
+}
+
+// Raw audio with no container header.
+message AudioFormat {
+  AudioEncoding encoding = 1;
+  uint32 sample_rate_hz = 2;
+  uint32 channels = 3;
+}
+
+// Use of one bounded budget. `used` never exceeds `limit`; a zero `limit` is a
+// budget the session's mode does not use.
+message Usage {
+  uint64 used = 1;
+  uint64 limit = 2;
+}
+
+// Input the server holds and has not consumed. The client may send only what
+// fits both budgets; more ends the session with reason `input_credit_exceeded`.
+message InputCredit {
+  // Bytes of accepted audio or text, as received.
+  Usage bytes = 1;
+  // Accepted text segments whose synthesis has not started.
+  Usage waiting_segments = 2;
+}
+
+// Limits in force for the session, in whole milliseconds.
+message SessionLimits {
+  // Longest gap between client events before the session is ended.
+  uint32 idle_timeout_ms = 1;
+  // How often the client is expected to send Ping.
+  uint32 heartbeat_interval_ms = 2;
+  // Longest gap between Pings before the session is ended.
+  uint32 liveness_timeout_ms = 3;
+  uint32 max_duration_ms = 4;
+  // Longest time the session may stay finalizing or draining, counted from
+  // when it left active; a later endpoint, Finalize or half-close does not
+  // restart it.
+  uint32 finalize_deadline_ms = 5;
+  // Longest time output may wait with none of it delivered.
+  uint32 output_stall_timeout_ms = 6;
+}
+
+// Why a session ended. `code` and `reason` are the code and the stable
+// snake_case reason of the error that ended it.
+message EndCause {
+  ErrorCode code = 1;
+  // Never empty; at most 64 ASCII characters, for example `idle_timeout`.
+  string reason = 2;
+  // Set when `reason` is one of the FailureReason names.
+  FailureReason failure_reason = 3;
+}
+
+// The server refuses an event of a live session by failing the session:
+// SessionClosed with SESSION_STATE_FAILED and the refusal as its cause. There
+// is no other error event.
+message ClientEvent {
+  // 1 for Open, then one more for each event.
+  uint64 sequence = 1;
+  // The id Ready returned. Empty on Open and on a Cancel sent before the
+  // client has read Ready, the only other event it may send by then.
+  string session_id = 2;
+  // The deployment generation the client addresses, on every event. Never
+  // zero.
+  uint64 generation = 3;
+
+  oneof body {
+    Open open = 10;
+    Finalize finalize = 11;
+    Cancel cancel = 12;
+    Ping ping = 13;
+    StatusRequest status_request = 14;
+    Audio audio = 20;
+    TextSegment text_segment = 21;
+  }
+
+  // Bodies of session modes not defined yet.
+  reserved 40 to 99;
+}
+
+message Open {
+  // Operator-only deployment settings; a client never selects them.
+  reserved "admission_mode", "test_count", "evidence_ref";
+
+  // 1 to 128 characters of [A-Za-z0-9._-], not `.` or `..`.
+  string deployment_id = 1;
+  // The descriptor identity the client resolved: `sha256:` and 64 lowercase
+  // hexadecimal digits.
+  string descriptor_digest = 2;
+  SessionMode mode = 3;
+  // A language the deployment declares, for example `en`.
+  string language = 4;
+  // Format of every Audio body, one the deployment declares. Speech-to-text
+  // only.
+  AudioFormat input_format = 5;
+  // A voice the deployment declares. Text-to-speech only.
+  string voice = 6;
+  // Optional, at most 64 ASCII characters each.
+  string trace_id = 7;
+  string turn_id = 8;
+}
+
+message Audio {
+  bytes data = 1;
+  // Samples in `data`: a frame length the deployment admits, never outside 20
+  // to 320 milliseconds of audio.
+  uint32 sample_count = 2;
+  // Samples sent before this body, at the input format's rate. Starts at zero
+  // and never resets, across utterances included.
+  uint64 sample_offset = 3;
+}
+
+message TextSegment {
+  // Greater than every earlier segment's id in the session; never reset by
+  // Finalize.
+  uint64 segment_id = 1;
+  // One complete segment within the deployment's segment limit, never above
+  // 4,096 bytes; empty or whitespace-only text is refused.
+  string text = 2;
+  // Optional, at most 64 ASCII characters.
+  string turn_id = 3;
+}
+
+// Completes the current utterance or the submitted synthesis and is answered
+// by a FinalTranscript or by SynthesisCompleted; input sent before that answer
+// is refused. A Finalize repeated before the answer, or received while the
+// session drains, starts nothing and has no answer of its own.
+message Finalize {}
+
+// Ends the whole session.
+message Cancel {}
+
+// Answered by Pong.
+message Ping {}
+
+// Answered by Status.
+message StatusRequest {}
+
+message ServerEvent {
+  // 1 for the first event, then one more for each event.
+  uint64 sequence = 1;
+
+  oneof body {
+    Ready ready = 10;
+    Accepted accepted = 11;
+    Status status = 12;
+    Pong pong = 13;
+    CancelAccepted cancel_accepted = 14;
+    SessionClosed session_closed = 15;
+    PartialTranscript partial_transcript = 20;
+    EndpointDetected endpoint_detected = 21;
+    FinalTranscript final_transcript = 22;
+    AudioChunk audio_chunk = 23;
+    SegmentCompleted segment_completed = 24;
+    SynthesisCompleted synthesis_completed = 25;
+  }
+
+  // Bodies of session modes not defined yet.
+  reserved 40 to 99;
+}
+
+// Sent once, after the session was admitted and initialized.
+message Ready {
+  // Server-allocated; 1 to 64 ASCII characters.
+  string session_id = 1;
+  // The generation the session serves, equal to the Open's.
+  uint64 generation = 2;
+  // Identity of the descriptor the session serves.
+  string descriptor_digest = 3;
+  SessionLimits limits = 4;
+  // Time left before `limits.max_duration_ms` ends the session.
+  uint32 remaining_duration_ms = 5;
+  // The accepted input format. Speech-to-text only.
+  AudioFormat input_format = 6;
+  // Format of every AudioChunk. Text-to-speech only.
+  AudioFormat output_format = 7;
+  Status status = 8;
+}
+
+// Every client event up to `accepted_sequence` was accepted, the Open and
+// control events included; one Accepted may cover several. Acceptance is not
+// completion.
+message Accepted {
+  uint64 accepted_sequence = 1;
+  InputCredit input_credit = 2;
+}
+
+// Numbers only: carries no text, identifier or caller data.
+message Status {
+  SessionState state = 1;
+  // Accepted audio bodies or text segments the server still holds, the one
+  // being processed included.
+  uint32 input_queue_depth = 2;
+  InputCredit input_credit = 3;
+  // Undelivered output audio, in bytes.
+  Usage output_pcm_bytes = 4;
+  // Undelivered transcripts and control events, in bytes.
+  Usage output_metadata_bytes = 5;
+}
+
+// Answers Ping. A reply still unsent may stand for several requests, and none
+// is queued while the client leaves its output unread, so the client does not
+// count replies. The same holds for the Status that answers a StatusRequest.
+message Pong {}
+
+// Output stops at once and SessionClosed follows. Not sent for a Cancel that
+// arrives before Ready or after the session's outcome is fixed.
+message CancelAccepted {}
+
+// The single terminal event.
+message SessionClosed {
+  // SESSION_STATE_CLOSED or SESSION_STATE_FAILED.
+  SessionState state = 1;
+  // Absent when the session ended without an error, which is when the client
+  // closed its sending half and the session drained.
+  EndCause cause = 2;
+  // Highest client sequence the server accepted; at least 1, the Open.
+  uint64 last_accepted_sequence = 3;
+  // Sequence of the last server event before this one; zero when there was
+  // none.
+  uint64 last_produced_sequence = 4;
+}
+
+// The whole current hypothesis of one utterance. A later revision replaces it;
+// revisions may be skipped.
+message PartialTranscript {
+  // Never zero. EndpointDetected and FinalTranscript name the utterance by
+  // the same id.
+  uint64 utterance_id = 1;
+  // Only grows within one utterance.
+  uint32 revision = 2;
+  string text = 3;
+}
+
+message EndpointDetected {
+  uint64 utterance_id = 1;
+  // Input samples up to, not including, this offset belong to the utterance.
+  // Same unit and origin as Audio.sample_offset.
+  uint64 end_sample_offset = 2;
+  EndpointReason reason = 3;
+}
+
+// A half-open interval of source audio in whole microseconds, measured from
+// the first accepted input sample. A boundary that falls between two
+// microseconds is rounded outward: `start_us` down and `end_us` up.
+message TranscriptSegment {
+  uint64 start_us = 1;
+  uint64 end_us = 2;
+  string text = 3;
+}
+
+// Exactly one per utterance, never revised. Empty for silence.
+message FinalTranscript {
+  uint64 utterance_id = 1;
+  string text = 2;
+  repeated TranscriptSegment segments = 3;
+  // Same meaning as EndpointDetected.end_sample_offset.
+  uint64 end_sample_offset = 4;
+}
+
+// Chunks of one segment are never interleaved with another segment's. Each
+// carries 20 milliseconds of audio; only a segment's last chunk may carry
+// less.
+message AudioChunk {
+  uint64 segment_id = 1;
+  // From zero, one more for each chunk of the segment.
+  uint32 chunk_index = 2;
+  // Samples of the segment sent before this chunk, at `format`'s rate.
+  uint64 sample_offset = 3;
+  // Always Ready.output_format.
+  AudioFormat format = 4;
+  bytes data = 5;
+}
+
+// Exactly one per delivered segment, after its last AudioChunk and before any
+// event of the next segment. A segment the end of the session cut short gets
+// none.
+message SegmentCompleted {
+  uint64 segment_id = 1;
+  // Samples in the segment's chunks together. Never zero.
+  uint64 total_samples = 2;
+  // The segment's AudioChunks: `total_samples` in 20 millisecond chunks,
+  // rounded up.
+  uint32 chunk_count = 3;
+}
+
+// Exactly one per finalized synthesis, after the SegmentCompleted of every
+// accepted segment. It answers the Finalize that asked for it.
+message SynthesisCompleted {
+  // Segments completed since the previous SynthesisCompleted, and their
+  // samples together.
+  uint32 segment_count = 1;
+  uint64 total_samples = 2;
+}

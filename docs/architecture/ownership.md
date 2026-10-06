@@ -19,6 +19,7 @@ enforced at review time. Changes here require tech lead approval.
 | `observability/` | safety / observability (process) | Rust | `tensorplate-observability` binary | safety owner |
 | `protocol/schemas/` | cross-cutting contract | data | n/a | runtime tech lead + agent owner |
 | `protocol/rust/` | cross-cutting contract | Rust | `tensorplate-protocol` library | agent owner |
+| `protocol/proto/` | cross-cutting contract (draft stream session envelope) | Protocol Buffers (proto3) | `tp_stream_proto` static library, generated in the build tree when `TP_ENABLE_STREAMING_GRPC` is ON; nothing committed | runtime tech lead |
 | `config/schemas/` | cross-cutting contract | data | n/a | runtime tech lead + agent owner |
 | `test/` | tests | C++20, Rust | test binaries | reviewers per area |
 | `cmake/` | build system | CMake | n/a | runtime tech lead |
@@ -63,6 +64,8 @@ Dependencies flow downward only. Upward dependencies are forbidden.
   protocol/schemas/ is consumed as data by both planes and by
   backends/python_pytorch/ over IPC.
   protocol/rust/   is consumed by agent/, cli/, observability/.
+  protocol/proto/  is compiled into C++ bindings by runtime/'s build when
+  TP_ENABLE_STREAMING_GRPC is ON. Only a contract test links them today.
   include/tensorplate/ is consumed by runtime/, serving_worker/, and tests.
 ```
 
@@ -79,7 +82,7 @@ must be designed; STL types, vendor SDK types, Rust-owned memory, and
 | Package | May depend on |
 | --- | --- |
 | `include/tensorplate/` | C++ standard library only |
-| `runtime/` | `include/tensorplate/`, approved third-party C++ via vcpkg |
+| `runtime/` | `include/tensorplate/`, approved third-party C++ via vcpkg, `protocol/proto/` (as the source of bindings its build generates) |
 | `serving_worker/` | `runtime/`, `include/tensorplate/`, protocol schemas |
 | `agent/` | `protocol/rust/`, approved third-party Rust crates |
 | `cli/` | `protocol/rust/`, approved third-party Rust crates |

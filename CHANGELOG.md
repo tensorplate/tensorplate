@@ -60,6 +60,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   profile is installed. The findings run in the operator's shell
   and read the agent's `EnvironmentFile`; they start no sidecar and load no
   model. (V030-E01-F01-T03)
+- A draft of the external stream session envelope,
+  `protocol/proto/tensorplate/stream/v1/session.proto`: one bidirectional
+  gRPC call per logical session, events numbered per direction, lifecycle
+  and control events, speech-to-text and text-to-speech bodies, and mirrors
+  of the shared error-code, failure-reason and session-state enums. A build
+  with `TP_ENABLE_STREAMING_GRPC=ON` generates its C++ bindings into the
+  build tree (`tp::stream_proto`) with the `protoc` and gRPC plugin of the
+  pinned vcpkg baseline, and configure now requires both to come from the
+  vcpkg install tree. A build with the feature OFF generates nothing and
+  gains no target or dependency. Golden frames recorded with that `protoc`
+  are under `test/contract/fixtures/stream/v1/`, and a T3 conformance test
+  holds the schema to them, to the ordering and unit rules of two recorded
+  sessions, and to the enums it mirrors. No listener, server or client uses
+  the envelope yet and it may change before it is frozen. The JSON
+  contracts and the protocol version are unchanged. See
+  `protocol/README.md`. (V030-E04-F02-T02)
 - Optional static gRPC/protobuf build dependencies from a pinned vcpkg baseline,
   with a default-disabled `streaming.enabled` config gate, mirrored by C++
   `StreamingConfig`, and a typed refusal when the build lacks streaming support.

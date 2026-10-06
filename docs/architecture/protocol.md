@@ -20,9 +20,11 @@ See also:
 | Cross-component control payloads (desired_state, worker_status, health_event, deploy_transaction) | JSON Schema Draft 7 | Crosses Rust/C++ language boundaries; JSON keeps the schema human-readable; the volume is low (status / event ticks, not request hot-path). |
 | HTTP `/infer` payload | JSON Schema Draft 7 (header) + raw bytes | The header documented in `infer_request.json` / `infer_result.json` rides as JSON; tensor payloads ride as raw bytes per `BufferRef` / `TensorView` metadata. v0.1.0 does not negotiate an alternative encoding; V01-E07 lands the HTTP server. |
 | Python/PyTorch sidecar IPC | JSON header + raw payload bytes | Schema captured in `python_pytorch_ipc.json`. Wire format: a 16-byte big-endian prefix (magic, wire version, header length, payload length), the JSON header, then the payload bytes: tensors, or a job's PCM or text input or its synthesized audio. JSON-encoding tensors was an explicit non-goal. |
+| External stream session envelope (draft) | Protocol Buffers (proto3), for gRPC | `protocol/proto/tensorplate/stream/v1/session.proto`: typed events on one ordered bidirectional stream per session, with audio as bytes. A draft that no listener serves yet; see [`protocol/README.md`](../../protocol/README.md#streaming-session-envelope). |
 | Agent-to-worker runtime control | Newline-delimited compact JSON | `worker_control.json` defines six runtime operations. The Rust and C++ codecs use the same byte-exact golden frames under `protocol/rust/tests/fixtures/worker_control_*.jsonl`. Each request and response names the member, transaction and correlation id. Frames are limited to 65,536 bytes including the newline. The serving worker answers them on its control thread when it is started as a member of a deployment generation. |
 
-We deliberately do **not** introduce protobuf in v0.1.0. The v0.1.0 hot
+We deliberately did **not** introduce protobuf in v0.1.0, and the JSON
+payload families above still do not use it. The v0.1.0 hot
 path runs in-process within `tensorplate-serving`; cross-process
 payloads are control-plane (low volume) plus the sidecar IPC where
 the tensor payload is raw bytes regardless of the header encoding.
@@ -30,11 +32,18 @@ Adding a binary header format earns no measurable throughput on the
 v0.1.0 critical path and would split the operator-facing config and
 the IPC headers across two encodings.
 
+The external stream session envelope is the one protobuf contract. It is
+a draft, it changes none of the JSON contracts, and no listener, server
+or client uses it yet.
+
 ## Versioning
 
-Every payload carries a `schema_version` string of the form
+Every JSON payload carries a `schema_version` string of the form
 `"MAJOR.MINOR"`, value-fixed (`const`) to the protocol version.
-v0.1.0 is `"0.1"`.
+v0.1.0 is `"0.1"`. The stream session envelope carries none: it is
+versioned by its protobuf package name, `tensorplate.stream.v1`, and is
+outside the protocol version. Its evolution rules are in
+[`protocol/README.md`](../../protocol/README.md#streaming-session-envelope).
 
 Decoders **must** call
 `tensorplate_protocol::decode_with_version_check` (Rust) — or a
@@ -111,10 +120,13 @@ schema that inlines a copy of it) and to the `reason` and `category` enums
 of `failure_reason.json`. Existing values are never renamed, removed,
 reordered or given a new meaning, and every schema copy and every language
 mirror (C++ `Error::Code`, the Rust `ErrorCode`, `FailureReason` and
-`FailureCategory`, the Python sidecar's `ERR_*` constants and the SDK's
-`ErrorCode`) moves in the same change;
-`protocol/rust/tests/schema_enum_drift.rs`, `test/unit/error_test.cpp` and a
-test in each Python package fail if one does not. An appended value is safe
+`FailureCategory`, the Python sidecar's `ERR_*` constants, the SDK's
+`ErrorCode`, and the `ErrorCode` and `FailureReason` enums of the draft
+stream session envelope) moves in the same change;
+`protocol/rust/tests/schema_enum_drift.rs`, `test/unit/error_test.cpp`, a
+test in each Python package and, in builds with `TP_ENABLE_STREAMING_GRPC`,
+`test/contract/stream_envelope_conformance_test.cpp` fail if one does not.
+An appended value is safe
 only while nothing sends it to a reader that predates it. The Rust readers
 (agent, CLI, observability) decode these enums into closed types and reject
 a value they do not know; the C++ adapter maps an unknown sidecar error code
@@ -193,7 +205,8 @@ rather than misreading it.
 
 ## Bindings
 
-Bindings are **hand-written**, not code-generated, in v0.1.0.
+Bindings of the JSON contracts are **hand-written**, not code-generated.
+The stream session envelope's C++ bindings are the one generated set.
 
 | Component | Path | Status |
 |-----------|------|--------|
@@ -202,6 +215,7 @@ Bindings are **hand-written**, not code-generated, in v0.1.0.
 | C++ control-plane value objects (desired_state, worker_status, health_event, deploy_transaction) | `protocol/cpp/` | **Deferred to V01-E07/V01-E10** alongside the components that emit/consume them. The Rust mirror plus the committed JSON fixtures under `protocol/rust/tests/fixtures/` are the v0.1.0 cross-language contract. |
 | C++ Python sidecar IPC binding | `runtime/src/adapters/python_pytorch/python_pytorch_session.cpp` | Reads the header fields it uses by name and ignores the rest. It sends and reads no job or session message yet. |
 | Python sidecar IPC binding | `backends/python_pytorch/src/tensorplate_pytorch_backend/protocol.py` | Kind, status, error-code, capability and job literals. `codec.py` frames headers without interpreting them. |
+| C++ stream session envelope binding (draft) | build tree only, target `tp::stream_proto` | Generated from `protocol/proto/tensorplate/stream/v1/session.proto` by the pinned `protoc` and gRPC plugin when `TP_ENABLE_STREAMING_GRPC` is ON; never committed. Only `test/contract/stream_envelope_conformance_test.cpp` links it. |
 
 We chose hand-written bindings over code generation because:
 

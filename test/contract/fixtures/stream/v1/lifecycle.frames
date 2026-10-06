@@ -1,0 +1,20 @@
+# Recorded by record.sh from the text column. Every value is synthetic.
+# Tab-separated: name, message type, the bytes protoc emitted in hex, the message in text format.
+# Single frames, not one session: the control bodies, four ends with a cause (three closed, one
+# failed; two with a failure reason), the largest sequence, the remaining endpoint reason and a
+# transcript interval whose bounds fall between two microseconds (samples 1 up to 3 at 16,000 Hz).
+
+ping	tensorplate.stream.v1.ClientEvent	0805121373796e7468657469632d73657373696f6e2d3118076a00	sequence: 5 session_id: "synthetic-session-1" generation: 7 ping {}
+pong	tensorplate.stream.v1.ServerEvent	08066a00	sequence: 6 pong {}
+status_request	tensorplate.stream.v1.ClientEvent	0806121373796e7468657469632d73657373696f6e2d3118077200	sequence: 6 session_id: "synthetic-session-1" generation: 7 status_request {}
+status	tensorplate.stream.v1.ServerEvent	08076224080310021a0d0a050816108040120408011002220708800f1080ee052a06083010808001	sequence: 7 status { state: SESSION_STATE_FINALIZING input_queue_depth: 2 input_credit { bytes { used: 22 limit: 8192 } waiting_segments { used: 1 limit: 2 } } output_pcm_bytes { used: 1920 limit: 96000 } output_metadata_bytes { used: 48 limit: 16384 } }
+cancel	tensorplate.stream.v1.ClientEvent	0807121373796e7468657469632d73657373696f6e2d3118076200	sequence: 7 session_id: "synthetic-session-1" generation: 7 cancel {}
+cancel_accepted	tensorplate.stream.v1.ServerEvent	08087200	sequence: 8 cancel_accepted {}
+closed_client_cancelled	tensorplate.stream.v1.ServerEvent	08097a1c08061214080a1210636c69656e745f63616e63656c6c656418072008	sequence: 9 session_closed { state: SESSION_STATE_CLOSED cause { code: ERROR_CODE_CANCELLED reason: "client_cancelled" } last_accepted_sequence: 7 last_produced_sequence: 8 }
+failed_input_credit_exceeded	tensorplate.stream.v1.ServerEvent	08047a230807121b080c1215696e7075745f6372656469745f6578636565646564181518052003	sequence: 4 session_closed { state: SESSION_STATE_FAILED cause { code: ERROR_CODE_RESOURCE_EXHAUSTED reason: "input_credit_exceeded" failure_reason: FAILURE_REASON_INPUT_CREDIT_EXCEEDED } last_accepted_sequence: 5 last_produced_sequence: 3 }
+closed_deployment_retired	tensorplate.stream.v1.ServerEvent	080c7a2008061218080b12126465706c6f796d656e745f7265746972656418181809200b	sequence: 12 session_closed { state: SESSION_STATE_CLOSED cause { code: ERROR_CODE_UNAVAILABLE reason: "deployment_retired" failure_reason: FAILURE_REASON_DEPLOYMENT_RETIRED } last_accepted_sequence: 9 last_produced_sequence: 11 }
+closed_idle_timeout	tensorplate.stream.v1.ServerEvent	08037a18080612100807120c69646c655f74696d656f757418022002	sequence: 3 session_closed { state: SESSION_STATE_CLOSED cause { code: ERROR_CODE_TIMEOUT reason: "idle_timeout" } last_accepted_sequence: 2 last_produced_sequence: 2 }
+client_last_sequence	tensorplate.stream.v1.ClientEvent	08ffffffffffffffffff01121373796e7468657469632d73657373696f6e2d3118076a00	sequence: 18446744073709551615 session_id: "synthetic-session-1" generation: 7 ping {}
+server_last_sequence	tensorplate.stream.v1.ServerEvent	08ffffffffffffffffff016a00	sequence: 18446744073709551615 pong {}
+endpoint_duration_limit	tensorplate.stream.v1.ServerEvent	0809aa010808041080d30e1803	sequence: 9 endpoint_detected { utterance_id: 4 end_sample_offset: 240000 reason: ENDPOINT_REASON_DURATION_LIMIT }
+final_between_microseconds	tensorplate.stream.v1.ServerEvent	0801b201210801120973796e7468657469631a10083e10bc011a0973796e7468657469632003	sequence: 1 final_transcript { utterance_id: 1 text: "synthetic" segments { start_us: 62 end_us: 188 text: "synthetic" } end_sample_offset: 3 }

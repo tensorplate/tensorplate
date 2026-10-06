@@ -193,3 +193,37 @@ set_target_properties(tp_runtime PROPERTIES
 
 tp_apply_warnings(tp_runtime)
 tp_apply_sanitizers(tp_runtime)
+
+if(TP_ENABLE_STREAMING_GRPC)
+  # C++ bindings of the stream envelope, generated into the build tree and
+  # never committed. Nothing in tp_runtime uses them yet.
+  set(_tp_stream_proto_root "${CMAKE_SOURCE_DIR}/protocol/proto")
+  set(_tp_stream_proto tensorplate/stream/v1/session.proto)
+  set(_tp_stream_out "${CMAKE_BINARY_DIR}/generated/proto")
+  set(_tp_stream_base "${_tp_stream_out}/tensorplate/stream/v1/session")
+  set(_tp_stream_generated
+    "${_tp_stream_base}.pb.h" "${_tp_stream_base}.pb.cc"
+    "${_tp_stream_base}.grpc.pb.h" "${_tp_stream_base}.grpc.pb.cc")
+  file(MAKE_DIRECTORY "${_tp_stream_out}")
+  add_custom_command(
+    OUTPUT ${_tp_stream_generated}
+    COMMAND protobuf::protoc
+            "--proto_path=${_tp_stream_proto_root}"
+            "--cpp_out=${_tp_stream_out}"
+            "--grpc_out=${_tp_stream_out}"
+            "--plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>"
+            "${_tp_stream_proto}"
+    DEPENDS "${_tp_stream_proto_root}/${_tp_stream_proto}"
+            protobuf::protoc gRPC::grpc_cpp_plugin
+    COMMENT "Generating the stream/v1 C++ bindings"
+    VERBATIM)
+
+  add_library(tp_stream_proto STATIC ${_tp_stream_generated})
+  add_library(tp::stream_proto ALIAS tp_stream_proto)
+  # SYSTEM: generated headers are not held to the project's warning set.
+  target_include_directories(tp_stream_proto SYSTEM PUBLIC
+    $<BUILD_INTERFACE:${_tp_stream_out}>)
+  target_compile_features(tp_stream_proto PUBLIC cxx_std_20)
+  target_link_libraries(tp_stream_proto PUBLIC gRPC::grpc++ protobuf::libprotobuf)
+  tp_apply_sanitizers(tp_stream_proto)
+endif()

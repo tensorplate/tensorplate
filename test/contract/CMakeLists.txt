@@ -25,6 +25,19 @@ target_link_libraries(tp_test_contract
 
 target_compile_features(tp_test_contract PRIVATE cxx_std_20)
 
+if(TP_ENABLE_STREAMING_GRPC)
+  # The stream envelope's golden frames, read from the source tree and decoded
+  # with the bindings generated in this build.
+  target_sources(tp_test_contract PRIVATE stream_envelope_conformance_test.cpp)
+  target_link_libraries(tp_test_contract PRIVATE tp::stream_proto)
+  target_compile_definitions(tp_test_contract PRIVATE TP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
+  add_test(NAME contract.stream_frames_recorded
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stream/v1/record.sh --check
+            $<TARGET_FILE:protobuf::protoc>)
+  set_tests_properties(contract.stream_frames_recorded PROPERTIES LABELS "T3")
+endif()
+
 tp_apply_warnings(tp_test_contract)
 tp_apply_sanitizers(tp_test_contract)
 
