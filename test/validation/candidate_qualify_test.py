@@ -7,6 +7,7 @@ in the shapes the real ones use, so the tool's reading of every seam is
 exercised without a GPU; every guard is then broken once to show the record
 turns `fail` or `incomplete` for its own reason. Set
 TP_CANDIDATE_QUALIFY_UPDATE_GOLDEN=1 to rewrite the committed synthetic record.
+`--filed-records [DIR]` checks only the records filed from hardware runs.
 """
 
 from __future__ import annotations
@@ -520,8 +521,66 @@ def check_schema(record: dict, schema: dict) -> None:
     record_mod.validate_error_codes(record, record_mod.load_error_codes())
 
 
+def check_filed_records(schema: dict, evidence: Path = EVIDENCE) -> int:
+    """Every filed record is valid, candidate-only and has the result its own steps derive."""
+    filed_paths = sorted(evidence.glob("speech-candidate-*/run-*/record.json"))
+    assert filed_paths, "no recorded candidate run is filed"
+    for path in filed_paths:
+        filed = json.loads(path.read_text())
+        check_schema(filed, schema)
+        assert filed["provenance"] == "recorded", path
+        assert filed["qualification"]["production_evidence"] is False, path
+        stop = next(
+            (r[len("stopped: ") :] for r in filed["result"]["reasons"] if r[:9] == "stopped: "),
+            None,
+        )
+        derived = record_mod.finalize(json.loads(json.dumps(filed)), stop)["result"]
+        assert derived == filed["result"], (path, derived)
+        for window in filed["memory"]["windows"].values():
+            for name in window.get("observations") or []:
+                assert (path.parent / name).is_file(), (path, name)
+        assert not (path.parent / "outputs").exists(), f"{path.parent}: outputs/ is private"
+    return len(filed_paths)
+
+
+def check_filed_record_guard(schema: dict) -> None:
+    """The filed-record check refuses a broken record, and the mode reports what it checked."""
+    filed = len(list(EVIDENCE.glob("speech-candidate-*/run-*/record.json")))
+    completed = subprocess.run(
+        [sys.executable, __file__, "--filed-records"], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0 and f"{filed} filed records" in completed.stdout, completed
+    source = sorted(EVIDENCE.glob("speech-candidate-*/run-1"))[0]
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        run = Path(raw_tmp) / source.parent.name / source.name
+        shutil.copytree(source, run)
+        assert check_filed_records(schema, Path(raw_tmp)) == 1
+        good = (run / "record.json").read_text()
+        for field, value in (("extra", 1), ("provenance", "synthetic")):
+            (run / "record.json").write_text(json.dumps({**json.loads(good), field: value}))
+            try:
+                check_filed_records(schema, Path(raw_tmp))
+            except (AssertionError, jsonschema.ValidationError):
+                continue
+            raise AssertionError(f"a filed record with {field} set to {value!r} passed")
+        completed = subprocess.run(
+            [sys.executable, __file__, "--filed-records", raw_tmp], capture_output=True, check=False
+        )
+        assert completed.returncode != 0, "the mode passed a broken record"
+        shutil.rmtree(run)
+        try:
+            check_filed_records(schema, Path(raw_tmp))
+        except AssertionError:
+            return
+        raise AssertionError("an evidence tree with no filed record passed")
+
+
 def main() -> int:
     schema = record_mod.load_schema()
+    if sys.argv[1:2] == ["--filed-records"]:
+        count = check_filed_records(schema, Path(sys.argv[2]) if sys.argv[2:] else EVIDENCE)
+        print(f"candidate qualify: {count} filed records are valid and derive their own result")
+        return 0
     assert audio.fir_taps_from_formula() == audio.FIR_TAPS_Q15, (
         "the pinned FIR taps drifted from their formula"
     )
@@ -713,25 +772,8 @@ def main() -> int:
             + "\n".join(diff_pointers(normalize(committed), golden)[:20])
         )
 
-        # Records filed from hardware runs: valid, candidate-only, and with the result
-        # their own steps derive.
-        filed_paths = sorted(EVIDENCE.glob("speech-candidate-*/run-*/record.json"))
-        assert filed_paths, "no recorded candidate run is filed"
-        for path in filed_paths:
-            filed = json.loads(path.read_text())
-            check_schema(filed, schema)
-            assert filed["provenance"] == "recorded", path
-            assert filed["qualification"]["production_evidence"] is False, path
-            stop = next(
-                (r[len("stopped: ") :] for r in filed["result"]["reasons"] if r[:9] == "stopped: "),
-                None,
-            )
-            derived = record_mod.finalize(json.loads(json.dumps(filed)), stop)["result"]
-            assert derived == filed["result"], (path, derived)
-            for window in filed["memory"]["windows"].values():
-                for name in window.get("observations") or []:
-                    assert (path.parent / name).is_file(), (path, name)
-            assert not (path.parent / "outputs").exists(), f"{path.parent}: outputs/ is private"
+        check_filed_records(schema)
+        check_filed_record_guard(schema)
 
         # -- guards, each broken once --
         completed, record, _ = harness.run("stt", mutate="wrong_code")

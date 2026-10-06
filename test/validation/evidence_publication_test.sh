@@ -1177,6 +1177,30 @@ python3 -c 'print("[" * 100000 + "]" * 100000)' >"${d}/deep.json" || die "could 
 check "an internal error is a fault, not a finding" "2" "$(scan "${d}.out" --patterns-only "$d")"
 check "  reported without a traceback that could quote scanned text" "no" "$(has "Traceback" "${d}.out")"
 
+# A pull request that changes only records triggers this workflow and not
+# the one that runs the qualify tool's test, so this job checks them too.
+workflow="${repo_root}/.github/workflows/evidence-publication.yml"
+# The scan job alone: from its key to the next job's.
+scan_job="$(awk '/^  scan:$/ {on = 1; print; next} on && /^  [^ #]/ {exit} on' "$workflow")" \
+  || die "could not read the workflow"
+# A whole line, so a commented-out step or one with `|| true` does not count.
+step_line() {
+  { grep -nxF -- "        $1" <<<"$scan_job" || true; } | head -n 1 | cut -d: -f1
+}
+filed_step="$(step_line 'run: test/validation/candidate_qualify_test.py --filed-records')"
+install_step="$(step_line 'run: python3 -m pip install --quiet -r tools/release/requirements.txt')"
+check "the scan job checks the filed candidate records" "yes" \
+  "$([[ -n "$filed_step" ]] && echo yes || echo no)"
+check "  after installing what the check imports" "yes" \
+  "$([[ -n "$install_step" && -n "$filed_step" && "$install_step" -lt "$filed_step" ]] && echo yes || echo no)"
+check "  with no condition and no tolerated failure in the job" "no" \
+  "$(grep -qE '^ +(if|continue-on-error):' <<<"$scan_job" && echo yes || echo no)"
+check "  in a workflow with no path filter" "no" "$(has 'paths' "$workflow")"
+pr_trigger="$(awk '/^  pull_request:$/ {on = 1; print; next} on && /^  [^ #]/ {exit} on' "$workflow")" \
+  || die "could not read the workflow"
+check "  that runs on every pull request" "yes" \
+  "$([[ -n "$pr_trigger" ]] && ! grep -q 'branches' <<<"$pr_trigger" && echo yes || echo no)"
+
 if [[ "$failures" -eq 0 ]]; then
   printf '\nall checks passed\n'
   exit 0

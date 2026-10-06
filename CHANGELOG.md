@@ -19,6 +19,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `tensorplate infer` test failed now and then with "Connection reset by
   peer". The health stub in the agent's deploy tests reads its request head
   the same way. Test code only; nothing that ships changes.
+- The Evidence publication workflow checks every filed candidate
+  qualification record against its schema and the result its own steps
+  derive. That check ran only inside the qualify tool's test, behind a path
+  filter a pull request that changes nothing but records does not match.
+  `test/validation/candidate_qualify_test.py --filed-records` runs the check
+  alone. (V030-E06-F02-T01)
 
 ### Added
 
