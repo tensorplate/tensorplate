@@ -7,6 +7,19 @@ and `BufferRef` lifetime invariants.
 Runs nightly and on release branches. Must skip cleanly (not fail) when the
 required backend SDK is not available on the runner.
 
+## Stream session envelope conformance
+
+`stream_envelope_conformance_test.cpp` holds the draft
+`tensorplate.stream.v1` schema to the golden frames under
+`fixtures/stream/v1/`. It is compiled only when `TP_ENABLE_STREAMING_GRPC`
+is ON, against the bindings generated in that build, and needs no backend
+SDK or hardware. `contract.stream_frames_recorded` runs the fixtures'
+`record.sh --check` with the build's `protoc`: it fails when a frame's hex
+is not what that `protoc` encodes from its text, or when `versions.txt`
+names another `protoc`. The fixture format, how to
+record the frames again and what the suite checks are in
+[`protocol/README.md`](../../protocol/README.md#streaming-session-envelope).
+
 ## V01-E04 ExecutionSession conformance suite
 
 `execution_session_conformance.hpp` is the V01-E04-F07-T01 shared

@@ -78,8 +78,14 @@ in C++ `Error::Code` numeric order, to `error.json` and to every copy in
 the same change, together with the language mirrors;
 `protocol/rust/tests/schema_enum_drift.rs` fails on any copy that differs
 from `ErrorCode::ALL`. The failure `reason`, `category` and `severity`
-enums exist only in `failure_reason.json` and are held to the Rust
-taxonomy by the same test. Appending to these enums keeps
+enums have no other JSON schema copy; they live in `failure_reason.json`
+and are held to the Rust taxonomy by the same test. The draft stream
+session envelope,
+[`../proto/tensorplate/stream/v1/session.proto`](../proto/tensorplate/stream/v1/session.proto),
+mirrors the error-code enum as `ErrorCode` and the `reason` enum as
+`FailureReason`; append to them in the same change, or
+`test/contract/stream_envelope_conformance_test.cpp` fails in builds with
+`TP_ENABLE_STREAMING_GRPC`. Appending to these enums keeps
 `schema_version` at `0.1` only under the narrow exception, and with the
 reader constraints, that
 [`docs/architecture/protocol.md`](../../docs/architecture/protocol.md#versioning)

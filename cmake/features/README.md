@@ -1,7 +1,8 @@
 # Streaming dependencies
 
 `TP_ENABLE_STREAMING_GRPC` defaults ON only when discovery validates the
-pinned static vcpkg gRPC, protobuf and OpenSSL archives. Missing dependencies,
+pinned static vcpkg gRPC, protobuf and OpenSSL archives and the two code
+generators. Missing dependencies,
 shared libraries or non-vcpkg installations default OFF with a status line
 explaining why. Explicit OFF skips discovery. Explicit ON treats any failed
 validation as a configure error and requires the `streaming-grpc` manifest
@@ -29,7 +30,12 @@ transport objects; this build is not a transport-footprint measurement.
 The baseline resolves gRPC 1.81.1, protobuf 6.33.4 (port revision 2), OpenSSL
 3.6.4 (port revision 1), GoogleTest 1.18.0 and nlohmann-json 3.12.0 (port
 revision 2). The gRPC port supplies its host code generator and host protobuf
-from that same baseline. Generated bindings are not part of this change.
+from that same baseline. Configure requires `protobuf::protoc` and
+`gRPC::grpc_cpp_plugin` to be imported from the vcpkg install tree, and a
+feature-ON build generates the draft stream session envelope's C++ bindings
+with them into the build tree (target `tp::stream_proto`, see
+[`protocol/README.md`](../../protocol/README.md#streaming-session-envelope)).
+Generated files are never committed.
 Source: the ports and triplets at the
 [pinned vcpkg revision](https://github.com/microsoft/vcpkg/tree/f907dc21e0e8699955b002d0fe7673de5db55fab).
 
@@ -38,8 +44,9 @@ and set `-DTP_ENABLE_STREAMING_GRPC=OFF`. Worker config `streaming.enabled`
 defaults to false, mirrored by C++ `ServingConfig::streaming` of type
 `StreamingConfig` with `bool enabled = false`. Setting it to true in that
 build returns `unsupported`.
-The feature currently prepares dependencies and config validation, with no
-stream listener. Unary HTTP and sidecar UDS keep their existing transports.
+The feature currently prepares dependencies, config validation and those
+bindings, with no stream listener. Unary HTTP and sidecar UDS keep their
+existing transports.
 
 Hosted C++ tests enable the feature; adapter-shell tests explicitly disable
 it and check both the typed refusal and unary serving. The cold dependency
