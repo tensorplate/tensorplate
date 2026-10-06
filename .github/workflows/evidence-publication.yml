@@ -73,6 +73,18 @@ jobs:
           tools/validation/check-evidence-publication.sh --patterns-only \
             docs/validation/evidence test/platform
 
+      # The qualify tool's whole test runs behind a path filter that a
+      # records-only pull request does not match, so the check of the filed
+      # records runs here too, after the identifier scan has given its verdict.
+      # It needs jsonschema.
+      - name: Install the filed-record check's dependencies
+        shell: bash
+        run: python3 -m pip install --quiet -r tools/release/requirements.txt
+
+      - name: Filed candidate qualification records
+        shell: bash
+        run: test/validation/candidate_qualify_test.py --filed-records
+
   public-hygiene:
     name: public hygiene scan
     if: github.event_name == 'pull_request'
