@@ -36,6 +36,17 @@ foreach(name gRPC::grpc++ gRPC::grpc gRPC::gpr OpenSSL::SSL OpenSSL::Crypto)
     set_property(TARGET ${name} PROPERTY IMPORTED_LOCATION_DEBUG "/system/lib/library.a")
   endif()
 endforeach()
+if(NOT MISSING_TARGET STREQUAL "gRPC::grpc_cpp_plugin")
+  add_executable(gRPC::grpc_cpp_plugin IMPORTED)
+  set_target_properties(gRPC::grpc_cpp_plugin PROPERTIES
+    IMPORTED_CONFIGURATIONS "RELEASE;DEBUG"
+    IMPORTED_LOCATION_RELEASE "${VCPKG_INSTALLED_DIR}/${TOOL_TRIPLET}/tools/grpc/grpc_cpp_plugin"
+    IMPORTED_LOCATION_DEBUG "${VCPKG_INSTALLED_DIR}/${TOOL_TRIPLET}/tools/grpc/grpc_cpp_plugin")
+  if(OUTSIDE_TARGET STREQUAL "gRPC::grpc_cpp_plugin")
+    set_property(TARGET gRPC::grpc_cpp_plugin PROPERTY
+      IMPORTED_LOCATION_DEBUG "/system/bin/grpc_cpp_plugin")
+  endif()
+endif()
 ]=])
 file(WRITE "${root}/packages/ProtobufConfig.cmake" [=[
 add_library(protobuf::libprotobuf STATIC IMPORTED)
@@ -43,6 +54,26 @@ set_target_properties(protobuf::libprotobuf PROPERTIES
   IMPORTED_LOCATION "${VCPKG_INSTALLED_DIR}/x64-linux/lib/protobuf.a")
 if(MISSING_ARCHIVE)
   set_property(TARGET protobuf::libprotobuf PROPERTY IMPORTED_LOCATION "")
+endif()
+if(DOTDOT_ARCHIVE)
+  set_property(TARGET protobuf::libprotobuf PROPERTY
+    IMPORTED_LOCATION "${VCPKG_INSTALLED_DIR}/x64-linux/../../system/lib/protobuf.a")
+endif()
+if(NOT MISSING_TARGET STREQUAL "protobuf::protoc")
+  add_executable(protobuf::protoc IMPORTED)
+  set_target_properties(protobuf::protoc PROPERTIES
+    IMPORTED_CONFIGURATIONS RELEASE
+    IMPORTED_LOCATION_RELEASE "${VCPKG_INSTALLED_DIR}/${TOOL_TRIPLET}/tools/protobuf/protoc")
+  if(OUTSIDE_TARGET STREQUAL "protobuf::protoc")
+    set_property(TARGET protobuf::protoc PROPERTY IMPORTED_LOCATION_RELEASE "/system/bin/protoc")
+  endif()
+  if(MISSING_GENERATOR)
+    set_property(TARGET protobuf::protoc PROPERTY IMPORTED_LOCATION_RELEASE "")
+  endif()
+  if(DOTDOT_GENERATOR)
+    set_property(TARGET protobuf::protoc PROPERTY
+      IMPORTED_LOCATION_RELEASE "${VCPKG_INSTALLED_DIR}/../system/bin/protoc")
+  endif()
 endif()
 ]=])
 
@@ -53,7 +84,7 @@ function(run_case name expected_error)
     "-DSTREAMING_CMAKE=${STREAMING_CMAKE}"
     "-DgRPC_DIR=${root}/packages" "-DProtobuf_DIR=${root}/packages"
     "-DVCPKG_INSTALLED_DIR=${root}/installed" -DVCPKG_TARGET_TRIPLET=x64-linux
-    -DEXPECTED=ON ${CASE_UNPARSED_ARGUMENTS}
+    -DTOOL_TRIPLET=x64-linux -DEXPECTED=ON ${CASE_UNPARSED_ARGUMENTS}
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE output)
   string(REGEX REPLACE "[ \t\r\n]+" " " normalized "${output}")
   if(expected_error STREQUAL "")
@@ -97,4 +128,21 @@ run_unavailable(system_grpc_archive "requires vcpkg static archives"
 run_unavailable(system_debug_archive "requires vcpkg static archives"
   -DOUTSIDE_TARGET=OpenSSL::Crypto)
 run_unavailable(missing_archive "has no imported static archive" -DMISSING_ARCHIVE=ON)
-message(STATUS "Streaming configure policy: 23 cases passed")
+# The generators are host tools: another triplet of the same install tree is theirs to use.
+run_case(host_triplet_generators "" -DTOOL_TRIPLET=x64-linux-release)
+run_unavailable(missing_protoc "requires imported target protobuf::protoc"
+  -DMISSING_TARGET=protobuf::protoc)
+run_unavailable(missing_plugin "requires imported target gRPC::grpc_cpp_plugin"
+  -DMISSING_TARGET=gRPC::grpc_cpp_plugin)
+run_unavailable(system_protoc "requires vcpkg code generators: protobuf::protoc"
+  -DOUTSIDE_TARGET=protobuf::protoc)
+run_unavailable(system_plugin "requires vcpkg code generators: gRPC::grpc_cpp_plugin"
+  -DOUTSIDE_TARGET=gRPC::grpc_cpp_plugin)
+run_unavailable(missing_generator "code generator has no imported location"
+  -DMISSING_GENERATOR=ON)
+# A location that starts with the install tree's path and leaves it through "..".
+run_unavailable(dotdot_archive "requires vcpkg static archives: protobuf::libprotobuf"
+  -DDOTDOT_ARCHIVE=ON)
+run_unavailable(dotdot_protoc "requires vcpkg code generators: protobuf::protoc"
+  -DDOTDOT_GENERATOR=ON)
+message(STATUS "Streaming configure policy: 38 cases passed")
