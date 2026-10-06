@@ -4,15 +4,75 @@
 # Operator helper for the Jetson GitHub Actions release runner.
 #
 # This script intentionally contains no GitHub registration token, password,
-# repository secret, or private network address. It only toggles a previously
+# repository secret, or private network address. It toggles a previously
 # configured self-hosted runner service and its temporary release sudoers
-# allowance.
+# allowance and, as the runner account and without root, provisions that
+# account's vcpkg checkout and binary cache.
 
 set -Eeuo pipefail
 
 readonly DEFAULT_RUNNER_USER="gha-runner"
 readonly DEFAULT_RUNNER_SERVICE="actions.runner.tensorplate-tensorplate.ubuntu.service"
 readonly DEFAULT_REQUIRED_LABELS="self-hosted,linux,ARM64,tensorplate-release"
+readonly DEFAULT_VCPKG_GIT_URL="https://github.com/microsoft/vcpkg.git"
+readonly DEFAULT_VCPKG_BUILD_TIMEOUT="21600"
+readonly VCPKG_FEATURE="streaming-grpc"
+readonly PLAIN_PATHS_RULE="the vcpkg directories must be absolute paths of [A-Za-z0-9._/+@-] with no empty, '.' or '..' component"
+readonly NO_CHECKOUT="this script was not started from its file in a repository checkout"
+readonly STAMP_KEYS=(
+  baseline dependencies_sha256 triplet feature vcpkg_version compiler provisioned_at
+  archives_sha256
+)
+# Prints what this script needs of a vcpkg manifest, on two lines: its
+# builtin-baseline, and the SHA-256 of its content without its own version.
+# The baseline is printed as JSON text, so that whatever the manifest holds
+# there is one line of ASCII for bash to judge. The file must be one JSON
+# object in UTF-8, with no byte order mark before it, that names no key
+# twice at any depth and holds no number other than an integer, so that two
+# manifests which say different things never read as the same one. The four
+# keys a manifest names its own version by are dropped where they are
+# members of that object and nowhere else; the rest is hashed in one
+# canonical form, so the digest follows what the manifest says and not how
+# the file is laid out. Anything else ends the program with status 1 and no
+# output. It ends itself and says nothing: bash gives the reason, and an
+# exception left to the interpreter goes to whatever the system hooks onto
+# those, a crash reporter for one.
+readonly MANIFEST_FACTS='
+import hashlib
+import json
+import sys
+
+
+def members(pairs):
+    found = dict(pairs)
+    if len(found) != len(pairs):
+        raise ValueError("an object names a key twice")
+    return found
+
+
+def refused(text):
+    raise ValueError("a manifest holds no such number: " + text)
+
+
+try:
+    with open(sys.argv[1], "rb") as manifest_file:
+        manifest = json.loads(
+            manifest_file.read().decode("utf-8"),
+            object_pairs_hook=members,
+            parse_constant=refused,
+            parse_float=refused,
+        )
+    if type(manifest) is not dict:
+        raise ValueError("the manifest is not an object")
+    baseline = manifest.get("builtin-baseline")
+    for key in ("version", "version-string", "version-semver", "version-date"):
+        manifest.pop(key, None)
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    digest = hashlib.sha256(canonical.encode("ascii")).hexdigest()
+    sys.stdout.write("%s\n%s\n" % (json.dumps(baseline), digest))
+except Exception:
+    sys.exit(1)
+'
 
 RUNNER_USER="${TP_JETSON_RUNNER_USER:-$DEFAULT_RUNNER_USER}"
 RUNNER_DIR="${TP_JETSON_RUNNER_DIR:-/home/${RUNNER_USER}/actions-runner}"
@@ -25,8 +85,41 @@ APT_GET="${TP_JETSON_RUNNER_APT_GET:-/usr/bin/apt-get}"
 INSTALL="${TP_JETSON_RUNNER_INSTALL:-/usr/bin/install}"
 VISUDO="${TP_JETSON_RUNNER_VISUDO:-/usr/sbin/visudo}"
 TIMEOUT_BIN="${TP_JETSON_RUNNER_TIMEOUT:-/usr/bin/timeout}"
+FLOCK_BIN="${TP_JETSON_RUNNER_FLOCK:-/usr/bin/flock}"
 DPKG_BIN="${TP_JETSON_RUNNER_DPKG:-/usr/bin/dpkg}"
 APT_WRAPPER="${TP_JETSON_RUNNER_APT_WRAPPER:-/usr/local/sbin/tensorplate-apt}"
+ID_BIN="${TP_JETSON_RUNNER_ID:-/usr/bin/id}"
+
+VCPKG_CHECKOUT="${TP_JETSON_RUNNER_VCPKG_DIR:-/home/${RUNNER_USER}/vcpkg}"
+VCPKG_CACHE_DIR="${TP_JETSON_RUNNER_VCPKG_CACHE_DIR:-/home/${RUNNER_USER}/.cache/tensorplate-vcpkg}"
+VCPKG_GIT_URL="${TP_JETSON_RUNNER_VCPKG_GIT_URL:-$DEFAULT_VCPKG_GIT_URL}"
+VCPKG_BUILD_TIMEOUT="${TP_JETSON_RUNNER_VCPKG_BUILD_TIMEOUT:-$DEFAULT_VCPKG_BUILD_TIMEOUT}"
+VCPKG_ARCHIVES="${VCPKG_CACHE_DIR}/archives"
+VCPKG_STAMP="${VCPKG_CACHE_DIR}/provisioned.stamp"
+VCPKG_LOCK="${VCPKG_CACHE_DIR}/provision.lock"
+VCPKG_TOOL="${VCPKG_CHECKOUT}/vcpkg"
+
+# No setting replaces the pin: it is the builtin-baseline of the checkout this
+# script is in. Read from standard input the script has no such checkout.
+SCRIPT_PATH=""
+REPO_ROOT=""
+MANIFEST=""
+MANIFEST_CONFIGURATION=""
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+  SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+  SCRIPT_PATH="${SCRIPT_DIR}/$(basename -- "${BASH_SOURCE[0]}")"
+  REPO_ROOT="$(dirname -- "$(dirname -- "$SCRIPT_DIR")")"
+  MANIFEST="${REPO_ROOT}/vcpkg.json"
+  MANIFEST_CONFIGURATION="${REPO_ROOT}/vcpkg-configuration.json"
+fi
+
+MANIFEST_BASELINE=""
+DEPENDENCIES_SHA256=""
+MANIFEST_ERROR=""
+NOT_READY_REASON=""
+PROOF_FAILURE=""
+THROWAWAY_ROOT=""
+THROWAWAY_PATHS=()
 
 usage() {
   cat <<EOF
@@ -34,8 +127,37 @@ Usage:
   jetson-runner-control.sh on
   jetson-runner-control.sh off
   jetson-runner-control.sh status
+  jetson-runner-control.sh provision-vcpkg [--check]
+  jetson-runner-control.sh vcpkg-env
 
 Controls the TensorPlate Jetson self-hosted release runner.
+
+provision-vcpkg runs as the runner account and needs no root. It puts the
+vcpkg checkout at the builtin-baseline of this checkout's vcpkg.json, builds the
+${VCPKG_FEATURE} manifest feature into a binary cache on the runner, proves
+that a second install restores every package from that cache without
+building, and only then records the runner as ready. --check repeats the
+proof against the existing cache. A proof that passes changes nothing; one
+that fails removes the record, so the runner stops being reported as ready.
+Only one provision-vcpkg, with or without --check, runs at a time: a second
+one is refused while the first, or a build it left behind, holds the lock.
+
+The record is for the vcpkg baseline and for the dependencies digest of this
+checkout's vcpkg.json: the SHA-256 of the manifest's content without its own
+version. python3 reads the file as JSON, drops the top-level version,
+version-string, version-semver and version-date, and hashes the rest in one
+canonical form. A new version, or the same content laid out another way,
+leaves the runner ready; any other change to what the manifest says does
+not. A vcpkg.json that is not one JSON object in UTF-8 with no byte order
+mark, names a key twice, holds a number other than an integer or has no
+builtin-baseline of 40 lowercase hex digits is refused. So is a checkout
+with a vcpkg-configuration.json beside its vcpkg.json: vcpkg would read
+that file, and the digest covers vcpkg.json alone.
+
+vcpkg-env prints the three environment lines a release job needs to use that
+checkout and cache. It prints nothing and fails unless the runner is ready
+for this checkout's vcpkg.json and git reports the vcpkg checkout unmodified.
+It asks git as the runner account and refuses to run as root.
 
 Environment overrides:
   TP_JETSON_RUNNER_USER          default: ${DEFAULT_RUNNER_USER}
@@ -43,6 +165,10 @@ Environment overrides:
   TP_JETSON_RUNNER_SERVICE       default: ${DEFAULT_RUNNER_SERVICE}
   TP_JETSON_RUNNER_SUDOERS_FILE  default: /etc/sudoers.d/gha-runner-tensorplate-release
   TP_JETSON_RUNNER_LABELS        default: ${DEFAULT_REQUIRED_LABELS}
+  TP_JETSON_RUNNER_VCPKG_DIR            default: /home/\$TP_JETSON_RUNNER_USER/vcpkg
+  TP_JETSON_RUNNER_VCPKG_CACHE_DIR      default: /home/\$TP_JETSON_RUNNER_USER/.cache/tensorplate-vcpkg
+  TP_JETSON_RUNNER_VCPKG_GIT_URL        default: ${DEFAULT_VCPKG_GIT_URL}
+  TP_JETSON_RUNNER_VCPKG_BUILD_TIMEOUT  default: ${DEFAULT_VCPKG_BUILD_TIMEOUT} (seconds per vcpkg run)
 EOF
 }
 
@@ -279,12 +405,592 @@ cmd_status() {
   print_sudoers_status
 }
 
+# Sets MANIFEST_BASELINE and DEPENDENCIES_SHA256 from this checkout's
+# vcpkg.json, or returns 1 with the reason in MANIFEST_ERROR. python3 reads
+# the manifest, isolated (-I) from the caller's environment and directory
+# and from the account's own site directory, any of which could otherwise
+# hand it other code than python's own. What it answers is taken
+# only as a full lowercase commit id and a SHA-256, each on a line of its own.
+load_manifest() {
+  local facts baseline status=0
+  MANIFEST_BASELINE=""
+  DEPENDENCIES_SHA256=""
+  MANIFEST_ERROR=""
+  [[ -n "$MANIFEST" ]] || {
+    MANIFEST_ERROR="cannot read a vcpkg.json: ${NO_CHECKOUT}"
+    return 1
+  }
+  # Only a regular file is read; opening anything else there could block for
+  # good.
+  [[ -f "$MANIFEST" && -r "$MANIFEST" ]] || {
+    MANIFEST_ERROR="cannot read ${MANIFEST}; run this command from a repository checkout"
+    return 1
+  }
+  # vcpkg reads a vcpkg-configuration.json beside the manifest: registries
+  # and overlay ports, which decide what is built and which the digest does
+  # not hold. Anything by that name is a refusal; nothing is read from it.
+  [[ ! -e "$MANIFEST_CONFIGURATION" && ! -L "$MANIFEST_CONFIGURATION" ]] || {
+    MANIFEST_ERROR="${MANIFEST_CONFIGURATION} is not covered by the dependencies digest and vcpkg would read it; move what it says into ${MANIFEST} as its vcpkg-configuration member"
+    return 1
+  }
+  command -v python3 >/dev/null 2>&1 || {
+    MANIFEST_ERROR="missing required command: python3, which reads ${MANIFEST}"
+    return 1
+  }
+  facts="$(python3 -I -c "$MANIFEST_FACTS" "$MANIFEST")" || status=$?
+  # The program ends with 1 for every manifest it refuses. Any other status
+  # is the interpreter's own, or that of whatever stopped it.
+  [[ "$status" -ne 1 ]] || {
+    MANIFEST_ERROR="python3 could not read ${MANIFEST} (exit ${status}): a manifest is one JSON object in UTF-8 with no byte order mark that names no key twice and holds no number other than an integer"
+    return 1
+  }
+  [[ "$status" -eq 0 ]] || {
+    MANIFEST_ERROR="python3 failed (exit ${status}) before it answered for ${MANIFEST}"
+    return 1
+  }
+  [[ "${facts%%$'\n'*}" =~ ^\"([0-9a-f]{40})\"$ ]] || {
+    MANIFEST_ERROR="${MANIFEST} does not name a builtin-baseline of 40 lowercase hex digits"
+    return 1
+  }
+  baseline="${BASH_REMATCH[1]}"
+  [[ "${facts#*$'\n'}" =~ ^[0-9a-f]{64}$ ]] || {
+    MANIFEST_ERROR="cannot compute the dependencies digest of ${MANIFEST}"
+    return 1
+  }
+  MANIFEST_BASELINE="$baseline"
+  DEPENDENCIES_SHA256="${facts#*$'\n'}"
+}
+
+# Prints the vcpkg triplet of this machine, or fails: an architecture the
+# release line does not build on gets no triplet rather than a default.
+host_triplet() {
+  local machine
+  machine="$(uname -m 2>/dev/null)" || return 1
+  case "$machine" in
+    aarch64) printf 'arm64-linux\n' ;;
+    x86_64) printf 'x64-linux\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Whether a path can be seen not to exist. A parent this account cannot
+# search hides what is under it, and calling that "absent" would be a guess.
+known_missing() {
+  local parent="$1"
+  [[ ! -e "$1" ]] || return 1
+  while [[ ! -e "$parent" ]]; do
+    parent="$(dirname -- "$parent")"
+  done
+  [[ -x "$parent" ]]
+}
+
+# Reads HEAD from its file rather than through git: `status` is run by root
+# on a checkout the runner account owns, which git refuses to open. Only a
+# regular file is read; opening anything else there could block for good.
+checkout_head() {
+  local head_file="${VCPKG_CHECKOUT}/.git/HEAD" head=""
+  if known_missing "$head_file"; then
+    printf 'absent\n'
+    return
+  fi
+  if [[ -f "$head_file" ]]; then
+    { read -r head <"$head_file"; } 2>/dev/null || true
+  fi
+  if [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
+    printf '%s\n' "$head"
+  elif [[ "$head" == "ref: "* ]]; then
+    printf 'not-detached\n'
+  else
+    printf 'unreadable\n'
+  fi
+}
+
+# Prints one value of the provisioning stamp, and only when the stamp holds
+# that key exactly once.
+stamp_value() {
+  local key="$1" line value="" seen=0
+  {
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      if [[ "$line" == "${key}="* ]]; then
+        value="${line#*=}"
+        seen=$((seen + 1))
+      fi
+    done <"$VCPKG_STAMP"
+  } 2>/dev/null || true
+  [[ "$seen" -eq 1 ]] || return 1
+  printf '%s\n' "$value"
+}
+
+# Both directories end up in VCPKG_BINARY_SOURCES and in a job's environment
+# file, where a comma, a semicolon or a line break would be read as syntax.
+# Each component is named outright, so the path is the directory it reads as.
+plain_vcpkg_paths() {
+  local path
+  for path in "$VCPKG_CHECKOUT" "$VCPKG_CACHE_DIR"; do
+    [[ "$path" =~ ^(/[A-Za-z0-9._+@-]+)+$ ]] || return 1
+    [[ "${path}/" != */./* && "${path}/" != */../* ]] || return 1
+  done
+}
+
+# The stamp records this digest of the cache's sorted file names, so a cache
+# that lost an archive after the proof stops answering as ready.
+cache_listing_sha256() {
+  local digest
+  digest="$(find "${VCPKG_ARCHIVES}/" -type f -printf '%P\n' 2>/dev/null |
+    LC_ALL=C sort | sha256sum)" || return 1
+  digest="${digest%% *}"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$digest"
+}
+
+# Succeeds only when a release job may use the runner's vcpkg for THIS
+# checkout; otherwise returns 1 with the reason in NOT_READY_REASON. Every
+# check names its own failure, so a check that cannot be made is a refusal.
+vcpkg_ready() {
+  local triplet head key listing
+  NOT_READY_REASON=""
+  plain_vcpkg_paths || {
+    NOT_READY_REASON="$PLAIN_PATHS_RULE"
+    return 1
+  }
+  load_manifest || {
+    NOT_READY_REASON="$MANIFEST_ERROR"
+    return 1
+  }
+  triplet="$(host_triplet)" || {
+    NOT_READY_REASON="this machine has no vcpkg triplet (expected aarch64 or x86_64)"
+    return 1
+  }
+  [[ -f "$VCPKG_STAMP" && -r "$VCPKG_STAMP" ]] || {
+    NOT_READY_REASON="cannot read a stamp at ${VCPKG_STAMP} as this account"
+    ! known_missing "$VCPKG_STAMP" ||
+      NOT_READY_REASON="not provisioned: no stamp at ${VCPKG_STAMP}"
+    return 1
+  }
+  for key in "${STAMP_KEYS[@]}"; do
+    stamp_value "$key" >/dev/null || {
+      NOT_READY_REASON="the stamp at ${VCPKG_STAMP} does not record ${key} exactly once"
+      return 1
+    }
+  done
+  [[ "$(stamp_value baseline)" == "$MANIFEST_BASELINE" ]] || {
+    NOT_READY_REASON="provisioned for another vcpkg baseline than ${MANIFEST_BASELINE}"
+    return 1
+  }
+  [[ "$(stamp_value dependencies_sha256)" == "$DEPENDENCIES_SHA256" ]] || {
+    NOT_READY_REASON="provisioned for another dependencies digest than ${MANIFEST} has now"
+    return 1
+  }
+  [[ "$(stamp_value triplet)" == "$triplet" ]] || {
+    NOT_READY_REASON="provisioned for another triplet than ${triplet}"
+    return 1
+  }
+  [[ "$(stamp_value feature)" == "$VCPKG_FEATURE" ]] || {
+    NOT_READY_REASON="provisioned for another manifest feature than ${VCPKG_FEATURE}"
+    return 1
+  }
+  head="$(checkout_head)"
+  [[ "$head" == "$MANIFEST_BASELINE" ]] || {
+    NOT_READY_REASON="the vcpkg checkout is ${head}, not at the baseline ${MANIFEST_BASELINE}"
+    return 1
+  }
+  [[ -f "$VCPKG_TOOL" && -x "$VCPKG_TOOL" ]] || {
+    NOT_READY_REASON="no executable vcpkg tool at ${VCPKG_TOOL}"
+    return 1
+  }
+  listing="$(cache_listing_sha256)" || {
+    NOT_READY_REASON="cannot list the binary cache at ${VCPKG_ARCHIVES}"
+    return 1
+  }
+  [[ "$(stamp_value archives_sha256)" == "$listing" ]] || {
+    NOT_READY_REASON="the binary cache at ${VCPKG_ARCHIVES} does not hold exactly the archives it was provisioned with"
+    return 1
+  }
+  return 0
+}
+
+# Provisioning writes the checkout and the cache a release job reads as the
+# runner account, so it runs as that account and needs no privilege. The
+# command it names is a hint for the operator; this script never runs it.
+require_runner_account() {
+  local uid name hint account=""
+  uid="$("$ID_BIN" -u 2>/dev/null)" || die "cannot read the current user id from ${ID_BIN}"
+  name="$("$ID_BIN" -un 2>/dev/null)" || die "cannot read the current user name from ${ID_BIN}"
+  # EUID is the shell's own answer: the id override can add a refusal and
+  # can never lift this one.
+  if [[ "${EUID}" -eq 0 || "$uid" == "0" || "$name" != "$RUNNER_USER" ]]; then
+    # The hinted command starts with a clean environment, so an account other
+    # than the default has to be named again on its far side.
+    [[ "$RUNNER_USER" == "$DEFAULT_RUNNER_USER" ]] ||
+      account="env TP_JETSON_RUNNER_USER=${RUNNER_USER} "
+    hint="$(printf 'sudo -u %s -H %s%s provision-vcpkg' "$RUNNER_USER" "$account" "$SCRIPT_PATH")"
+    die "provision-vcpkg runs as the runner account ${RUNNER_USER}, never as root; use: ${hint}${1:+ $1}"
+  fi
+}
+
+# Runs as the command ends. A path that cannot be removed is reported and
+# does not change how the command ended, nor keep the next one from going.
+remove_throwaway_paths() {
+  local path
+  for path in ${THROWAWAY_PATHS[@]+"${THROWAWAY_PATHS[@]}"}; do
+    rm -rf -- "$path" ||
+      printf 'warning: could not remove %s; remove it by hand\n' "$path" >&2
+  done
+}
+
+# timeout puts vcpkg in a process group of its own, so a signal to this
+# script stops the build only if it is passed on to timeout.
+stop_on_signal() {
+  local name="$1" status="$2" pid
+  trap '' INT TERM HUP
+  for pid in $(jobs -p); do
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  wait
+  printf 'error: stopped by SIG%s before the command finished\n' "$name" >&2
+  exit "$status"
+}
+
+# An install root that exists only for one vcpkg run and is removed on exit,
+# whichever way the command ends.
+new_throwaway_root() {
+  THROWAWAY_ROOT="$(mktemp -d "${VCPKG_CACHE_DIR}/install.XXXXXX")" ||
+    die "cannot create an install root under ${VCPKG_CACHE_DIR}"
+  THROWAWAY_PATHS+=("$THROWAWAY_ROOT")
+}
+
+# One provisioning run at a time: two would move the same checkout and write
+# the same cache and stamp. The lock is on a descriptor every child inherits,
+# so a build that outlives a killed command still holds it, and so does
+# anything else a run started; it goes when the last of them ends. Nothing
+# waits for it. It is a file of the cache directory, so it keeps apart the
+# runs that are given the same cache directory.
+take_provisioning_lock() {
+  local status=0
+  mkdir -p "$VCPKG_CACHE_DIR" || die "cannot create ${VCPKG_CACHE_DIR}"
+  # Through `command`: where bash runs as a POSIX shell, a plain exec that
+  # cannot open the file ends the script before it can say why.
+  { command exec 9>>"$VCPKG_LOCK"; } 2>/dev/null || die "cannot open the lock at ${VCPKG_LOCK}"
+  "$FLOCK_BIN" -n 9 || status=$?
+  [[ "$status" -ne 1 ]] ||
+    die "another provision-vcpkg is running, or the build of one that was killed still is: ${VCPKG_LOCK} is locked. Wait for it to end, or stop that build, and run this command again; 'fuser -v ${VCPKG_LOCK}' lists what holds the lock"
+  [[ "$status" -eq 0 ]] || die "cannot lock ${VCPKG_LOCK} (${FLOCK_BIN} exit ${status})"
+}
+
+# git takes the repository, its work tree and its index from the environment
+# before it looks at -C, and a job's environment may name another repository.
+forget_git_environment() {
+  local names name
+  names="$(git rev-parse --local-env-vars)" ||
+    die "cannot ask git which environment variables name a repository"
+  while IFS= read -r name; do
+    [[ -z "$name" ]] || unset "$name"
+  done <<<"$names"
+}
+
+require_clean_checkout() {
+  local changes
+  # Asked for explicitly: a user setting can hide untracked files.
+  changes="$(git -C "$VCPKG_CHECKOUT" status --porcelain --untracked-files=all)" ||
+    die "cannot inspect ${VCPKG_CHECKOUT} with git"
+  [[ -z "$changes" ]] ||
+    die "${VCPKG_CHECKOUT} has local modifications or untracked files; refusing to build from it"
+}
+
+prepare_vcpkg_checkout() {
+  if [[ ! -e "$VCPKG_CHECKOUT" ]]; then
+    note "cloning ${VCPKG_GIT_URL} into ${VCPKG_CHECKOUT}"
+    git clone -- "$VCPKG_GIT_URL" "$VCPKG_CHECKOUT"
+  fi
+  [[ -d "${VCPKG_CHECKOUT}/.git" ]] ||
+    die "${VCPKG_CHECKOUT} exists and is not a git checkout; refusing to replace it"
+  # The file vcpkg itself knows its root by. Without it this is some other
+  # repository, and fetching into it and moving its HEAD would damage it.
+  [[ -f "${VCPKG_CHECKOUT}/.vcpkg-root" ]] ||
+    die "${VCPKG_CHECKOUT} is not a vcpkg checkout (it has no .vcpkg-root); refusing to move it"
+  require_clean_checkout
+  if ! git -C "$VCPKG_CHECKOUT" cat-file -e "${MANIFEST_BASELINE}^{commit}" 2>/dev/null; then
+    note "fetching ${VCPKG_GIT_URL}: the checkout does not hold ${MANIFEST_BASELINE}"
+    git -C "$VCPKG_CHECKOUT" fetch -- "$VCPKG_GIT_URL" '+refs/heads/*:refs/remotes/origin/*'
+    git -C "$VCPKG_CHECKOUT" cat-file -e "${MANIFEST_BASELINE}^{commit}" 2>/dev/null ||
+      die "${MANIFEST_BASELINE} is not a commit of ${VCPKG_GIT_URL}"
+  fi
+}
+
+# git checkout exits 0 with files it could not write, and a build runs for
+# hours beside whatever else the account does: $1 says when this was asked.
+require_checkout_at_baseline() {
+  local head
+  head="$(checkout_head)"
+  [[ "$head" == "$MANIFEST_BASELINE" ]] ||
+    die "${VCPKG_CHECKOUT} is ${head} after the $1, not ${MANIFEST_BASELINE}"
+  require_clean_checkout
+}
+
+move_checkout_to_baseline() {
+  note "checking out ${MANIFEST_BASELINE} in ${VCPKG_CHECKOUT}"
+  git -C "$VCPKG_CHECKOUT" checkout --quiet --detach "$MANIFEST_BASELINE"
+  require_checkout_at_baseline checkout
+}
+
+bootstrap_vcpkg() {
+  note "bootstrapping the vcpkg tool in ${VCPKG_CHECKOUT}"
+  # Removed first, so the tool found afterwards is the one this bootstrap
+  # made for this commit and not one an earlier baseline left behind.
+  rm -f "$VCPKG_TOOL"
+  VCPKG_FORCE_SYSTEM_BINARIES=1 "${VCPKG_CHECKOUT}/bootstrap-vcpkg.sh" -disableMetrics ||
+    die "the vcpkg bootstrap failed"
+  [[ -f "$VCPKG_TOOL" && -x "$VCPKG_TOOL" ]] ||
+    die "the vcpkg bootstrap left no executable ${VCPKG_TOOL}"
+}
+
+# Prints the first line a command reports as its version, or fails.
+first_version_line() {
+  local out
+  out="$("$@" 2>/dev/null)" || return 1
+  out="${out%%$'\n'*}"
+  [[ -n "$out" ]] || return 1
+  printf '%s\n' "$out"
+}
+
+# Takes the triplet, the install root, the cache access and further arguments.
+# Waited for in the background, so a signal is acted on while vcpkg runs.
+# Returns what vcpkg exited with, and 124 when the bound stopped it.
+run_vcpkg_install() {
+  local triplet="$1" root="$2" access="$3" status=0 started="$SECONDS"
+  shift 3
+  VCPKG_BINARY_SOURCES="clear;files,${VCPKG_ARCHIVES},${access}" \
+    VCPKG_FORCE_SYSTEM_BINARIES=1 \
+    "$TIMEOUT_BIN" -k 30 "$VCPKG_BUILD_TIMEOUT" "$VCPKG_TOOL" install \
+    "--vcpkg-root=${VCPKG_CHECKOUT}" \
+    "--x-manifest-root=${REPO_ROOT}" \
+    "--x-install-root=${root}" \
+    "--triplet=${triplet}" \
+    "--host-triplet=${triplet}" \
+    "--x-feature=${VCPKG_FEATURE}" \
+    "$@" &
+  wait "$!" || status=$?
+  # 124 is how timeout reports that the bound ran out, and 137 that vcpkg
+  # had to be killed because it did not stop when told to. A build the
+  # system killed before the bound is 137 as well; the clock tells them apart.
+  if [[ "$status" -eq 137 && "$((SECONDS - started))" -ge "$VCPKG_BUILD_TIMEOUT" ]]; then
+    status=124
+  fi
+  return "$status"
+}
+
+warm_vcpkg_cache() {
+  local triplet="$1" status=0
+  mkdir -p "$VCPKG_ARCHIVES"
+  new_throwaway_root
+  note "building ${VCPKG_FEATURE} for ${triplet} into ${VCPKG_ARCHIVES} (bound: ${VCPKG_BUILD_TIMEOUT}s)"
+  run_vcpkg_install "$triplet" "$THROWAWAY_ROOT" readwrite || status=$?
+  [[ "$status" -ne 124 ]] ||
+    die "vcpkg did not finish within ${VCPKG_BUILD_TIMEOUT}s and was stopped"
+  [[ "$status" -eq 0 ]] || die "the vcpkg build failed (exit ${status})"
+}
+
+# The build exiting 0 does not show the cache is complete. A second install
+# into an empty root that may only restore, and never build, does. Returns 1
+# with the reason in PROOF_FAILURE when that install did not succeed.
+prove_vcpkg_cache() {
+  local triplet="$1" status=0
+  PROOF_FAILURE=""
+  new_throwaway_root
+  note "proving the binary cache: restoring every package from it with building disabled"
+  run_vcpkg_install "$triplet" "$THROWAWAY_ROOT" read --only-binarycaching || status=$?
+  [[ "$status" -ne 0 ]] || return 0
+  if [[ "$status" -eq 124 ]]; then
+    PROOF_FAILURE="vcpkg did not finish within ${VCPKG_BUILD_TIMEOUT}s and was stopped"
+  else
+    PROOF_FAILURE="the binary-only install failed (exit ${status}): a package of ${VCPKG_FEATURE} for ${triplet} is missing from the cache, or vcpkg could not run or write under ${VCPKG_CACHE_DIR}; see its output above"
+  fi
+  return 1
+}
+
+write_vcpkg_stamp() {
+  local triplet="$1" tool_version="$2" compiler="$3" listing="$4" tmp
+  tmp="$(mktemp "${VCPKG_STAMP}.XXXXXX")" || die "cannot write under ${VCPKG_CACHE_DIR}"
+  THROWAWAY_PATHS+=("$tmp")
+  {
+    printf 'baseline=%s\n' "$MANIFEST_BASELINE"
+    printf 'dependencies_sha256=%s\n' "$DEPENDENCIES_SHA256"
+    printf 'triplet=%s\n' "$triplet"
+    printf 'feature=%s\n' "$VCPKG_FEATURE"
+    printf 'vcpkg_version=%s\n' "$tool_version"
+    printf 'compiler=%s\n' "$compiler"
+    printf 'provisioned_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'archives_sha256=%s\n' "$listing"
+  } >"$tmp"
+  mv -f "$tmp" "$VCPKG_STAMP"
+}
+
+# Refused before the proof, a check changes nothing. A proof that ran and
+# failed has shown the stamp to be wrong, so the stamp goes with it: status
+# and vcpkg-env must not go on answering for a cache that does not restore.
+# A stamp that cannot be unlinked, in a directory that was closed to this
+# account for one, is emptied where it can still be written: an empty stamp
+# records nothing, and is not ready either.
+check_vcpkg_cache() {
+  local triplet="$1" outcome
+  vcpkg_ready || die "the runner's vcpkg is not ready for this checkout: ${NOT_READY_REASON}"
+  take_provisioning_lock
+  forget_git_environment
+  require_clean_checkout
+  prove_vcpkg_cache "$triplet" || {
+    if rm -f "$VCPKG_STAMP"; then
+      outcome="Removed the stamp at ${VCPKG_STAMP}"
+    elif { true >"$VCPKG_STAMP"; } 2>/dev/null; then
+      outcome="Could not remove the stamp at ${VCPKG_STAMP} and emptied it instead"
+    else
+      die "${PROOF_FAILURE}. The stamp at ${VCPKG_STAMP} could be neither removed nor emptied, so status and vcpkg-env still report the runner as ready. It is not: remove the stamp by hand"
+    fi
+    die "${PROOF_FAILURE}. ${outcome}: the runner is no longer reported as ready until provision-vcpkg succeeds again"
+  }
+  note "the vcpkg checkout and binary cache are ready for ${MANIFEST_BASELINE} (${triplet})"
+}
+
+cmd_provision_vcpkg() {
+  local mode="provision" triplet compiler tool_version started_sha256 listing
+  case "$#:${1:-}" in
+    0:) ;;
+    1:--check) mode="check" ;;
+    *) die "provision-vcpkg takes no argument other than --check" ;;
+  esac
+  [[ -n "$SCRIPT_PATH" ]] || die "$NO_CHECKOUT"
+  require_runner_account "$@"
+  plain_vcpkg_paths || die "$PLAIN_PATHS_RULE"
+  [[ -x "$TIMEOUT_BIN" ]] || die "timeout not found at $TIMEOUT_BIN"
+  [[ -x "$FLOCK_BIN" ]] || die "flock not found at $FLOCK_BIN"
+  [[ "$VCPKG_BUILD_TIMEOUT" =~ ^[1-9][0-9]*$ ]] ||
+    die "TP_JETSON_RUNNER_VCPKG_BUILD_TIMEOUT must be a whole number of seconds above zero"
+  load_manifest || die "$MANIFEST_ERROR"
+  triplet="$(host_triplet)" || die "this machine has no vcpkg triplet (expected aarch64 or x86_64)"
+  trap remove_throwaway_paths EXIT
+  trap 'stop_on_signal INT 130' INT
+  trap 'stop_on_signal TERM 143' TERM
+  trap 'stop_on_signal HUP 129' HUP
+
+  if [[ "$mode" == "check" ]]; then
+    check_vcpkg_cache "$triplet"
+    return
+  fi
+
+  compiler="$(first_version_line "${CXX:-c++}" --version)" ||
+    die "no C++ compiler: '${CXX:-c++} --version' failed"
+  started_sha256="$DEPENDENCIES_SHA256"
+  take_provisioning_lock
+  note "vcpkg baseline ${MANIFEST_BASELINE} from ${MANIFEST}"
+  forget_git_environment
+  prepare_vcpkg_checkout
+  # From here on the checkout, the tool and the cache change, so a stamp an
+  # earlier run wrote no longer describes them. It comes back only after the
+  # proof below, and a run that fails in between leaves the runner not ready.
+  rm -f "$VCPKG_STAMP"
+  move_checkout_to_baseline
+  bootstrap_vcpkg
+  tool_version="$(first_version_line "$VCPKG_TOOL" version)" ||
+    die "cannot read the version of ${VCPKG_TOOL}"
+  warm_vcpkg_cache "$triplet"
+  prove_vcpkg_cache "$triplet" || die "$PROOF_FAILURE"
+  listing="$(cache_listing_sha256)" || die "cannot list the binary cache at ${VCPKG_ARCHIVES}"
+  # The build runs for hours in a checkout a job may move meanwhile; the
+  # stamp must describe the dependencies the proof read.
+  load_manifest || die "$MANIFEST_ERROR"
+  [[ "$DEPENDENCIES_SHA256" == "$started_sha256" ]] ||
+    die "${MANIFEST} changed while the cache was being built; run provision-vcpkg again"
+  require_checkout_at_baseline build
+  write_vcpkg_stamp "$triplet" "$tool_version" "$compiler" "$listing"
+  note "provisioned: vcpkg ${MANIFEST_BASELINE} with ${VCPKG_FEATURE} for ${triplet}"
+}
+
+# All three lines or none. git is asked whether the checkout is as proved,
+# and never as root, whom a repository's own configuration must not reach.
+cmd_vcpkg_env() {
+  [[ "$#" -eq 0 ]] || die "vcpkg-env takes no arguments"
+  [[ "${EUID}" -ne 0 ]] ||
+    die "vcpkg-env asks git about the vcpkg checkout and does not do that as root; run it as the runner account"
+  vcpkg_ready ||
+    die "the runner's vcpkg is not ready for this checkout: ${NOT_READY_REASON}"
+  forget_git_environment
+  require_clean_checkout
+  printf 'VCPKG_ROOT=%s\n' "$VCPKG_CHECKOUT"
+  printf 'VCPKG_BINARY_SOURCES=clear;files,%s,read\n' "$VCPKG_ARCHIVES"
+  printf 'VCPKG_FORCE_SYSTEM_BINARIES=1\n'
+}
+
+count_cache_archives() {
+  local count
+  if known_missing "$VCPKG_ARCHIVES"; then
+    printf '0\n'
+  elif count="$(find "${VCPKG_ARCHIVES}/" -type f 2>/dev/null | wc -l)"; then
+    printf '%s\n' "$((count))"
+  else
+    printf 'unreadable\n'
+  fi
+}
+
+print_vcpkg_status() {
+  local head key value
+  printf 'vcpkg_root: %s\n' "$VCPKG_CHECKOUT"
+  if load_manifest; then
+    printf 'vcpkg_baseline: %s\n' "$MANIFEST_BASELINE"
+  else
+    printf 'vcpkg_baseline: unreadable (%s)\n' "$MANIFEST_ERROR"
+  fi
+  head="$(checkout_head)"
+  printf 'vcpkg_commit: %s\n' "$head"
+  if [[ "$head" == "absent" ]]; then
+    printf 'vcpkg_checkout: absent\n'
+  elif [[ -z "$MANIFEST_BASELINE" || "$head" == "unreadable" ]]; then
+    # Nothing to compare on one side or the other; `stale` would be a guess.
+    printf 'vcpkg_checkout: unknown\n'
+  elif [[ "$head" == "$MANIFEST_BASELINE" ]]; then
+    printf 'vcpkg_checkout: current\n'
+  else
+    printf 'vcpkg_checkout: stale\n'
+  fi
+  if [[ -f "$VCPKG_TOOL" && -x "$VCPKG_TOOL" ]]; then
+    printf 'vcpkg_tool: present\n'
+  elif [[ -e "$VCPKG_TOOL" ]] || known_missing "$VCPKG_TOOL"; then
+    printf 'vcpkg_tool: absent\n'
+  else
+    printf 'vcpkg_tool: unknown\n'
+  fi
+  printf 'vcpkg_binary_cache: %s\n' "$VCPKG_ARCHIVES"
+  printf 'vcpkg_cache_archives: %s\n' "$(count_cache_archives)"
+  if vcpkg_ready; then
+    printf 'vcpkg_cache_ready: yes\n'
+  else
+    printf 'vcpkg_cache_ready: no (%s)\n' "$NOT_READY_REASON"
+  fi
+  if [[ -f "$VCPKG_STAMP" ]]; then
+    # The runner account writes the stamp and root reads it here, so what it
+    # holds is shown as text and never as terminal control.
+    for key in baseline triplet compiler provisioned_at; do
+      value="$(stamp_value "$key")" || value="unreadable"
+      printf 'vcpkg_stamp_%s: %s\n' "$key" "${value//[^[:print:]]/?}"
+    done
+  fi
+}
+
 main() {
   local command="${1:-}"
   case "$command" in
     on) cmd_on ;;
     off) cmd_off ;;
-    status) cmd_status ;;
+    status)
+      cmd_status
+      print_vcpkg_status
+      ;;
+    provision-vcpkg)
+      shift
+      cmd_provision_vcpkg "$@"
+      ;;
+    vcpkg-env)
+      shift
+      cmd_vcpkg_env "$@"
+      ;;
     -h|--help|help) usage ;;
     "") usage; exit 1 ;;
     *) usage >&2; die "unknown command: $command" ;;
