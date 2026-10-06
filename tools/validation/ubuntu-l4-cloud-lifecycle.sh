@@ -768,6 +768,9 @@ profile = by_id["platform_profile"]
 assert expected_row in profile["message"], \
     f"{expected_row} is not among the host's candidate rows: {profile['message']}"
 
+# python_pytorch_runtime is `missing`, which fails nothing, where a runner
+# profile is installed and the descriptor's interpreter has no PyTorch.
+# The bundle this run deploys names no profile and is served there.
 for required_ok in ("platform_registry", "agent_reachable", "agent_socket",
                     "serving_binary_installed", "python_pytorch_backend",
                     "python_pytorch_runtime", "path_layout", "config_files"):
