@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Fixture only, not a wire contract: the parts of tensorplate.stream.v1 the
+// extensibility frames use, with the same numbers and types, plus members a
+// later revision could add. record.sh encodes extensibility.frames with it.
+
+syntax = "proto3";
+
+package tensorplate.stream.fixture;
+
+enum SessionMode {
+  SESSION_MODE_UNSPECIFIED = 0;
+  SESSION_MODE_STT_STREAMING = 1;
+  SESSION_MODE_TTS_STREAMING = 2;
+  // Added: stream/v1 names no mode 3.
+  SESSION_MODE_ADDED = 3;
+}
+
+message ClientEvent {
+  uint64 sequence = 1;
+  string session_id = 2;
+  uint64 generation = 3;
+  // Added: an envelope field.
+  uint32 added_scalar = 4;
+
+  oneof body {
+    Open open = 10;
+    // Added: a body in the range stream/v1 reserves.
+    AddedBody added_body = 40;
+  }
+}
+
+message Open {
+  string deployment_id = 1;
+  string descriptor_digest = 2;
+  SessionMode mode = 3;
+  // Added: a field inside a known body.
+  string added_text = 9;
+}
+
+message ServerEvent {
+  uint64 sequence = 1;
+
+  oneof body {
+    // Added: a body in the range stream/v1 reserves.
+    AddedBody added_body = 40;
+  }
+}
+
+message AddedBody {
+  string text = 1;
+}
