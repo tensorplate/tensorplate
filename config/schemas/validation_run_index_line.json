@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/validation_run_index_line.json",
+  "title": "Validation run index line",
+  "description": "One line of a validation run index: what one subject measured in one hardware session, in a form two sessions can be compared in. tools/validation/validation_index.py derives a line from the files a run recorded and never from prose; a value that was not measured is absent from `metrics`, never zero.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "date",
+    "session",
+    "row",
+    "machine",
+    "build",
+    "subject",
+    "kind",
+    "result",
+    "metrics",
+    "checks",
+    "settings",
+    "records",
+    "raw",
+    "notes"
+  ],
+  "properties": {
+    "run_id": {
+      "description": "<date>-<row>-<subject>, with a suffix when a session ran the subject more than once. Unique in an index.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}-[a-z0-9][a-z0-9.-]*$"
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "session": {
+      "description": "The hardware session the run belongs to. Lines of one session share it.",
+      "type": "string",
+      "minLength": 1
+    },
+    "row": {
+      "description": "The platform row id.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "machine": {
+      "type": "string",
+      "minLength": 1
+    },
+    "build": {
+      "description": "The tag or commit installed.",
+      "type": "string",
+      "minLength": 1
+    },
+    "family_build": {
+      "description": "The commit the speech runtime family was built from, when it was built on the host.",
+      "type": "string",
+      "minLength": 1
+    },
+    "subject": {
+      "description": "What was run: lifecycle, doctor, or a candidate's name.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "kind": {
+      "description": "evidence: filed publicly. validation: a rolling pass, filed nowhere public.",
+      "enum": ["evidence", "validation"]
+    },
+    "result": {
+      "description": "The record's own status, never re-labelled.",
+      "type": "string",
+      "minLength": 1
+    },
+    "metrics": {
+      "description": "Numbers, with the unit as the key's suffix (_ms, _s, _mib).",
+      "type": "object",
+      "additionalProperties": { "type": "number" }
+    },
+    "checks": {
+      "description": "Each named check's outcome as recorded.",
+      "type": "object",
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "settings": {
+      "description": "Anything that makes the run not comparable with a default install.",
+      "type": "object"
+    },
+    "records": {
+      "description": "Where the record files are.",
+      "type": "string",
+      "minLength": 1
+    },
+    "raw": {
+      "description": "The raw capture archive, or local-only until it is stored.",
+      "oneOf": [
+        { "const": "local-only" },
+        {
+          "type": "object",
+          "required": ["object", "sha256"],
+          "properties": {
+            "object": { "type": "string", "minLength": 1 },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        }
+      ]
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}
