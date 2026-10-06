@@ -6,7 +6,8 @@
 // One Session call carries one logical session. Each direction numbers its
 // events from 1 without gaps. The client's first event is Open. A refused Open
 // creates no session: the call ends with its status and no event. A session
-// sends Ready first, or SessionClosed alone when it fails before it is ready;
+// sends Ready first. A session that ends before it is ready sends SessionClosed
+// alone: failed, or closed with reason `client_cancelled` after a Cancel.
 // SessionClosed is always its last event.
 //
 // A field number is never reused: a deleted field stays reserved. A receiver
@@ -320,8 +321,8 @@ message CancelAccepted {}
 message SessionClosed {
   // SESSION_STATE_CLOSED or SESSION_STATE_FAILED.
   SessionState state = 1;
-  // Absent when the session ended without an error: the client closed its
-  // sending half, or the worker drained it without a cause.
+  // Absent when the session ended without an error, which is when the client
+  // closed its sending half and the session drained.
   EndCause cause = 2;
   // Highest client sequence the server accepted; at least 1, the Open.
   uint64 last_accepted_sequence = 3;
@@ -350,7 +351,8 @@ message EndpointDetected {
 }
 
 // A half-open interval of source audio in whole microseconds, measured from
-// the first accepted input sample.
+// the first accepted input sample. A boundary that falls between two
+// microseconds is rounded outward: `start_us` down and `end_us` up.
 message TranscriptSegment {
   uint64 start_us = 1;
   uint64 end_us = 2;

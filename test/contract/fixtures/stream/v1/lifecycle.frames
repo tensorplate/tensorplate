@@ -1,7 +1,8 @@
 # Recorded by record.sh from the text column. Every value is synthetic.
 # Tab-separated: name, message type, the bytes protoc emitted in hex, the message in text format.
 # Single frames, not one session: the control bodies, four ends with a cause (three closed, one
-# failed; two with a failure reason), the largest sequence and the remaining endpoint reason.
+# failed; two with a failure reason), the largest sequence, the remaining endpoint reason and a
+# transcript interval whose bounds fall between two microseconds (samples 1 up to 3 at 16,000 Hz).
 
 ping	tensorplate.stream.v1.ClientEvent	0805121373796e7468657469632d73657373696f6e2d3118076a00	sequence: 5 session_id: "synthetic-session-1" generation: 7 ping {}
 pong	tensorplate.stream.v1.ServerEvent	08066a00	sequence: 6 pong {}
@@ -16,3 +17,4 @@ closed_idle_timeout	tensorplate.stream.v1.ServerEvent	08037a18080612100807120c69
 client_last_sequence	tensorplate.stream.v1.ClientEvent	08ffffffffffffffffff01121373796e7468657469632d73657373696f6e2d3118076a00	sequence: 18446744073709551615 session_id: "synthetic-session-1" generation: 7 ping {}
 server_last_sequence	tensorplate.stream.v1.ServerEvent	08ffffffffffffffffff016a00	sequence: 18446744073709551615 pong {}
 endpoint_duration_limit	tensorplate.stream.v1.ServerEvent	0809aa010808041080d30e1803	sequence: 9 endpoint_detected { utterance_id: 4 end_sample_offset: 240000 reason: ENDPOINT_REASON_DURATION_LIMIT }
+final_between_microseconds	tensorplate.stream.v1.ServerEvent	0801b201210801120973796e7468657469631a10083e10bc011a0973796e7468657469632003	sequence: 1 final_transcript { utterance_id: 1 text: "synthetic" segments { start_us: 62 end_us: 188 text: "synthetic" } end_sample_offset: 3 }

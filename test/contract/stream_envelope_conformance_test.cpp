@@ -271,6 +271,15 @@ std::uint64_t bytes_per_sample(const v1::AudioFormat& format) {
   return format.encoding() == v1::AUDIO_ENCODING_MULAW ? format.channels() : 0;
 }
 
+// A sample boundary between two microseconds is rounded outward: a start down, an end up.
+constexpr std::uint64_t start_us_of(std::uint64_t sample, std::uint64_t rate) {
+  return sample * 1'000'000 / rate;
+}
+
+constexpr std::uint64_t end_us_of(std::uint64_t sample, std::uint64_t rate) {
+  return (sample * 1'000'000 + rate - 1) / rate;
+}
+
 bool is_snake_case(std::string_view text) {
   return !text.empty() && text.front() >= 'a' && text.front() <= 'z' &&
          std::all_of(text.begin(), text.end(), [](char c) {
@@ -430,8 +439,10 @@ uint64 SynthesisCompleted.total_samples = 2
 )";
 
 // A property of the recordings: the code and the outcome the session layer
-// gives each end with a cause that the frames show
-// (docs/architecture/serving-worker.md, "How sessions end").
+// gives each end with a cause that the frames show. A timer's reason and code
+// are expiry_error's in runtime/src/serving/session/session_manager.cpp; an
+// expiry of an admitted session takes the abort path and so closes it. The
+// others are in docs/architecture/serving-worker.md ("How sessions end").
 struct End {
   std::string_view reason;
   v1::ErrorCode code;
@@ -711,8 +722,8 @@ TEST(StreamEnvelope, SpeechToTextScriptKeepsSampleAndTimeUnits) {
       EXPECT_EQ(final_transcript.end_sample_offset(), endpoint->end_sample_offset());
       // An utterance's audio starts where the one before ended. That its segments
       // are in order, apart and never empty is a property of this recording.
-      std::uint64_t from_us = covered * 1'000'000 / rate;
-      const std::uint64_t until_us = final_transcript.end_sample_offset() * 1'000'000 / rate;
+      std::uint64_t from_us = start_us_of(covered, rate);
+      const std::uint64_t until_us = end_us_of(final_transcript.end_sample_offset(), rate);
       for (const v1::TranscriptSegment& segment : final_transcript.segments()) {
         EXPECT_GE(segment.start_us(), from_us);
         EXPECT_LT(segment.start_us(), segment.end_us());
@@ -733,6 +744,24 @@ TEST(StreamEnvelope, SpeechToTextScriptKeepsSampleAndTimeUnits) {
   EXPECT_FALSE(endpoint.has_value()) << "the last utterance has no FinalTranscript";
   EXPECT_FALSE(finalizing) << "a Finalize has no FinalTranscript";
   EXPECT_TRUE(audio_after_final);
+}
+
+TEST(StreamEnvelope, TranscriptIntervalsRoundOutward) {
+  const auto frames = load_frames("lifecycle.frames");
+  const auto frame = std::find_if(frames.begin(), frames.end(), [](const Frame& candidate) {
+    return candidate.name == "final_between_microseconds";
+  });
+  ASSERT_NE(frame, frames.end()) << "lifecycle.frames has no frame final_between_microseconds";
+  v1::ServerEvent event;
+  ASSERT_TRUE(event.ParseFromString(frame->bytes));
+  ASSERT_EQ(event.final_transcript().segments_size(), 1);
+  const v1::TranscriptSegment& segment = event.final_transcript().segments(0);
+  // At 16,000 Hz a sample boundary is 62.5 microseconds: samples 1 up to 3 are 62.5 to 187.5.
+  constexpr std::uint64_t rate = 16'000;
+  EXPECT_EQ(segment.start_us(), start_us_of(1, rate));
+  EXPECT_EQ(segment.start_us(), 62U);
+  EXPECT_EQ(segment.end_us(), end_us_of(3, rate));
+  EXPECT_EQ(segment.end_us(), 188U);
 }
 
 TEST(StreamEnvelope, TextToSpeechScriptDeliversWholeSegmentsInOrder) {
