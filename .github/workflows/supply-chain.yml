@@ -115,6 +115,12 @@ jobs:
           - package: sdk/python
             install: ./sdk/python[vision]
             artifact: tensorplate-sdk-python-vision
+          # The streaming speech extra, installed from its hashed pins so
+          # the audit covers the versions a pinned install gets.
+          - package: sdk/python
+            install: ./sdk/python[speech]
+            pins: sdk/python/constraints/speech.txt
+            artifact: tensorplate-sdk-python-speech
           - package: backends/python_pytorch
             install: ./backends/python_pytorch
             artifact: tensorplate-backend-python-pytorch
@@ -141,6 +147,9 @@ jobs:
       - name: Install ${{ matrix.install }} into a clean environment
         run: |
           python -m venv --without-pip "${RUNNER_TEMP}/target"
+          if [ -n "${{ matrix.pins }}" ]; then
+            python -m pip --python "${RUNNER_TEMP}/target/bin/python" install --quiet --require-hashes -r "${{ matrix.pins }}"
+          fi
           python -m pip --python "${RUNNER_TEMP}/target/bin/python" install --quiet "${{ matrix.install }}"
           python -m pip --python "${RUNNER_TEMP}/target/bin/python" list
 
@@ -172,8 +181,8 @@ jobs:
 
       # What is audited is the package's runtime dependency closure: what
       # pip freeze lists in the clean environment, less the package.
-      # Both packages declare no runtime dependency today, so the closure is
-      # empty and a clean result would prove nothing about the scanner; the
+      # Without an extra, both packages declare no runtime dependency today,
+      # so that closure is empty and a clean result would prove nothing; the
       # positive control first requires it to report a pin with published
       # advisories.
       - name: pip-audit, with the recorded dispositions

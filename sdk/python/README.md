@@ -15,12 +15,13 @@ import tensorplate
 ```bash
 pip install tensorplate-python            # core client
 pip install "tensorplate-python[vision]"  # + numpy & Pillow for VisionClient.detect
+pip install "tensorplate-python[speech]"  # + grpcio & protobuf (streaming client not yet included)
 ```
 
 The wheel + sdist are also attached to each signed GitHub Release for
 checksum-verified or air-gapped installs. See the
 [SDK quickstart](../../docs/sdk/python.md#install) for that flow and the
-`[numpy]` / `[vision]` extras.
+`[numpy]` / `[vision]` / `[speech]` extras.
 
 ## Ownership
 

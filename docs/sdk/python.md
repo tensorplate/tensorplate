@@ -19,6 +19,7 @@ capabilities (see [Scope and non-goals](#scope-and-non-goals)).
 pip install tensorplate-python            # core client (no third-party deps)
 pip install "tensorplate-python[numpy]"   # + numpy for tensor array access
 pip install "tensorplate-python[vision]"  # + numpy & Pillow for VisionClient.detect
+pip install "tensorplate-python[speech]"  # + grpcio & protobuf, see "Speech extra"
 ```
 
 `import tensorplate` and constructing a `ServingClient` with raw-bytes
@@ -62,6 +63,41 @@ Then install it (append `[vision]` for the detection helpers):
 ```bash
 pip install "./tensorplate_python-${TP_VERSION}-py3-none-any.whl[vision]"
 ```
+
+### Speech extra
+
+The `speech` extra declares what the streaming speech transport needs:
+`grpcio>=1.81.1,<2` and `protobuf>=6.33.5,<7`. The streaming client is not
+in the package yet; today the extra and the `tensorplate.speech` package
+fix only the dependency range and the failure mode. `import tensorplate`
+never imports `tensorplate.speech`, grpc or protobuf, so the unary client
+keeps no third-party dependency. Importing `tensorplate.speech` without the
+extra raises `MissingDependencyError`, which names the extra to install.
+
+grpcio 1.81.1 is the gRPC version the serving worker links. The worker links
+protobuf 6.33.4; the Python floor is one patch higher because
+`grpcio-tools` 1.81.1 generates code with protoc 33.5, and generated code
+refuses an older runtime. The wire format is the same.
+
+[`sdk/python/constraints/speech.txt`](../../sdk/python/constraints/speech.txt)
+pins those floors and grpcio's one dependency, each with the SHA-256 of
+every file published for it; CI installs from it. It is compiled from the
+extra (the command is in its header), and a test fails when a pin and the
+extra's floor differ. To install exactly those versions, take the file from
+the repository at the release tag and install it before the SDK:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install --require-hashes -r speech.txt
+.venv/bin/pip install --no-index "./tensorplate_python-${TP_VERSION}-py3-none-any.whl[speech]"
+```
+
+The first command fails when a downloaded file does not match its pinned
+hash. It is a command of its own because a hashed file puts pip in
+hash-required mode for the whole command, and pip then refuses the SDK
+wheel given beside it. `--no-index` in the second command lets pip use only
+the wheel and what is already installed, so it fails rather than fetch
+anything the pins do not cover.
 
 ## Quickstart
 
@@ -165,6 +201,7 @@ whole surface:
 | `ProtocolError` | The response is not a valid v0.1 envelope. |
 | `UnsupportedSchemaVersionError` (a `ProtocolError`) | The worker's `schema_version` is not `0.1`. |
 | `ServingError` | The worker returned a typed `failure`. Carries `.code` (an `ErrorCode`), `.message`, `.context`, and `.request_id`. |
+| `MissingDependencyError` (also an `ImportError`) | An optional part of the SDK, today `tensorplate.speech`, is imported without its extra. Carries `.extra` and `.dependency`. |
 
 ```python
 from tensorplate import ServingClient, ServingError, TransportError
