@@ -99,3 +99,22 @@ class ServingError(TensorPlateError):
         if context:
             detail = f"{detail} (context: {context})"
         super().__init__(detail)
+
+
+class MissingDependencyError(TensorPlateError, ImportError):
+    """Raised when an optional part of the SDK is imported without its extra.
+
+    Also an ``ImportError``, so ``except ImportError`` and package walkers
+    treat it like any other failed import. Carries the ``extra`` to install
+    and the ``dependency`` (distribution) that was not found; ``name`` is the
+    module whose import failed.
+    """
+
+    def __init__(self, extra: str, dependency: str, module: str) -> None:
+        self.extra = extra
+        self.dependency = dependency
+        super().__init__(
+            f"{dependency} is not installed; install the {extra!r} extra: "
+            f'pip install "tensorplate-python[{extra}]"',
+            name=module,
+        )
