@@ -12,7 +12,10 @@ TensorPlate install:
   Debian dependency machinery cannot express that choice.
 - `tensorplate doctor` reports `python_pytorch_backend = missing` when
   the package or its runtime are absent. Deploys of a `python_pytorch`
-  bundle fail before staging with a typed `BackendUnrunnable` error.
+  bundle fail before staging with a typed `BackendUnrunnable` error. A
+  bundle that names an installed [runner profile](speech-runtime.md) is
+  the exception: it runs in that profile's interpreter and does not need
+  PyTorch in this one.
 
 ## 1. Install the backend package
 
@@ -128,8 +131,8 @@ tensorplate deploy /var/lib/tensorplate/bundles/staging/smolvla.tpmodel
 ```
 
 If the descriptor is missing or the interpreter cannot import `torch`,
-the deploy fails with a typed `BackendUnrunnable` error **before** any
-files are staged. It will not silently fall through to first inference.
+the deploy of a bundle that names no runner profile fails with a typed
+`BackendUnrunnable` error **before** any files are staged. It will not silently fall through to first inference.
 
 ## Async-policy route support
 

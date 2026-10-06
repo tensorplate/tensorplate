@@ -8,6 +8,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The backend probe kills an interpreter query that outlasts its limit: five
+  seconds by default, and 120 for the PyTorch import, which reads far more
+  from disk. The limit was documented and never applied, so a
+  Python that hung held `tensorplate doctor`, and held the agent's startup
+  before its control socket existed. The probe's queries are also started
+  from `/`, so a module in the directory `tensorplate doctor` was run from
+  is no longer imported in place of an installed one. (V030-E01-F01-T03)
 - Run serving-worker SIGINT/SIGTERM shutdown on the main thread, retaining
   signals during model load and avoiding signal-handler locks, allocation,
   and repeated shutdown entry. (V030-E04-F03-T02)
@@ -28,6 +35,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `tensorplate doctor` reports the installed runner profiles and checks them
+  where their sidecars start, in three findings. `runner_profiles` is the
+  record the serving worker's launcher reads: each profile's interpreter,
+  environment root, compute types, the packages its declaration names with
+  their installed versions and the `sys.version` the interpreter printed. It
+  fails when the interpreter is not an executable file that runs, is older
+  than the backend's minimum Python, does not import the sidecar module or
+  reports a `sys.prefix` other than the declared environment root, when a
+  library search path holds `:` or `;`, and when
+  `/etc/default/tensorplate-agent` points the agent at another descriptor
+  directory. `runner_profile_dependencies` runs one script in each shipped
+  profile's interpreter with the launcher's environment: the engines'
+  modules import, `libcublas.so.12` loads by name from a file under the
+  profile's environment root (a copy mapped from anywhere else fails),
+  CTranslate2 counts a CUDA device and supports the declared compute types,
+  Kokoro's English model package is installed and the espeak-ng library
+  loads; PyTorch counting no CUDA device is a warning. `runner_launch_environment` reports the sidecar's temporary
+  directory and the variables the launcher sets, and fails when the
+  directory is missing or on a `noexec` filesystem, and warns when the
+  agent's environment file cannot be read. All three are `skipped` where no
+  profile is installed. The findings run in the operator's shell
+  and read the agent's `EnvironmentFile`; they start no sidecar and load no
+  model. (V030-E01-F01-T03)
 - Optional static gRPC/protobuf build dependencies from a pinned vcpkg baseline,
   with a default-disabled `streaming.enabled` config gate, mirrored by C++
   `StreamingConfig`, and a typed refusal when the build lacks streaming support.
@@ -216,6 +246,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The backend probe keeps one state per installed runner profile, and the
+  agent's deploy gate takes the state of the interpreter a bundle would run
+  in. Each profile's interpreter is probed in the environment the sidecar
+  launcher sets: it is an executable file that runs, meets the backend's
+  minimum Python and imports the sidecar module. A bundle that names a
+  runner profile no longer needs PyTorch in the descriptor's own
+  interpreter, so a host with only the speech runtime serves it; a bundle
+  that names none is decided as before. A bundle that names a profile no
+  installed package declares is refused before staging, as `unsupported`
+  with the reason `missing_backend_package` ("runner profile `<id>` is not
+  installed"); it was refused by the worker at load. The agent logs one
+  `backend probe:` line per profile at startup.
+  `tensorplate doctor`'s `python_pytorch_runtime` reports a PyTorch that does
+  not import in the descriptor's interpreter as `missing` where a runner
+  profile is installed and as `fail` where none is, and notes an interpreter
+  override it reads in `/etc/default/tensorplate-agent`. A refused runner
+  profile declaration's hint names the package to install or reinstall.
+  (V030-E01-F01-T03)
 - A deploy or rollback whose candidate worker exits while loading now fails
   as soon as the worker exits instead of at the agent's warm timeout, and
   with the worker's own code: a runner that refuses the model as

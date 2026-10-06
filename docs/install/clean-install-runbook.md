@@ -170,7 +170,7 @@ Attach the archive to the release validation report.
 | `serving_systemd_absent = fail` | An old or third-party unit named `tensorplate-serving.service` is installed. `sudo systemctl disable --now tensorplate-serving` then remove it. The agent owns the serving worker. |
 | `agent_reachable = fail` after `systemctl enable --now` | `journalctl -u tensorplate-agent` for the typed startup error. Common causes: misconfigured `agent.json` (run `tensorplate doctor` for the validator output), `/run/tensorplate` group ownership mismatch (the postinst should handle this — file an issue if it doesn't). |
 | `python_pytorch_backend = fail` | The descriptor parsed badly or PyTorch failed to import. See `docs/install/python-pytorch-backend.md`. |
-| `tensorplate deploy` rejects a bundle with `BackendUnrunnable` | The bundle's `backend_hint` is declared but the agent's startup probe found it non-runnable. Doctor's `python_pytorch_runtime` / matching descriptor finding has the detail. |
+| `tensorplate deploy` rejects a bundle with `BackendUnrunnable` | The bundle's `backend_hint` is declared but the agent's startup probe found it non-runnable. Doctor's `python_pytorch_runtime` / matching descriptor finding has the detail; for a bundle that names a runner profile it is in `runner_profiles`. |
 
 ## Known unsupported environments
 
