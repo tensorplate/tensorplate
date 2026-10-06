@@ -76,6 +76,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   the envelope yet and it may change before it is frozen. The JSON
   contracts and the protocol version are unchanged. See
   `protocol/README.md`. (V030-E04-F02-T02)
+- `tools/release/jetson-runner-control.sh` gains `provision-vcpkg` and
+  `vcpkg-env` for the self-hosted ARM64 release runner. `provision-vcpkg`
+  runs as the runner account, without root: it puts a vcpkg checkout at the
+  manifest's `builtin-baseline`, builds the `streaming-grpc` feature into a
+  binary cache on the runner, and records the runner as ready only after a
+  second install, forbidden to build, has restored every package from that
+  cache. `--check` repeats that proof, and withdraws the record when the
+  proof fails. `vcpkg-env` prints the environment a release job needs, and
+  nothing unless the runner is ready for the checkout's `vcpkg.json`;
+  `status` reports the checkout, the cache and the readiness. Readiness
+  follows what the manifest says, which `python3` reads, and neither the
+  project's own version nor the layout of the file, so a release's version
+  bump leaves the runner ready, and only one provisioning run or check runs
+  at a time. The runner's sudo allowance is unchanged, release jobs do not
+  use the cache yet, and the Jetson release job no longer sets a
+  `VCPKG_BINARY_SOURCES` nothing read. (V030-E04-F02-T04)
+
 - Optional static gRPC/protobuf build dependencies from a pinned vcpkg baseline,
   with a default-disabled `streaming.enabled` config gate, mirrored by C++
   `StreamingConfig`, and a typed refusal when the build lacks streaming support.

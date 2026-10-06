@@ -4159,5 +4159,24 @@ class RunnerVcpkgProvisioningTests(unittest.TestCase):
             self.assertIn(expected, result.stdout.splitlines())
 
 
+class ReleaseWorkflowVcpkgTests(unittest.TestCase):
+    """The release workflow leaves vcpkg alone until the feature is turned on.
+
+    `build-release-artifacts.sh` adds the vcpkg toolchain to its configure as
+    soon as `VCPKG_ROOT` is set, so a job that exported the runner's
+    provisioned checkout would move today's ARM64 release build onto vcpkg.
+    The change that enables the streaming feature in the release jobs is the
+    one to replace this case.
+    """
+
+    def test_the_release_workflow_does_not_mention_vcpkg(self):
+        mentions = [
+            (number, line.strip())
+            for number, line in enumerate(RELEASE_WORKFLOW.read_text().splitlines(), 1)
+            if "vcpkg" in line.lower()
+        ]
+        self.assertEqual(mentions, [])
+
+
 if __name__ == "__main__":
     unittest.main()

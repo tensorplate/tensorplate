@@ -852,7 +852,6 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
           VERSION: ${{ needs.meta.outputs.version }}
           DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
           PYTHON_VERSION: ${{ needs.meta.outputs.python_version }}
