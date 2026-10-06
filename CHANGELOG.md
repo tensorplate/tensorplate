@@ -197,6 +197,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   new job's wheelhouse, build and closure steps on every packaging change,
   and the stub wheelhouse generator moves to
   `test/packaging/speech_runtime_stub_wheelhouse.py`. (V030-E01-F01-T04)
+- A run index for hardware validation sessions and a comparison between two
+  of them. `tools/validation/validation-pass.py index` derives one line per
+  subject (the lifecycle harness, doctor, each qualified candidate) from the
+  files a run recorded, in the shape of
+  `config/schemas/validation_run_index_line.json`; `compare` reports each
+  metric and check against the newest earlier line for the same row and
+  subject and exits 2 when a value or a subject the earlier session had is
+  missing, instead of treating it as unchanged.
+  `docs/validation/rolling-validation.md` describes both.
+  (V030-E06-F02-T01)
 
 ### Changed
 
