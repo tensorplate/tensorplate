@@ -164,6 +164,12 @@ jobs:
         shell: bash
         run: test/validation/candidate_qualify_test.py
 
+      # Indexes and compares the runs filed under docs/validation/evidence;
+      # needs the same jsonschema.
+      - name: Validation run index and comparison
+        shell: bash
+        run: test/validation/validation_pass_test.py
+
       # Runs the memory sampling wrapper over recorded nvidia-smi output; the
       # sampler is the platform crate's example binary.
       - name: Memory sampling wrapper
