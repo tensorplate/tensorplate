@@ -235,8 +235,12 @@ The package build runner must have:
 - `sudo` access for installing Debian build dependencies.
 - Rust via `rustup`, CMake, Ninja, a C++ compiler, debhelper, `dh-exec`,
   `dpkg-buildpackage`, `nlohmann-json3-dev`, and GitHub CLI `gh`.
-- A configured vcpkg checkout via `VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`,
-  or a system `nlohmann_json` package.
+- A system `nlohmann_json` package (`nlohmann-json3-dev`). The current
+  release builds use it, and the runner must export neither `VCPKG_ROOT` nor
+  `VCPKG_INSTALLATION_ROOT` until the release jobs enable the streaming
+  feature: the release builder configures through vcpkg as soon as either
+  names a vcpkg checkout. The vcpkg checkout that release will use is
+  provisioned ahead; see "Provision the vcpkg checkout and binary cache".
 - JetPack-compatible CUDA/TensorRT development headers and libraries when
   building v0.1.x release packages with `TP_ENABLE_TENSORRT=ON`. Release
   artifact builds default `TP_REQUIRE_TENSORRT_SDK=ON` so they fail during
@@ -280,6 +284,291 @@ Do not leave this persistent self-hosted runner online for general OSS PR
 CI. Normal pull-request CI should remain on GitHub-hosted runners; the
 Jetson runner is for trusted release jobs that require JetPack/CUDA/
 TensorRT on the target architecture.
+
+#### Provision the vcpkg checkout and binary cache
+
+The release line will link gRPC and protobuf statically from the vcpkg
+manifest feature `streaming-grpc`, at the vcpkg commit `vcpkg.json` pins as
+its `builtin-baseline`. A cold build of that feature is expected to take
+this runner hours, so the operator does it ahead of a release and it never
+happens inside a release job. **Release jobs do not use the result yet:**
+both release builds configure with `TP_ENABLE_STREAMING_GRPC=OFF`, and
+nothing in `release.yml` sets `VCPKG_ROOT` or reads the cache. The change
+that turns the feature on in the release jobs will. Until then, do not set
+`VCPKG_ROOT` or `VCPKG_INSTALLATION_ROOT` in the runner service's
+environment either: the release builder configures through vcpkg as soon as
+one of them names a checkout, and today's Jetson build uses the system
+`nlohmann_json` package.
+
+The runner needs `git`, `curl`, `zip`, `unzip`, `tar`, `make`, Perl with
+`IPC::Cmd`, the Linux kernel headers (`linux-libc-dev`), Ninja, and the
+CMake and the C and C++ compilers the release build uses; vcpkg's scripts
+need CMake 3.21 or newer and this tree needs 3.25. The OpenSSL port that
+gRPC depends on is what asks for `make`, Perl and the kernel headers. The
+runner also needs network access to clone vcpkg and download the sources it
+builds, and room in the cache directory for two install trees beside the
+archives: the build's and the proof's exist at the same time. The command
+itself runs `timeout` and `flock` from `/usr/bin`, where coreutils and
+util-linux install them, and refuses to start without either. It reads
+`vcpkg.json` with `python3` from `PATH`, as `status` and `vcpkg-env` do, and
+none of the three takes a baseline or reports the runner ready without it.
+The release build needs `python3` already:
+`tools/release/build-release-artifacts.sh` runs it to check the source
+version, and the Jetson job installs it with its other packages. The
+commands trust the `PATH` they are run with: `git`, `find`, `sha256sum`,
+`uname` and `python3` are whatever it resolves. `python3 -I` keeps the
+Python variables, the directory the command is run from and the account's
+own site directory out of the read; it does not keep out a `PATH` that
+names another interpreter.
+
+The record of readiness is for the vcpkg baseline and for the
+**dependencies digest** of `vcpkg.json`: the SHA-256 of the manifest's
+content without its own version. `python3` reads the file as JSON, drops
+the top-level `version`, `version-string`, `version-semver` and
+`version-date`, and hashes everything else in one canonical form: keys
+sorted, no blanks, ASCII. The digest therefore follows what the manifest
+says and not how the file is laid out. vcpkg builds nothing from the
+project's own version, and the preparation PR of step 3a changes nothing
+else that the manifest says: `prepare` writes the release's version into
+`vcpkg.json` and writes the whole file back in its own layout, which may
+move lines the commit before it had laid out another way. So a runner
+provisioned from any commit with the release's baseline and dependencies
+stays ready for the release commit, and no provisioning run belongs to a
+release. Provision again when:
+
+- anything `vcpkg.json` says other than its own version changes: the
+  `builtin-baseline`, a dependency, a feature, an override, the name, the
+  order of a list. A `version` below the top level is not the manifest's
+  own and counts: an override's, or a dependency's minimum.
+  `status` then reports `vcpkg_cache_ready: no`, provisioned for another
+  vcpkg baseline or for another dependencies digest. With the cache kept,
+  the packages the change left alone should be restored, not built.
+- vcpkg rewrites `vcpkg.json`: `vcpkg format-manifest`, or any vcpkg
+  command that writes the manifest back. Its formatter drops the two empty
+  `dependencies` lists the committed file holds. vcpkg builds the same
+  without them, and it is still a change in what the file says, so the
+  digest changes; the provisioning run after it should restore every
+  package from the cache.
+- the manifest's `vcpkg-configuration` member names a directory under
+  `overlay-ports` or `overlay-triplets` and something inside that directory
+  changes, which `status` cannot see: the digest holds the path the
+  manifest names and not what the directory contains. The manifest has no
+  such member today.
+- the compiler or the CMake the release build resolves on the runner
+  changes, which `status` cannot see; "Readiness does not compare
+  toolchains" below says how to find out.
+- the proof of `provision-vcpkg --check` fails, which removes the stamp.
+
+Re-indenting `vcpkg.json`, reordering its keys or laying a list out over
+more or fewer lines changes nothing it says, and leaves the runner ready.
+
+A `vcpkg.json` that no baseline and no digest can be taken from is refused,
+by every command and with the reason: a file that is not one JSON object in
+UTF-8 with no byte order mark before it, an object that names a key twice
+at any depth, a number that is not an integer, a `builtin-baseline` that is
+not 40 lowercase hex digits. vcpkg itself reads a manifest behind a byte
+order mark; these commands do not. Nothing is guessed from such a file:
+`status` reports `vcpkg_baseline: unreadable (...)` and `vcpkg_cache_ready:
+no (...)`, `vcpkg-env` prints nothing, and `provision-vcpkg` changes
+nothing. The same holds where `python3` is not on `PATH`, and where it
+fails: the reason then names `python3` and its exit status and not the
+manifest.
+
+A checkout with a `vcpkg-configuration.json` beside its `vcpkg.json` is
+refused the same way, whatever the file holds. vcpkg reads that file with
+the manifest -- registries, overlay ports, overlay triplets -- and the
+digest is of `vcpkg.json` alone, so the runner would answer ready for
+packages its proof never restored. This repository has no such file. If it
+ever needs what one says, put it into `vcpkg.json` as the
+`vcpkg-configuration` member, where the digest holds it.
+
+Run the provisioning **as the runner account**, from a checkout that the
+account can read and cannot write, under directories it can search -- a
+clone owned by root outside every home directory, for example: `status`,
+`on` and `off` are run from the same checkout as root. Provisioning needs
+no root and no sudo allowance, so the runner can stay `off`; it refuses to
+run as root or as any other account, and prints the command to use when it
+does:
+
+```bash
+sudo -u gha-runner -H env PATH="<runner_path>" \
+  <checkout>/tools/release/jetson-runner-control.sh provision-vcpkg
+```
+
+`sudo -u` starts the command with a clean environment and a `PATH` of its
+own, and vcpkg keys every cached package on the compiler and the CMake it
+finds. `<runner_path>` is the `PATH` the runner service starts jobs with,
+which `status` prints as `runner_path`: a cache built with another CMake or
+compiler than a release job resolves is a cache that job misses. Set
+everything else on the far side of `sudo` in the same way: `CC` and `CXX`
+if the release build sets them, `VCPKG_MAX_CONCURRENCY=<n>` to limit how
+many jobs vcpkg runs at once (the script sets no job count of its own), and
+`TP_JETSON_RUNNER_USER=<account>` with any other `TP_JETSON_RUNNER_*`
+setting when the runner does not use the defaults. Every command of this
+section that runs as the runner account takes the same assignments, and
+`status` takes the `TP_JETSON_RUNNER_*` ones:
+`sudo env TP_JETSON_RUNNER_USER=<account> <checkout>/tools/release/jetson-runner-control.sh status`.
+
+The build runs downloaded build scripts as the runner account, for hours,
+on the operator's terminal. Check that `sudo -l` lists `use_pty` among the
+defaults, so that those processes get a terminal of their own and cannot
+type into the operator's. Where it does not, give the command one:
+
+```bash
+sudo -u gha-runner -H env PATH="<runner_path>" script -qec \
+  '<checkout>/tools/release/jetson-runner-control.sh provision-vcpkg' /dev/null
+```
+
+Start the command in a session that outlives a dropped connection, such as
+`tmux`. Ctrl-C, a hangup or a `TERM` stops the build along with the
+command, and the runner is then not recorded as ready; run the command
+again and the packages that were finished are restored from the cache. A
+command that is killed outright cannot stop its build, which goes on
+running without it for up to the bound.
+
+Only one `provision-vcpkg`, with or without `--check`, runs at a time. Each
+takes a lock on the file `provision.lock` in the cache directory without
+waiting for it, and one that finds the lock held is refused before it
+touches the checkout, the cache or the stamp. A build left behind by a
+killed command holds the lock as well, so nothing can be provisioned over
+it: find that build with `pgrep -u gha-runner -fa 'vcpkg install'`, send
+`TERM` to the `timeout` process among the matches, and remove the
+`install.*` directory left next to the `archives` directory. Anything else
+a run started and left running holds the lock too, until it ends. When
+`pgrep` finds no build, `sudo fuser -v` on the lock file (from `psmisc`), or
+`sudo lsof` on it, lists every process that still has it open; `lslocks`
+may show nothing for it. The lock file is empty and stays; do not remove it
+while a run is under way. `status` and `vcpkg-env` take no lock and answer
+while a run holds it.
+
+The lock is a file of the cache directory, so it keeps apart the runs that
+are given the same cache directory. Two runs given different
+`TP_JETSON_RUNNER_VCPKG_CACHE_DIR` values and the same vcpkg checkout are
+not kept apart and would move that checkout under each other: give every
+run the same `TP_JETSON_RUNNER_*` settings. With the defaults both
+directories follow the runner account.
+
+The command reads the baseline from `vcpkg.json` in the checkout it is run
+from, so run it from the checkout, not from a copy of the script. The same
+holds for the vcpkg lines of `status`, for `vcpkg-env` and for
+`provision-vcpkg --check`: a copy of the helper outside a checkout reports
+`vcpkg_baseline: unreadable` and the cache as not ready. The command then:
+
+1. clones vcpkg into the runner account's home directory, or reuses the
+   vcpkg checkout there, and checks out the baseline commit. A checkout with
+   local modifications or untracked files is refused, before the move and
+   again after it, and so is a repository that is not vcpkg.
+2. bootstraps the vcpkg tool of that commit, with
+   `VCPKG_FORCE_SYSTEM_BINARIES=1` so vcpkg uses the system CMake and Ninja.
+3. builds the manifest with the `streaming-grpc` feature for the machine's
+   triplet into a binary cache under the account's `.cache` directory. Each
+   vcpkg run is bounded by `TP_JETSON_RUNNER_VCPKG_BUILD_TIMEOUT` seconds,
+   six hours unless set.
+4. proves the cache: installs the same manifest a second time, into an
+   empty directory, with the cache read-only and vcpkg forbidden to build.
+   That install succeeds only if every package is restored from the cache.
+5. checks that the checkout is still unmodified at the baseline, and
+   records a stamp beside the cache: the baseline, the dependencies digest
+   of `vcpkg.json`, the triplet, the feature, the vcpkg tool version, the
+   compiler, the time, and a digest of the names of the cache's archives.
+
+A run that gets as far as moving the checkout leaves a stamp only if it
+completes: a stamp from an earlier run is removed before the checkout
+moves, so a failed bootstrap, build or proof never leaves the runner
+reported as ready. A run that is refused before that -- the wrong account,
+a missing compiler, `python3`, `timeout` or `flock`, an unusable
+`vcpkg.json`, a `vcpkg-configuration.json` beside it, another run holding
+the lock, a directory that is not a vcpkg
+checkout, a modified checkout -- exits non-zero and changes nothing but the
+cache directory and the empty lock file it may have created, so an earlier
+stamp stands.
+
+When provisioning refuses the vcpkg checkout, look at it before changing
+it. `<vcpkg_root>` is the directory `status` prints:
+
+```bash
+sudo -u gha-runner -H git -C <vcpkg_root> status --porcelain --untracked-files=all
+```
+
+A clone or a checkout that was cut off, by a full disk for example, leaves
+files of its own behind, and git then reports them as changes; so does a
+file the runner account could not write. If nothing listed is worth
+keeping, put the checkout back as the runner account with git's own
+`reset --hard` and `clean -fd`, or remove the directory. Removing it loses
+the clone and nothing else: the next `provision-vcpkg` clones vcpkg again
+and restores the packages from the cache.
+
+The build leaves vcpkg's `buildtrees` and `packages` directories in the
+vcpkg checkout. git ignores both and nothing reads what they hold once the
+cache is proved, so they can be removed when the disk is needed.
+
+Before a release, check the runner, with the same assignments as the
+provisioning command:
+
+```bash
+sudo <checkout>/tools/release/jetson-runner-control.sh status
+sudo -u gha-runner -H env PATH="<runner_path>" \
+  <checkout>/tools/release/jetson-runner-control.sh provision-vcpkg --check
+```
+
+`status` reports `vcpkg_root`, `vcpkg_baseline`, `vcpkg_commit`,
+`vcpkg_checkout` (`current`, `stale` or `absent`), `vcpkg_tool`,
+`vcpkg_binary_cache`, `vcpkg_cache_archives` and `vcpkg_cache_ready`, which
+is `yes` or `no` with the reason, followed by the stamp's baseline, triplet,
+compiler and time. Run without `sudo` by an account the runner's home
+directory is closed to, it reports what it cannot see as `unknown` or
+`unreadable`, not as absent. `status` reads files only: the `vcpkg.json` of
+the checkout it is run from, the stamp, the vcpkg checkout's `HEAD`, the
+tool, and the names of the cache's archives, which must be the ones the
+stamp recorded. It does not read the archives, and it does not ask git
+whether the checkout was modified, because root must not run git in a
+checkout another account can write. `provision-vcpkg --check` does both: it
+requires the same readiness and an unmodified checkout, then repeats step 4
+against the existing cache. A proof that passes changes nothing: the stamp
+and the cache are as they were, and the install directory it used is
+removed. The command exits non-zero if the checkout is stale or modified,
+if another run holds the lock, if a package is missing from the cache, or
+if the install could not run, could not write its directory or did not end
+within the bound.
+
+`--check` fails closed. A check that is refused before its proof -- the
+wrong account, a runner that is not ready, a stale or modified checkout, a
+held lock -- changes nothing. A proof that ran and failed has shown the
+stamp to be wrong, so the command removes the stamp before it exits and
+says so. From then on `status` reports `vcpkg_cache_ready: no (not
+provisioned: ...)` and `vcpkg-env` prints nothing, until `provision-vcpkg`
+succeeds again; the archives stay, so that run restores what is intact and
+builds only what is not. A stamp the command cannot remove it empties
+instead, and says so: an empty stamp records nothing, and `status` reports
+`vcpkg_cache_ready: no` for it as well. Only where it can do neither, on a
+file system that went read-only for one, does the stamp stand: the command
+says that, `status` and `vcpkg-env` go on answering ready, and the stamp
+has to be removed by hand. A check stopped by Ctrl-C, a hangup or a `TERM`
+has proved nothing either way and leaves the stamp.
+
+Readiness does not compare toolchains. vcpkg keys each cached package on
+the compiler and on the CMake it ran with, so a compiler or CMake that
+changed after provisioning makes the cache miss while `status` still says
+`yes`. `status` shows the compiler line the stamp recorded; after a
+toolchain upgrade run `provision-vcpkg --check` with the release build's
+`PATH`, `CC` and `CXX`. If its proof fails it removes the stamp; provision
+again.
+
+`vcpkg-env` is for the release job that will use the cache. It prints
+`VCPKG_ROOT`, a read-only `VCPKG_BINARY_SOURCES` and
+`VCPKG_FORCE_SYSTEM_BINARIES=1`, one per line, for the job to append to its
+environment file. It prints them only when `status` would report the cache
+as ready for the `vcpkg.json` of the checkout it is run from and git
+reports the vcpkg checkout unmodified; otherwise it prints nothing and
+exits non-zero, so a job cannot pick up a cache made for another baseline
+or other dependencies, or a checkout whose tracked files were edited after
+the proof. git does not report what vcpkg's own `.gitignore` covers, which
+includes the bootstrapped tool and a triplet file placed directly in
+`triplets/`: only `provision-vcpkg --check`, which runs the tool, can
+notice a change there.
+`vcpkg-env` asks git as the runner account, with the variables that would
+point git at another repository removed from its environment, and refuses
+to run as root.
 
 ### 3. Put The Release Commit On The Trunk, Then Tag It
 
