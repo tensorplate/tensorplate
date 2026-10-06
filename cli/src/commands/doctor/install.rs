@@ -19,11 +19,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Duration;
 
 use tensorplate_platform::PlatformRegistry;
 use tensorplate_protocol::backend_descriptor::{BackendDescriptor, BackendDescriptorError};
 use tensorplate_protocol::backend_probe::{
-    probe_backend_with_inventory, BackendProbeReport, ProbeOptions,
+    probe_backend_with_inventory, run_bounded, BackendProbeReport, ProbeOptions,
 };
 use tensorplate_protocol::install_paths::{
     self, AGENT_CONFIG_PATH, BACKEND_DESCRIPTOR_DIR, CLI_CONFIG_PATH, OBSERVABILITY_CONFIG_PATH,
@@ -259,13 +260,22 @@ enum DpkgPackageState {
     Unavailable(String),
 }
 
+/// The limit the descriptor reader gives the same tool.
+const DPKG_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn query_dpkg_package(package: &str) -> DpkgPackageState {
-    let output = match Command::new("dpkg-query")
-        .args(["-W", "-f=${db:Status-Abbrev}\t${Version}", package])
-        .output()
-    {
+    query_dpkg_with(Path::new("dpkg-query"), package, DPKG_QUERY_TIMEOUT)
+}
+
+/// Ask `program` about one package, and kill it at `timeout`: a package
+/// database that does not answer must not hold doctor.
+fn query_dpkg_with(program: &Path, package: &str, timeout: Duration) -> DpkgPackageState {
+    let output = match run_bounded(
+        Command::new(program).args(["-W", "-f=${db:Status-Abbrev}\t${Version}", package]),
+        timeout,
+    ) {
         Ok(output) => output,
-        Err(err) => return DpkgPackageState::Unavailable(err.to_string()),
+        Err(why) => return DpkgPackageState::Unavailable(why),
     };
     if !output.status.success() {
         return DpkgPackageState::Missing;
@@ -985,14 +995,25 @@ impl PackageSource<'_> {
     fn versions<'n>(&self, names: impl Iterator<Item = &'n String>) -> BTreeMap<String, String> {
         match self {
             Self::Staged(packages) => (*packages).clone(),
-            Self::Dpkg => names
-                .filter_map(|name| match query_dpkg_package(name) {
-                    DpkgPackageState::Installed(version) => Some((name.clone(), version)),
-                    DpkgPackageState::Missing | DpkgPackageState::Unavailable(_) => None,
-                })
-                .collect(),
+            Self::Dpkg => installed_versions(names, query_dpkg_package),
         }
     }
+}
+
+/// The installed version of each of `names`, each asked about once however
+/// many profiles name it.
+fn installed_versions<'n>(
+    names: impl Iterator<Item = &'n String>,
+    query: impl Fn(&str) -> DpkgPackageState,
+) -> BTreeMap<String, String> {
+    names
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|name| match query(name) {
+            DpkgPackageState::Installed(version) => Some((name.clone(), version)),
+            DpkgPackageState::Missing | DpkgPackageState::Unavailable(_) => None,
+        })
+        .collect()
 }
 
 /// The backend descriptor finding, the runtime finding and the runner
@@ -1178,7 +1199,9 @@ fn probed_findings(
             versions: &versions,
             agent_environment: &agent_environment,
             descriptor_dir: &descriptor_dir,
-            systemd: !opts.skip_systemd,
+            packaged_unit: !opts.skip_systemd
+                && find_unit(&systemd_unit_search_dirs(opts), "tensorplate-agent.service")
+                    .is_some(),
             mountinfo: mountinfo.as_deref(),
         }));
     }
@@ -2182,6 +2205,72 @@ tensorplate-agent         started operator ~/Library/LaunchAgents/homebrew.mxcl.
 tensorplate-observability none
 other-service             error   root       ~/Library/LaunchAgents/other.plist
 ";
+
+    fn dpkg_stub(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("dpkg-query");
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_package_database_that_does_not_answer_does_not_hold_doctor() {
+        let td = TempDir::new().unwrap();
+        let hung = dpkg_stub(td.path(), "exec sleep 30");
+        let started = std::time::Instant::now();
+        let state = query_dpkg_with(&hung, "tensorplate-cli", Duration::from_millis(300));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let DpkgPackageState::Unavailable(why) = state else {
+            panic!("a query that never answers is not an answer");
+        };
+        assert_eq!(why, "did not finish: no exit within 300ms");
+    }
+
+    #[test]
+    fn a_package_counts_as_installed_only_in_the_installed_state() {
+        let td = TempDir::new().unwrap();
+        let limit = Duration::from_secs(30);
+        let answer = |body: &str| query_dpkg_with(&dpkg_stub(td.path(), body), "p", limit);
+        assert!(matches!(
+            answer("printf 'ii \\t1.2.3-1'"),
+            DpkgPackageState::Installed(version) if version == "1.2.3-1"
+        ));
+        assert!(matches!(
+            answer("printf 'iU \\t1.2.3-1'"),
+            DpkgPackageState::Missing
+        ));
+        assert!(matches!(answer("exit 1"), DpkgPackageState::Missing));
+        assert!(matches!(
+            answer("printf 'no tab'"),
+            DpkgPackageState::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn a_package_several_profiles_name_is_asked_about_once() {
+        let names: Vec<String> = ["base", "ct2", "base", "kokoro", "cublas", "cublas"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let versions = installed_versions(names.iter(), |name| {
+            asked.borrow_mut().push(name.to_string());
+            match name {
+                "kokoro" => DpkgPackageState::Missing,
+                "cublas" => DpkgPackageState::Unavailable("no answer".into()),
+                _ => DpkgPackageState::Installed(format!("{name}-1")),
+            }
+        });
+        assert_eq!(*asked.borrow(), ["base", "ct2", "cublas", "kokoro"]);
+        assert_eq!(
+            versions,
+            BTreeMap::from([
+                ("base".to_string(), "base-1".to_string()),
+                ("ct2".to_string(), "ct2-1".to_string()),
+            ])
+        );
+    }
 
     #[test]
     fn a_launchd_listing_is_read_by_exact_service_name() {

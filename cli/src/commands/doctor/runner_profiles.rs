@@ -21,7 +21,7 @@ use serde::Deserialize;
 use tensorplate_protocol::backend_descriptor::{BackendDescriptor, RunnerProfile};
 use tensorplate_protocol::backend_probe::{
     launcher_temp_dir, run_bounded, runner_launch_environment, staged, BackendProbeReport,
-    BackendProbeState, ProbeOptions, RunnerProfileProbe,
+    BackendProbeState, ProbeOptions, RunnerProfileProbe, LAUNCHER_TEMP_VARIABLES,
 };
 use tensorplate_protocol::install_paths::{BACKEND_DESCRIPTOR_DIR, BACKEND_DESCRIPTOR_DIR_ENV};
 
@@ -119,8 +119,9 @@ pub(super) struct Inputs<'a> {
     pub agent_environment: &'a AgentEnvironment,
     /// The descriptor directory `report` was read from, as installed.
     pub descriptor_dir: &'a Path,
-    /// Whether the agent runs under the packaged systemd unit.
-    pub systemd: bool,
+    /// Whether the packaged agent unit is installed. Only then is its
+    /// `EnvironmentFile` what decides the agent's descriptor directory.
+    pub packaged_unit: bool,
     /// `/proc/self/mountinfo`, when it could be read.
     pub mountinfo: Option<&'a str>,
 }
@@ -174,7 +175,7 @@ fn record_finding(inputs: &Inputs<'_>) -> Finding {
         .get(BACKEND_DESCRIPTOR_DIR_ENV)
         .filter(|dir| !dir.is_empty())
         .unwrap_or(BACKEND_DESCRIPTOR_DIR);
-    if inputs.systemd && Path::new(agent_dir) != inputs.descriptor_dir {
+    if inputs.packaged_unit && Path::new(agent_dir) != inputs.descriptor_dir {
         faults.push(format!(
             "the agent's environment (`{AGENT_ENVIRONMENT_FILE}`) reads backend descriptors from `{agent_dir}`, and this report read `{}`",
             inputs.descriptor_dir.display()
@@ -380,7 +381,9 @@ fn dependency_finding(inputs: &Inputs<'_>) -> Finding {
             let profile = &probe.profile;
             let verdict = match requirements(&profile.id) {
                 _ if probe.state != BackendProbeState::Runnable => Verdict {
-                    faults: vec!["not checked: its interpreter does not run".into()],
+                    faults: vec![
+                        "not checked: its sidecar would not start (see `runner_profiles`)".into(),
+                    ],
                     ..Verdict::default()
                 },
                 None => Verdict {
@@ -609,7 +612,7 @@ fn launch_environment_finding(inputs: &Inputs<'_>) -> Finding {
     let id = FindingId::RunnerLaunchEnvironment;
     let environment = inputs.agent_environment;
     let temp_dir = sidecar_temp_dir(environment);
-    let origin = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
+    let origin = LAUNCHER_TEMP_VARIABLES
         .into_iter()
         .find(|name| environment.get(name).is_some())
         .map_or_else(
@@ -1012,7 +1015,7 @@ mod tests {
             versions,
             agent_environment,
             descriptor_dir: Path::new(BACKEND_DESCRIPTOR_DIR),
-            systemd: true,
+            packaged_unit: true,
             mountinfo: None,
         }
     }
@@ -1047,7 +1050,7 @@ mod tests {
             "`another_family`: no dependency list for this profile; only its interpreter was checked"
         );
 
-        // A profile whose interpreter does not run is never asked.
+        // A profile whose sidecar would not start is never asked.
         let both = report_of(vec![
             runnable(profile("another_family", &["int8"], &[])),
             stopped,
@@ -1055,9 +1058,9 @@ mod tests {
         let finding = dependency_finding(&inputs_for(&both, &probe, &versions, &environment));
         assert_eq!(finding.status_label(), "fail");
         assert!(
-            finding
-                .message
-                .ends_with("`kokoro`: not checked: its interpreter does not run"),
+            finding.message.ends_with(
+                "`kokoro`: not checked: its sidecar would not start (see `runner_profiles`)"
+            ),
             "{}",
             finding.message
         );
@@ -1133,10 +1136,10 @@ mod tests {
         let (status, message) = record(&report_of(vec![runnable(whisper())]), &moved);
         assert_eq!(status, "fail");
         assert!(message.contains("reads backend descriptors from `/opt/backends`"));
-        // Off systemd the file is not the agent's environment.
+        // Without the packaged unit the file is not the agent's environment.
         let report = report_of(vec![runnable(whisper())]);
         let mut unmanaged = inputs_for(&report, &probe, &versions, &moved);
-        unmanaged.systemd = false;
+        unmanaged.packaged_unit = false;
         assert_eq!(record_finding(&unmanaged).status_label(), "ok");
         let same = AgentEnvironment::parse(&format!(
             "TP_BACKEND_DESCRIPTOR_DIR={BACKEND_DESCRIPTOR_DIR}\n"

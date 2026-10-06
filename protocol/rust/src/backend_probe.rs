@@ -242,12 +242,15 @@ pub fn runner_launch_environment(
     ]
 }
 
+/// The variables C++'s `temp_directory_path` reads, in its order.
+pub const LAUNCHER_TEMP_VARIABLES: [&str; 4] = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"];
+
 /// The temporary directory the launcher hands a runner profile's sidecar,
-/// in an environment answering `lookup`: the first of these variables that
-/// is set, as C++'s `temp_directory_path` reads them, and `/tmp` otherwise.
+/// in an environment answering `lookup`: the first of
+/// [`LAUNCHER_TEMP_VARIABLES`] that is set, and `/tmp` otherwise.
 #[must_use]
 pub fn launcher_temp_dir(lookup: impl Fn(&str) -> Option<String>) -> PathBuf {
-    ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
+    LAUNCHER_TEMP_VARIABLES
         .into_iter()
         .find_map(lookup)
         .map_or_else(|| PathBuf::from("/tmp"), PathBuf::from)

@@ -377,16 +377,21 @@ preflight() {
   [[ -n "$BUNDLE_DIR" && -f "${BUNDLE_DIR}/manifest.json" ]] ||
     die "--bundle-dir must contain manifest.json"
 
-  # The installer runs doctor at the end of a runtime install and dies on
-  # a critical finding. python_pytorch_runtime is probed unconditionally
-  # on Linux, so a host without PyTorch fails the install stage for a
-  # missing prerequisite rather than for anything about the release.
+  # The bundle this run deploys names no runner profile, so it is served
+  # in the backend descriptor's interpreter and needs PyTorch there.
+  # Without it doctor reports python_pytorch_runtime as a critical
+  # failure, which stops the installer's own doctor run, or, where a
+  # runner profile is installed, as `missing`, which the install stage's
+  # list of findings that must be ok refuses. Either way the host lacks a
+  # prerequisite, and saying so here beats failing a stage for it.
   # Ubuntu 24.04 marks its system interpreter externally-managed, so the
   # remedy is spelled out rather than left to the operator to discover.
   "$BACKEND_PYTHON" -c 'import torch' >/dev/null 2>&1 || die "$(cat <<'MSG'
-PyTorch is not importable by the backend descriptor's interpreter, which
-the installer's own doctor run probes unconditionally on Linux. It
-refuses a critical finding, so install PyTorch before validating. Ubuntu
+PyTorch is not importable by the backend descriptor's interpreter, where
+the bundle this run deploys is served. Doctor reports that as a critical
+finding, which stops the installer, or as `missing` where a runner
+profile is installed, which the install stage refuses. Install PyTorch
+before validating. Ubuntu
 24.04 marks its system interpreter externally-managed; see
 docs/validation/cloud-row-runbooks.md for the supported way to satisfy
 this on a validation host.

@@ -26,6 +26,7 @@ use tensorplate_cli::commands::doctor::install::{
 
 const ENVIRONMENT_ROOT: &str = "usr/lib/tensorplate/speech-runtime";
 const DESCRIPTOR_DIR: &str = "usr/share/tensorplate/backends/python_pytorch";
+const AGENT_UNIT: &str = "usr/lib/systemd/system/tensorplate-agent.service";
 const CUBLAS: &str =
     "/usr/lib/tensorplate/speech-runtime/lib/python3.12/site-packages/nvidia/cublas/lib";
 
@@ -203,6 +204,10 @@ fn stage(root: &Path, case: &Case) {
         &root.join("usr/bin/python3"),
         &replaying_interpreter(&fixture("recordings/own"), &root.join("own"), OWN_QUERIES),
         0o755,
+    );
+    copy(
+        repo_path("packaging/debian/tensorplate-agent.service"),
+        root.join(AGENT_UNIT),
     );
     fs::create_dir_all(root.join("tmp")).unwrap();
     fs::create_dir_all(root.join("var/lib/tensorplate/tmp")).unwrap();
@@ -444,4 +449,32 @@ fn the_three_findings_are_skipped_where_nothing_can_be_probed() {
 
     fs::remove_file(&descriptor).unwrap();
     skipped(&run(&opts), "backend descriptor absent");
+}
+
+#[test]
+fn the_environment_file_decides_the_descriptor_directory_only_with_the_packaged_unit() {
+    let case = CASES
+        .iter()
+        .find(|case| case.agent_environment.is_some())
+        .unwrap();
+    let td = TempDir::new().unwrap();
+    stage(td.path(), case);
+    let opts = InstallProbeOptions {
+        prefix: Some(td.path().to_path_buf()),
+        probe_backends: true,
+        skip_systemd: false,
+        cli_config_rejection: None,
+    };
+    let packages = installed_packages();
+    let record = |opts: &InstallProbeOptions| {
+        let findings = python_pytorch_findings(opts, PackageSource::Staged(&packages));
+        (findings[2].status_label(), findings[2].message.clone())
+    };
+    let (status, message) = record(&opts);
+    assert_eq!(status, "fail");
+    assert!(message.contains("reads backend descriptors from `/opt/backends`"));
+
+    // No unit installed: nothing says the agent reads that file.
+    fs::remove_file(td.path().join(AGENT_UNIT)).unwrap();
+    assert_eq!(record(&opts).0, "ok");
 }

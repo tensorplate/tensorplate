@@ -14,7 +14,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   Python that hung held `tensorplate doctor`, and held the agent's startup
   before its control socket existed. The probe's queries are also started
   from `/`, so a module in the directory `tensorplate doctor` was run from
-  is no longer imported in place of an installed one. (V030-E01-F01-T03)
+  is no longer imported in place of an installed one. `tensorplate doctor`'s
+  own `dpkg-query` calls are killed after five seconds as well.
+  (V030-E01-F01-T03)
 - Run serving-worker SIGINT/SIGTERM shutdown on the main thread, retaining
   signals during model load and avoiding signal-handler locks, allocation,
   and repeated shutdown entry. (V030-E04-F03-T02)
