@@ -76,9 +76,10 @@ release so far.
   auxiliary models do come inside the wheels: the Silero voice activity
   model in faster-whisper, and spaCy's `en_core_web_sm`, which Kokoro's
   English grapheme-to-phoneme step needs.
-- It does not change how `tensorplate doctor` probes the backend: the
-  runtime probe still uses the descriptor's `python.interpreter`, so PyTorch
-  must still be importable there.
+- It does not put PyTorch in the backend descriptor's own interpreter
+  (`python.interpreter`, `/usr/bin/python3` as packaged). A bundle that
+  names no runner profile is still served there and still needs PyTorch
+  there; see [What the agent and doctor check](#what-the-agent-and-doctor-check).
 
 ## What runs in it
 
@@ -155,11 +156,54 @@ never asked about its packages, so nothing changes where the family is not
 installed.
 
 `tensorplate doctor` reports a refusal as a failed `python_pytorch_backend`
-finding that carries the reason. The agent logs it at startup in its
-`backend probe:` line, as `state=RunnerProfilePackageMissing` for a package
-that is not installed and `state=DescriptorMalformed` for every other
-refusal, and refuses `python_pytorch` deployments with the reason
-`missing_backend_package` or `accelerator_runtime_unavailable` respectively.
+finding that carries the reason, with a hint that names the package to act
+on: the one to install, or the one that installed the refused file. The
+agent logs it at startup in its `backend probe:` line, as
+`state=RunnerProfilePackageMissing` for a package that is not installed and
+`state=DescriptorMalformed` for every other refusal, and refuses
+`python_pytorch` deployments with the reason `missing_backend_package` or
+`accelerator_runtime_unavailable` respectively.
+
+## What the agent and doctor check
+
+When it starts, the agent probes each installed runner profile's
+interpreter, in the environment the launcher sets for that profile's
+sidecar, and the descriptor's own: the interpreter is an executable file
+that runs, it meets the backend's minimum Python version and it imports the
+sidecar module. Each query is run from `/` and killed after five seconds;
+the PyTorch import in the descriptor's interpreter is given 120.
+The agent logs one line for the backend and one for each profile, with the
+interpreter's whole error text in `detail`:
+
+```
+backend probe: backend=python_pytorch state=PytorchMissing { detail: "Traceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nModuleNotFoundError: No module named 'torch'" } descriptor=/usr/share/tensorplate/backends/python_pytorch/backend.json
+backend probe: backend=python_pytorch runner_profile=faster_whisper state=Runnable interpreter=/usr/lib/tensorplate/speech-runtime/bin/python
+```
+
+A deploy is decided by the state of the interpreter the bundle would run
+in. A bundle that names a runner profile needs that profile `Runnable` and
+does not need PyTorch in the descriptor's interpreter, so a host with only
+this family serves such a bundle. A bundle that names none needs the
+descriptor's interpreter, PyTorch included, as before. A bundle that names
+a profile no installed package declares is refused before staging, with the
+error code `unsupported`, the platform reason `missing_backend_package` and
+the message ``backend `python_pytorch` is unrunnable on this device: runner
+profile `<id>` is not installed``. A refused descriptor still refuses every
+bundle.
+
+The agent's probe does not import a profile's engines or look at the
+temporary directory. `tensorplate doctor` does, in three findings:
+`runner_profiles` (the record the launcher reads, with package versions and
+the Python version each interpreter reports), `runner_profile_dependencies`
+(what each profile's engines import and load, Kokoro's English model
+package among them, which file `libcublas.so.12` is mapped from, and
+whether the engine sees a CUDA device) and
+`runner_launch_environment` (the sidecar's temporary directory and
+variables). [`docs/cli/doctor.md`](../cli/doctor.md) says when each fails.
+On a host where an image or another package also provides
+`libcublas.so.12`, the second finding is what tells this family's copy from
+that one. `python_pytorch_runtime` reports a descriptor interpreter without
+PyTorch as `missing` rather than `fail` once a profile is installed.
 
 ## Licenses
 

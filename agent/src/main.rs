@@ -160,6 +160,12 @@ fn probe_available_backends(
             report.state,
             report.descriptor_path.display()
         );
+        for probe in &report.runner_profiles {
+            eprintln!(
+                "backend probe: backend={} runner_profile={} state={:?} interpreter={}",
+                report.backend_name, probe.profile.id, probe.state, probe.profile.interpreter
+            );
+        }
         out.insert(backend.clone(), report);
     }
     out

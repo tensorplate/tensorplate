@@ -101,6 +101,19 @@ pub enum FindingId {
     /// no statement of what was found leaves an operator unable to tell
     /// "wrong card" from "right card, too many".
     AcceleratorFacts,
+    /// The installed runner profiles as the sidecar launcher reads them:
+    /// each profile's interpreter, environment root, packages with their
+    /// installed versions, compute types and the Python version its
+    /// interpreter reports. `fail` when a profile's sidecar would not start
+    /// in the declared environment; `skipped` where none is installed.
+    RunnerProfiles,
+    /// Whether each installed runner profile's engines import and load
+    /// what they need in the environment the launcher sets, and from where.
+    RunnerProfileDependencies,
+    /// The temporary directory and variables the launcher hands a runner
+    /// profile's sidecar. `fail` when the launcher would refuse the
+    /// directory.
+    RunnerLaunchEnvironment,
 }
 
 impl FindingId {
@@ -146,6 +159,9 @@ impl FindingId {
             Self::PlatformRow => "platform_row",
             Self::ModelClassRows => "model_class_rows",
             Self::AcceleratorFacts => "accelerator_facts",
+            Self::RunnerProfiles => "runner_profiles",
+            Self::RunnerProfileDependencies => "runner_profile_dependencies",
+            Self::RunnerLaunchEnvironment => "runner_launch_environment",
         }
     }
 }
@@ -307,6 +323,15 @@ mod tests {
             (FindingId::AgentReachable, "agent_reachable"),
             (FindingId::Ros2HealthStub, "ros2_health_stub"),
             (FindingId::ResidentSetMembers, "resident_set_members"),
+            (FindingId::RunnerProfiles, "runner_profiles"),
+            (
+                FindingId::RunnerProfileDependencies,
+                "runner_profile_dependencies",
+            ),
+            (
+                FindingId::RunnerLaunchEnvironment,
+                "runner_launch_environment",
+            ),
         ];
         for (id, expected) in cases {
             assert_eq!(id.as_str(), expected);

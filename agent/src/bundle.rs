@@ -43,7 +43,7 @@ use tensorplate_protocol::bundle_manifest::BundleManifest;
 
 use tensorplate_platform::PlatformReason;
 
-use crate::backend_detection::{BackendProbeReport, BackendProbeState};
+use crate::backend_detection::{BackendProbeReport, BackendProbeState, ServingState};
 use crate::config::{AgentConfig, BackendCapability};
 use crate::error::{AgentError, AgentResult};
 
@@ -150,9 +150,12 @@ pub fn verify(bundle_path: &Path, config: &AgentConfig) -> AgentResult<VerifiedB
 /// In addition to the variants returned by [`verify`], returns
 /// [`AgentError::BackendUnrunnable`] when the bundle's
 /// `backend_hint` matches a probe entry whose state is anything other
-/// than [`BackendProbeState::Runnable`]. The error carries a short
-/// reason string for log output; the CLI doctor surfaces the full
-/// structured detail.
+/// than [`BackendProbeState::Runnable`]. The state is the one for the
+/// interpreter the bundle's sidecar would run in: the named runner
+/// profile's, or the backend's own when the manifest names none. A
+/// profile that is not installed is refused as a missing package. The
+/// error carries a short reason string for log output; the CLI doctor
+/// surfaces the full structured detail.
 pub fn verify_with_probes(
     bundle_path: &Path,
     config: &AgentConfig,
@@ -178,11 +181,25 @@ pub fn verify_with_probes(
     // operator is managing them out-of-band.
     let backend_hint = descriptor.manifest.backend_hint.as_str();
     if let Some(report) = probes.get(backend_hint) {
-        if !matches!(report.state, BackendProbeState::Runnable) {
+        let runner_profile = descriptor
+            .manifest
+            .profile
+            .as_ref()
+            .and_then(|profile| profile.runner_profile.as_deref());
+        let serving = report.serving_state(runner_profile);
+        let reason = match serving {
+            ServingState::Probed(BackendProbeState::Runnable) => None,
+            ServingState::Probed(state) => Some(format_probe_reason(state)),
+            ServingState::RunnerProfileNotInstalled => Some(format!(
+                "runner profile `{}` is not installed",
+                runner_profile.unwrap_or_default()
+            )),
+        };
+        if let Some(reason) = reason {
             return Err(AgentError::BackendUnrunnable {
                 backend: backend_hint.to_string(),
-                reason: format_probe_reason(&report.state),
-                platform_reason: PlatformReason::for_backend_probe(&report.state),
+                reason,
+                platform_reason: PlatformReason::for_serving_state(serving),
             });
         }
     }
@@ -682,6 +699,7 @@ mod tests {
                 ),
                 state: BackendProbeState::DescriptorMissing,
                 install_hint: Some("apt install tensorplate-backend-python-pytorch".into()),
+                runner_profiles: Vec::new(),
             },
         );
         let err = verify_with_probes(bundle.path(), &cfg, &probes).expect_err("must reject");
@@ -730,6 +748,7 @@ mod tests {
                     detail: "No module named 'torch'".into(),
                 },
                 install_hint: None,
+                runner_profiles: Vec::new(),
             },
         );
 
@@ -772,6 +791,7 @@ mod tests {
                     declaration: "runner_profiles.d/kokoro.json".into(),
                 },
                 install_hint: None,
+                runner_profiles: Vec::new(),
             },
         );
 
@@ -784,6 +804,110 @@ mod tests {
             "a package to install is not a runtime that will not run"
         );
         assert!(record.message.contains("tensorplate-speech-runtime-cuda"));
+    }
+
+    #[test]
+    fn a_bundle_that_names_a_runner_profile_is_decided_by_that_profiles_interpreter() {
+        use super::verify_with_probes;
+        use crate::backend_detection::{BackendProbeReport, BackendProbeState, RunnerProfileProbe};
+        use std::collections::BTreeMap;
+        use tensorplate_protocol::backend_descriptor::{ComputeType, RunnerProfile};
+
+        let fixture = |name: &str| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../test/models/bundles")
+                .join(name)
+        };
+        let td = TempDir::new().expect("td");
+        let mut cfg = config(td.path().join("s"), td.path().join("st"));
+        cfg.available_backends.push("python_pytorch".into());
+        cfg.runtime_version = Some("0.3.1".into());
+        let probe = |id: &str, state: BackendProbeState| RunnerProfileProbe {
+            profile: RunnerProfile {
+                id: id.into(),
+                interpreter: "/opt/env/bin/python".into(),
+                environment_root: "/opt/env".into(),
+                library_search_paths: Vec::new(),
+                packages: vec!["speech-runtime".into()],
+                compute_types: vec![ComputeType::Float16],
+            },
+            state,
+            observed: None,
+        };
+        // A host with the speech runtime and no PyTorch in the descriptor's
+        // own interpreter, and a `kokoro` whose interpreter does not start.
+        let report = |state: BackendProbeState| BackendProbeReport {
+            backend_name: "python_pytorch".into(),
+            descriptor_path: PathBuf::from("backend.json"),
+            state,
+            install_hint: None,
+            runner_profiles: vec![
+                probe("faster_whisper", BackendProbeState::Runnable),
+                probe(
+                    "kokoro",
+                    BackendProbeState::PythonInterpreterMissing {
+                        interpreter: "/opt/env/bin/python".into(),
+                    },
+                ),
+            ],
+        };
+        let verdict = |bundle: &str, report: BackendProbeReport| {
+            let probes = BTreeMap::from([("python_pytorch".to_string(), report)]);
+            verify_with_probes(&fixture(bundle), &cfg, &probes).map(|_| ())
+        };
+        let refusal = |result: crate::AgentResult<()>| match result {
+            Err(AgentError::BackendUnrunnable {
+                reason,
+                platform_reason,
+                ..
+            }) => (reason, platform_reason),
+            other => panic!("expected BackendUnrunnable, got {other:?}"),
+        };
+        let no_torch = || BackendProbeState::PytorchMissing {
+            detail: "ModuleNotFoundError".into(),
+        };
+
+        verdict("v0_2/speech_stt_streaming", report(no_torch())).expect("faster_whisper runs");
+        assert_eq!(
+            refusal(verdict("v0_2/speech_tts_streaming", report(no_torch()))),
+            (
+                "Python interpreter `/opt/env/bin/python` missing".to_string(),
+                Some(PlatformReason::AcceleratorRuntimeUnavailable)
+            )
+        );
+        // The bundle that names no profile still needs the descriptor's interpreter.
+        assert_eq!(
+            refusal(verdict("v0_1/x86_fixture_smoke", report(no_torch()))).0,
+            "PyTorch is not importable"
+        );
+        verdict(
+            "v0_1/x86_fixture_smoke",
+            report(BackendProbeState::Runnable),
+        )
+        .expect("own");
+
+        // A profile no package declares is a package to install.
+        let mut uninstalled = report(BackendProbeState::Runnable);
+        uninstalled.runner_profiles.remove(0);
+        assert_eq!(
+            refusal(verdict("v0_2/speech_stt_streaming", uninstalled)),
+            (
+                "runner profile `faster_whisper` is not installed".to_string(),
+                Some(PlatformReason::MissingBackendPackage)
+            )
+        );
+
+        // A backend-wide refusal decides a profile's bundle too.
+        assert_eq!(
+            refusal(verdict(
+                "v0_2/speech_stt_streaming",
+                report(BackendProbeState::DescriptorMalformed {
+                    reason: "bad declaration".into()
+                })
+            ))
+            .1,
+            Some(PlatformReason::AcceleratorRuntimeUnavailable)
+        );
     }
 
     #[test]
@@ -810,6 +934,7 @@ mod tests {
                 descriptor_path: PathBuf::from("/dev/null"),
                 state: BackendProbeState::Runnable,
                 install_hint: None,
+                runner_profiles: Vec::new(),
             },
         );
         verify_with_probes(bundle.path(), &cfg, &probes).expect("ok");

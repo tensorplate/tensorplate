@@ -275,6 +275,52 @@ The startup probe reports `PackageNotInstalled` as its own state,
 classifies as `missing_backend_package`. Every other refusal above is a
 `descriptor_malformed` probe state and `accelerator_runtime_unavailable`.
 
+### Probing the interpreters
+
+`probe_backend` (`protocol/rust/src/backend_probe.rs`) is shared by the
+agent's startup probe and `tensorplate doctor`. Its report holds two kinds
+of state:
+
+- `state` is a backend-wide refusal (an absent or refused descriptor, a
+  declared package that is not installed, a runtime version below the
+  descriptor's minimum) or else the state of the descriptor's own
+  interpreter: `python.interpreter` exists and runs, meets the minimum
+  version, imports the backend module, and imports PyTorch where the
+  descriptor requires it. A bundle that names no runner profile is served
+  there.
+- `runner_profiles` holds one entry per installed profile, in the merged
+  order: the declared record, a state and what the interpreter printed for
+  `sys.version` and `sys.prefix`. A profile's interpreter must run (one the
+  system will not execute is missing, as the launcher refuses it) and is
+  held to the descriptor's `python` requirements. It is run with the three
+  variables of the
+  [launcher's table](#launching-a-runner-profiles-sidecar), which the probe
+  builds from a Rust mirror of the launcher's function. It is never held to
+  the descriptor's `pytorch` requirement: a profile's engines are its own.
+  The list is empty under a backend-wide refusal, when nothing is run.
+
+`BackendProbeReport::serving_state` picks the state that decides one bundle:
+the backend-wide refusal if there is one, otherwise the named profile's
+state, or the descriptor's own when the manifest names no profile. The
+agent's deploy gate (`verify_with_probes` in `agent/src/bundle.rs`) refuses
+before staging on anything but `Runnable`, and refuses a bundle whose
+profile has no entry as `missing_backend_package`; the reason for either
+comes from `PlatformReason::for_serving_state`. Every query the probe
+runs is started from `/` and killed at the probe's limit, five seconds
+by default; the PyTorch import, which reads far more from disk, gets 120. Before this split the
+gate required PyTorch in the descriptor's interpreter for every bundle.
+
+The probe stops at the interpreter and the sidecar module. Whether a
+profile's engines import, which copy of a library the loader maps and
+whether the sidecar's temporary directory allows execution are
+`tensorplate doctor`'s `runner_profile_dependencies` and
+`runner_launch_environment` findings, which reuse the same mirror of the
+launcher's environment. The mirror is pinned by Rust tests and shares no
+fixture with the launcher. Doctor reports the launcher's refusal of a search
+path holding `:` or `;` and of a `noexec` temporary directory; whether the
+worker can write to that directory is not checked outside the launcher,
+because doctor runs as another user.
+
 ### Launching a runner profile's sidecar
 
 A bundle that names a `runner_profile` is served by a sidecar started in

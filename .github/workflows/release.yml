@@ -935,7 +935,7 @@ jobs:
             echo "Download the workflow artifact named tensorplate-${TAG}-release-assets-unsigned to test install.sh before publishing."
             echo "Build-only assets are unsigned; smoke-test the installer with --allow-unsigned. Signing and provenance run on the publish path (RC or final tag)."
             if [[ "$SPEECH_RUNTIME" == "stub" ]]; then
-              echo "The tensorplate-speech-runtime packages in this bundle are stand-ins built from stub wheels: they exercise the build, the manifest and install.sh --with-speech-runtime, and serve no model."
+              echo "The tensorplate-speech-runtime packages in this bundle are stand-ins built from stub wheels: they exercise the build, the manifest and the package install of install.sh --with-speech-runtime, and serve no model. That install ends in tensorplate doctor, which fails on runner_profile_dependencies because stub modules do not import."
             fi
           } >>"$GITHUB_STEP_SUMMARY"
 

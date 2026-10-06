@@ -782,6 +782,10 @@ describes. The measured stack belongs in the evidence bundle.
    satisfy this prerequisite. That variable selects the serving
    sidecar's interpreter; both this harness's preflight and doctor's
    packaged backend probe still require PyTorch in `/usr/bin/python3`.
+   Installed speech runtime packages do not satisfy it either: with a
+   runner profile installed doctor reports `python_pytorch_runtime` as
+   `missing` rather than `fail`, and the harness requires `ok`, because
+   the bundle it deploys names no runner profile.
    Unlike the CPU-only CI smoke, do **not** use the CPU wheel index
    here: this row has an accelerator, and the default index resolves to
    the CUDA build.

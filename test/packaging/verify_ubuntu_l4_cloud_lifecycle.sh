@@ -2237,7 +2237,11 @@ case "$command" in
   doctor)
     failing=0
     row_status=ok
+    runtime_status=ok
     if [ "$mode" = "doctor-failing" ]; then failing=1; fi
+    # As doctor reports a descriptor interpreter without PyTorch where a
+    # runner profile is installed: nothing fails.
+    if [ "$mode" = "pytorch-runtime-missing" ]; then runtime_status=missing; fi
     if [ "$mode" = "wrong-row" ]; then row_status=warning; fi
     if [ "$mode:$installed" = upgrade-wrong-row:upgraded ]; then row_status=warning; fi
     case "$mode:$installed" in
@@ -2277,7 +2281,7 @@ case "$command" in
  {"id":"agent_socket","status":"ok","message":"ok"},
  {"id":"serving_binary_installed","status":"ok","message":"ok"},
  {"id":"python_pytorch_backend","status":"ok","message":"ok"},
- {"id":"python_pytorch_runtime","status":"ok","message":"ok"},
+ {"id":"python_pytorch_runtime","status":"${runtime_status}","message":"ok"},
  {"id":"path_layout","status":"ok","message":"ok"},
  {"id":"config_files","status":"ok","message":"ok"}]}}
 JSON
@@ -3373,6 +3377,16 @@ check "a restart that fails is recorded as a failed restart" "fail" \
 row_evidence="${td}/stages-wrong-row"
 check "a host whose row does not resolve fails the install stage" "fail" \
   "$(run_stages wrong-row "$row_evidence" >/dev/null; stage_status "${row_evidence}/lifecycle-report.json" install)"
+
+# The deploy stage's bundle names no runner profile, so it is served in
+# the descriptor's own interpreter. Doctor fails nothing when that
+# interpreter has no PyTorch and a runner profile is installed.
+runtime_evidence="${td}/stages-pytorch-runtime-missing"
+check "a descriptor interpreter without PyTorch fails the install stage with nothing failing in doctor" "fail" \
+  "$(run_stages pytorch-runtime-missing "$runtime_evidence" >/dev/null; stage_status "${runtime_evidence}/lifecycle-report.json" install)"
+check "  and names the finding and its status" yes \
+  "$(grep -Fq 'python_pytorch_runtime is missing' \
+       "${runtime_evidence}/install.log" && echo yes || echo no)"
 
 # Install runs online, so doctor has to have read the machine type live.
 # A shape from the record, or none at all, fails the stage.
