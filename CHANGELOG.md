@@ -53,6 +53,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   supply-chain workflow builds an SBOM and audits the pinned versions in a
   new `sdk/python[speech]` leg. (V030-E04-F02-T03, V030-E04-F02-T04)
 
+- `tools/validation/validation-pass.py run` runs one rolling validation pass on
+  the machine it is started on: it verifies both artifact sets and the
+  checkout's commit, runs the Ubuntu cloud lifecycle harness, installs the
+  candidate build and the speech runtime family (from the set, or built on the
+  machine), records `tensorplate doctor`, then provisions, cold-deploys and
+  qualifies each candidate and indexes what ran. Every step's commands, exit
+  code and log are recorded in `pass-report.json`; every command has a time
+  limit, after which it is sent `SIGTERM` and its process group, once it has
+  ended or a grace period has passed, `SIGKILL`, and a failed step
+  stops only the steps that need it. The index line of a candidate gains `first_request_ms`, read from the
+  record, and `deploy_wall_cold_cache_ms`, which the pass times itself after
+  dropping the page cache. What a pass requires of doctor now depends on
+  whether a speech runtime family is installed (`--speech-family`), so a
+  machine that serves only speech passes with `python_pytorch_runtime`
+  reported `missing`. (V030-E06-F02-T01)
+
 - `tensorplate doctor` reports the installed runner profiles and checks them
   where their sidecars start, in three findings. `runner_profiles` is the
   record the serving worker's launcher reads: each profile's interpreter,

@@ -24,6 +24,7 @@ on:
       # This workflow is the only runner of the lifecycle and evidence
       # suites, so a PR editing only one of them would skip it entirely.
       - 'test/validation/**'
+      - 'cli/src/commands/doctor/**'
       # The drift guard in test/release/run.sh reads the amd64 copy list
       # out of release.yml, so a change to release.yml alone must trigger
       # it — otherwise the guard cannot fire on the edit that causes the
@@ -169,6 +170,12 @@ jobs:
       - name: Validation run index and comparison
         shell: bash
         run: test/validation/validation_pass_test.py
+
+      # Runs a pass over a stubbed checkout and machine. A fake sudo shadows
+      # the real one and only runs what it is given, so nothing runs as root.
+      - name: Validation pass driver
+        shell: bash
+        run: test/validation/validation_pass_run_test.py
 
       # Runs the memory sampling wrapper over recorded nvidia-smi output; the
       # sampler is the platform crate's example binary.

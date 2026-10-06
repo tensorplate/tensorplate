@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Rolling validation pass: index what a hardware session recorded and compare two passes.
+"""Rolling validation pass: run one, index what it recorded and compare two passes.
 
+  run      run a pass on this machine: the lifecycle harness, the candidate
+           build and the speech runtime family, doctor, each candidate through
+           the qualification recipe, then index what ran
   index    derive index lines from a lifecycle report, qualification records and
            doctor's JSON output
   compare  report what moved between the newest earlier lines of an index and a
            pass's lines; exit 0 nothing moved, 1 something moved, 2 not comparable
 
-docs/validation/rolling-validation.md describes the index and the comparison.
+docs/validation/rolling-validation.md describes a pass, the index and the comparison.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import math
 import sys
@@ -21,28 +25,30 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validation_index as index_mod  # noqa: E402
+import validation_pass_run as run_mod  # noqa: E402
 
-# Findings a pass requires to be `ok`: `failing == 0` lets a warning through.
-REQUIRED_OK_FINDINGS = (
-    "platform_row",
-    "python_pytorch_runtime",
-    "runner_profiles",
-    "runner_profile_dependencies",
-    "runner_launch_environment",
+SPEECH_FAMILY_HELP = (
+    "how the speech runtime family reached the machine; it decides what doctor must report"
 )
 
 
-def add_envelope_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--date", required=True, help="the session's day, YYYY-MM-DD")
+def add_envelope_arguments(parser: argparse.ArgumentParser, a_pass: bool = False) -> None:
+    """`a_pass` is always a validation run of today whose raw set is still on the machine."""
+    if a_pass:
+        today = f"{_dt.datetime.now(tz=_dt.timezone.utc):%Y-%m-%d}"
+        parser.add_argument("--date", default=today, help="the session's day; today (UTC)")
+        parser.set_defaults(kind="validation", raw_object=None, raw_sha256=None)
+    else:
+        parser.add_argument("--date", required=True, help="the session's day, YYYY-MM-DD")
+        parser.add_argument("--kind", choices=("validation", "evidence"), default="validation")
+        parser.add_argument("--raw-object", help="the raw archive's object name, once stored")
+        parser.add_argument("--raw-sha256", help="the raw archive's sha256, with --raw-object")
     parser.add_argument("--session", required=True, help="the hardware session's name")
     parser.add_argument("--row", required=True, help="the platform row id")
     parser.add_argument("--machine", required=True, help="the machine type, in words")
     parser.add_argument("--build", required=True, help="the tag or commit installed")
     parser.add_argument("--family-build", help="the commit a host-built speech runtime came from")
-    parser.add_argument("--kind", choices=("validation", "evidence"), default="validation")
     parser.add_argument("--records", default="not filed", help="where the record files are kept")
-    parser.add_argument("--raw-object", help="the raw archive's object name, once stored")
-    parser.add_argument("--raw-sha256", help="the raw archive's sha256, with --raw-object")
     parser.add_argument("--notes", default="")
     parser.add_argument("--run-suffix", help="appended to run ids when a subject runs twice")
     parser.add_argument(
@@ -111,18 +117,24 @@ def derive_lines(
     qualification_records: list[tuple[str, str]],
     doctor: str | None,
     interpreter_override: bool,
+    speech_family: str | None,
+    cold_deploys: dict[str, str],
 ) -> list[dict[str, Any]]:
     lines = []
     if lifecycle_report:
         lines.append(index_mod.lifecycle_line(load_json(lifecycle_report), envelope))
     if doctor:
         payload = load_json(doctor)["payload"]
-        lines.append(
-            index_mod.doctor_line(payload, envelope, interpreter_override, REQUIRED_OK_FINDINGS)
-        )
+        required = index_mod.DOCTOR_REQUIREMENTS[index_mod.SPEECH_FAMILY_MODES[speech_family]]
+        lines.append(index_mod.doctor_line(payload, envelope, interpreter_override, required))
+    unused = set(cold_deploys) - {subject for subject, _ in qualification_records}
+    if unused:
+        raise index_mod.IndexLineError(f"--cold-deploy names no indexed record: {sorted(unused)}")
     for subject, path in qualification_records:
-        record = load_json(path)
-        lines.append(index_mod.qualification_line(record, envelope, subject, family_build))
+        cold = load_json(cold_deploys[subject]) if subject in cold_deploys else None
+        lines.append(
+            index_mod.qualification_line(load_json(path), envelope, subject, family_build, cold)
+        )
     if not lines:
         raise index_mod.IndexLineError("nothing to index: no report, record or doctor output")
     run_ids = [line["run_id"] for line in lines]
@@ -134,8 +146,13 @@ def derive_lines(
 
 
 def command_index(args: argparse.Namespace) -> int:
-    if args.doctor and args.interpreter_override is None:
-        raise index_mod.IndexLineError("--doctor needs --interpreter-override present|absent")
+    if args.doctor and (args.interpreter_override is None or args.speech_family is None):
+        raise index_mod.IndexLineError(
+            "--doctor needs --interpreter-override present|absent and --speech-family"
+        )
+    cold_deploys = [split_pair(item, "--cold-deploy") for item in args.cold_deploy]
+    if len(dict(cold_deploys)) != len(cold_deploys):
+        raise index_mod.IndexLineError("--cold-deploy names one subject twice")
     lines = derive_lines(
         envelope_from(args),
         args.family_build,
@@ -143,6 +160,8 @@ def command_index(args: argparse.Namespace) -> int:
         [split_pair(item, "--qualification-record") for item in args.qualification_record],
         args.doctor,
         args.interpreter_override == "present",
+        args.speech_family,
+        dict(cold_deploys),
     )
     text = "".join(index_mod.dump_line(line) for line in lines)
     if args.out:
@@ -195,6 +214,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
+    run = commands.add_parser("run", help="run a pass on this machine")
+    run_mod.add_arguments(run)
+    run.add_argument(
+        "--speech-family",
+        required=True,
+        choices=sorted(index_mod.SPEECH_FAMILY_MODES),
+        help=SPEECH_FAMILY_HELP,
+    )
+    add_envelope_arguments(run, a_pass=True)
+    run.set_defaults(run=lambda args: run_mod.command_run(args, envelope_from(args)))
+
     index = commands.add_parser("index", help="derive index lines from recorded files")
     add_envelope_arguments(index)
     index.add_argument("--lifecycle-report", help="a lifecycle-report.json")
@@ -210,6 +240,16 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--interpreter-override",
         choices=("present", "absent"),
         help="whether the agent's environment file names an interpreter for the backend",
+    )
+    index.add_argument(
+        "--speech-family", choices=sorted(index_mod.SPEECH_FAMILY_MODES), help=SPEECH_FAMILY_HELP
+    )
+    index.add_argument(
+        "--cold-deploy",
+        action="append",
+        default=[],
+        metavar="SUBJECT=PATH",
+        help="the pass's cold-deploy.json for a subject indexed with --qualification-record",
     )
     index.add_argument("--out", help="write the lines here instead of standard output")
     index.set_defaults(run=command_index)
