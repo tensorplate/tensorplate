@@ -55,7 +55,12 @@ from test_artifact_identity import (  # noqa: E402
 )
 BUILD_SCRIPT = REPO_ROOT / "tools/release/build-release-artifacts.sh"
 PROFILE = "tools/release/amd64-build-profile.sh"
-RELEASE_WORKFLOW = REPO_ROOT / ".github/workflows/release.yml"
+WORKFLOWS = REPO_ROOT / ".github/workflows"
+RELEASE_WORKFLOW = WORKFLOWS / "release.yml"
+VCPKG_ACTION_USE = "./.github/actions/release-vcpkg"
+VCPKG_ACTION = REPO_ROOT / VCPKG_ACTION_USE / "action.yml"
+CACHE_WARMER = WORKFLOWS / "release-dependencies.yml"
+CLOSURE_CHECK = REPO_ROOT / "tools/release/assert-static-streaming-closure.sh"
 FIXTURE_SOURCES = (
     "packaging/version.sh",
     "packaging/scripts/install.sh",
@@ -69,8 +74,8 @@ SNAPSHOT_TAG = "snapshot-fixture-deadbeef1234"
 RELEASE_TAG = "v0.2.1-rc.1"
 RELEASE_DEB_VERSION = "0.2.1~rc.1"
 
-# Variables that change what the builder hands cmake. Hosted runners set
-# VCPKG_INSTALLATION_ROOT, which would add a toolchain file to every run.
+# Variables that change what the builder hands cmake. The fixture supplies
+# its own VCPKG_ROOT; the host's vcpkg must not reach a run.
 SCRUBBED_ENVIRONMENT = (
     "BASH_ENV",
     "CC",
@@ -86,9 +91,14 @@ SCRUBBED_ENVIRONMENT = (
     "TP_JETSON_SYSROOT",
     "TP_REQUIRE_TENSORRT_SDK",
     "TP_RUST_TARGET",
+    "TP_VCPKG_BINARY_ONLY",
     "VCPKG_INSTALLATION_ROOT",
     "VCPKG_ROOT",
 )
+
+# "{vcpkg_root}" is the fixture's checkout; BuilderFixture.pinned fills it in.
+VCPKG_TOOLCHAIN_ARG = "-DCMAKE_TOOLCHAIN_FILE={vcpkg_root}/scripts/buildsystems/vcpkg.cmake"
+BINARY_ONLY_ARG = "-DVCPKG_INSTALL_OPTIONS=--only-binarycaching"
 
 ARM64_SNAPSHOT_ARGS = [
     "-S",
@@ -105,8 +115,11 @@ ARM64_SNAPSHOT_ARGS = [
     "-DTP_ENABLE_TENSORRT=ON",
     "-DTP_REQUIRE_TENSORRT_SDK=ON",
     "-DTP_ENABLE_LIBTORCH=OFF",
-    "-DTP_ENABLE_STREAMING_GRPC=OFF",
+    "-DTP_ENABLE_STREAMING_GRPC=ON",
     "-DTP_ENABLE_PYTHON_PYTORCH_SIDECAR=ON",
+    "-DVCPKG_MANIFEST_FEATURES=streaming-grpc",
+    "-DVCPKG_TARGET_TRIPLET=arm64-linux",
+    VCPKG_TOOLCHAIN_ARG,
 ]
 
 AMD64_SNAPSHOT_COMMON_ARGS = [
@@ -121,6 +134,15 @@ AMD64_SNAPSHOT_COMMON_ARGS = [
     "-DTP_BUILD_TESTS=OFF",
     "-DTP_BUILD_EXAMPLES=OFF",
     "-DTP_ENABLE_SANITIZERS=OFF",
+]
+
+# What the amd64 profile adds for the streaming feature, in its order.
+STREAMING_PREFIXES = ("-DTP_ENABLE_STREAMING_GRPC=", "-DVCPKG_", "-DCMAKE_TOOLCHAIN_FILE=")
+AMD64_STREAMING_ARGS = [
+    "-DTP_ENABLE_STREAMING_GRPC=ON",
+    "-DVCPKG_MANIFEST_FEATURES=streaming-grpc",
+    "-DVCPKG_TARGET_TRIPLET=x64-linux",
+    VCPKG_TOOLCHAIN_ARG,
 ]
 
 
@@ -184,6 +206,11 @@ class BuilderFixture(unittest.TestCase):
             ["git", "init", "-q", "-b", "fixture"], cwd=self.repo, check=True
         )
 
+        # A vcpkg checkout as far as the builder looks: its toolchain file.
+        self.vcpkg_root = self.root / "vcpkg"
+        (self.vcpkg_root / "scripts/buildsystems").mkdir(parents=True)
+        (self.vcpkg_root / "scripts/buildsystems/vcpkg.cmake").write_text("")
+
         self.fake_bin = self.root / "bin"
         self.fake_bin.mkdir()
         self.cmake_log = self.root / "cmake.log"
@@ -220,7 +247,8 @@ class BuilderFixture(unittest.TestCase):
 
     # -- helpers -----------------------------------------------------------
 
-    def environment(self, host_arch: str, extra: dict[str, str] | None) -> dict:
+    def environment(self, host_arch: str, extra: dict | None) -> dict:
+        """The builder's environment; an extra value of None removes the variable."""
         env = os.environ.copy()
         for name in SCRUBBED_ENVIRONMENT:
             env.pop(name, None)
@@ -228,8 +256,12 @@ class BuilderFixture(unittest.TestCase):
         env["FIXTURE_HOST_ARCH"] = host_arch
         env["FIXTURE_CMAKE_LOG"] = str(self.cmake_log)
         env["FIXTURE_CARGO_MARKER"] = str(self.cargo_marker)
+        env["VCPKG_ROOT"] = str(self.vcpkg_root)
         env.update(extra or {})
-        return env
+        return {name: value for name, value in env.items() if value is not None}
+
+    def pinned(self, args: list[str]) -> list[str]:
+        return [arg.replace("{vcpkg_root}", str(self.vcpkg_root)) for arg in args]
 
     def artifact_paths(self, directory: str = "artifacts", tag: str = SNAPSHOT_TAG):
         return [
@@ -247,7 +279,7 @@ class BuilderFixture(unittest.TestCase):
         *,
         arch: str,
         host_arch: str | None = None,
-        env: dict[str, str] | None = None,
+        env: dict | None = None,
         release: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         if release:
@@ -298,6 +330,7 @@ class BuilderFixture(unittest.TestCase):
                 "profile",
                 str(REPO_ROOT / PROFILE),
             ],
+            env=self.environment("amd64", None),
             text=True,
             capture_output=True,
             check=False,
@@ -331,7 +364,7 @@ class BuilderFixture(unittest.TestCase):
         self.assertFalse(self.cmake_log.exists(), result.stdout)
         self.assert_changelog_restored()
 
-    def run_release_step(self) -> dict:
+    def execute_release_step(self, extra: dict | None = None):
         """Execute the release job's configure step with a stub cmake."""
         workflow = yaml.safe_load(RELEASE_WORKFLOW.read_text())
         steps = [
@@ -345,7 +378,7 @@ class BuilderFixture(unittest.TestCase):
         self.assertEqual(body.count("cmake --build"), 1, body)
         configure = body.split("cmake --build")[0]
 
-        env = self.environment("amd64", {"FIXTURE_CMAKE_STATUS": "0"})
+        env = self.environment("amd64", {"FIXTURE_CMAKE_STATUS": "0", **(extra or {})})
         expressions = {"DEB_VERSION": RELEASE_DEB_VERSION}
         for name, value in (step.get("env") or {}).items():
             if "${{" in str(value):
@@ -356,7 +389,7 @@ class BuilderFixture(unittest.TestCase):
         script = self.root / "release-step.sh"
         script.write_text(configure)
         # `shell: bash` on GitHub Actions runs exactly this.
-        result = subprocess.run(
+        return subprocess.run(
             ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
             cwd=self.repo,
             env=env,
@@ -365,6 +398,9 @@ class BuilderFixture(unittest.TestCase):
             timeout=60,
             check=False,
         )
+
+    def run_release_step(self, extra: dict | None = None) -> dict:
+        result = self.execute_release_step(extra)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = read_cmake_calls(self.cmake_log)
         self.assertEqual(len(calls), 1, calls)
@@ -378,7 +414,7 @@ class BuildConfigurationTests(BuilderFixture):
     def test_arm64_snapshot_pins_configure_arguments(self) -> None:
         result = self.run_builder(self.artifact_paths(), arch="arm64")
         call = self.assert_reached_configure(result)
-        self.assertEqual(call["args"], ARM64_SNAPSHOT_ARGS)
+        self.assertEqual(call["args"], self.pinned(ARM64_SNAPSHOT_ARGS))
         self.assertIsNone(call["CC"])
         self.assertIsNone(call["CXX"])
 
@@ -389,7 +425,7 @@ class BuildConfigurationTests(BuilderFixture):
         call = self.assert_reached_configure(result)
         expected = [
             "-DTP_ENABLE_TENSORRT=OFF" if arg == "-DTP_ENABLE_TENSORRT=ON" else arg
-            for arg in ARM64_SNAPSHOT_ARGS
+            for arg in self.pinned(ARM64_SNAPSHOT_ARGS)
         ]
         self.assertEqual(call["args"], expected)
 
@@ -398,8 +434,86 @@ class BuildConfigurationTests(BuilderFixture):
             self.artifact_paths(), arch="arm64", env={"CC": "gcc", "CXX": "g++"}
         )
         call = self.assert_reached_configure(result)
-        self.assertEqual(call["args"], ARM64_SNAPSHOT_ARGS)
+        self.assertEqual(call["args"], self.pinned(ARM64_SNAPSHOT_ARGS))
         self.assertEqual((call["CC"], call["CXX"]), ("gcc", "g++"))
+
+    def test_arm64_takes_an_explicit_toolchain_file_in_place_of_the_checkouts(self) -> None:
+        expected = ARM64_SNAPSHOT_ARGS[:-1] + ["-DCMAKE_TOOLCHAIN_FILE=/elsewhere/toolchain.cmake"]
+        for root in (None, str(self.vcpkg_root)):
+            with self.subTest(vcpkg_root=root):
+                explicit = {"TP_CMAKE_TOOLCHAIN_FILE": "/elsewhere/toolchain.cmake"}
+                explicit["VCPKG_ROOT"] = root
+                result = self.run_builder(self.artifact_paths(), arch="arm64", env=explicit)
+                self.assertEqual(self.assert_reached_configure(result)["args"], expected)
+                self.cmake_log.unlink()
+
+    def test_arm64_forbids_vcpkg_to_build_when_binary_only_is_1(self) -> None:
+        only = {"TP_VCPKG_BINARY_ONLY": "1"}
+        result = self.run_builder(self.artifact_paths(), arch="arm64", env=only)
+        call = self.assert_reached_configure(result)
+        self.assertEqual(call["args"], self.pinned(ARM64_SNAPSHOT_ARGS) + [BINARY_ONLY_ARG])
+
+    def test_a_binary_only_value_other_than_0_or_1_is_refused(self) -> None:
+        said = {"TP_VCPKG_BINARY_ONLY": "true"}
+        for arch in ("arm64", "amd64"):
+            with self.subTest(arch=arch):
+                result = self.run_builder(self.artifact_paths(), arch=arch, env=said)
+                self.assert_refused(result, "TP_VCPKG_BINARY_ONLY must be 0 or 1")
+        result = self.execute_release_step(said)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("TP_VCPKG_BINARY_ONLY must be 0 or 1", result.stderr)
+        self.assertFalse(self.cmake_log.exists(), result.stdout)
+
+    def test_a_binary_only_configure_that_fails_points_at_the_cold_cache(self) -> None:
+        hint = "the binary cache is cold or was built with another compiler"
+        for only in ("1", "0", None):
+            said = {"TP_VCPKG_BINARY_ONLY": only, "FIXTURE_CMAKE_STATUS": "97"}
+            failed = {"release step": self.execute_release_step(said)}
+            for arch in ("arm64", "amd64"):
+                failed[arch] = self.run_builder(self.artifact_paths(), arch=arch, env=said)
+            for writer, result in failed.items():
+                with self.subTest(writer=writer, binary_only=only):
+                    text = result.stdout + (result.stderr or "")
+                    self.assertNotEqual(result.returncode, 0, text)
+                    hints = [line for line in text.splitlines() if hint in line]
+                    self.assertEqual(len(hints), 1 if only == "1" else 0, text)
+                    for line in hints:
+                        self.assertRegex(line, r"^(::error::|error: ).*docs/release/runbook\.md")
+
+    def test_a_cross_build_adds_only_the_chainload_file(self) -> None:
+        for name in ("tensorplate-agent", "tensorplate-observability", "tensorplate"):
+            binary = self.repo / "target/aarch64-unknown-linux-gnu/release" / name
+            binary.parent.mkdir(parents=True, exist_ok=True)
+            write_executable(binary, "#!/bin/sh\n")
+        cross = {"TP_JETSON_SYSROOT": "/sysroot", "TP_JETSON_CC": "cc", "TP_JETSON_CXX": "c++"}
+        result = self.run_builder(self.artifact_paths(), arch="arm64", host_arch="amd64", env=cross)
+        call = self.assert_reached_configure(result)
+        chainload = "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE={}/cmake/toolchains/aarch64-jetson.cmake"
+        expected = self.pinned(ARM64_SNAPSHOT_ARGS) + [chainload.format(self.repo.resolve())]
+        self.assertEqual(call["args"], expected)
+
+    # -- no build without the pinned checkout ---------------------------------
+
+    def test_a_build_without_a_vcpkg_checkout_is_refused_before_cmake(self) -> None:
+        missing = {"unset": None, "empty": "", "no toolchain file": str(self.root)}
+        for label, value in missing.items():
+            for arch in ("arm64", "amd64"):
+                with self.subTest(vcpkg_root=label, arch=arch):
+                    env = {"VCPKG_ROOT": value}
+                    result = self.run_builder(self.artifact_paths(), arch=arch, env=env)
+                    self.assert_refused(result, "VCPKG_ROOT")
+            with self.subTest(vcpkg_root=label, writer="release step"):
+                result = self.execute_release_step({"VCPKG_ROOT": value})
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("VCPKG_ROOT", result.stderr)
+                self.assertFalse(self.cmake_log.exists(), result.stdout)
+
+    def test_a_hosted_images_own_vcpkg_is_not_taken_for_the_pinned_checkout(self) -> None:
+        image = {"VCPKG_ROOT": None, "VCPKG_INSTALLATION_ROOT": str(self.vcpkg_root)}
+        for arch in ("arm64", "amd64"):
+            with self.subTest(arch=arch):
+                result = self.run_builder(self.artifact_paths(), arch=arch, env=image)
+                self.assert_refused(result, "VCPKG_ROOT")
 
     # -- amd64 takes the shared profile --------------------------------------
 
@@ -414,6 +528,8 @@ class BuildConfigurationTests(BuilderFixture):
         self.assertEqual(call["args"], AMD64_SNAPSHOT_COMMON_ARGS + profile["args"])
         self.assertTrue(profile["CC"] and profile["CXX"], profile)
         self.assertEqual((call["CC"], call["CXX"]), (profile["CC"], profile["CXX"]))
+        streaming = [arg for arg in call["args"] if arg.startswith(STREAMING_PREFIXES)]
+        self.assertEqual(streaming, self.pinned(AMD64_STREAMING_ARGS))
 
         definitions = [arg.split("=", 1) for arg in call["args"] if arg.startswith("-D")]
         names = [name for name, _ in definitions]
@@ -438,22 +554,28 @@ class BuildConfigurationTests(BuilderFixture):
         self.assertEqual((call["CC"], call["CXX"]), (profile["CC"], profile["CXX"]))
 
     def test_amd64_release_configure_matches_the_release_workflow(self) -> None:
-        release = self.run_release_step()
-        result = self.run_builder(
-            self.artifact_paths(tag=RELEASE_TAG), arch="amd64", release=True
-        )
-        builder = self.assert_reached_configure(result)
-        self.assertEqual(sorted(builder["args"]), sorted(release["args"]))
-        self.assertIsNotNone(release["CC"])
-        self.assertIsNotNone(release["CXX"])
-        self.assertEqual((builder["CC"], builder["CXX"]), (release["CC"], release["CXX"]))
+        for binary_only in (None, "1"):
+            with self.subTest(binary_only=binary_only):
+                extra = {"TP_VCPKG_BINARY_ONLY": binary_only}
+                release = self.run_release_step(extra)
+                self.cargo_marker.unlink(missing_ok=True)
+                result = self.run_builder(
+                    self.artifact_paths(tag=RELEASE_TAG), arch="amd64", release=True, env=extra
+                )
+                builder = self.assert_reached_configure(result)
+                self.cmake_log.unlink()
+                self.assertEqual(sorted(builder["args"]), sorted(release["args"]))
+                # Only a run told to may refuse to build what the cache lacks.
+                for call in (builder, release):
+                    self.assertEqual(call["args"].count(BINARY_ONLY_ARG), 1 if binary_only else 0)
+                self.assertTrue(release["CC"] and release["CXX"], release)
+                compilers = (release["CC"], release["CXX"])
+                self.assertEqual((builder["CC"], builder["CXX"]), compilers)
 
-    def test_release_workflow_explicitly_disables_streaming(self) -> None:
+    def test_release_workflow_builds_streaming_through_the_pinned_checkout(self) -> None:
         release = self.run_release_step()
-        streaming_args = [
-            arg for arg in release["args"] if arg.startswith("-DTP_ENABLE_STREAMING_GRPC=")
-        ]
-        self.assertEqual(streaming_args, ["-DTP_ENABLE_STREAMING_GRPC=OFF"])
+        streaming = [arg for arg in release["args"] if arg.startswith(STREAMING_PREFIXES)]
+        self.assertEqual(streaming, self.pinned(AMD64_STREAMING_ARGS))
 
     def test_release_workflow_pins_a_dwarf_version_dwz_can_read(self) -> None:
         # jammy's dwz (0.14) cannot read DWARF 5's .debug_addr section and
@@ -481,6 +603,8 @@ class BuildConfigurationTests(BuilderFixture):
             "TP_REQUIRE_TENSORRT_SDK": "ON",
             "TP_ENABLE_LIBTORCH": "ON",
             "TP_ENABLE_PYTHON_PYTORCH_SIDECAR": "OFF",
+            # It would be a second toolchain file beside the profile's.
+            "TP_CMAKE_TOOLCHAIN_FILE": "/elsewhere/toolchain.cmake",
         }
         for name, value in overrides.items():
             with self.subTest(name=name):
@@ -1345,7 +1469,7 @@ class SelfHostedRunnerPrivilegeTests(unittest.TestCase):
     # Repository helper scripts the job runs. A step that shells out to one
     # of these elevates whatever the helper elevates, so scanning only the
     # inline `run:` bodies reports a job as safe while it still cannot run.
-    HELPERS = ("tools/ci/apt-get.sh",)
+    HELPERS = ("tools/ci/apt-get.sh", "tools/release/assert-static-streaming-closure.sh")
 
     def elevated_commands(self, body: str, step_name: str):
         """Yield (where, binary) for every sudo in a body and in helpers it calls."""
@@ -4194,23 +4318,345 @@ class RunnerVcpkgProvisioningTests(unittest.TestCase):
             self.assertIn(expected, result.stdout.splitlines())
 
 
+def run_step(step: dict, cwd: Path, **values: str) -> subprocess.CompletedProcess:
+    """Run a step's script as `shell: bash` does; values stand for its expressions."""
+    env = {"PATH": os.environ["PATH"], **values}
+    for name, value in (step.get("env") or {}).items():
+        if "${{" not in str(value):
+            env[name] = str(value)
+        elif name not in values:
+            raise AssertionError(f"no fixture value for step env {name}")
+    return subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+        cwd=cwd, env=env, text=True, capture_output=True, timeout=60, check=False,
+    )
+
+
 class ReleaseWorkflowVcpkgTests(unittest.TestCase):
-    """The release workflow leaves vcpkg alone until the feature is turned on.
+    """Where each job that builds the release configuration gets its vcpkg."""
 
-    `build-release-artifacts.sh` adds the vcpkg toolchain to its configure as
-    soon as `VCPKG_ROOT` is set, so a job that exported the runner's
-    provisioned checkout would move today's ARM64 release build onto vcpkg.
-    The change that enables the streaming feature in the release jobs is the
-    one to replace this case.
-    """
+    PUBLISHES = "needs.meta.outputs.publish == 'true'"
 
-    def test_the_release_workflow_does_not_mention_vcpkg(self):
-        mentions = [
-            (number, line.strip())
-            for number, line in enumerate(RELEASE_WORKFLOW.read_text().splitlines(), 1)
-            if "vcpkg" in line.lower()
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+        self.github_env = self.root / "github-env"
+
+    def job(self, workflow: str, name: str) -> dict:
+        return yaml.safe_load((WORKFLOWS / workflow).read_text())["jobs"][name]
+
+    def only_step(self, job: dict, text: str) -> int:
+        """The position of the one step whose action, name or script holds text."""
+        found = [
+            index for index, step in enumerate(job["steps"])
+            if any(text in str(step.get(key, "")) for key in ("uses", "name", "run"))
         ]
-        self.assertEqual(mentions, [])
+        self.assertEqual(len(found), 1, f"expected one step with {text!r}")
+        return found[0]
+
+    def action_steps(self) -> dict:
+        action = yaml.safe_load(VCPKG_ACTION.read_text())
+        self.assertEqual(action["runs"]["using"], "composite")
+        return {step.get("id"): step for step in action["runs"]["steps"]}
+
+    def tools(self, clang: str | None, binary: str | None = "fixture compiler") -> str:
+        """A PATH of what the action's first step runs, with a clang of that version line."""
+        tools = self.root / "tools"
+        shutil.rmtree(tools, ignore_errors=True)
+        tools.mkdir()
+        for tool in ("bash", "python3", "sha256sum", "readlink"):
+            (tools / tool).symlink_to(shutil.which(tool))
+        if clang:
+            write_executable(tools / "clang", f"#!/bin/sh\necho '{clang}'\necho 'Target: x'\n")
+        if binary:
+            # Reached through a link, as the alternatives system leaves clang++.
+            (self.root / "clang-15").write_text(binary)
+            (tools / "clang++").symlink_to(self.root / "clang-15")
+        return str(tools)
+
+    def appended(self, step: dict, **values: str) -> tuple:
+        self.github_env.write_text("")
+        result = run_step(step, self.root, GITHUB_ENV=str(self.github_env), **values)
+        return result, self.github_env.read_text()
+
+    def test_the_arm64_job_takes_its_vcpkg_from_the_runner_before_it_builds(self):
+        job = self.job("release.yml", "build_packages")
+        asks = self.only_step(job, "jetson-runner-control.sh vcpkg-env")
+        build = self.only_step(job, "build-release-artifacts.sh")
+        self.assertLess(asks, build)
+        self.assertEqual(job["steps"][build]["env"].get("TP_VCPKG_BINARY_ONLY"), "1")
+
+        control = self.root / "tools/release/jetson-runner-control.sh"
+        control.parent.mkdir(parents=True)
+        ready = "VCPKG_ROOT=/runner/vcpkg\nVCPKG_BINARY_SOURCES=clear;files,/runner/archives,read\n"
+        write_executable(
+            control, f"#!/bin/sh\n[ \"$1\" = vcpkg-env ] || exit 9\nprintf '%s' '{ready}'\n"
+        )
+        result, written = self.appended(job["steps"][asks])
+        self.assertEqual((result.returncode, written), (0, ready), result.stderr)
+        write_executable(control, "#!/bin/sh\necho VCPKG_ROOT=/half\nexit 1\n")
+        result, written = self.appended(job["steps"][asks])
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(written, "")
+        self.assertRegex(
+            result.stdout,
+            r"(?m)^::error::.*not provisioned for this checkout.*docs/release/runbook\.md",
+        )
+
+    def test_the_arm64_job_writes_no_vcpkg_value_of_its_own(self):
+        job = self.job("release.yml", "build_packages")
+        scopes = (yaml.safe_load(RELEASE_WORKFLOW.read_text()), job, *job["steps"])
+        names = [name for scope in scopes for name in (scope.get("env") or {})]
+        written = [name for name in names if name.startswith("VCPKG_")]
+        scripts = "\n".join(step.get("run") or "" for step in job["steps"])
+        changed = re.findall(r"\bVCPKG_\w+=|\bunset\b[^\n;|&]*\bVCPKG_\w+", scripts)
+        self.assertEqual(written + changed, [])
+
+    def test_the_amd64_job_may_build_dependencies_only_when_it_does_not_publish(self):
+        job = self.job("release.yml", "build_packages_amd64")
+        use = self.only_step(job, VCPKG_ACTION_USE)
+        self.assertLess(use, self.only_step(job, "Build amd64 serving worker"))
+        self.assertEqual(job["steps"][use]["with"], {"binary-only": "${{ %s }}" % self.PUBLISHES})
+        self.assertEqual(job["timeout-minutes"], "${{ %s && 60 || 180 }}" % self.PUBLISHES)
+
+    def test_both_release_jobs_check_the_static_closure_of_what_they_built(self):
+        built = {"build_packages_amd64": "packaging/scripts/build-deb.sh",
+                 "build_packages": "build-release-artifacts.sh"}
+        for name, builds in built.items():
+            job = self.job("release.yml", name)
+            self.assertLess(self.only_step(job, builds), self.only_step(job, CLOSURE_CHECK.name))
+
+    def test_a_closure_the_checker_refuses_fails_the_job_that_built_it(self):
+        called = self.root / "called"
+        checker = self.root / "tools/release" / CLOSURE_CHECK.name
+        packages = {"build_packages_amd64": "dist/amd64/tensorplate-serving_1_amd64.deb",
+                    "build_packages": "rel/tensorplate-serving_1_arm64.deb"}
+        for made in (checker, "bin/file", *packages.values(), "dist/amd64/tensorplate_1_amd64.deb"):
+            (self.root / made).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / made).write_text("")
+        # What the amd64 step reads before the checker: an x86-64 worker the package ships.
+        write_executable(self.root / "bin/file", "#!/bin/sh\necho 'ELF 64-bit, x86-64'\n")
+        ls = "echo '-rwxr-xr-x root/root 1 2026-01-01 00:00 ./usr"
+        ships = f"*serving*) {ls}/lib/tensorplate/tensorplate-serving' ;; *) {ls}/share/doc/x' ;;"
+        write_executable(self.root / "bin/dpkg-deb", f"#!/bin/sh\ncase \"$2\" in {ships} esac\n")
+        path = f"{self.root / 'bin'}{os.pathsep}{os.environ['PATH']}"
+        for name, package in packages.items():
+            job = self.job("release.yml", name)
+            step = job["steps"][self.only_step(job, CLOSURE_CHECK.name)]
+            for status in (0, 1):
+                with self.subTest(job=name, checker_exits=status):
+                    record = f"#!/bin/sh\nprintf '%s\\n' \"$@\" >'{called}'\nexit {status}\n"
+                    write_executable(checker, record)
+                    result = run_step(step, self.root, PATH=path, RELEASE_DIR="rel")
+                    self.assertEqual(result.returncode != 0, status != 0, result.stderr)
+                    passed = ["--deb", package, "--binary", "build/release/tensorplate-serving"]
+                    self.assertEqual(called.read_text().split(), passed)
+
+    def test_every_caller_installs_clang_before_the_action_keys_the_cache_on_it(self):
+        callers = (("release.yml", "build_packages_amd64"), ("apt-lifecycle.yml", "cpu-only-smoke"),
+                   (CACHE_WARMER.name, "warm"))
+        for workflow, name in callers:
+            job = self.job(workflow, name)
+            installs = self.only_step(job, "/usr/bin/clang-15 100")
+            self.assertLess(installs, self.only_step(job, VCPKG_ACTION_USE), name)
+
+    def test_the_cache_warmer_runs_for_the_default_branch_and_is_never_cancelled(self):
+        text = CACHE_WARMER.read_text()
+        workflow = yaml.safe_load(text)
+        triggers = workflow[True]  # PyYAML reads the key `on` as True.
+        self.assertEqual(set(triggers), {"push", "schedule", "workflow_dispatch"})
+        watched = {"vcpkg.json", f"{VCPKG_ACTION_USE[2:]}/**", PROFILE,
+                   f".github/workflows/{CACHE_WARMER.name}"}
+        push = triggers["push"]
+        self.assertEqual((push["branches"], set(push["paths"])), (["develop"], watched))
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+        self.assertIs(workflow["concurrency"]["cancel-in-progress"], False)
+        self.assertNotIn("secrets.", text)
+        # An Actions cache nothing reads for seven days is evicted.
+        days = set()
+        for entry in triggers["schedule"]:
+            _, _, day_of_month, month, weekdays = entry["cron"].split()
+            self.assertEqual((day_of_month, month), ("*", "*"), entry)
+            days.update(range(7) if weekdays == "*" else map(int, weekdays.split(",")))
+        self.assertGreaterEqual(len(days), 2, "the warmer must run at least twice a week")
+        for use in re.findall(r"(?m)^\s*(?:- )?uses:\s*(\S+)", text):
+            self.assertRegex(use, r"^\./|@[0-9a-f]{40}$")
+
+    def test_the_smoke_and_the_cache_warmer_build_what_the_cache_lacks(self):
+        smoke = self.job("apt-lifecycle.yml", "cpu-only-smoke")
+        warmer = self.job(CACHE_WARMER.name, "warm")
+        for job in (smoke, warmer):
+            use = job["steps"][self.only_step(job, VCPKG_ACTION_USE)]
+            self.assertEqual(use["with"], {"binary-only": "false"})
+        # sudo drops what the action exported unless the command names it.
+        run = smoke["steps"][self.only_step(smoke, "verify_cpu_only_smoke.sh")]["run"]
+        preserved = re.search(r"--preserve-env=(\S+)", run).group(1).split(",")
+        exported = {"VCPKG_ROOT", "VCPKG_BINARY_SOURCES", "VCPKG_FORCE_DOWNLOADED_BINARIES"}
+        self.assertLessEqual(exported, set(preserved))
+        # The warmer configures the release profile and compiles nothing of this tree.
+        scripts = "\n".join(step.get("run") or "" for step in warmer["steps"])
+        self.assertIn(f". {PROFILE}\n", scripts)
+        self.assertIn('"${TP_AMD64_CMAKE_ARGS[@]}"', scripts)
+        self.assertNotIn("cmake --build", scripts)
+
+    def test_the_action_names_no_commit_and_pins_what_it_uses(self):
+        text = VCPKG_ACTION.read_text()
+        uses = re.findall(r"(?m)^\s*(?:- )?uses:\s*(\S+)", text)
+        self.assertTrue(uses, "the action restores no cache")
+        for use in uses:
+            self.assertRegex(use, r"@[0-9a-f]{40}$")
+        rest = re.sub(r"(?m)^\s*(?:- )?uses:.*$", "", text)
+        self.assertEqual(re.findall(r"[0-9a-f]{40}", rest), [])
+
+    def test_a_binary_only_run_restores_the_cache_and_never_saves_one(self):
+        action = yaml.safe_load(VCPKG_ACTION.read_text())
+        caches = {step.get("if"): step for step in action["runs"]["steps"] if "uses" in step}
+        conditions = [f"inputs.binary-only == '{said}'" for said in ("true", "false")]
+        self.assertEqual(sorted(caches), sorted(conditions))
+        restores, saves = (caches[condition] for condition in conditions)
+        self.assertRegex(restores["uses"], r"^actions/cache/restore@[0-9a-f]{40}$")
+        self.assertEqual(saves["uses"], restores["uses"].replace("/restore@", "@"))
+        self.assertEqual(restores["with"], saves["with"])
+
+    def test_the_action_keys_its_cache_on_the_baseline_and_the_dependencies(self):
+        steps = self.action_steps()
+        manifest = {"name": "fixture", "version-string": "0.3.1",
+                    "builtin-baseline": "ab" * 20, "dependencies": ["grpc"]}
+        output = self.root / "output"
+        compiler = "Ubuntu clang version 15.0.7"
+
+        def keyed(*compilers, **change):
+            (self.root / "vcpkg.json").write_text(json.dumps({**manifest, **change}, indent=2))
+            output.write_text("")
+            values = {"GITHUB_OUTPUT": str(output), "PATH": self.tools(*compilers or (compiler,))}
+            return run_step(steps["manifest"], self.root, **values)
+
+        def outputs(*compilers, **change) -> dict:
+            result = keyed(*compilers, **change)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return dict(line.split("=", 1) for line in output.read_text().splitlines())
+
+        first = outputs()
+        said = {key: value for key, value in manifest.items() if key != "version-string"}
+        canonical = json.dumps(said, sort_keys=True, separators=(",", ":"))
+        binary = hashlib.sha256(b"fixture compiler").hexdigest()
+        digest = hashlib.sha256(f"{canonical}\n{compiler}\n{binary}".encode()).hexdigest()
+        self.assertEqual(first, {"baseline": "ab" * 20, "digest": digest})
+        # The release tooling rewrites the version; the cache must stay warm.
+        for version in ("version", "version-string", "version-semver", "version-date"):
+            self.assertEqual(outputs(**{version: "0.4.0"}), first, version)
+        self.assertNotEqual(outputs(dependencies=["grpc", "protobuf"])["digest"], digest)
+        # vcpkg keys packages on the compiler binary: another one is another key.
+        self.assertNotEqual(outputs("Ubuntu clang version 15.0.8")["digest"], digest)
+        self.assertNotEqual(outputs(compiler, "rebuilt under the same version")["digest"], digest)
+        for missing in ((None,), (compiler, None)):
+            unkeyed = keyed(*missing)
+            self.assertNotEqual(unkeyed.returncode, 0, unkeyed.stdout)
+            self.assertRegex(unkeyed.stdout, r"(?m)^::error::clang\S* is not on PATH")
+            self.assertEqual(output.read_text(), "")
+        for baseline in ("AB" * 20, "ab" * 19, None):
+            bad = keyed(**{"builtin-baseline": baseline})
+            self.assertNotEqual(bad.returncode, 0, baseline)
+            self.assertEqual((output.read_text(), "builtin-baseline" in bad.stderr), ("", True))
+        cache = steps["cache"]["with"]
+        key = "vcpkg-release-${{ runner.os }}-x64-linux-${{ steps.manifest.outputs.baseline }}-"
+        self.assertEqual(cache["key"], key + "${{ steps.manifest.outputs.digest }}")
+        self.assertEqual(cache["restore-keys"].splitlines(), [key])
+        self.assertEqual(cache["path"], "${{ runner.temp }}/vcpkg-archives")
+
+    def test_the_action_lets_vcpkg_build_only_when_binary_only_is_false(self):
+        export = self.action_steps()["export"]
+        root = "VCPKG_ROOT=/runner/temp/vcpkg\n"
+        sources = "VCPKG_BINARY_SOURCES=clear;files,/runner/temp/vcpkg-archives,"
+        # vcpkg's own cmake and ninja, whichever way the cache is used.
+        own = "VCPKG_FORCE_DOWNLOADED_BINARIES=1\n"
+        expected = {
+            "true": (0, root + sources + "read\n" + own + "TP_VCPKG_BINARY_ONLY=1\n"),
+            "false": (0, root + sources + "readwrite\n" + own),
+            # A value that is neither must not become a build that may run cold.
+            "yes": (1, ""),
+        }
+        for value, outcome in expected.items():
+            with self.subTest(binary_only=value):
+                result, written = self.appended(
+                    export, BINARY_ONLY=value, RUNNER_TEMP="/runner/temp"
+                )
+                self.assertEqual((result.returncode, written), outcome, result.stderr)
+
+
+class StaticStreamingClosureTests(unittest.TestCase):
+    """The closure checker against stand-ins for dpkg-deb and ldd."""
+
+    def check(self, depends="libc6 (>= 2.35), libstdc++6", linked="libc.so.6 => /lib/libc.so.6",
+              dpkg_status=0, ldd_status=0, args=("--deb", "serving.deb", "--binary", "worker"),
+              pre_depends="tensorplate-common (= 1)"):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "serving.deb").write_text("")
+            (root / "worker").write_text("")
+            fields = f"-fDepends) echo '{depends}' ;; -fPre-Depends) echo '{pre_depends}' ;;"
+            asked = f"#!/bin/sh\ncase \"$1$3\" in {fields} *) exit 9 ;; esac\n"
+            write_executable(root / "dpkg-deb", f"{asked}exit {dpkg_status}\n")
+            ldd = f"#!/bin/sh\nprintf '\\t%s\\n' '{linked}'\nexit {ldd_status}\n"
+            write_executable(root / "ldd", ldd)
+            env = {**os.environ, "PATH": f"{root}{os.pathsep}{os.environ['PATH']}"}
+            return subprocess.run(
+                [str(CLOSURE_CHECK), *args], cwd=root, env=env,
+                text=True, capture_output=True, timeout=30, check=False,
+            )
+
+    def test_a_closure_without_grpc_or_protobuf_passes_with_a_line_per_check(self):
+        # A vendor library may load the system OpenSSL or zlib on the Jetson.
+        for linked in ("libssl.so.3 => /lib/libssl.so.3", "/lib/libcrypto.so.3 (0x1)", "libz.so.1"):
+            result = self.check(linked=linked)
+            self.assertEqual((result.returncode, len(result.stdout.splitlines())), (0, 2), result)
+
+    def test_what_the_check_finds_or_cannot_make_fails_and_is_named(self):
+        refused = {
+            "libgrpc++1": {"depends": "libc6, libgrpc++1 (>= 1.30)"},
+            "libprotobuf23": {"depends": "libc6 | libprotobuf23:any"},
+            "libgrpc++.so.1": {"linked": "libgrpc++.so.1 => /usr/lib/libgrpc++.so.1 (0x2)"},
+            "libgpr.so.10": {"linked": "libgpr.so.10 => /usr/lib/libgpr.so.10 (0x2)"},
+            "libprotobuf.so.23": {"linked": "libprotobuf.so.23 => not found"},
+            "libgrpc10": {"pre_depends": "tensorplate-common (= 1), libgrpc10"},
+            "libabsl20220623": {"depends": "libabsl20220623 (>= 0~20220623.0-1)"},
+            "libre2-9": {"depends": "libc6, libre2-9"},
+            "libc-ares2": {"depends": "libc-ares2 (>= 1.11.0~rc1)"},
+            "libupb0": {"pre_depends": "libupb0"},
+            "libssl3": {"depends": "libssl3 (>= 3.0.0~~alpha1) | libssl1.1"},
+            "/usr/lib/libabsl_base.so.2206": {"linked": "/usr/lib/libabsl_base.so.2206 (0x3)"},
+            "libre2.so.9": {"linked": "libre2.so.9 => /usr/lib/libre2.so.9 (0x3)"},
+            "libcares.so.2": {"linked": "libcares.so.2 => /usr/lib/libcares.so.2 (0x3)"},
+            "libupb.so.0": {"linked": "libupb.so.0 => not found"},
+            "--deb needs a value": {"args": ("--binary", "worker", "--deb")},
+            "--binary needs a value": {"args": ("--binary", "--deb", "serving.deb")},
+            # A check that could not be made is not a pass.
+            "dpkg-deb": {"dpkg_status": 2},
+            "ldd": {"ldd_status": 1},
+            "--binary": {"args": ("--deb", "serving.deb")},
+            "--deb": {"args": ("--binary", "worker")},
+        }
+        for name, case in refused.items():
+            with self.subTest(name=name):
+                result = self.check(**case)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(name, result.stderr)
+
+
+class SourceInstallPreflightTests(unittest.TestCase):
+    def test_a_source_install_without_a_vcpkg_checkout_is_refused_before_any_clone(self):
+        script = Path(__file__).resolve().parents[2] / "packaging/scripts/build-install-from-source.sh"
+        with tempfile.TemporaryDirectory() as temp:
+            env = {"PATH": os.environ["PATH"], "TMPDIR": temp}
+            for said in ({}, {"VCPKG_ROOT": temp}, {"VCPKG_ROOT": temp, "TP_CMAKE_TOOLCHAIN_FILE": "x"}):
+                result = subprocess.run(
+                    ["bash", str(script), "--no-install", "--no-fetch", "--arch", "amd64"],
+                    cwd=temp, env={**env, **said}, text=True, capture_output=True, timeout=60,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("error: VCPKG_ROOT must name a vcpkg checkout", result.stderr)
+                self.assertEqual(os.listdir(temp), [], "a checkout was made before the refusal")
 
 
 if __name__ == "__main__":
