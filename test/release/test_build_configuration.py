@@ -4599,7 +4599,8 @@ class ReleaseWorkflowVcpkgTests(unittest.TestCase):
         callers = sorted(
             path.name for path in WORKFLOWS.glob("*.yml") if VCPKG_ACTION_USE in path.read_text()
         )
-        self.assertEqual(callers, ["apt-lifecycle.yml", CACHE_WARMER.name, "release.yml"])
+        self.assertEqual(callers, ["apt-lifecycle.yml", CACHE_WARMER.name, "release.yml",
+                                   "supply-chain.yml"])
         self.assertEqual(self.mode(CACHE_WARMER.name, "warm"), "build-and-save")
         refs = {"default branch": ("branch", "develop"), "tag": ("tag", "v1.2.3"),
                 "another branch": ("branch", "topic")}
@@ -4619,6 +4620,10 @@ class ReleaseWorkflowVcpkgTests(unittest.TestCase):
         events = ("pull_request", "workflow_dispatch", "push", "schedule")
         smoke = [self.mode("apt-lifecycle.yml", "cpu-only-smoke", event_name=on) for on in events]
         self.assertEqual(smoke, ["build-and-save", "build", "build", "build"])
+        # The native closure leg reads what is warm and builds the rest; it never saves.
+        native = [self.mode("supply-chain.yml", "native", event_name=on, ref_name=ref)
+                  for on in events for ref in ("develop", "topic")]
+        self.assertEqual(native, ["build"] * 8)
 
     def test_both_release_jobs_check_the_static_closure_of_what_they_built(self):
         built = {"build_packages_amd64": "packaging/scripts/build-deb.sh",
@@ -4678,7 +4683,8 @@ class ReleaseWorkflowVcpkgTests(unittest.TestCase):
 
     def test_every_caller_installs_clang_before_the_action_keys_the_cache_on_it(self):
         callers = (("release.yml", "build_packages_amd64"), ("apt-lifecycle.yml", "cpu-only-smoke"),
-                   (CACHE_WARMER.name, "warm"), (CACHE_WARMER.name, "restore"))
+                   (CACHE_WARMER.name, "warm"), (CACHE_WARMER.name, "restore"),
+                   ("supply-chain.yml", "native"))
         for workflow, name in callers:
             job = self.job(workflow, name)
             installs = self.only_step(job, "/usr/bin/clang-15 100")
@@ -4833,6 +4839,72 @@ class ReleaseWorkflowVcpkgTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 result, written = self.appended(export, MODE=mode, RUNNER_TEMP="/runner/temp")
                 self.assertEqual((result.returncode, written), outcome, result.stderr)
+
+
+class NativeClosureScanTests(unittest.TestCase):
+    """The supply-chain workflow's scan of the worker's native closure, against a stub grype."""
+
+    setUp = ReleaseWorkflowVcpkgTests.setUp
+    job = ReleaseWorkflowVcpkgTests.job
+    only_step = ReleaseWorkflowVcpkgTests.only_step
+
+    def grype(self, exit_status: int, matches: int, ignored: int = 0) -> str:
+        """A grype that writes a report with that many matches where -o json= says, then exits."""
+        match = {"vulnerability": {"id": "CVE-2000-0001", "severity": "Unknown"},
+                 "artifact": {"name": "openssl", "version": "3.0.0"}}
+        report = json.dumps({"matches": [match] * matches, "ignoredMatches": [match] * ignored})
+        (self.root / "bin").mkdir(exist_ok=True)
+        write_executable(
+            self.root / "bin/grype",
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >>'{self.root / 'grype-calls'}'\n"
+            "for arg in \"$@\"; do case \"$arg\" in json=*) "
+            f"printf '%s' '{report}' >\"${{arg#json=}}\" ;; esac; done\n"
+            f"exit {exit_status}\n",
+        )
+        return f"{self.root / 'bin'}{os.pathsep}{os.environ['PATH']}"
+
+    def run_named(self, name: str, path: str) -> subprocess.CompletedProcess:
+        job = self.job("supply-chain.yml", "native")
+        step = job["steps"][self.only_step(job, name)]
+        (self.root / "temp").mkdir(exist_ok=True)
+        return run_step(step, REPO_ROOT, PATH=path, RUNNER_TEMP=str(self.root / "temp"))
+
+    def test_the_positive_control_needs_grypes_threshold_exit_and_a_match(self):
+        cases = {(2, 3): True, (2, 0): False, (0, 3): False, (1, 3): False, (0, 0): False}
+        for (status, matches), passes in cases.items():
+            with self.subTest(grype_exits=status, matches=matches):
+                result = self.run_named("grype positive control", self.grype(status, matches))
+                self.assertEqual(result.returncode == 0, passes, result.stderr)
+        calls = (self.root / "grype-calls").read_text()
+        self.assertIn("sbom:test/release/fixtures/native-sbom/positive-control.spdx.json", calls)
+        control = json.loads((REPO_ROOT / "test/release/fixtures/native-sbom"
+                              / "positive-control.spdx.json").read_text())
+        refs = control["packages"][0]["externalRefs"]
+        self.assertEqual([r["referenceType"] for r in refs], ["cpe23Type"])
+
+    def test_the_scan_fails_on_any_match_whatever_its_severity_and_on_a_scan_that_did_not_finish(self):
+        cases = {(0, 0, 0): True, (0, 0, 2): True, (0, 1, 0): False, (1, 0, 0): False, (2, 0, 0): False}
+        for (status, matches, ignored), passes in cases.items():
+            with self.subTest(grype_exits=status, matches=matches, ignored=ignored):
+                result = self.run_named("grype, with the recorded dispositions",
+                                        self.grype(status, matches, ignored))
+                self.assertEqual(result.returncode == 0, passes, result.stdout + result.stderr)
+        result = self.run_named("grype, with the recorded dispositions", self.grype(0, 1))
+        self.assertIn("CVE-2000-0001 Unknown openssl 3.0.0", result.stderr)
+        self.assertNotIn("--fail-on", (self.root / "grype-calls").read_text().splitlines()[-1])
+        config = yaml.safe_load((self.root / "temp/grype.yaml").read_text())
+        self.assertIn("CVE-2026-0994", [rule["vulnerability"] for rule in config["ignore"]])
+
+    def test_the_sbom_is_uploaded_before_the_scan_and_the_control_runs_first(self):
+        job = self.job("supply-chain.yml", "native")
+        order = [self.only_step(job, text) for text in (
+            "native-sbom.py collect", "Upload the SBOM", "grype positive control",
+            "grype, with the recorded dispositions")]
+        self.assertEqual(order, sorted(order))
+        collect = job["steps"][order[0]]["run"]
+        self.assertIn("native-sbom.py check", collect)
+        self.assertIn("--cmake-cache", collect)
 
 
 class StaticStreamingClosureTests(unittest.TestCase):
