@@ -629,7 +629,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--feature", default="streaming-grpc")
     p.add_argument("--triplet", required=True)
 
-    p = commands.add_parser("control", help="generate one vulnerable control per native CPE pair")
+    p = commands.add_parser("control", help="generate one vulnerable control per controlled CPE pair")
     p.add_argument("--output", type=pathlib.Path, required=True)
 
     p = commands.add_parser("check-control", help="require every native CPE control to match")

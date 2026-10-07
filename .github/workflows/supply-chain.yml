@@ -437,7 +437,7 @@ jobs:
           echo "${RUNNER_TEMP}/bin" >>"$GITHUB_PATH"
           "${RUNNER_TEMP}/bin/grype" version
 
-      # A known vulnerable version for every identifier must match by CPE.
+      # A known vulnerable version for every controlled identifier must match by CPE.
       - name: grype positive control
         shell: bash
         env:
