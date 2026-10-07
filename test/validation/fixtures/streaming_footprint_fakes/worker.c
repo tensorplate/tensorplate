@@ -35,12 +35,16 @@ static void *touch(size_t mib) {
     return NULL;
   }
   size_t bytes = mib << 20;
-  unsigned char *block = malloc(bytes);
+  // Written through a volatile pointer, a byte per page: a compiler that sees
+  // malloc, memset and free alone removes all three, and nothing is resident.
+  volatile unsigned char *block = malloc(bytes);
   if (block == NULL) {
     abort();
   }
-  memset(block, 1, bytes);
-  return block;
+  for (size_t offset = 0; offset < bytes; offset += 1024) {
+    block[offset] = 1;
+  }
+  return (void *)block;
 }
 
 static void send_all(int fd, const char *text) {

@@ -445,7 +445,7 @@ def compile_worker(work: Path, name: str, *defines: str) -> Path:
     subprocess.run(
         [
             os.environ.get("CC", "cc"),
-            "-O1",
+            "-O2",
             "-Wall",
             "-Wextra",
             "-pthread",
