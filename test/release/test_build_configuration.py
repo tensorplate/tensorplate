@@ -5001,12 +5001,12 @@ class SourceInstallStreamingTests(unittest.TestCase):
                               capture_output=True, text=True).stdout.strip()
         other = "arm64" if host != "arm64" else "amd64"
         cases = (  # arch, the worker's --version lines, what the wrapper says
-            (host, [*three, "streaming-grpc on"], "streaming gRPC support in the built worker: on"),
+            (host, [*three, "streaming-grpc on"], "Streaming gRPC support in the built worker: on"),
             (host, [*three, "streaming-grpc off"],
-             "streaming gRPC support in the built worker: off"),
-            (host, three, "streaming gRPC support in the built worker: not reported"),
+             "Streaming gRPC support in the built worker: off"),
+            (host, three, "Streaming gRPC support in the built worker: not reported"),
             (other, [*three, "streaming-grpc on"],
-             f"streaming gRPC support in the built worker: not run (the package is for {other}"),
+             f"Streaming gRPC support in the built worker: not run (the package is for {other}"),
         )
         for arch, lines, said in cases:
             with self.subTest(arch=arch, last=lines[-1]):
@@ -5014,7 +5014,7 @@ class SourceInstallStreamingTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 reported = [
                     line for line in result.stdout.splitlines()
-                    if "streaming gRPC support in the built worker" in line
+                    if "Streaming gRPC support in the built worker" in line
                 ]
                 self.assertEqual(len(reported), 1, result.stdout)
                 self.assertTrue(reported[0].startswith(said), reported[0])

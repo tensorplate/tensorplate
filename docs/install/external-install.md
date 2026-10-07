@@ -192,7 +192,17 @@ sudo bash packaging/scripts/build-install-from-source.sh --branch develop
 This default needs no vcpkg. It builds a serving worker without streaming
 gRPC support and says so in one line; that worker serves as before and
 refuses `streaming.enabled=true` in its config with the typed `unsupported`
-error. Release packages are built with the support.
+error. Release packages are built with the support. After the build the
+wrapper prints `Streaming gRPC support in the built worker: on` or `off`,
+read from the worker in the package it just built. To check a worker that
+is already installed, ask it:
+
+```bash
+/usr/lib/tensorplate/tensorplate-serving --version
+```
+
+Its fourth line is `streaming-grpc on` or `streaming-grpc off`; a worker
+built from a branch that predates this line prints the first three only.
 
 To build with it, give the wrapper a vcpkg checkout at the
 `builtin-baseline` of `vcpkg.json`. vcpkg needs `git`, `curl`, `zip`,

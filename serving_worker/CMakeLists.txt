@@ -12,6 +12,10 @@ add_executable(tp::serving_worker ALIAS tp_serving_worker)
 
 target_link_libraries(tp_serving_worker PRIVATE tp::runtime)
 
+# The same answer the runtime's config check gives: --version reports it.
+target_compile_definitions(tp_serving_worker PRIVATE
+  TP_ENABLE_STREAMING_GRPC=$<BOOL:${TP_ENABLE_STREAMING_GRPC}>)
+
 target_compile_features(tp_serving_worker PRIVATE cxx_std_20)
 
 set_target_properties(tp_serving_worker PROPERTIES

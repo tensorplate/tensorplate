@@ -50,6 +50,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `tensorplate-serving --version` prints a fourth line, `streaming-grpc on`
+  or `streaming-grpc off`, so an installed worker says whether streaming
+  support was compiled in; the first three lines keep their shape. Both
+  C++ CI flavours assert their line. `build-install-from-source.sh` prints
+  `Streaming gRPC support in the built worker: on|off` after its build,
+  read from the worker in the package it built, and says when the package
+  is for another architecture or the worker predates the line;
+  `docs/install/external-install.md` says how to ask an installed worker.
+  (V030-E04-F02-T04)
 - The Python SDK declares a `speech` extra, `grpcio>=1.81.1,<2` and
   `protobuf>=6.33.5,<7`, for the streaming speech transport, and
   `sdk/python/constraints/speech.txt` pins those floors and grpcio's one

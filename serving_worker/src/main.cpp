@@ -176,9 +176,16 @@ void report_startup_failure(const tensorplate::Error& error) noexcept {
 }
 
 void print_version() {
+  // The fourth line is the one place an installed worker says whether streaming
+  // support was compiled in; the first three keep their shape.
   std::cout << "tensorplate-serving " << tensorplate::kRuntimeVersion << '\n'
             << "protocol " << tensorplate::kProtocolVersion << '\n'
-            << "bundle-format " << tensorplate::kBundleFormatVersion << '\n';
+            << "bundle-format " << tensorplate::kBundleFormatVersion << '\n'
+#if TP_ENABLE_STREAMING_GRPC
+            << "streaming-grpc on\n";
+#else
+            << "streaming-grpc off\n";
+#endif
 }
 
 void print_usage() {
