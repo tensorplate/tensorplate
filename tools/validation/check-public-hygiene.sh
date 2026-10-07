@@ -145,12 +145,9 @@ USAGE = """usage: check-public-hygiene.sh --base REF [--branch FILE] [--message 
 Exit 0: publishable. Exit 1: findings. Exit 2: no verdict."""
 
 ALLOWLIST_PATH = "tools/validation/public-hygiene-allowlist.txt"
-# Recorded lifecycle evidence, and recorded or transcribed fixtures of
-# real machines. Every platform row's evidence.location is under one of
-# these or under a git-ignored build path that is never committed;
-# test/validation/public_hygiene_test.sh asserts it. Matched in any
-# letter case.
-EVIDENCE_PREFIXES = ("docs/validation/evidence/", "test/platform/")
+# Recorded evidence and fixtures from real machines and dependency tools.
+# Prefix matching is case-insensitive.
+EVIDENCE_PREFIXES = ("docs/validation/evidence/", "test/platform/", "test/release/fixtures/native-sbom/")
 
 SYNTHETIC_OPERATOR = "tp-synthetic-operator"
 # Account and host names that identify nobody: containers, CI runners,

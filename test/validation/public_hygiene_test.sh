@@ -697,6 +697,37 @@ g rm -q test/platform/rec/capture.txt || die "git rm failed"
 commit "Remove the recording"
 expect_finding "a journal host in a recording a later commit deletes" journal-host "$host" --base base
 
+native_fixture=test/release/fixtures/native-sbom/install-tree/x64-linux/share/example/vcpkg.spdx.json
+namespace_uuid="$(random_uuid)"
+namespace="https://spdx.org/spdxdocs/example-${namespace_uuid}"
+synthetic_namespace=https://spdx.org/spdxdocs/example-00000000-0000-4000-8000-000000000001
+
+new_case
+put "$native_fixture" "{\"documentNamespace\": \"${namespace}\"}"
+commit "Add a dependency recording"
+expect_finding "a UUID in a native dependency fixture" uuid "$namespace_uuid" --base base
+
+new_case
+put "$native_fixture" "{\"documentNamespace\": \"${namespace}\"}"
+commit "Add a dependency recording"
+recorded_commit="$(g rev-parse --short=12 HEAD)"
+put "$native_fixture" "{\"documentNamespace\": \"${synthetic_namespace}\"}"
+commit "Sanitize the recording"
+expect_finding "a UUID in an earlier native dependency fixture" uuid "$namespace_uuid" --base base
+check "  reported against that version" "yes" \
+  "$(has "${native_fixture}@${recorded_commit}:1: uuid" "${r}.out")"
+check "the sanitized native fixture passes as a tree" "0" "$(scan "${r}.tree.out" --tree)"
+
+new_case
+put "$native_fixture" "{\"documentNamespace\": \"${synthetic_namespace}\"}"
+commit "Add a synthetic dependency recording"
+check "a synthetic native fixture passes as a change" "0" "$(scan "${r}.out" --base base)"
+
+new_case
+put Test/Release/Fixtures/Native-Sbom/capture.log "$journal_line"
+commit "Add a dependency recording in another case"
+expect_finding "a journal host in a native fixture path in another case" journal-host "$host" --base base
+
 new_case
 put notes/stage.log "$journal_line"
 commit
@@ -789,7 +820,7 @@ check "a synthetic device UUID in a platform fixture passes" "0" "$(scan "${r}.o
 plain_uuid="$(random_uuid)"
 encoded_uuid="$(random_uuid)"
 byte_array="$(python3 -c 'import sys; print(list(("GPU-" + sys.argv[1]).encode()))' "$encoded_uuid")"
-for evidence_file in test/platform/accelerator/card.json docs/validation/evidence/v9.9.9/synthetic-row/card.json; do
+for evidence_file in test/platform/accelerator/card.json docs/validation/evidence/v9.9.9/synthetic-row/card.json "$native_fixture"; do
   new_case
   put "$evidence_file" "{\"uuid\": \"GPU-${plain_uuid}\", \"raw\": ${byte_array}}"
   put "$allowlist" "${evidence_file} device-uuid 1 One UUID."

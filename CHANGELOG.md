@@ -8,6 +8,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Apply the evidence publication policy to native dependency fixtures,
+  including earlier versions in a change's commit history. Recorded
+  fixtures cannot bypass the policy through a source allowlist.
+  (V030-E01-F03-T01)
+
 - The backend probe kills an interpreter query that outlasts its limit: five
   seconds by default, and 120 for the PyTorch import, which reads far more
   from disk. The limit was documented and never applied, so a
