@@ -1,0 +1,76 @@
+{
+  "$schema": "https://raw.githubusercontent.com/spdx/spdx-spec/v2.3/schemas/spdx-schema.json",
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "documentNamespace": "https://spdx.org/spdxdocs/c-ares-x64-linux-1.34.8-f6547b41-2185-4efc-a19e-374f27c48b22",
+  "name": "c-ares:x64-linux@1.34.8 2fb294fb262e3df1cfd837b1aa6e776fc746e1ab663be321b20e7d0a8163a31a",
+  "creationInfo": {
+    "creators": [
+      "Tool: vcpkg-2026-07-27-98d7cb0cf1f4686a3e43aa5672b6230c1d56bce8"
+    ],
+    "created": "2026-10-07T16:26:03Z"
+  },
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "GENERATES",
+      "relatedSpdxElement": "SPDXRef-binary"
+    },
+    {
+      "spdxElementId": "SPDXRef-port-file-0",
+      "relationshipType": "DEPENDENCY_MANIFEST_OF",
+      "relatedSpdxElement": "SPDXRef-port"
+    }
+  ],
+  "packages": [
+    {
+      "name": "c-ares",
+      "SPDXID": "SPDXRef-port",
+      "versionInfo": "1.34.8",
+      "downloadLocation": "git+https://github.com/Microsoft/vcpkg@028f0b728dc1149d00a1633c95ff1cc21efd795e",
+      "homepage": "https://github.com/c-ares/c-ares",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "description": "A C library for asynchronous DNS requests",
+      "comment": "This is the port (recipe) consumed by vcpkg.",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:vcpkg/c-ares@1.34.8?triplet=x64-linux&vcs_url=git%2Bhttps%3A%2F%2Fgithub.com%2FMicrosoft%2Fvcpkg%40028f0b728dc1149d00a1633c95ff1cc21efd795e"
+        },
+        {
+          "referenceCategory": "PERSISTENT-ID",
+          "referenceType": "gitoid",
+          "referenceLocator": "gitoid:tree:sha1:028f0b728dc1149d00a1633c95ff1cc21efd795e"
+        }
+      ]
+    },
+    {
+      "name": "c-ares:x64-linux",
+      "SPDXID": "SPDXRef-binary",
+      "versionInfo": "2fb294fb262e3df1cfd837b1aa6e776fc746e1ab663be321b20e7d0a8163a31a",
+      "downloadLocation": "NONE",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "comment": "This is a binary package built by vcpkg."
+    },
+    {
+      "SPDXID": "SPDXRef-resource-0",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "66399b3d053157179fe3df60922a49c780bfd7e31fd853dc530b36e430c82534018a06b76f779b31554e088749083ca04dfeaa60301c1f1b9d96eba888790fa0"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "downloadLocation": "git+https://github.com/c-ares/c-ares@v1.34.8",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "c-ares/c-ares"
+    }
+  ]
+}

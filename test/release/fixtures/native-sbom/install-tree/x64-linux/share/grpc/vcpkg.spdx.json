@@ -1,0 +1,76 @@
+{
+  "$schema": "https://raw.githubusercontent.com/spdx/spdx-spec/v2.3/schemas/spdx-schema.json",
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "documentNamespace": "https://spdx.org/spdxdocs/grpc-x64-linux-1.81.1-7ef2fbcb-93c5-4090-9a82-29c298f74613",
+  "name": "grpc:x64-linux@1.81.1 71f9f1746935362803ebbfdeca27c32e0b78f8c0d09ca79a461c46551496c46a",
+  "creationInfo": {
+    "creators": [
+      "Tool: vcpkg-2026-07-27-98d7cb0cf1f4686a3e43aa5672b6230c1d56bce8"
+    ],
+    "created": "2026-10-07T17:06:10Z"
+  },
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-port",
+      "relationshipType": "GENERATES",
+      "relatedSpdxElement": "SPDXRef-binary"
+    },
+    {
+      "spdxElementId": "SPDXRef-port-file-4",
+      "relationshipType": "DEPENDENCY_MANIFEST_OF",
+      "relatedSpdxElement": "SPDXRef-port"
+    }
+  ],
+  "packages": [
+    {
+      "name": "grpc",
+      "SPDXID": "SPDXRef-port",
+      "versionInfo": "1.81.1",
+      "downloadLocation": "git+https://github.com/Microsoft/vcpkg@dd34d98b6fa959331f1be77c79592e6b8569859f",
+      "homepage": "https://github.com/grpc/grpc",
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "description": "gRPC is a modern, open source, high-performance remote procedure call (RPC) framework that can run anywhere. gRPC enables client and server applications to communicate transparently, and simplifies the building of connected systems.",
+      "comment": "This is the port (recipe) consumed by vcpkg.",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceType": "purl",
+          "referenceLocator": "pkg:vcpkg/grpc@1.81.1?triplet=x64-linux&vcs_url=git%2Bhttps%3A%2F%2Fgithub.com%2FMicrosoft%2Fvcpkg%40dd34d98b6fa959331f1be77c79592e6b8569859f"
+        },
+        {
+          "referenceCategory": "PERSISTENT-ID",
+          "referenceType": "gitoid",
+          "referenceLocator": "gitoid:tree:sha1:dd34d98b6fa959331f1be77c79592e6b8569859f"
+        }
+      ]
+    },
+    {
+      "name": "grpc:x64-linux",
+      "SPDXID": "SPDXRef-binary",
+      "versionInfo": "71f9f1746935362803ebbfdeca27c32e0b78f8c0d09ca79a461c46551496c46a",
+      "downloadLocation": "NONE",
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "comment": "This is a binary package built by vcpkg."
+    },
+    {
+      "SPDXID": "SPDXRef-resource-0",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "2fcc219bf91de49607ed1f74243c2d43c0fb0def4944e48fbd4b382033d648f0e0b8551426993d04db49b9cae8d8b9efe20a817f6985ed3c72f086bf8ea2e26e"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "downloadLocation": "git+https://github.com/grpc/grpc@v1.81.1",
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "grpc/grpc"
+    }
+  ]
+}

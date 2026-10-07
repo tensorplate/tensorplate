@@ -1,0 +1,38 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "native-closure-scan-positive-control",
+  "documentNamespace": "https://tensorplate.com/spdxdocs/native-closure-scan-positive-control/2026-10-07",
+  "comment": "A control input for the native closure scan, not a record of any build: one package, OpenSSL 3.0.0, carried by the same kind of CPE reference the real document carries. OpenSSL 3.0.0 has published advisories (CVE-2022-3602 and CVE-2022-3786 among them), so a scanner that reads the reference must report it; one that reports nothing is not reading CPEs and the scan proves nothing.",
+  "creationInfo": {
+    "created": "2026-10-07T00:00:00Z",
+    "creators": ["Tool: tensorplate-native-sbom"]
+  },
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-port-openssl",
+      "name": "openssl",
+      "versionInfo": "3.0.0",
+      "downloadLocation": "git+https://github.com/openssl/openssl@openssl-3.0.0",
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "SECURITY",
+          "referenceType": "cpe23Type",
+          "referenceLocator": "cpe:2.3:a:openssl:openssl:3.0.0:*:*:*:*:*:*:*"
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-port-openssl"
+    }
+  ]
+}
