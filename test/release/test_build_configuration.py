@@ -4979,14 +4979,18 @@ class SourceInstallStreamingTests(unittest.TestCase):
                        check=True, capture_output=True)
         return package
 
-    def install_built(self, arch: str, version_lines: list[str]):
+    def install_built(self, arch: str, version_lines: list[str], copies: int = 1):
         """The wrapper with a builder that stages the stub package instead of building."""
         package = self.built_package(arch, version_lines)
+        staged = " && ".join(
+            f"cp '{package}' \"$out/tensorplate-serving_0.2.1.dev.{index}.abc_{arch}.deb\""
+            for index in range(1, copies + 1)
+        )
         write_executable(
             self.source / "tools/release/build-release-artifacts.sh",
             "#!/bin/sh\n[ \"$1\" != --help ] || { echo '--without-streaming'; exit 0; }\n"
             "while [ $# -gt 0 ]; do [ \"$1\" = --artifacts-dir ] && out=$2; shift; done\n"
-            f"mkdir -p \"$out\" && cp '{package}' \"$out/\"\n",
+            f"mkdir -p \"$out\" && {staged}\n",
         )
         return subprocess.run(
             ["bash", str(SOURCE_INSTALL), "--no-install", "--source-dir", str(self.source),
@@ -5008,9 +5012,10 @@ class SourceInstallStreamingTests(unittest.TestCase):
             (other, [*three, "streaming-grpc on"],
              f"Streaming gRPC support in the built worker: not run (the package is for {other}"),
         )
-        for arch, lines, said in cases:
-            with self.subTest(arch=arch, last=lines[-1]):
-                result = self.install_built(arch, lines)
+        two = "Streaming gRPC support in the built worker: not run (expected one tensorplate-serving"
+        for arch, lines, said, copies in (*((*case, 1) for case in cases), (host, three, two, 2)):
+            with self.subTest(arch=arch, last=lines[-1], copies=copies):
+                result = self.install_built(arch, lines, copies)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 reported = [
                     line for line in result.stdout.splitlines()
