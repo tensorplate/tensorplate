@@ -24,7 +24,9 @@ PORTS = {"grpc": "libgrpc.a", "openssl": "libcrypto.a", "zlib": "libz.a"}
 
 
 def build_fixture(
-    root: pathlib.Path, included_port: str | None = None, shared_port: str | None = None
+    root: pathlib.Path, included_port: str | None = None, shared_port: str | None = None,
+    thin_port: str | None = None, inventory_symlink_port: str | None = None,
+    linked_alias_port: str | None = None,
 ) -> pathlib.Path:
     """Compile synthetic ports and record real ELF/link-map output below root/native."""
     native = root / "native"
@@ -43,8 +45,18 @@ def build_fixture(
         obj = native / f"{port}.o"
         subprocess.run(["cc", "-fPIC", "-c", str(source), "-o", str(obj)], check=True)
         archive = libraries / name
-        subprocess.run(["ar", "rcs", str(archive), str(obj)], check=True)
+        archive.unlink(missing_ok=True)
+        subprocess.run(["ar", "rcsT" if port == thin_port else "rcs", str(archive), str(obj)], check=True)
         (info / f"{port}_1.0_x64-linux.list").write_text(f"x64-linux/lib/{name}\n")
+        if port == inventory_symlink_port:
+            regular = archive.with_name(name.replace(".a", "-real.a"))
+            archive.replace(regular)
+            archive.symlink_to(regular)
+        if port == linked_alias_port:
+            alias = native / f"{port}-alias.bin"
+            alias.unlink(missing_ok=True)
+            alias.symlink_to(archive)
+            archive = alias
         archives.append(str(archive))
     main = native / "main.c"
     expression = "0"
@@ -99,6 +111,66 @@ class NativeCodeAbsenceTests(unittest.TestCase):
                 build_fixture(self.root, shared_port=port)
                 with self.assertRaisesRegex(ValueError, f"{port}: worker loads shared libraries"):
                     self.verify()
+
+    def test_real_extracted_thin_archive_of_each_port_is_rejected(self) -> None:
+        for port in PORTS:
+            with self.subTest(port=port):
+                build_fixture(self.root, included_port=port, thin_port=port)
+                with self.assertRaisesRegex(ValueError, f"{port}: inventory contains an unsupported archive format"):
+                    self.verify()
+
+    def test_real_unextracted_thin_archive_of_each_port_is_rejected(self) -> None:
+        for port in PORTS:
+            with self.subTest(port=port):
+                build_fixture(self.root, thin_port=port)
+                with self.assertRaisesRegex(ValueError, f"{port}: inventory contains an unsupported archive format"):
+                    self.verify()
+
+    def test_unloaded_thin_archive_in_inventory_is_rejected(self) -> None:
+        archive = self.installed / "x64-linux/lib/libunused.a"
+        subprocess.run(["ar", "rcsT", str(archive), str(self.native / "grpc.o")], check=True)
+        inventory = self.installed / "vcpkg/info/grpc_1.0_x64-linux.list"
+        inventory.write_text(inventory.read_text() + "x64-linux/lib/libunused.a\n")
+        with self.assertRaisesRegex(ValueError, "grpc: inventory contains an unsupported archive format"):
+            self.verify()
+
+    def test_corrupt_archive_header_is_rejected(self) -> None:
+        (self.installed / "x64-linux/lib/libgrpc.a").write_bytes(b"!<arc")
+        with self.assertRaisesRegex(ValueError, "grpc: inventory contains an unsupported archive format"):
+            self.verify()
+
+    def test_real_extracted_inventory_symlink_of_each_port_is_rejected(self) -> None:
+        for port in PORTS:
+            with self.subTest(port=port):
+                build_fixture(self.root, included_port=port, inventory_symlink_port=port)
+                with self.assertRaisesRegex(ValueError, f"{port}: inventory contains an archive path alias"):
+                    self.verify()
+
+    def test_real_unextracted_inventory_symlink_of_each_port_is_rejected(self) -> None:
+        for port in PORTS:
+            with self.subTest(port=port):
+                build_fixture(self.root, inventory_symlink_port=port)
+                with self.assertRaisesRegex(ValueError, f"{port}: inventory contains an archive path alias"):
+                    self.verify()
+
+    def test_inventory_archive_parent_symlink_is_rejected(self) -> None:
+        libraries = self.installed / "x64-linux/lib"
+        regular = libraries.with_name("lib-real")
+        libraries.rename(regular)
+        libraries.symlink_to(regular, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "grpc: inventory contains an archive path alias"):
+            self.verify()
+
+    def test_real_extracted_linker_alias_of_each_port_is_rejected(self) -> None:
+        for port in PORTS:
+            with self.subTest(port=port):
+                build_fixture(self.root, included_port=port, linked_alias_port=port)
+                with self.assertRaisesRegex(ValueError, f"{port}: worker extracted archive members"):
+                    self.verify()
+
+    def test_real_unextracted_linker_alias_is_absent(self) -> None:
+        build_fixture(self.root, linked_alias_port="grpc")
+        self.assertEqual(self.verify()["absent_ports"], sorted(PORTS))
 
     def test_empty_map_is_rejected(self) -> None:
         self.link_map.write_text("")

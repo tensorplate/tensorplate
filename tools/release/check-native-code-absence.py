@@ -60,7 +60,9 @@ def verify_absence(
             raise ValueError("GNU ld map .text does not match the worker's ELF section")
         loads = {(build_dir / item).resolve() for item in
                  re.findall(r"^LOAD (.+)$", text, re.MULTILINE)}
-        members = {pathlib.Path(item).name for item in re.findall(r"(\S+\.a)\([^()\n]+\)", text)}
+        member_inputs = re.findall(r"([^\s()]+)\([^()\n]+\)", text)
+        members = {pathlib.Path(item).name for item in member_inputs}
+        member_paths = {(build_dir / item).resolve() for item in member_inputs}
         needed = re.findall(r"\(NEEDED\).*Shared library: \[([^\]]+)\]", elf)
         for port in sorted(set(ports)):
             if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", port):
@@ -72,16 +74,23 @@ def verify_absence(
             for entry in inventories[0].read_text().splitlines():
                 if not entry.endswith(".a"):
                     continue
-                path = (install_root / entry).resolve(strict=True)
+                inventory_path = install_root / entry
+                path = inventory_path.resolve(strict=True)
                 if not path.is_relative_to(install_root / triplet) or not path.is_file():
                     raise ValueError(f"{port}: archive outside target-triplet install tree")
+                if inventory_path != path:
+                    raise ValueError(f"{port}: inventory contains an archive path alias")
+                with path.open("rb") as archive:
+                    if archive.read(8) != b"!<arch>\n":
+                        raise ValueError(f"{port}: inventory contains an unsupported archive format")
                 archives.add(path)
             if not archives:
                 raise ValueError(f"{port}: inventory lists no installed archives")
             if not loads.intersection(archives):
                 raise ValueError(f"{port}: map never loads an installed archive")
             names = {path.name for path in archives}
-            included = sorted(names.intersection(members))
+            included = sorted(names.intersection(members)
+                              | {path.name for path in archives.intersection(member_paths)})
             if included:
                 raise ValueError(f"{port}: worker extracted archive members from {', '.join(included)}")
             stems = {path.name[:-2] for path in archives}
