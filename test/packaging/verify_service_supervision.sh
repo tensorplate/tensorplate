@@ -47,9 +47,19 @@ cd "$repo_root"
 AGENT_UNIT="tensorplate-agent.service"
 OBS_UNIT="tensorplate-observability.service"
 MODE_FILE="${TP_STATE_DIR}/supervision-stub-mode"
-# RestartSec=5, so a restart cycle needs >5s; keep waits generously above it.
-RESTART_WAIT=45
 STOP_WAIT=30
+
+# Seconds to allow for one automatic restart of the unit file given: its
+# RestartSec plus systemd noticing the exit and starting the stub, with
+# several cycles' worth of margin for a loaded runner.
+restart_wait_for() {
+  local unit_file="$1" restart_sec
+  restart_sec="$(sed -n 's/^RestartSec=\([0-9][0-9]*\)s\{0,1\}$/\1/p' "$unit_file")"
+  [[ "$restart_sec" =~ ^[0-9]+$ ]] ||
+    die "RestartSec= in ${unit_file} is not a whole number of seconds"
+  printf '%s' "$((restart_sec * 4 + 20))"
+}
+RESTART_WAIT="$(restart_wait_for "packaging/debian/${AGENT_UNIT}")"
 
 cleanup() {
   systemctl stop "$AGENT_UNIT" "$OBS_UNIT" >/dev/null 2>&1 || true
@@ -85,6 +95,42 @@ await_property() {
   done
   printf '%s' "$observed"
   return 1
+}
+
+# Wait until systemd has restarted the unit: NRestarts advanced and the
+# unit is active with a main process. Right after a kill the unit still
+# reads as active with NRestarts 0 until systemd processes the exit, so
+# no single property can be sampled once. Prints the values seen last.
+await_restart() {
+  local unit="$1" deadline="$2" i restarts="" state="" pid=""
+  for ((i = 0; i < deadline; i++)); do
+    restarts="$(systemctl show -p NRestarts --value "$unit" 2>/dev/null || echo '')"
+    state="$(systemctl show -p ActiveState --value "$unit" 2>/dev/null || echo '')"
+    pid="$(systemctl show -p MainPID --value "$unit" 2>/dev/null || echo '')"
+    if [[ "$restarts" =~ ^[0-9]+$ && "$restarts" -ge 1 && "$state" == "active" &&
+          "$pid" =~ ^[0-9]+$ && "$pid" -ne 0 ]]; then
+      printf 'NRestarts=%s ActiveState=%s MainPID=%s' "$restarts" "$state" "$pid"
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'NRestarts=%s ActiveState=%s MainPID=%s' "$restarts" "$state" "$pid"
+  return 1
+}
+
+# Observe the unit coming back after its main process was killed; the
+# caller has already sent the signal.
+check_crash_recovery() {
+  local first_pid="$1" seen second_pid restarts
+  seen="$(await_restart "$AGENT_UNIT" "$RESTART_WAIT")" || {
+    journalctl -u "$AGENT_UNIT" --no-pager -n 20 >&2 || true
+    die "agent was not restarted within ${RESTART_WAIT}s of SIGKILL (saw ${seen}); Restart=on-failure must recover a hard crash"
+  }
+  restarts="${seen#NRestarts=}"; restarts="${restarts%% *}"
+  second_pid="${seen##*MainPID=}"
+  [[ "$second_pid" != "$first_pid" ]] ||
+    die "MainPID unchanged after SIGKILL; the unit was not actually restarted"
+  pass "recovered as PID ${second_pid} (NRestarts=${restarts})"
 }
 
 note "staging users, directories, and stub binaries"
@@ -136,15 +182,7 @@ pass "agent active as PID ${first_pid}, logs at ${TP_LOG_DIR}"
 
 note "2. a hard crash is recovered"
 kill -9 "$first_pid"
-# Wait for systemd to notice, back off RestartSec, and come back up.
-state="$(await_property "$AGENT_UNIT" ActiveState "$RESTART_WAIT" active)" ||
-  die "agent did not recover from SIGKILL (state=${state}); Restart=on-failure must recover a hard crash"
-second_pid="$(systemctl show -p MainPID --value "$AGENT_UNIT")"
-[[ "$second_pid" != "$first_pid" ]] ||
-  die "MainPID unchanged after SIGKILL; the unit was not actually restarted"
-restarts="$(systemctl show -p NRestarts --value "$AGENT_UNIT")"
-[[ "${restarts:-0}" -ge 1 ]] || die "NRestarts=${restarts} after a crash; expected at least 1"
-pass "recovered as PID ${second_pid} (NRestarts=${restarts})"
+check_crash_recovery "$first_pid"
 
 note "3. a crash loop is given up on, not restarted forever"
 printf 'crash\n' > "$MODE_FILE"

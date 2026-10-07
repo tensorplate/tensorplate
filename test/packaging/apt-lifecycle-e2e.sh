@@ -25,7 +25,7 @@
 
 set -Eeuo pipefail
 
-BASELINE_TAG="${TP_APT_LIFECYCLE_BASELINE_TAG:-v0.1.1}"
+BASELINE_TAG="${TP_APT_LIFECYCLE_BASELINE_TAG:-v0.2.1}"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 # `apt-get update` here refreshes EVERY configured source, not just the
@@ -192,7 +192,7 @@ apt-get remove -y -qq tensorplate >"${work}/meta-remove.log" 2>&1 ||
 # first, so the runtime packages' Pre-Depends on tensorplate-common can never be
 # satisfied from within the same invocation. Downgrade common on its own first
 # (it ships files only and has no maintainer scripts), which both satisfies the
-# Pre-Depends and leaves the 0.1.1 preflight helper in place.
+# Pre-Depends and leaves the baseline's preflight helper in place.
 runtime_set=(
   "${work}"/tensorplate-agent_"${baseline_ver}"_*.deb
   "${work}"/tensorplate-serving_"${baseline_ver}"_*.deb

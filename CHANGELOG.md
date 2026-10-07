@@ -34,6 +34,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   filter a pull request that changes nothing but records does not match.
   `test/validation/candidate_qualify_test.py --filed-records` runs the check
   alone. (V030-E06-F02-T01)
+- The systemd supervision contract test (`test/packaging/
+  verify_service_supervision.sh`) read `NRestarts` once, right after
+  killing the agent, and failed on a runner where systemd had not yet
+  processed the death; CI showed `NRestarts=0 after a crash` and passed
+  on rerun. The crash case now waits, bounded by the unit's `RestartSec`,
+  until the restart is counted and the unit is active with a new main
+  process, and a failure names the state it saw. A new core verifier,
+  `verify_supervision_restart_wait.sh`, replays that window and the
+  other ways the wait can be wrong against a fake `systemctl`.
+  (V030-E01-F01-T02)
+- The APT channel lifecycle rehearsal (`test/packaging/
+  apt-lifecycle-e2e.sh`) builds its baseline from `v0.2.1`, the published
+  predecessor, instead of `v0.1.1`. (V030-E01-F01-T02)
 
 ### Added
 
