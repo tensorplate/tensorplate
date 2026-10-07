@@ -256,8 +256,10 @@ fi
 
 # A node has no other way to tell a worker built with streaming support from
 # one built without: the built package's worker is asked, and the answer is
-# printed once here, whether or not it is installed next.
+# printed once here, whether or not it is installed next. Every failure on
+# the way changes this line only, never the build or the install.
 streaming_support="not reported (the worker predates the line)"
+extracted=""
 shopt -s nullglob
 built_serving=("${ARTIFACTS_DIR}"/tensorplate-serving_*_"${TARGET_ARCH}".deb)
 shopt -u nullglob
@@ -265,18 +267,23 @@ if ((${#built_serving[@]} != 1)); then
   streaming_support="not run (expected one tensorplate-serving package for ${TARGET_ARCH} in ${ARTIFACTS_DIR}, found ${#built_serving[@]})"
 elif ! command -v dpkg-deb >/dev/null 2>&1 || ! command -v dpkg >/dev/null 2>&1; then
   streaming_support="not run (dpkg-deb is not available here)"
-elif [[ "$(dpkg-deb -f "${built_serving[0]}" Architecture)" != "$(dpkg --print-architecture)" ]]; then
-  streaming_support="not run (the package is for ${TARGET_ARCH}; on that machine run /usr/lib/tensorplate/tensorplate-serving --version)"
-else
-  extracted="$(mktemp -d)"
-  dpkg-deb -x "${built_serving[0]}" "$extracted"
-  reported="$("${extracted}/usr/lib/tensorplate/tensorplate-serving" --version 2>/dev/null |
-    sed -n 's/^streaming-grpc //p')" || reported=""
-  rm -rf "$extracted"
+elif ! package_arch="$(dpkg-deb -f "${built_serving[0]}" Architecture 2>/dev/null)"; then
+  streaming_support="not run (dpkg-deb could not read ${built_serving[0]##*/})"
+elif [[ "$package_arch" != "$(dpkg --print-architecture)" ]]; then
+  streaming_support="not run (the package is for ${package_arch}; on that machine run /usr/lib/tensorplate/tensorplate-serving --version)"
+elif ! extracted="$(mktemp -d)" || ! dpkg-deb -x "${built_serving[0]}" "$extracted" 2>/dev/null; then
+  streaming_support="not run (could not extract ${built_serving[0]##*/})"
+elif version_text="$("${extracted}/usr/lib/tensorplate/tensorplate-serving" --version 2>/dev/null)"; then
+  reported="$(printf '%s\n' "$version_text" | sed -n 's/^streaming-grpc //p')"
   case "$reported" in
     on | off) streaming_support="$reported" ;;
+    "") ;;
+    *) streaming_support="not recognised (the worker printed 'streaming-grpc ${reported}')" ;;
   esac
+else
+  streaming_support="not run (the built worker exited $? on --version)"
 fi
+[[ -z "$extracted" ]] || rm -rf "$extracted"
 printf 'Streaming gRPC support in the built worker: %s\n' "$streaming_support"
 
 install_args=(
