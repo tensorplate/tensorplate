@@ -56,8 +56,9 @@ or a failed request refuses the run before any installation or removal;
 retry preflight once access is restored. This check also runs with
 `--preflight-only` and needs access to GitHub's API and release assets.
 
-The harness installs the baseline with its signature verified even when
-the candidate is run with `--allow-unsigned`. Signing and publication are
+Online, the harness installs the baseline with its signature verified even
+when the candidate is run with `--allow-unsigned`; the offline stage's one
+install of it under the denial is unsigned, as described there. Signing and publication are
 separate checks: the release workflow can produce a valid signature before
 it publishes a release, so a local signature bundle alone is insufficient.
 The verified public checksum digest stays bound to the baseline assets
@@ -195,6 +196,14 @@ sudo rm -f <drop-in paths> && sudo systemctl daemon-reload \
   && sudo systemctl restart tensorplate-agent tensorplate-observability
 ```
 
+When a package sub-step of the offline stage fails after its removal and
+before the baseline is installed, a unit is not installed. The cleanup
+then removes the drop-ins, reloads, checks that each is gone, restarts and
+reads back nothing, files no `offline-restored.json`, and names the units
+in one `not installed:` line; a service that is still installed keeps the
+denial until it is restarted. The host is between releases at that point:
+rerun the harness from the start, which purges what is left.
+
 Uncatchable termination such as `SIGKILL` cannot run cleanup; a reboot
 clears `/run` in that case. A drop-in left behind that way is refused by
 the next run's preflight, before anything is installed, with its path
@@ -318,6 +327,73 @@ per-call `offline-cli-probe-<call>.json` for `status`, `doctor`,
 - the restore must have read back one removal per denied unit;
 - a persistent drop-in found on either side refuses the certificate.
 
+**Restart, rollback and upgrade under the denial.** Before the drop-ins
+are removed the stage runs up to three sub-steps. Each files into a
+directory of its own under the evidence directory, with the file names
+above, so nothing `offline-runtime.json` reads is replaced; the two
+package listings, `packages-offline-after-rollback.txt` and
+`packages-offline-after-upgrade.txt`, are in the evidence directory
+itself. The certificate does not cover the sub-steps. In their
+directories the `*-check.json` files, the classifications,
+`offline-denial.json`, `offline-identity.json` and
+`offline-record-before-start.json` are written only by a check that
+passed; the probes, the journal capture and the CLI output are filed as
+taken, whatever they say. After each sub-step's start, the
+services it replaced must read back as new instances, both must still
+carry the denial, each service's probe is taken again inside its control group and
+classified against the control taken before the denial, and the agent's
+`platform identity:` line must again name the record.
+
+- `offline-restart/`, always. The agent is restarted with the denial in
+  place; the observability service is left running, still denied.
+  `status` and `infer`, each in its own denied unit, must then show the
+  deployment made under the denial being served. The restart ends every
+  process in the agent's unit, so the worker that answers is one the
+  restarted agent started while denied. Only the agent, because each
+  unit allows five starts in 300 seconds and nothing resets the
+  observability unit's count before this stage: with this restart it
+  would be at its limit when the drop-ins are removed.
+- `offline-rollback/`, with `--baseline-assets-dir`. The documented
+  rollback, with `apt-get remove` and the baseline's `install.sh` each in
+  a denied transient unit that probed itself first
+  (`offline-cli-probe-remove.json`, `offline-cli-probe-install.json`).
+  After the removal and before the installer, which is what starts the
+  baseline agent, the machine-type record is read once: it must be the
+  bytes digested before state was set aside, and a JSON object whose
+  `schema_version` is 2, the layout the baseline reads
+  (`offline-record-before-start.json`). The baseline agent must then
+  start on it, the record and the instance binding must keep their bytes,
+  the set-aside state must be preserved, and a fresh deploy, `status` and
+  `infer` must answer on the baseline, each denied. The deploy uses the
+  smoke deployment's id, not the one the candidate was serving, so the
+  status that follows names a deployment only the baseline can have made.
+- `offline-upgrade/`, after it. The candidate's `install.sh` over that
+  baseline, in a denied unit. The record and the binding must keep their
+  bytes, the candidate agent must start on the record, doctor must
+  resolve the row from the recorded machine type, and the deployment made
+  on the denied baseline must be served without being deployed again.
+
+An agent that starts under the denial has no metadata answer to record,
+so here an unchanged digest shows the file survived, which the online
+stages cannot show.
+
+An installer under the denial cannot download the signature verifier or
+reach its trust root, so these two installs pass `--allow-unsigned`. Each
+set stays pinned to the `SHA256SUMS` digest taken before the run started,
+the installer still checks every package against it, and an online
+install of the same set in the same run verifies its signature: the
+candidate's in `install`, unless the run itself was given
+`--allow-unsigned`, and the baseline's in `upgrade`. A run that passes
+has verified both, but the baseline's only after its denied install.
+
+What the two package sub-steps do not show: the order is rollback, then
+upgrade, so the upgrade under the denial starts from a baseline that is
+itself running on the restored record, and the candidate finds the
+instance binding its own online start wrote. A candidate meeting a record
+the baseline wrote, with no binding, under the denial is not exercised.
+Both installers also run their own doctor inside the denied unit and
+refuse a critical finding; the baseline's doctor output is not filed.
+
 **Identity, and what it costs.** `tensorplate-agent` writes a
 machine-type record to `/var/lib/tensorplate/state/machine-type.json` on
 every start where the GCE metadata service answered. The record is bound
@@ -399,14 +475,15 @@ record for that boot and still fails detection, so the procedure above is
 unchanged: run the offline stage on a host that has been online since its
 last boot.
 
-**install and upgrade stay online.** Both run the shipped installer the
-way an operator does, and denying them would validate a procedure nobody
-follows. Their doctor runs must show live detection: a `host_os` without
-`(from GCE metadata)` fails the stage, since a recorded shape there would
-mean the metadata service did not answer a host that was meant to be
-online. The stubbed-appliance tests also check the other direction: no
-installer runs with a denial in place, and no CLI call outside the
-offline stage runs denied or in a transient unit.
+**The install, upgrade and rollback stages stay online.** They run the
+shipped installer the way an operator with a network does. Their doctor
+runs must show live detection: a `host_os` without `(from GCE metadata)`
+fails the stage, since a recorded shape there would mean the metadata
+service did not answer a host that was meant to be online. The
+stubbed-appliance tests also check the other direction: the only
+installers run with a denial in place are the offline stage's two, each
+in a denied unit, and no CLI call outside the offline stage runs denied
+or in a transient unit.
 
 **offline runs before upgrade, and has to.** Upgrade's clean baseline
 install deletes `/var/lib/tensorplate`, taking the candidate's
@@ -418,8 +495,10 @@ The report still reports `incomplete` without `--baseline-assets-dir`,
 because upgrade and rollback are skipped. With a baseline, all eight
 canonical stages run.
 
-**upgrade and rollback** run after offline, so the six stages above are
-always about a clean candidate install. A failed upgrade ends the run
+**upgrade and rollback** run after offline. The five stages before
+offline, and offline up to its sub-steps, are about a clean candidate
+install; with a baseline the offline stage then leaves a candidate that
+was installed over the baseline, which `upgrade` purges. A failed upgrade ends the run
 there, and the report has no rollback record.
 
 **upgrade** purges the candidate, installs the baseline through the

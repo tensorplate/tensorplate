@@ -467,6 +467,15 @@ def dpkg(args):
     return 0 if results[op] else 1
 
 mode = os.environ.get("TP_FAKE_MODE", "ok")
+# An upgrade or rollback failure mode belongs to the online stage it names.
+# A package operation run in a denied unit answers only to the `offline-`
+# spelling of one, so each mode fails one stage.
+DENIED = os.environ.get("TP_FAKE_DENIED") == "1"
+if DENIED:
+    if mode.startswith(("offline-upgrade-", "offline-rollback-")):
+        mode = mode[len("offline-"):]
+    elif mode.startswith(("upgrade-", "rollback-", "baseline-", "candidate-set-")):
+        mode = "ok"
 
 def db_path():
     return pathlib.Path(os.environ["TP_FAKE_DB"])
@@ -571,19 +580,22 @@ def install(db, directory):
     # Only the candidate's installer lays out the identity directory, and
     # only its agent binds the record to the instance there; the baseline
     # never touches it. The modes below break each of those in turn.
+    # An agent started under the denial has no metadata answer to record
+    # or to bind, so a denied install writes neither file.
     record = varlib / "state" / "machine-type.json"
-    if mode != "offline-no-machine-type-record":
+    if mode != "offline-no-machine-type-record" and not DENIED:
         record.write_text(FAKE_MACHINE_TYPE_RECORD)
     if (mode == "upgrade-rewrites-record" and phase == "upgraded") \
             or (mode == "rollback-baseline-rewrites-record" and phase == "rolled-back"):
         record.write_text('{"schema_version":3,"machine_type":"g2-standard-8"}\n')
     binding = varlib / "identity" / "instance-binding.json"
-    if phase in ("candidate", "upgraded"):
+    if phase in ("candidate", "upgraded") and not DENIED:
         binding.parent.mkdir(parents=True, exist_ok=True)
         if not (mode == "upgrade-no-binding" and phase == "upgraded"):
             binding.write_text(FAKE_INSTANCE_BINDING)
-    if mode == "rollback-touches-binding" and phase == "rolled-back":
-        binding.write_text('{"fixture": "rewritten by the baseline"}\n')
+    if (mode == "rollback-touches-binding" and phase == "rolled-back") \
+            or (mode == "upgrade-touches-binding" and phase == "upgraded"):
+        binding.write_text('{"fixture": "rewritten by the install"}\n')
     # A real run has deleted /var/lib/tensorplate by now, so this plants
     # the directory where only the rollback's own refusal can catch it.
     if mode == "rollback-state-aside-exists" and phase == "upgraded":
@@ -703,6 +715,11 @@ def database(args):
         return forget(db, args[1:], keep_conffiles=False)
     if command == "remove":
         names = args[1:]
+        record = pathlib.Path(os.environ["TP_FAKE_VARLIB"]) / "state" / "machine-type.json"
+        if mode in ("rollback-remove-drops-record", "rollback-remove-drops-record-drop-in-stays"):
+            record.unlink(missing_ok=True)
+        if mode == "rollback-remove-rewrites-record":
+            record.write_text('{"schema_version":3,"machine_type":"g2-standard-8"}\n')
         if mode == "rollback-remove-leaves-backend":
             names = [n for n in names if n != "tensorplate-backend-python-pytorch"]
         return forget(db, names, keep_conffiles=mode != "rollback-remove-purges")
@@ -1303,6 +1320,10 @@ if IN_UNIT:
     # restarted, and sending freely.
     if MODE == "offline-service-filter-not-attached" and UNIT == "tensorplate-observability":
         DENIED = False
+    # The agent restarted while denied and came back with no filter.
+    if MODE == "offline-restart-filter-not-attached" and UNIT == "tensorplate-agent" \
+            and os.path.exists(os.path.join(os.path.dirname(running), "restarted-while-denied")):
+        DENIED = False
     ALLOW = expand(tokens)
 else:
     UNIT = ""
@@ -1429,9 +1450,20 @@ printf '%s\n' "$*" >>"${TP_FAKE_SUDO_LOG}"
 # Injectable failure, so a privileged step that the harness forgot to
 # check can be caught here rather than on a VM.
 if [ -n "${TP_FAKE_SUDO_FAIL:-}" ]; then
-  case "$*" in
-    *"${TP_FAKE_SUDO_FAIL}"*) exit 9 ;;
-  esac
+  # A rollback or upgrade command is failed in its online stage: the same
+  # command run with the agent's drop-in installed is left to succeed.
+  spared=0
+  if [ -e "${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-agent.service.d/10-tensorplate-validation-offline.conf" ]; then
+    case "$*" in
+      *"/install.sh --local-artifacts "*|*"systemctl stop "*|*"apt-get remove"*) spared=1 ;;
+      "sha256sum /var/lib/tensorplate/"*|"mv -T "*|"cp -p /var/lib/tensorplate/state.bak/"*) spared=1 ;;
+    esac
+  fi
+  if [ "$spared" -eq 0 ]; then
+    case "$*" in
+      *"${TP_FAKE_SUDO_FAIL}"*) exit 9 ;;
+    esac
+  fi
 fi
 # The operator's conffile edit, applied to the fixture copy and nowhere
 # else.
@@ -1511,10 +1543,25 @@ case "$*" in
     done
     ;;
 esac
+# With the agent's drop-in installed, only the `offline-` spelling of a
+# rollback failure mode applies.
+rollback_mode="${TP_FAKE_MODE:-ok}"
+if [ -e "$(offline_unit_conf tensorplate-agent)" ]; then
+  case "$rollback_mode" in
+    offline-rollback-*) rollback_mode="${rollback_mode#offline-}" ;;
+    rollback-*) rollback_mode=ok ;;
+  esac
+fi
+# An installer starts both services itself, as `enable --now` does.
+started=""
 case "$*" in
-  *"systemctl enable --now "*|*"systemctl restart "*|*"systemctl start "*)
+  *"systemctl enable --now "*|*"systemctl restart "*|*"systemctl start "*) started="$*" ;;
+  "bash "*"/install.sh --local-artifacts "*) started="tensorplate-agent tensorplate-observability" ;;
+esac
+case "$started" in
+  ?*)
     mkdir -p "${TP_OFFLINE_UNIT_ROOT}/generation" || exit 9
-    for word in "$@"; do
+    for word in $started; do
       case "$word" in
         tensorplate-agent|tensorplate-observability) ;;
         *) continue ;;
@@ -1524,7 +1571,14 @@ case "$*" in
       generation=$(sed -n 1p "$record" 2>/dev/null)
       state=$(sed -n 2p "$record" 2>/dev/null)
       [ -n "$generation" ] || generation=0
+      # A start of an agent that was already denied: the restart sub-step
+      # or a later one, never the restart that applied the denial.
       skip=0
+      if [ "$word:$state" = tensorplate-agent:denied ] && [ -f "$conf" ]; then
+        : >"${TP_OFFLINE_UNIT_ROOT}/generation/restarted-while-denied" || exit 9
+        # Reported as restarted, and still the instance that was running.
+        [ "${TP_FAKE_MODE:-ok}" = offline-restart-ignored ] && skip=1
+      fi
       case "${TP_FAKE_MODE:-ok}" in
         # A restart systemd reported and that did not replace the running
         # instance: the loaded policy still reads back as denied, and the
@@ -1564,8 +1618,8 @@ case "$*" in
     for file in "${TP_OFFLINE_UNIT_ROOT}"/generation/*.running; do
       if [ -e "$file" ]; then denied_units=$((denied_units + 1)); fi
     done
-    printf 'install dropins=%s denied_units=%s\n' "$dropins" "$denied_units" \
-      >>"${TP_FAKE_ONLINE_LOG}"
+    printf 'install dropins=%s denied_units=%s denied=%s\n' "$dropins" "$denied_units" \
+      "${TP_FAKE_DENIED:-unset}" >>"${TP_FAKE_ONLINE_LOG}"
     ;;
 esac
 # The agent writes its boot-bound machine-type record on every start where
@@ -1598,10 +1652,10 @@ case "$*" in
     # first read this mode breaks is the manifest's. A stop from
     # clear_install is followed by the wipe of /var/lib/tensorplate, which
     # takes the marker with it; only the rollback's stop leaves one.
-    if [ "${TP_FAKE_MODE:-ok}" = rollback-digest-not-hex ] && [ -d "${TP_FAKE_VARLIB}" ]; then
+    if [ "$rollback_mode" = rollback-digest-not-hex ] && [ -d "${TP_FAKE_VARLIB}" ]; then
       : >"${TP_FAKE_VARLIB}/.fixture-services-stopped"
     fi
-    if [ "${TP_FAKE_MODE:-ok}" = rollback-state-file-missing ]; then
+    if [ "$rollback_mode" = rollback-state-file-missing ]; then
       rm -f "${TP_FAKE_VARLIB}/state/state.json"
     fi
     # A durable-state file whose name holds a space, present in the
@@ -1611,7 +1665,7 @@ case "$*" in
     # wipe /var/lib/tensorplate straight after, so only the rollback's
     # stop shows. The Production rows hold no such name; this is about
     # which file the operator is told to go and look at when one appears.
-    if [ "${TP_FAKE_MODE:-ok}" = rollback-empties-spaced-file ]; then
+    if [ "$rollback_mode" = rollback-empties-spaced-file ]; then
       printf '{"fixture": "a name with a space in it"}\n' \
         >"${TP_FAKE_VARLIB}/state/two words.json"
     fi
@@ -1666,6 +1720,9 @@ case "$*" in
     [ -f "${TP_FAKE_VARLIB}/state/machine-type.json" ]
     exit
     ;;
+  "cat /var/lib/tensorplate/state/machine-type.json")
+    exec cat "${TP_FAKE_VARLIB}/state/machine-type.json"
+    ;;
   "test -f /var/lib/tensorplate/identity/instance-binding.json")
     [ -f "${TP_FAKE_VARLIB}/identity/instance-binding.json" ]
     exit
@@ -1679,7 +1736,7 @@ case "$*" in
     ;;
   "cp -p /var/lib/tensorplate/state.bak/machine-type.json /var/lib/tensorplate/state/machine-type.json")
     # A copy that lands different bytes under the right name.
-    if [ "${TP_FAKE_MODE:-ok}" = rollback-restore-garbles-record ]; then
+    if [ "$rollback_mode" = rollback-restore-garbles-record ]; then
       printf '{"schema_version":2}\n' >"${TP_FAKE_VARLIB}/state/machine-type.json"
       exit
     fi
@@ -1742,7 +1799,7 @@ case "$*" in
     ;;
   "rm -f "*"/10-tensorplate-validation-offline.conf")
     case "${TP_FAKE_MODE:-ok}" in
-      offline-drop-in-not-removed) exit 0 ;;
+      offline-drop-in-not-removed|offline-rollback-remove-drops-record-drop-in-stays) exit 0 ;;
     esac
     rm -f "$3"
     exit
@@ -1824,7 +1881,7 @@ print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$target")" |
     if [ -e "$target_dir" ]; then
       rmdir "$target_dir" 2>/dev/null || { echo "mv: cannot overwrite '$target_dir': Directory not empty" >&2; exit 1; }
     fi
-    case "${TP_FAKE_MODE:-ok}" in
+    case "$rollback_mode" in
       rollback-keeps-state) cp -R "$source_dir" "$target_dir" ;;
       *) mv "$source_dir" "$target_dir" ;;
     esac
@@ -1967,6 +2024,14 @@ case "$1" in
           printf 'IPAddressDeny=\nIPAddressAllow=\n'
         fi
         exit 0
+        ;;
+      # A unit whose package was removed is not one systemd has loaded.
+      *LoadState*)
+        if "${TP_FAKE_DPKG_DB}" query | grep -q '^tensorplate-agent config-files '; then
+          printf 'not-found\n'
+        else
+          printf 'loaded\n'
+        fi
         ;;
       *ActiveState*)
         # A looping unit reads as failed between attempts, which is why
@@ -2186,6 +2251,16 @@ if [ "$unit" = tensorplate-agent.service ] && [ "$agent_state" = denied ]; then
       identity='machine_type=none source=none record=not_applicable' ;;
     offline-identity-twice) repeat=2 ;;
   esac
+  # A live answer at one later start under the denial, by what is
+  # installed then.
+  again=no
+  [ -f "${TP_OFFLINE_UNIT_ROOT}/generation/restarted-while-denied" ] && again=yes
+  case "${TP_FAKE_MODE:-ok}:$("${TP_FAKE_DPKG_DB}" phase):${again}" in
+    offline-restart-identity-live-metadata:candidate:yes|\
+    offline-rollback-identity-live-metadata:rolled-back:*|\
+    offline-upgrade-identity-live-metadata:upgraded:*)
+      identity='machine_type=g2-standard-8 source=gce_metadata record=written' ;;
+  esac
   while [ "$repeat" -gt 0 ]; do
     printf '{%s,%s,"_SYSTEMD_INVOCATION_ID":"%s","_SYSTEMD_UNIT":"%s","_PID":"4242","PRIORITY":"6","SYSLOG_IDENTIFIER":"%s","MESSAGE":"platform identity: %s","__REALTIME_TIMESTAMP":"1789300000000001"}\n' \
       "$host_fields" "$fields" "$invocation" "$unit" "${unit%.service}" "$identity"
@@ -2201,6 +2276,14 @@ cat >"${appliance}/bin/tensorplate" <<'STUB'
 #!/bin/sh
 # A stubbed appliance. TP_FAKE_MODE selects which way it misbehaves.
 mode="${TP_FAKE_MODE:-ok}"
+# As in the package database: a denied call answers only to the
+# `offline-` spelling of an upgrade or rollback failure.
+if [ "${TP_FAKE_DENIED:-0}" = 1 ]; then
+  case "$mode" in
+    offline-upgrade-*|offline-rollback-*) mode="${mode#offline-}" ;;
+    upgrade-*|rollback-*|baseline-*) mode=ok ;;
+  esac
+fi
 phase=initial
 [ -f "${TP_FAKE_RESTART_MARKER}" ] && phase=restarted
 # Which install the appliance is on: candidate, baseline, upgraded or
@@ -2288,6 +2371,8 @@ JSON
     # Doctor exits 10 when a finding fails. Only the baseline mode says
     # so, so the install-stage cases keep reaching the harness's own check.
     case "$mode:$failing" in baseline-doctor-failing:1) exit 10 ;; esac
+    # A clean document from a doctor that exits as if a finding had failed.
+    case "$mode:$installed" in upgrade-doctor-exits-failing:upgraded) exit 10 ;; esac
     ;;
   deploy)
     # The deployment is durable state: it is what an upgraded agent
@@ -2310,7 +2395,8 @@ JSON
     fi
     # An agent with no durable deployment reports none -- unless it kept
     # the previous one from state it should not have loaded.
-    if [ ! -f "$state_file" ]; then
+    if [ ! -f "$state_file" ] || { [ "$mode:${TP_FAKE_DENIED:-0}" = offline-restart-status-no-deployment:1 ] \
+         && [ -f "${TP_OFFLINE_UNIT_ROOT}/generation/restarted-while-denied" ]; }; then
       previous=null
       if [ "$mode:$installed" = rollback-keeps-previous:rolled-back ]; then
         previous="{\"deployment_id\":\"${TP_FAKE_DEPLOYMENT_ID}\",\"backend\":\"python_pytorch\"}"
@@ -2610,7 +2696,8 @@ for line in cli:
 denied = [c for c in calls if c[1] == "1" and c[2] > 0]
 leaked = [c for c in calls if c[2] > 0 and c[1] != "1"]
 transient = [c for c in calls if c[2] == 0 and c[1] != "unset"]
-under_denial = [line for line in online if line != "install dropins=0 denied_units=0"]
+under_denial = [line for line in online
+                if line != "install dropins=0 denied_units=0 denied=unset"]
 for name, items in (("outside", outside), ("leaked", leaked), ("transient", transient),
                     ("under_denial", under_denial)):
     for item in items:
@@ -2685,21 +2772,22 @@ print(" ".join(json.load(open(sys.argv[1]))["mechanism"]["allow"]))' \
     "${ok_evidence}/offline-runtime.json")"
 # status twice -- once for the deployment the agent re-warmed while
 # denied, once for the one this stage deployed -- plus doctor, deploy and
-# infer. Every one of them inside its own denied transient unit.
-check "  every CLI call ran in a denied transient unit" "5" \
+# infer, then status and infer again after the restart under the denial.
+# Every one of them inside its own denied transient unit.
+check "  every CLI call ran in a denied transient unit" "7" \
   "$(grep -c 'systemd-run .*--property=IPAddressDeny=any.*-- tensorplate ' "${appliance}/sudo.log")"
 check "  and none of them ran in an undenied one" "0" \
   "$(grep 'systemd-run .*-- tensorplate ' "${appliance}/sudo.log" \
      | grep -vc 'IPAddressDeny=any' || true)"
 for command in status doctor deploy infer; do
   check "  ${command} ran denied" yes \
-    "$(grep 'systemd-run .*--property=IPAddressDeny=any' "${appliance}/sudo.log" \
-       | grep -q -- "-- tensorplate ${command} " && echo yes || echo no)"
+    "$(grep -q -- "^systemd-run .*--property=IPAddressDeny=any.* -- tensorplate ${command} " \
+         "${appliance}/sudo.log" && echo yes || echo no)"
 done
 # Each through the module's run-denied, which probes that call's own unit
 # and only then execs the call, in the stage's order.
 check "  each call ran behind a probe of its own unit" \
-  "status doctor deploy status-after-deploy infer" \
+  "status doctor deploy status-after-deploy infer status infer" \
   "$(sed -n 's/^systemd-run .*--property=IPAddressDeny=any.* -- python3 .*linux_offline_runtime\.py run-denied --call \([a-z-]*\) .* -- tensorplate .*/\1/p' \
        "${appliance}/sudo.log" | tr '\n' ' ' | sed 's/ $//')"
 check "  and the certificate classifies each unit's probe against the transient control" \
@@ -2756,7 +2844,7 @@ print(" ".join(sorted(json.load(open(sys.argv[1]))["units_probed_in_their_own_co
 # in a transient unit at all; the installer ran with no denial in place;
 # and no offline-only privileged command ran outside the stage.
 check "  the denial reached exactly the offline stage" \
-  "window=yes outside=0 denied=5 leaked=0 transient=0 installs=1 installs_denied=0" \
+  "window=yes outside=0 denied=7 leaked=0 transient=0 installs=1 installs_denied=0" \
   "$(offline_scope)"
 check "  the agent socket and the serving port stay reachable under the denial" "ok ok" \
   "$(python3 -c 'import json,sys
@@ -3644,7 +3732,10 @@ sudo_after() {
     echo missing
     return 0
   fi
-  tail -n "+$(($1 + 1))" "${appliance}/sudo.log" | grep -qF -- "$2" && echo yes || echo no
+  # One process: a reader that exits at its first match would fail the
+  # pipe that feeds it under pipefail.
+  awk -v after="$1" -v text="$2" 'NR > after && index($0, text) { found = 1; exit }
+    END { exit !found }' "${appliance}/sudo.log" && echo yes || echo no
 }
 sha256_of() {
   python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"
@@ -3660,13 +3751,12 @@ for stage in install deploy-smoke status-logs restart crash-loop upgrade rollbac
   check "  ${stage} is recorded as a pass" pass "$(stage_status "$report" "$stage")"
 done
 check "  offline still passes with a baseline supplied" pass "$(stage_status "$report" offline)"
-# Install and upgrade stay online, rollback too: every installer run with
-# no denial in place, no CLI call outside the offline stage denied or made
-# in a transient unit, and no offline-only privileged command after the
-# stage -- the old never-mutates guard, kept for everything the offline
-# stage is not.
+# The install, upgrade and rollback stages stay online: the two installer
+# runs with a denial in place are the offline stage's own, no CLI call
+# outside that stage is denied or made in a transient unit, and no
+# offline-only privileged command follows it.
 check "  and the denial reached exactly the offline stage, not install, upgrade or rollback" \
-  "window=yes outside=0 denied=5 leaked=0 transient=0 installs=4 installs_denied=0" \
+  "window=yes outside=0 denied=13 leaked=0 transient=0 installs=6 installs_denied=2" \
   "$(offline_scope)"
 # The install stage's listing is the dpkg-query shape -- `<name> <status>
 # <version>` and nothing else -- which is the reason it is that query:
@@ -3747,23 +3837,25 @@ print(f"{side(path['from'])} -> {side(path['to'])}")
 PY
 )"
 # Which agent version answered each deploy and each inference, in order:
-# deploy-smoke, restart and crash-loop on the candidate; the offline
-# stage's own fresh deploy and inference, still on the candidate and made
-# with the network denied; a deploy on the baseline; the baseline's
-# deployment answering on the upgraded candidate without a deploy; and a
-# fresh deploy on the rolled-back baseline.
-check "  deploys ran on candidate, candidate under denial, baseline, rolled-back baseline" \
-  "0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.1-1" \
+# the candidate through the offline stage's restart; the baseline and then
+# the candidate again under the denial; the upgrade stage's baseline and
+# candidate, which deploys nothing; the rolled-back baseline.
+check "  deploys ran on candidate, candidate under denial, denied baseline, baseline, rolled-back baseline" \
+  "0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.1-1 0.2.1~rc.1-1" \
   "$(one_line "${appliance}/deploy-versions.log")"
 check "  inferences ran on each install in turn" \
-  "0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.2-1 0.2.1~rc.1-1" \
+  "0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.2-1 0.2.1~rc.1-1 0.2.1~rc.2-1 0.2.1~rc.1-1" \
   "$(one_line "${appliance}/infer-versions.log")"
+# The offline stage rolls back and upgrades under the denial first, so the
+# upgrade and rollback stages' own commands are found from where it
+# removes its last drop-in.
 # Empty when the line is missing, which every check below treats as a
 # failure; `|| true` keeps a missing line from ending the suite early.
-first_baseline_install="$(sudo_line 'set-rc1/install.sh --local-artifacts' || true)"
+denial_lifted="$(last_sudo_line '/10-tensorplate-validation-offline.conf' || true)"
+first_baseline_install="$(sudo_after_line "$denial_lifted" 'set-rc1/install.sh --local-artifacts' || true)"
 last_baseline_install="$(last_sudo_line 'set-rc1/install.sh --local-artifacts' || true)"
 last_candidate_install="$(last_sudo_line 'assets-rc2/install.sh --local-artifacts' || true)"
-remove_line="$(sudo_line 'apt-get remove' || true)"
+remove_line="$(sudo_after_line "$denial_lifted" 'apt-get remove' || true)"
 # What the upgrade leaves in the durable state directory for the rollback
 # to carry across: the agent's primary state and the recovery copy it
 # keeps beside it, both naming the deployment the baseline made, and the
@@ -3785,9 +3877,9 @@ check "  and never purges after the last candidate install" no \
   "$(sudo_after "$last_candidate_install" 'apt-get purge')"
 # The documented rollback puts the machine-type record back after setting
 # state aside and before the baseline's installer starts its agent.
-restore_record_line="$(sudo_line 'cp -p /var/lib/tensorplate/state.bak/machine-type.json' || true)"
+restore_record_line="$(sudo_after_line "$denial_lifted" 'cp -p /var/lib/tensorplate/state.bak/machine-type.json' || true)"
 check "  the rollback restores the machine-type record after the set-aside and before the baseline install" yes \
-  "$(mv_line="$(sudo_line 'mv -T /var/lib/tensorplate/state ' || true)"
+  "$(mv_line="$(sudo_after_line "$denial_lifted" 'mv -T /var/lib/tensorplate/state ' || true)"
      [[ -n "$restore_record_line" && -n "$mv_line" && -n "$last_baseline_install" &&
         "$restore_record_line" -gt "$mv_line" && "$restore_record_line" -lt "$last_baseline_install" ]] &&
        echo yes || echo no)"
@@ -3897,10 +3989,14 @@ check "  though it was installed throughout" yes \
 evidence="${td}/stages-upgrade-unsigned"
 check "a run with a baseline and --allow-unsigned completes" 0 \
   "$(run_upgrade_stages ok "$evidence" "" set-rc1 --allow-unsigned)"
-check "  the baseline is installed twice, never unsigned" "2 0" \
-  "$(grep -cF 'set-rc1/install.sh' "${appliance}/sudo.log") $(grep -F 'set-rc1/install.sh' "${appliance}/sudo.log" | grep -cF -- '--allow-unsigned')"
-check "  the candidate is installed twice, unsigned each time" "2 2" \
-  "$(grep -cF 'assets-rc2/install.sh' "${appliance}/sudo.log") $(grep -F 'assets-rc2/install.sh' "${appliance}/sudo.log" | grep -cF -- '--allow-unsigned')"
+# Installer runs, not the transient units two of them are run through. The
+# offline stage's own install of each set is unsigned whatever the run was
+# given; the flag must not reach the baseline's two online installs.
+denial_lifted="$(last_sudo_line '/10-tensorplate-validation-offline.conf' || true)"
+check "  the baseline is installed three times, unsigned only under the denial" "3 1 0" \
+  "$(grep -c '^bash .*set-rc1/install\.sh ' "${appliance}/sudo.log") $(grep '^bash .*set-rc1/install\.sh ' "${appliance}/sudo.log" | grep -cF -- '--allow-unsigned') $(tail -n "+$((${denial_lifted:-0} + 1))" "${appliance}/sudo.log" | grep '^bash .*set-rc1/install\.sh ' | grep -cF -- '--allow-unsigned')"
+check "  the candidate is installed three times, unsigned each time" "3 3" \
+  "$(grep -c '^bash .*assets-rc2/install\.sh ' "${appliance}/sudo.log") $(grep '^bash .*assets-rc2/install\.sh ' "${appliance}/sudo.log" | grep -cF -- '--allow-unsigned')"
 check "  and upgrade-path.json says which side was unsigned" "False True" \
   "$(python3 -c 'import json,sys;p=json.load(open(sys.argv[1]));print(p["from"]["allow_unsigned"],p["to"]["allow_unsigned"])' \
     "${evidence}/upgrade-path.json")"
@@ -4052,7 +4148,7 @@ for case in \
       ;;
     rollback-remove-leaves-backend)
       check "  and the baseline was never installed over the leftover" no \
-        "$(sudo_after "$(sudo_line 'apt-get remove')" 'set-rc1/install.sh')"
+        "$(sudo_after "$(last_sudo_line 'apt-get remove')" 'set-rc1/install.sh')"
       ;;
     rollback-state-not-preserved)
       # The set-aside directory is not there at all: the check names what
@@ -4224,6 +4320,240 @@ done
 
 check "no destructive command reached the host" "yes" \
   "$([[ -f "${appliance}/sudo.log" ]] && echo yes || echo no)"
+
+# --- restart, rollback and upgrade under the denial: sub-steps of the
+# offline stage, each filing into a directory of its own.
+sub_step_field() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get(sys.argv[2], "no such field"))
+except OSError:
+    print("no document")
+PY
+}
+sub_step_documents() {
+  local directory="$1" name present=0
+  shift
+  for name in "$@"; do
+    [[ -s "${directory}/${name}" ]] && present=$((present + 1))
+  done
+  printf '%s of %s' "$present" "$#"
+}
+# The most starts either unit is asked for between two resets of its start
+# counter, against the packaged StartLimitBurst. `enable --now` is counted
+# although it starts nothing on a running unit, which leaves a start spare.
+starts_within_limit() {
+  python3 - "${appliance}/sudo.log" "${repo_root}/packaging/debian" <<'PY'
+import re, sys
+
+sudo = open(sys.argv[1], encoding="utf-8").read().splitlines()
+units = ("tensorplate-agent", "tensorplate-observability")
+burst = {unit: int(re.search(r"^StartLimitBurst=(\d+)$",
+                             open(f"{sys.argv[2]}/{unit}.service", encoding="utf-8").read(),
+                             re.M).group(1)) for unit in units}
+count, worst = dict.fromkeys(units, 0), dict.fromkeys(units, 0)
+for line in sudo:
+    named = [unit for unit in units if unit in line.split()]
+    if re.search(r"(^| )apt-get (purge|remove) ", line) or line.startswith("systemctl reset-failed "):
+        for unit in named:
+            count[unit] = 0
+        continue
+    if line.startswith("bash ") and "/install.sh " in line:
+        named = list(units)
+    elif not re.match(r"systemctl (restart|start|enable --now) ", line):
+        continue
+    for unit in named:
+        count[unit] += 1
+        worst[unit] = max(worst[unit], count[unit])
+over = [f"{unit} {worst[unit]} of {burst[unit]}" for unit in units if worst[unit] > burst[unit]]
+print("; ".join(over) or "ok")
+PY
+}
+both_units="['tensorplate-agent.service', 'tensorplate-observability.service']"
+served=(offline-denial.json offline-unit-classification-tensorplate-agent.service.json
+        offline-unit-classification-tensorplate-observability.service.json offline-identity.json
+        offline-cli-probe-status.json offline-status-check.json
+        offline-cli-probe-infer.json offline-infer-check.json)
+
+evidence="${td}/stages-offline-restart"
+check "a run without a baseline restarts under the denial and completes" 0 \
+  "$(run_stages ok "$evidence")"
+check "  the agent alone restarts a second time before the drop-ins are removed" "1 1" \
+  "$(python3 - "${appliance}/sudo.log" <<'PY'
+import re, sys
+
+sudo = open(sys.argv[1], encoding="utf-8").read().splitlines()
+conf = r"\S*/10-tensorplate-validation-offline\.conf"
+first = next(i for i, line in enumerate(sudo) if re.fullmatch(r"install -D -m 0644 \S+ " + conf, line))
+last = next(i for i, line in enumerate(sudo) if re.fullmatch("rm -f " + conf, line))
+print(sudo[first:last].count("systemctl restart tensorplate-agent tensorplate-observability"),
+      sudo[first:last].count("systemctl restart tensorplate-agent"))
+PY
+)"
+check "  the restart sub-step files every document of a served start" \
+  "${#served[@]} of ${#served[@]}" \
+  "$(sub_step_documents "${evidence}/offline-restart" "${served[@]}")"
+check "  the restarted agent reads back as replaced" "['tensorplate-agent.service']" \
+  "$(sub_step_field "${evidence}/offline-restart/offline-denial.json" units_restarted)"
+check "  no unit is started more often between resets than its unit file allows" ok \
+  "$(starts_within_limit)"
+check "  the restarted agent took its machine type from the record" recorded_gce_metadata \
+  "$(sub_step_field "${evidence}/offline-restart/offline-identity.json" machine_type_source)"
+check "  it serves the deployment made under the denial" "${deployment_id}-offline" \
+  "$(sub_step_field "${evidence}/offline-restart/offline-status-check.json" deployment_id)"
+check "  and the offline stage passes with its certificate filed" "pass yes" \
+  "$(printf '%s %s' "$(stage_status "${evidence}/lifecycle-report.json" offline)" \
+     "$([[ -s "${evidence}/offline-runtime.json" ]] && echo yes || echo no)")"
+check "  without a baseline nothing is rolled back or upgraded under the denial" "no no" \
+  "$(printf '%s %s' "$([[ -e "${evidence}/offline-rollback" ]] && echo yes || echo no)" \
+     "$([[ -e "${evidence}/offline-upgrade" ]] && echo yes || echo no)")"
+
+evidence="${td}/stages-offline-lifecycle"
+check "a run with a baseline rolls back and upgrades under the denial and completes" 0 \
+  "$(run_upgrade_stages ok "$evidence" "" set-rc1)"
+# The installer is what starts the baseline agent, so a read that follows
+# the removal and precedes the installer is a read before that agent runs.
+check "  the record is read once, after the denied removal and before the baseline's installer" \
+  "1 yes" \
+  "$(python3 - "${appliance}/sudo.log" <<'PY'
+import sys
+
+sudo = open(sys.argv[1], encoding="utf-8").read().splitlines()
+reads = [i for i, line in enumerate(sudo)
+         if line == "cat /var/lib/tensorplate/state/machine-type.json"]
+removed = next(i for i, line in enumerate(sudo) if " apt-get remove -y " in line)
+installed = next(i for i, line in enumerate(sudo)
+                 if line.startswith("bash ") and "/set-rc1/install.sh " in line)
+print(len(reads), "yes" if reads and removed < reads[0] < installed else "no")
+PY
+)"
+# Stopped, set aside, restored and removed in that order, all of it before
+# the stage removes a drop-in.
+check "  the rollback under the denial follows the documented order" yes \
+  "$(python3 - "${appliance}/sudo.log" <<'PY'
+import re, sys
+
+sudo = open(sys.argv[1], encoding="utf-8").read().splitlines()
+conf = r"\S*/10-tensorplate-validation-offline\.conf"
+denied = next(i for i, line in enumerate(sudo) if re.fullmatch(r"install -D -m 0644 \S+ " + conf, line))
+lifted = next(i for i, line in enumerate(sudo) if re.fullmatch("rm -f " + conf, line))
+steps = ("systemctl stop tensorplate-agent tensorplate-observability",
+         "mv -T /var/lib/tensorplate/state /var/lib/tensorplate/state.bak",
+         "cp -p /var/lib/tensorplate/state.bak/machine-type.json ",
+         " apt-get remove -y ")
+found = [next((i for i in range(denied, lifted) if step in sudo[i]), None) for step in steps]
+print("yes" if None not in found and found == sorted(found) else "no")
+PY
+)"
+check "  it has the predecessor's layout and the bytes digested before the set-aside" \
+  "pass 2 $(printf '{"schema_version":2,"machine_type":"g2-standard-8"}\n' |
+            python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')" \
+  "$(printf '%s %s %s' \
+     "$(sub_step_field "${evidence}/offline-rollback/offline-record-before-start.json" record)" \
+     "$(sub_step_field "${evidence}/offline-rollback/offline-record-before-start.json" schema_version)" \
+     "$(sub_step_field "${evidence}/offline-rollback/offline-record-before-start.json" sha256)")"
+# Baseline then candidate under the denial, each in a denied unit and
+# unsigned; the four online installs carry neither.
+check "  only the two installers under the denial run in a denied unit, unsigned" \
+  "unset:signed 1:unsigned 1:unsigned unset:signed unset:signed unset:signed" \
+  "$(python3 - "${appliance}/sudo.log" "${appliance}/online.log" <<'PY'
+import sys
+
+sudo, online = (open(path, encoding="utf-8").read().splitlines() for path in sys.argv[1:])
+installs = [line for line in sudo if line.startswith("bash ") and "/install.sh " in line]
+assert len(installs) == len(online), (installs, online)
+print(" ".join("{}:{}".format(
+    where.rsplit("denied=", 1)[1],
+    "unsigned" if line.endswith(" --allow-unsigned") else "signed")
+    for line, where in zip(installs, online)))
+PY
+)"
+check "  the baseline started on the record, deployed and served under the denial" \
+  "$((${#served[@]} + 2)) of $((${#served[@]} + 2))" \
+  "$(sub_step_documents "${evidence}/offline-rollback" "${served[@]}" \
+     offline-cli-probe-deploy.json offline-deploy-check.json)"
+check "  the candidate started on it, resolved the row and served what the baseline deployed" \
+  "$((${#served[@]} + 2)) of $((${#served[@]} + 2))" \
+  "$(sub_step_documents "${evidence}/offline-upgrade" "${served[@]}" \
+     offline-cli-probe-doctor.json offline-doctor-check.json)"
+check "  both services read back as replaced after each installer" "$both_units $both_units" \
+  "$(printf '%s %s' \
+     "$(sub_step_field "${evidence}/offline-rollback/offline-denial.json" units_restarted)" \
+     "$(sub_step_field "${evidence}/offline-upgrade/offline-denial.json" units_restarted)")"
+# The id deploy-smoke used, not the one the candidate was serving when
+# state was set aside.
+check "  the baseline serves what it deployed, and the candidate serves that too" \
+  "${deployment_id} ${deployment_id}" \
+  "$(printf '%s %s' \
+     "$(sub_step_field "${evidence}/offline-rollback/offline-status-check.json" deployment_id)" \
+     "$(sub_step_field "${evidence}/offline-upgrade/offline-status-check.json" deployment_id)")"
+check "  both package operations of the rollback probed their own unit first" "2 of 2" \
+  "$(sub_step_documents "${evidence}/offline-rollback" \
+     offline-cli-probe-remove.json offline-cli-probe-install.json)"
+check "  no unit is started more often between resets than its unit file allows" ok \
+  "$(starts_within_limit)"
+for stage in upgrade rollback; do
+  check "  and the ${stage} stage still passes after it" pass \
+    "$(stage_status "${evidence}/lifecycle-report.json" "$stage")"
+done
+
+# mode : the step that fails : the sub-step that had passed : the one that had not
+for case in \
+  "offline-restart-ignored:both units read back as denied:.:offline-restart" \
+  "offline-restart-filter-not-attached:the denial is enforced inside the tensorplate-agent control group:.:offline-restart" \
+  "offline-restart-identity-live-metadata:the machine type came from the record, not from metadata:.:offline-restart" \
+  "offline-restart-status-no-deployment:status checks:.:offline-restart" \
+  "offline-rollback-restore-garbles-record:restore the machine-type record for the baseline:offline-restart:offline-rollback" \
+  "offline-rollback-remove-drops-record:the record the baseline reads is in place before it starts:offline-restart:offline-rollback" \
+  "offline-rollback-remove-rewrites-record:the record the baseline reads is in place before it starts:offline-restart:offline-rollback" \
+  "offline-rollback-baseline-rewrites-record:the machine-type record is byte-identical with the denied baseline up:offline-restart:offline-rollback" \
+  "offline-rollback-touches-binding:the denied rollback left the instance binding alone:offline-restart:offline-rollback" \
+  "offline-rollback-state-not-preserved:the set-aside state is preserved, file by file:offline-restart:offline-rollback" \
+  "offline-rollback-identity-live-metadata:the machine type came from the record, not from metadata:offline-restart:offline-rollback" \
+  "offline-rollback-infer-garbled:inference checks:offline-restart:offline-rollback" \
+  "offline-upgrade-rewrites-record:the machine-type record is byte-identical across the denied upgrade:offline-rollback:offline-upgrade" \
+  "offline-upgrade-touches-binding:the denied upgrade left the instance binding alone:offline-rollback:offline-upgrade" \
+  "offline-upgrade-identity-live-metadata:the machine type came from the record, not from metadata:offline-rollback:offline-upgrade" \
+  "offline-upgrade-wrong-row:doctor resolves ubuntu2404-x86-l4-g2s8 from the recorded machine type:offline-rollback:offline-upgrade" \
+  "offline-upgrade-doctor-exits-failing:doctor resolves ubuntu2404-x86-l4-g2s8 from the recorded machine type:offline-rollback:offline-upgrade"; do
+  IFS=: read -r mode failed_step passed failing <<<"$case"
+  evidence="${td}/stages-${mode}"
+  check "${mode} fails the run" 1 "$(run_upgrade_stages "$mode" "$evidence" "" set-rc1)"
+  check "  in the offline stage, before upgrade starts" "fail absent" \
+    "$(printf '%s %s' "$(stage_status "${evidence}/lifecycle-report.json" offline)" \
+       "$(stage_status "${evidence}/lifecycle-report.json" upgrade)")"
+  check "  at: ${failed_step}" yes \
+    "$(stage_log_says "${evidence}/offline.log" "): ${failed_step}")"
+  check "  after ${passed} passed and before ${failing} did" "yes no" \
+    "$(printf '%s %s' \
+       "$([[ -s "${evidence}/${passed}/offline-infer-check.json" ]] && echo yes || echo no)" \
+       "$([[ -s "${evidence}/${failing}/offline-infer-check.json" ]] && echo yes || echo no)")"
+  check "  and the network policy is put back anyway" 0 "$(offline_drop_ins_left)"
+  case "$mode" in
+    offline-rollback-remove-*)
+      check "  and the baseline's installer is never run" 0 \
+        "$(grep -c '/set-rc1/install.sh ' "${appliance}/sudo.log" || true)"
+      # No unit is installed at that point, so the cleanup has nothing to
+      # restart or read back, says so, and is not repeated on exit.
+      check "  and the cleanup removes both drop-ins once and restarts nothing" "2 no" \
+        "$(printf '%s %s' "$(grep -c '^rm -f .*/10-tensorplate-validation-offline\.conf$' "${appliance}/sudo.log")" \
+           "$(sudo_after "$(last_sudo_line '/10-tensorplate-validation-offline.conf')" 'systemctl restart')")"
+      check "  and says what it left, not that the denial may still be in place" "yes no no" \
+        "$(printf '%s %s %s' \
+           "$(stage_log_says "${evidence}/offline.log" 'not installed: tensorplate-agent tensorplate-observability.')" \
+           "$(grep -Fq 'may still be in place' "${evidence}/offline.log" "${evidence}.err" && echo yes || echo no)" \
+           "$([[ -e "${evidence}/offline-restored.json" ]] && echo yes || echo no)")" ;;
+  esac
+done
+
+evidence="${td}/stages-offline-rollback-remove-drops-record-drop-in-stays"
+check "a drop-in that outlives a failure between releases fails the cleanup too" 1 \
+  "$(run_upgrade_stages offline-rollback-remove-drops-record-drop-in-stays "$evidence" "" set-rc1)"
+check "  and then the run does say the denial may still be in place" "2 yes" \
+  "$(printf '%s %s' "$(offline_drop_ins_left)" \
+     "$(stage_log_says "${evidence}/offline.log" 'may still be in place; remove it with: sudo rm -f ')")"
 
 # --- across every stubbed run.
 #
