@@ -58,6 +58,10 @@ def run_cli(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
 
 
 def synthetic_run(index: int, stripped: int, idle_kib: int, steady_kib: int) -> dict:
+    """One run; later runs are larger, so the pairing the delta uses is visible."""
+    stripped += index * 4096
+    idle_kib += index * 1000
+    steady_kib += index * 1000
     return {
         "index": index,
         "elf_files": [
@@ -141,8 +145,8 @@ def checker_cases(work: Path) -> dict:
     )
     check(
         "the maximum delta is the largest with-streaming value minus the smallest without",
-        good["result"]["budgets"]["idle_rss"]["max_delta_bytes"] == (50_008 - 30_008) * 1024
-        and good["result"]["budgets"]["installed_size"]["max_delta_bytes"] == 14 * MIB,
+        good["result"]["budgets"]["idle_rss"]["max_delta_bytes"] == (53_008 - 31_008) * 1024
+        and good["result"]["budgets"]["installed_size"]["max_delta_bytes"] == 14 * MIB + 8192,
         json.dumps(good["result"]["budgets"]["idle_rss"]),
     )
     if jsonschema is not None:
@@ -299,13 +303,13 @@ def checker_cases(work: Path) -> dict:
 
     def exceed_idle(record):
         for run in record["sides"]["with_streaming"]["runs"]:
-            run["idle_rss_samples_kib"] = [30_008 + 64 * 1024 + 1]
+            run["idle_rss_samples_kib"] = [31_008 + 64 * 1024 + 1]
 
     mutate(
         "a delta over its budget fails",
         exceed_idle,
         1,
-        "fail: installed_size within (14680064 of 33554432 bytes); idle_rss exceeded"
+        "fail: installed_size within (14688256 of 33554432 bytes); idle_rss exceeded"
         " (67109888 of 67108864 bytes)",
         honest=True,
     )
@@ -499,6 +503,17 @@ def harness_cases(work: Path) -> None:
         "the stripped-size delta is the fake's 2 MiB payload",
         size_delta is not None and 2 * MIB - 4096 <= size_delta <= 2 * MIB + 8192,
         f"delta {size_delta}",
+    )
+    elf_files = [
+        entry
+        for side in record.get("sides", {}).values()
+        for run in side.get("runs", [])
+        for entry in run.get("elf_files", [])
+    ]
+    check(
+        "every ELF file was stripped: the stripped size is below the installed size",
+        bool(elf_files) and all(entry["stripped_bytes"] < entry["bytes"] for entry in elf_files),
+        json.dumps(elf_files[:1]),
     )
     idle_delta = budgets.get("idle_rss", {}).get("max_delta_bytes")
     check(
