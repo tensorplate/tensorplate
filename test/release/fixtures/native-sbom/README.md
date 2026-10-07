@@ -27,6 +27,11 @@ To record again after the baseline or the feature changes, run
 copy the status file, reduce each SPDX document and substitute its namespace UUID the same way.
 
 `native-sbom.py control` generates synthetic vulnerable-version documents
-from the identifier table, one package per vendor/product pair. They are
-scanner controls, not recordings of a build. `check-control` requires each
-pair to match its native advisory through the CPE matcher.
+from the identifier table, one package per controlled vendor/product pair.
+They are scanner controls, not recordings of a build. `check-control` requires
+each pair to match its native advisory through the CPE matcher and refuses
+unexpected control artifacts. nlohmann-json retains its two original CPEs as
+`LOOKUP_WITHOUT_POSITIVE_CONTROL`: no native historical advisory exists in the
+inspected database, so no vulnerable version or advisory is invented for it.
+re2 and utf8-range remain `UNSCANNED`. The collected document records all three
+coverage states separately.

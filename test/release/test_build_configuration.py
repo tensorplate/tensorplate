@@ -4493,6 +4493,13 @@ class ReleaseWorkflowVcpkgTests(unittest.TestCase):
 
     PUBLISHES = "needs.meta.outputs.publish == 'true'"
 
+    def test_release_checks_install_their_declared_python_dependencies_first(self):
+        job = self.job("apt-lifecycle.yml", "script-checks")
+        install = self.only_step(job, "Install release tooling dependencies")
+        self.assertIn("python3 -m pip install --quiet -r tools/release/requirements.txt",
+                      job["steps"][install]["run"])
+        self.assertLess(install, self.only_step(job, "Release driver checks"))
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -4847,6 +4854,11 @@ class NativeClosureScanTests(unittest.TestCase):
     job = ReleaseWorkflowVcpkgTests.job
     only_step = ReleaseWorkflowVcpkgTests.only_step
 
+    @classmethod
+    def setUpClass(cls):
+        from test_native_code_absence import require_native_toolchain
+        require_native_toolchain()
+
     def setUp(self):
         ReleaseWorkflowVcpkgTests.setUp(self)
         from test_native_code_absence import build_fixture
@@ -4892,10 +4904,30 @@ class NativeClosureScanTests(unittest.TestCase):
         )
         return f"{self.root / 'bin'}{os.pathsep}{os.environ['PATH']}"
 
-    def run_named(self, name: str, path: str) -> subprocess.CompletedProcess:
+    def run_named(self, name: str, path: str,
+                  today: datetime.date = datetime.date(2026, 10, 7)) -> subprocess.CompletedProcess:
         job = self.job("supply-chain.yml", "native")
         step = job["steps"][self.only_step(job, name)]
+        write_executable(
+            self.root / "bin/python3",
+            "#!/bin/sh\n"
+            "if [ \"$1\" = tools/release/check-vulnerability-dispositions.py ]; then\n"
+            f"  exec '{sys.executable}' \"$@\" --today '{today.isoformat()}'\n"
+            "fi\n"
+            f"exec '{sys.executable}' \"$@\"\n",
+        )
         return run_step(step, REPO_ROOT, PATH=path, RUNNER_TEMP=str(self.root / "temp"))
+
+    def test_the_live_scan_enforces_the_supplied_expiry_date_before_scanning(self):
+        entries = json.loads((REPO_ROOT / "tools/release/vulnerability-dispositions.json").read_text())["dispositions"]
+        if not entries:
+            self.skipTest("no live dispositions to expire")
+        after_expiry = min(datetime.date.fromisoformat(e["review_by"]) for e in entries) + datetime.timedelta(days=1)
+        result = self.run_named("grype, with the recorded dispositions",
+                                self.grype(0, self.scan_report()), after_expiry)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("expired on ", result.stderr)
+        self.assertFalse((self.root / "grype-calls").exists())
 
     def test_the_positive_control_needs_threshold_exit_and_every_pair(self):
         complete = self.control_report()
@@ -4954,6 +4986,8 @@ class NativeClosureScanTests(unittest.TestCase):
             self.assertIn(arg, collect)
         self.assertIn("git show -s --format=%ct HEAD", collect)
         self.assertIn("--grype-report", job["steps"][order[-1]]["run"])
+        report = job["steps"][self.only_step(job, "Upload the scan report")]
+        self.assertIn("${{ runner.temp }}/native/worker.map", report["with"]["path"].splitlines())
 
 
 class StaticStreamingClosureTests(unittest.TestCase):

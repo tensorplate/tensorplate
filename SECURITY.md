@@ -82,8 +82,10 @@ Python package (the SDK with and without its `vision` extra) and audit its
 runtime dependencies with `pip-audit`, and produce an SPDX SBOM of the
 vcpkg ports the serving worker builds against, collected from the release
 configuration's install tree, and scan recognized native identifiers with
-`grype`. nlohmann-json, re2 and utf8-range are inventoried but unscanned;
-absence of findings for them is not a clean result. Dispositions based on
+`grype`. Six ports have controlled identifiers. nlohmann-json retains two CPE
+forward lookups without positive controls because the inspected database has
+no native historical advisory; re2 and utf8-range remain unscanned. No findings
+for those three ports is not a clean result. Dispositions based on
 absent code require the built worker's linker-map check to pass; see
 [Supply-chain checks](docs/release/artifacts.md#supply-chain-checks). Those
 SBOMs are workflow artifacts, not release assets: an SBOM attached to a

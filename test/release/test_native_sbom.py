@@ -96,7 +96,7 @@ class Collect(Fixture):
         ports = {p["name"]: p for p in self.document()["packages"][1:]}
         package = ports["nlohmann-json"]
         self.assertIn("Header-only", package["comment"])
-        self.assertIn("UNSCANNED:", package["comment"])
+        self.assertIn("LOOKUP_WITHOUT_POSITIVE_CONTROL:", package["comment"])
         self.assertEqual([r["referenceLocator"] for r in package["externalRefs"]
                           if r["referenceType"] == "purl"],
                          ["pkg:vcpkg/nlohmann-json@3.12.0%232"])
@@ -183,11 +183,17 @@ class Collect(Fixture):
         ])
         self.assertEqual(cpes["abseil"],
                          [f"cpe:2.3:a:abseil:common_libraries:{version['abseil']}:*:*:*:*:*:*:*"])
-        for name in ("nlohmann-json", "re2", "utf8-range"):
+        self.assertEqual(cpes["nlohmann-json"], [
+            "cpe:2.3:a:json-for-modern-cpp_project:json-for-modern-cpp:3.12.0:*:*:*:*:*:*:*",
+            "cpe:2.3:a:nlohmann:json:3.12.0:*:*:*:*:*:*:*",
+        ])
+        for name in ("re2", "utf8-range"):
             self.assertEqual(cpes[name], [])
             self.assertIn("UNSCANNED: ", ports[name]["comment"], name)
-        self.assertEqual(tool.document_annotations(self.document())["unscanned"],
-                         "nlohmann-json re2 utf8-range")
+        annotations = tool.document_annotations(self.document())
+        self.assertEqual(annotations["unscanned"], "re2 utf8-range")
+        self.assertEqual(annotations["lookup-without-positive-control"], "nlohmann-json")
+        self.assertEqual(annotations["controlled"], "abseil c-ares grpc openssl protobuf zlib")
 
     def test_the_worker_and_the_archives_are_digested_when_given(self) -> None:
         worker = self.root / "tensorplate-serving"
@@ -376,7 +382,7 @@ class Gate(Fixture):
             for package in doc["packages"]:
                 package.pop("comment", None)
         self.assert_refused(self.check(self.changed(uncomment)),
-                            "nlohmann-json lacks its explicit UNSCANNED declaration")
+                            "nlohmann-json lacks its exact lookup-without-positive-control coverage declaration")
 
     def test_a_name_collision_is_not_accepted_as_a_native_identifier(self) -> None:
         def npm(doc: dict) -> None:
@@ -389,14 +395,57 @@ class Gate(Fixture):
 
     def test_an_unscanned_port_is_not_reported_as_scanned(self) -> None:
         def cpe(doc: dict) -> None:
-            package = next(p for p in doc["packages"] if p["name"] == "nlohmann-json")
+            package = next(p for p in doc["packages"] if p["name"] == "re2")
             package["externalRefs"].append({"referenceType": "cpe23Type",
-                                           "referenceLocator": "cpe:2.3:a:nlohmann:json:3.12.0:*:*:*:*:*:*:*"})
-        self.assert_refused(self.check(self.changed(cpe)), "nlohmann-json lacks its explicit UNSCANNED declaration")
+                                           "referenceLocator": "cpe:2.3:a:example:re2:1.0:*:*:*:*:*:*:*"})
+        self.assert_refused(self.check(self.changed(cpe)), "re2 lacks its explicit UNSCANNED declaration")
 
         def erase(doc: dict) -> None:
             doc["annotations"] = [a for a in doc["annotations"] if not a["comment"].startswith("unscanned:")]
         self.assert_refused(self.check(self.changed(erase)), "unscanned coverage must name")
+
+    def test_both_forward_lookup_identifiers_are_required(self) -> None:
+        for missing in ("json-for-modern-cpp_project", "nlohmann"):
+            with self.subTest(vendor=missing):
+                def remove(doc: dict) -> None:
+                    package = next(p for p in doc["packages"] if p["name"] == "nlohmann-json")
+                    package["externalRefs"] = [r for r in package["externalRefs"]
+                                               if f":{missing}:" not in r["referenceLocator"]]
+                self.assert_refused(self.check(self.changed(remove)),
+                                    "nlohmann-json lacks its exact native CPE identifier set")
+
+    def test_forward_lookup_requires_its_explicit_state(self) -> None:
+        for state in (None, "UNSCANNED: no identifier", "CONTROLLED: positive control verified"):
+            with self.subTest(state=state):
+                def replace(doc: dict) -> None:
+                    package = next(p for p in doc["packages"] if p["name"] == "nlohmann-json")
+                    if state is None:
+                        del package["comment"]
+                    else:
+                        package["comment"] = state
+                self.assert_refused(self.check(self.changed(replace)),
+                                    "nlohmann-json lacks its exact lookup-without-positive-control coverage declaration")
+
+    def test_all_coverage_groups_are_required_and_exact(self) -> None:
+        for key in ("controlled", "lookup-without-positive-control", "unscanned"):
+            for replacement in (None, "none", "nlohmann-json re2"):
+                with self.subTest(key=key, replacement=replacement):
+                    def change(doc: dict) -> None:
+                        annotation = next(a for a in doc["annotations"] if a["comment"].startswith(key + ": "))
+                        if replacement is None:
+                            doc["annotations"].remove(annotation)
+                        else:
+                            annotation["comment"] = f"{key}: {replacement}"
+                    self.assert_refused(self.check(self.changed(change)), f"{key} coverage must name")
+
+    def test_a_conflicting_duplicate_coverage_declaration_is_rejected(self) -> None:
+        def duplicate(doc: dict) -> None:
+            declaration = next(a for a in doc["annotations"]
+                               if a["comment"].startswith("controlled: "))
+            conflict = dict(declaration, comment="controlled: nlohmann-json")
+            doc["annotations"].insert(0, conflict)
+        self.assert_refused(self.check(self.changed(duplicate)),
+                            "controlled coverage must be declared exactly once")
 
     def test_a_plausible_but_wrong_cpe_vendor_is_rejected(self) -> None:
         def vendor(doc: dict) -> None:
@@ -475,7 +524,7 @@ class ScannerControls(unittest.TestCase):
         self.report.write_text(json.dumps(report))
         return run("check-control", "--report", self.report)
 
-    def test_controls_cover_every_emitted_pair_at_its_affected_version(self) -> None:
+    def test_controls_cover_every_controlled_pair_at_its_affected_version(self) -> None:
         output = self.root / "controls.json"
         result = run("control", "--output", output)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -495,6 +544,25 @@ class ScannerControls(unittest.TestCase):
         result = self.check(self.report_matches())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("9/9", result.stdout)
+
+    def test_forward_lookups_have_no_fabricated_positive_controls(self) -> None:
+        forward = tool.CPE_DECISIONS["nlohmann-json"]
+        self.assertIsInstance(forward, tool.ForwardLookup)
+        self.assertEqual(forward.pairs, (("json-for-modern-cpp_project", "json-for-modern-cpp"),
+                                       ("nlohmann", "json")))
+        self.assertNotIn("nlohmann-json", {name for _, name, _ in tool.control_entries()})
+        self.assertNotIn("nlohmann-json", {p["name"] for p in tool.control_document()["packages"]})
+        for index, (vendor, product) in enumerate(forward.pairs):
+            with self.subTest(pair=(vendor, product)):
+                report = self.report_matches()
+                report["matches"].append({
+                    "artifact": {"id": f"control-nlohmann-json-{index}", "name": "nlohmann-json",
+                                 "type": "vcpkg", "purl": tool.purl("nlohmann-json", "1.0")},
+                    "vulnerability": {"id": "CVE-2000-0000"},
+                })
+                result = self.check(report)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("unexpected control artifact", result.stderr)
 
     def test_every_pair_must_independently_match(self) -> None:
         for missing in range(len(tool.control_entries())):

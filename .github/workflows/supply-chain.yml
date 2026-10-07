@@ -413,7 +413,7 @@ jobs:
           doc = json.load(open(sys.argv[1]))
           for p in doc["packages"][1:]:
               cpes = [r["referenceLocator"] for r in p.get("externalRefs", []) if r["referenceType"] == "cpe23Type"]
-              print(p["name"], p["versionInfo"], p["licenseConcluded"], cpes or p.get("comment"))
+              print(p["name"], p["versionInfo"], p["licenseConcluded"], cpes, p.get("comment"))
           PY
 
       # Before the scan, so a run whose scan fails still keeps its SBOM.
@@ -493,4 +493,5 @@ jobs:
             ${{ runner.temp }}/native-scan.json
             ${{ runner.temp }}/control.json
             ${{ runner.temp }}/native-code-absence.json
+            ${{ runner.temp }}/native/worker.map
           if-no-files-found: ignore

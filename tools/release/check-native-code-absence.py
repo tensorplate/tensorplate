@@ -126,8 +126,7 @@ def main() -> int:
         serialized = json.dumps(report, indent=2, sort_keys=True) + "\n"
         if args.output:
             args.output.write_text(serialized)
-        else:
-            print(serialized, end="")
+        print(serialized, end="")
         return 0
     except (ValueError, OSError) as exc:
         print(str(exc), file=sys.stderr)

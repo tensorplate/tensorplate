@@ -82,10 +82,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 - The serving worker's native build dependencies are inventoried from the
   vcpkg install tree in SPDX and scanned with pinned Grype. Native package
   identifiers avoid matches against same-name packages in other ecosystems;
-  every emitted CPE vendor/product pair has a positive control. Unscanned
-  ports are explicit. A built-worker linker-map check enforces dispositions
+  CPE coverage distinguishes positive controls, forward lookups without
+  controls, and unscanned ports. A built-worker linker-map check enforces dispositions
   based on absent archive code, and stale dispositions that match nothing
-  fail. Release tooling supports Python 3.10. Records for both release jobs,
+  fail. The checked result is logged and its map is retained. Release tests
+  use explicit policy dates and skip unavailable local GNU linker controls;
+  hosted CI requires them. Release tooling supports Python 3.10. Records for both release jobs,
   cache provenance and the final-tag gate remain separate follow-up work.
   (V030-E01-F03-T01)
 - The Python SDK declares a `speech` extra, `grpcio>=1.81.1,<2` and

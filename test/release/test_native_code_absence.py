@@ -4,13 +4,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
+import json
 import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -21,6 +26,46 @@ assert SPEC and SPEC.loader
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
 PORTS = {"grpc": "libgrpc.a", "openssl": "libcrypto.a", "zlib": "libz.a"}
+
+
+def native_toolchain_gap() -> str | None:
+    """Return why this host cannot produce the real ELF/link-map controls."""
+    if not sys.platform.startswith("linux"):
+        return "native linker controls require a Linux ELF host"
+    missing = [name for name in ("cc", "ld.bfd", "ar", "readelf") if shutil.which(name) is None]
+    if missing:
+        return f"no {', '.join(missing)} on PATH"
+    for command, banner in (("ld.bfd", "GNU ld"), ("ar", "GNU ar"), ("readelf", "GNU readelf")):
+        try:
+            result = subprocess.run([command, "--version"], text=True, capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            return f"cannot run {command}"
+        if result.returncode or not result.stdout.startswith(banner):
+            return f"{command} on PATH is not the required GNU tool"
+    try:
+        with tempfile.TemporaryDirectory(prefix="tp-native-toolchain-") as directory:
+            worker = pathlib.Path(directory) / "probe"
+            result = subprocess.run(
+                ["cc", "-fuse-ld=bfd", "-x", "c", "-", "-o", str(worker)],
+                input="int main(void) { return 0; }\n", text=True, capture_output=True, timeout=30,
+            )
+            if result.returncode:
+                return "cc cannot link a C executable with GNU ld.bfd"
+            if worker.read_bytes()[:4] != b"\x7fELF":
+                return "cc with GNU ld.bfd did not produce an ELF executable"
+    except (OSError, subprocess.SubprocessError):
+        return "cannot run the C compiler and linker prerequisite check"
+    return None
+
+
+def require_native_toolchain() -> None:
+    """Skip unavailable local controls; missing hosted-CI prerequisites must fail."""
+    gap = native_toolchain_gap()
+    if gap:
+        reason = f"{gap}; native code absence NOT verified here"
+        if os.environ.get("CI") == "true":
+            raise AssertionError(reason)
+        raise unittest.SkipTest(reason)
 
 
 def build_fixture(
@@ -77,6 +122,10 @@ def build_fixture(
 
 
 class NativeCodeAbsenceTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        require_native_toolchain()
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="tp-native-absence-")
         self.root = pathlib.Path(self.temp.name)
@@ -97,6 +146,21 @@ class NativeCodeAbsenceTests(unittest.TestCase):
         self.assertEqual(report["absent_ports"], sorted(PORTS))
         self.assertEqual(report["worker_sha256"], guard.digest(self.worker))
         self.assertEqual(report["link_map_sha256"], guard.digest(self.link_map))
+
+    def test_cli_prints_the_verified_report_with_and_without_output(self) -> None:
+        output = self.root / "absence.json"
+        arguments = ["check-native-code-absence.py", "--worker", str(self.worker),
+                     "--link-map", str(self.link_map), "--install-root", str(self.installed),
+                     "--triplet", "x64-linux", "--port", "grpc"]
+        for extra in ([], ["--output", str(output)]):
+            with self.subTest(extra=bool(extra)), mock.patch.object(sys, "argv", arguments + extra):
+                printed = io.StringIO()
+                with contextlib.redirect_stdout(printed):
+                    self.assertEqual(guard.main(), 0)
+                self.assertTrue(printed.getvalue(), "verified report missing from stdout")
+                self.assertEqual(json.loads(printed.getvalue()), self.verify(["grpc"]))
+                if extra:
+                    self.assertEqual(output.read_text(), printed.getvalue())
 
     def test_real_extraction_of_each_port_is_rejected(self) -> None:
         for port in PORTS:
@@ -246,6 +310,84 @@ class NativeCodeAbsenceTests(unittest.TestCase):
         archive.symlink_to(outside)
         with self.assertRaisesRegex(ValueError, "grpc: archive outside target-triplet"):
             self.verify()
+
+
+class NativeToolchainPrerequisiteTests(unittest.TestCase):
+    def test_non_linux_host_has_an_explicit_reason(self) -> None:
+        with mock.patch.object(sys, "platform", "darwin"):
+            self.assertEqual(native_toolchain_gap(), "native linker controls require a Linux ELF host")
+
+    def test_every_required_tool_is_checked(self) -> None:
+        for missing in ("cc", "ld.bfd", "ar", "readelf"):
+            with self.subTest(tool=missing), mock.patch.object(sys, "platform", "linux"), \
+                    mock.patch.object(shutil, "which", side_effect=lambda name: None if name == missing else name):
+                self.assertEqual(native_toolchain_gap(), f"no {missing} on PATH")
+
+    @staticmethod
+    def tool_result(arguments, **kwargs):
+        banners = {"ld.bfd": "GNU ld", "ar": "GNU ar", "readelf": "GNU readelf"}
+        return subprocess.CompletedProcess(arguments, 0, banners.get(arguments[0], ""), "")
+
+    def test_non_gnu_tools_are_rejected(self) -> None:
+        for tool in ("ld.bfd", "ar", "readelf"):
+            def result(arguments, **kwargs):
+                if arguments[0] == tool:
+                    return subprocess.CompletedProcess(arguments, 0, "another implementation", "")
+                return self.tool_result(arguments)
+            with self.subTest(tool=tool), mock.patch.object(sys, "platform", "linux"), \
+                    mock.patch.object(shutil, "which", return_value="available"), \
+                    mock.patch.object(subprocess, "run", side_effect=result):
+                self.assertEqual(native_toolchain_gap(), f"{tool} on PATH is not the required GNU tool")
+
+    def test_compiler_link_failure_has_an_explicit_reason(self) -> None:
+        def result(arguments, **kwargs):
+            if arguments[0] == "cc":
+                return subprocess.CompletedProcess(arguments, 1, "", "missing compiler runtime")
+            return self.tool_result(arguments)
+        with mock.patch.object(sys, "platform", "linux"), \
+                mock.patch.object(shutil, "which", return_value="available"), \
+                mock.patch.object(subprocess, "run", side_effect=result):
+            self.assertEqual(native_toolchain_gap(), "cc cannot link a C executable with GNU ld.bfd")
+
+    def test_compiler_output_must_be_elf(self) -> None:
+        with mock.patch.object(sys, "platform", "linux"), \
+                mock.patch.object(shutil, "which", return_value="available"), \
+                mock.patch.object(subprocess, "run", side_effect=self.tool_result), \
+                mock.patch.object(pathlib.Path, "read_bytes", return_value=b"not ELF"):
+            self.assertEqual(native_toolchain_gap(), "cc with GNU ld.bfd did not produce an ELF executable")
+
+    def test_unavailable_local_toolchain_skips_with_reason(self) -> None:
+        with mock.patch.dict(os.environ, {"CI": "false"}), \
+                mock.patch.dict(require_native_toolchain.__globals__, native_toolchain_gap=lambda: "no cc on PATH"):
+            with self.assertRaisesRegex(unittest.SkipTest, "no cc on PATH; native code absence NOT verified here"):
+                require_native_toolchain()
+
+    def test_unavailable_ci_toolchain_fails_instead_of_skipping(self) -> None:
+        with mock.patch.dict(os.environ, {"CI": "true"}), \
+                mock.patch.dict(require_native_toolchain.__globals__, native_toolchain_gap=lambda: "no cc on PATH"):
+            try:
+                require_native_toolchain()
+            except unittest.SkipTest:
+                self.fail("missing CI prerequisites must fail, not skip")
+            except AssertionError as exc:
+                self.assertIn("no cc on PATH; native code absence NOT verified here", str(exc))
+            else:
+                self.fail("missing CI prerequisites were accepted")
+
+    def test_available_toolchain_runs_locally_and_in_ci(self) -> None:
+        for ci in ("false", "true"):
+            with self.subTest(ci=ci), mock.patch.dict(os.environ, {"CI": ci}), \
+                    mock.patch.dict(require_native_toolchain.__globals__, native_toolchain_gap=lambda: None):
+                require_native_toolchain()
+
+    def test_linker_cases_use_the_local_skip_guard(self) -> None:
+        with mock.patch.dict(os.environ, {"CI": "false"}), \
+                mock.patch.dict(require_native_toolchain.__globals__, native_toolchain_gap=lambda: "no cc on PATH"):
+            result = unittest.TestResult()
+            unittest.TestSuite([NativeCodeAbsenceTests("test_loaded_but_unextracted_archives_are_absent")]).run(result)
+            self.assertEqual(len(result.skipped), 1)
+            self.assertIn("native code absence NOT verified here", result.skipped[0][1])
+            self.assertEqual(result.errors, [])
 
 
 if __name__ == "__main__":

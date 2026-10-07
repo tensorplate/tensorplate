@@ -344,7 +344,7 @@ any change here), and on demand. It uses no secrets.
 | `cargo-deny` | licenses of normal and build dependencies (cargo-deny does not license-check crates reached only through dev-dependencies), wildcard version requirements, dependency sources (crates.io only, no git), yanked crates and RustSec advisories for the whole Rust workspace with all features; duplicate crate versions are reported as warnings | `deny.toml` |
 | `SBOM and audit` (`sdk/python`, `sdk/python[vision]`, `sdk/python[speech]`, `backends/python_pytorch`) | a CycloneDX JSON SBOM of the package installed into a clean environment without pip, uploaded as a workflow artifact, and a `pip-audit` run over the package's runtime dependency closure in that environment, after a positive control that requires it to report a pin with published advisories; the `sdk/python[speech]` leg first installs `sdk/python/constraints/speech.txt` with `--require-hashes`, so its closure is the pinned versions | the PyPI entries of the disposition file |
 | `SBOM and audit (speech runtime lock)` | a CycloneDX JSON SBOM of the speech runtime lock, one component per pin with its locked SHA-256, uploaded as a workflow artifact, and a `pip-audit` run over the same pins after the same positive control; the lock is read, not installed, a local version label is dropped for the advisory lookup, and a pin that is not on PyPI is reported as skipped | the PyPI entries of the disposition file |
-| `SBOM and audit (serving worker native closure)` | restores the amd64 release profile's vcpkg dependencies without saving, builds the worker with a GNU linker map, and collects an SPDX 2.3 build dependency inventory with native package URLs and database-derived CPEs. Every emitted vendor/product pair has a vulnerable-version positive control. The scan fails on any undispositioned match or any disposition that matches nothing; absent-code dispositions also require a fresh check of the built worker and its map | the vcpkg entries of the disposition file |
+| `SBOM and audit (serving worker native closure)` | restores the amd64 release profile's vcpkg dependencies without saving, builds the worker with a GNU linker map, and collects an SPDX 2.3 build dependency inventory with native package URLs and CPEs. Coverage distinguishes controlled identifiers, forward lookups without historical positive controls, and unscanned ports. The scan fails on any undispositioned match or any disposition that matches nothing; absent-code dispositions also require a fresh check of the built worker and its map | the vcpkg entries of the disposition file |
 
 cargo-deny and grype run as prebuilt binaries whose version and SHA-256 are
 pinned in the workflow. `cyclonedx-bom` and `pip-audit` are pinned by version and
@@ -374,15 +374,21 @@ native amd64 job has identical host and target triplets. A cross build
 must preserve host/target identities separately before using this collector;
 the ARM64 release-record follow-up must address that limitation.
 
-The identifier table is derived from Grype's database, with a positive
-control for each emitted vendor/product pair. It covers OpenSSL, gRPC,
-zlib, c-ares, abseil and protobuf (both generic and C++ product names).
-`pkg:vcpkg/` package URLs identify the native ecosystem: a same-name npm or
-RubyGems package is not this dependency. Three ports are **unscanned**:
-nlohmann-json, re2 and utf8-range have no native identifier in the checked
-database. They remain in the inventory with that explicit limitation. No
-matches for these ports is not a clean security result. CPE matching is
-limited to the scanner's published data and is not a source audit.
+The document and its checker distinguish three coverage states:
+
+| State | Ports | Evidence and limit |
+| --- | --- | --- |
+| `CONTROLLED` | OpenSSL, gRPC, zlib, c-ares, abseil, protobuf | Nine vendor/product pairs have positive controls at known vulnerable versions from Grype's database. |
+| `LOOKUP_WITHOUT_POSITIVE_CONTROL` | nlohmann-json | The original `json-for-modern-cpp_project:json-for-modern-cpp` and `nlohmann:json` CPEs remain forward lookups. No native historical advisory exists in the inspected database, so neither pair has a positive control. |
+| `UNSCANNED` | re2, utf8-range | No native identifier was found in the inspected database. |
+
+Every package declares its state, and the document lists each group separately.
+The checker requires both nlohmann-json CPEs and refuses a missing or incorrect
+state declaration; the control checker rejects invented control artifacts.
+`pkg:vcpkg/` package URLs identify the native ecosystem: same-name npm or
+RubyGems packages are unrelated. Zero findings for forward lookups or unscanned
+ports do not establish controlled coverage or a clean security result. CPE
+matching is limited to published scanner data and is not a source audit.
 
 `check-native-code-absence.py` checks the freshly built ELF worker and its
 GNU linker map against the requested ports' installed archive inventories.
@@ -391,7 +397,9 @@ object from those archives, a shared-library dependency, or missing or
 inconsistent proof fails the job. A disposition with `requires_absent: true`
 re-runs this check before it can become a scanner ignore rule and when the
 report is judged. Linking the transport later therefore invalidates this
-ground until the advisories are fixed or reviewed on another ground.
+ground until the advisories are fixed or reviewed on another ground. The
+verified absence result prints in the job log; `worker.map` is uploaded with
+the report so its recorded digest can be checked.
 
 The first scan (2026-10-07, Grype 0.120.1) reported 19 matches: 13 OpenSSL,
 three gRPC-Go, two zlib and one nlohmann-json. Match-detail review found the
@@ -401,7 +409,7 @@ its upstream fix is in
 [the zlib source](https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148),
 with no fixed release listed by that database. The OpenSSL matches list
 3.6.5 as fixed. Dispositions for installed vulnerable dependencies rely on
-the executable absence check, with short review dates. The report and the
+the executable absence check, with review due by 2026-11-18. The report and the
 identifier controls are uploaded even when the scan fails.
 
 Still required before a final release: records for both release jobs'
@@ -429,7 +437,9 @@ package, a decision (`not_affected`, `accepted` or `fix_pending`), the
 reason, the date decided and a `review_by` date at most 180 days later.
 `tools/release/check-vulnerability-dispositions.py` refuses an entry past
 its `review_by` date, so an expired acceptance turns the check red instead
-of lasting forever. The dispositions job and both scanner jobs run it, the
+of lasting forever. Release unit and workflow-step tests supply a fixed
+review date; calendar expiry is enforced by the live supply-chain check.
+The dispositions job and both scanner jobs run it, the
 cargo-deny job first of all, because `deny.toml`'s ignore list has no dates
 and cargo-deny would otherwise keep honouring an expired entry. A `cargo` entry must also appear in `deny.toml`'s
 `[advisories] ignore` list, which is what cargo-deny reads; the checker
@@ -448,8 +458,9 @@ pins. It is due for review by 2026-12-23.
 
 Not covered yet: native dependencies of the C++ runtime other than the
 vcpkg ports above (the distribution libraries a package depends on are
-listed by its `Depends`, not by an SBOM), and nlohmann-json, re2 and utf8-range
-as far as native scanning goes; an SBOM of the
+listed by its `Depends`, not by an SBOM); controlled native scanning for
+nlohmann-json, whose two CPEs are forward lookups without positive controls;
+native scanning for re2 and utf8-range; an SBOM of the
 Rust workspace (cargo-deny checks policy, it lists nothing); the PyTorch
 backend's model stack (`torch`, `transformers`, `lerobot`, `numpy`), which
 it imports only when a model loads and does not declare as dependencies;

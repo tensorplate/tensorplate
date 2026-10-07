@@ -33,9 +33,15 @@ class CPEIdentity(NamedTuple):
     control_advisory: str
 
 
+class ForwardLookup(NamedTuple):
+    pairs: tuple[tuple[str, str], ...]
+    reason: str
+
+
 # Verified in Grype's v6.1.10 database built 2026-10-07T06:31:48Z, using
-# cpes/affected_cpe_handles/blobs. Each emitted pair has a vulnerable control.
-CPE_DECISIONS: dict[str, list[CPEIdentity] | str] = {
+# cpes/affected_cpe_handles/blobs. Forward lookups retain known product names
+# without claiming a historical advisory or a positive control.
+CPE_DECISIONS: dict[str, list[CPEIdentity] | ForwardLookup | str] = {
     "grpc": [CPEIdentity("grpc", "grpc", "1.51.0", "CVE-2023-1428")],
     "protobuf": [
         CPEIdentity("google", "protobuf", "3.14.0", "CVE-2021-22570"),
@@ -51,10 +57,51 @@ CPE_DECISIONS: dict[str, list[CPEIdentity] | str] = {
     "abseil": [
         CPEIdentity("abseil", "common_libraries", "20240722.0", "CVE-2025-0838"),
     ],
-    "nlohmann-json": "no native CPE in the 2026-10-07 Grype database; the npm namesake is unrelated",
+    "nlohmann-json": ForwardLookup(
+        (("json-for-modern-cpp_project", "json-for-modern-cpp"), ("nlohmann", "json")),
+        "no native historical advisory in the 2026-10-07 Grype database; "
+        "these CPEs remain forward lookups without positive controls; the npm namesake is unrelated",
+    ),
     "re2": "no native CPE in the 2026-10-07 Grype database; distro and npm namesakes do not identify this port",
     "utf8-range": "no package or CPE in the 2026-10-07 Grype database; protobuf's identifier does not cover this port",
 }
+
+
+def cpe_pairs(decision: list[CPEIdentity] | ForwardLookup | str) -> list[tuple[str, str]]:
+    """Identifiers for controlled scans or forward lookups, without inventing controls."""
+    if isinstance(decision, str):
+        return []
+    if isinstance(decision, ForwardLookup):
+        return list(decision.pairs)
+    return [(identity.vendor, identity.product) for identity in decision]
+
+
+def coverage_state(name: str) -> str:
+    """The port's controlled, forward-lookup or unscanned coverage state."""
+    decision = CPE_DECISIONS[name]
+    if isinstance(decision, str):
+        return "unscanned"
+    if isinstance(decision, ForwardLookup):
+        return "lookup-without-positive-control"
+    return "controlled"
+
+
+def coverage_comment(name: str) -> str:
+    """The exact package declaration required for its scanner coverage."""
+    decision = CPE_DECISIONS[name]
+    prefix = "Header-only build dependency; code is compiled from its headers. " if name == "nlohmann-json" else ""
+    if isinstance(decision, str):
+        return f"{prefix}UNSCANNED: {decision}"
+    if isinstance(decision, ForwardLookup):
+        return f"{prefix}LOOKUP_WITHOUT_POSITIVE_CONTROL: {decision.reason}"
+    return f"{prefix}CONTROLLED: every native CPE pair has a vulnerable-version positive control."
+
+
+def coverage_annotations(closure: list[str]) -> dict[str, str]:
+    """List each coverage state separately, including empty groups."""
+    return {state: " ".join(name for name in closure
+                             if name in CPE_DECISIONS and coverage_state(name) == state) or "none"
+            for state in ("controlled", "lookup-without-positive-control", "unscanned")}
 
 
 # Manifest dependencies the worker does not link, with the reason; they are
@@ -326,14 +373,10 @@ def collect(args: argparse.Namespace) -> dict:
         spdx_id = f"SPDXRef-port-{name}"
         refs: list[dict] = [purl_reference(name, full_version(ports[name]))]
         decision = CPE_DECISIONS[name]
-        if isinstance(decision, str):
-            cpe_note = decision
-        else:
-            cpe_note = None
-            for identity in decision:
-                version = ports[name]["version"]
-                refs.append({"referenceCategory": "SECURITY", "referenceType": "cpe23Type",
-                             "referenceLocator": cpe(identity.vendor, identity.product, version)})
+        for vendor, product in cpe_pairs(decision):
+            version = ports[name]["version"]
+            refs.append({"referenceCategory": "SECURITY", "referenceType": "cpe23Type",
+                         "referenceLocator": cpe(vendor, product, version)})
         refs.append({"referenceCategory": "OTHER", "referenceType": "vcpkg-port",
                      "referenceLocator": port.get("downloadLocation", "NOASSERTION")})
         if ports[name]["abi"]:
@@ -357,13 +400,7 @@ def collect(args: argparse.Namespace) -> dict:
         }
         if resource.get("checksums"):
             package["checksums"] = resource["checksums"]
-        notes = []
-        if name == "nlohmann-json":
-            notes.append("Header-only build dependency; code is compiled from its headers.")
-        if cpe_note:
-            notes.append(f"UNSCANNED: {cpe_note}")
-        if notes:
-            package["comment"] = " ".join(notes)
+        package["comment"] = coverage_comment(name)
         packages.append(package)
         relationships.append(
             {"spdxElementId": "SPDXRef-worker", "relationshipType": "DEPENDS_ON",
@@ -374,7 +411,7 @@ def collect(args: argparse.Namespace) -> dict:
         "vcpkg-feature": args.feature,
         "vcpkg-triplet": args.triplet,
         "closure": " ".join(closure),
-        "unscanned": " ".join(name for name in closure if isinstance(CPE_DECISIONS[name], str)) or "none",
+        **coverage_annotations(closure),
         "not-linked": "; ".join(f"{name} ({NOT_LINKED[name]})" for name in left_out) or "none",
     }
     # Named by what the document says, so the same build yields the same name.
@@ -391,9 +428,10 @@ def collect(args: argparse.Namespace) -> dict:
         "creationInfo": {"created": created, "creators": sorted(creators)},
         "comment": "Build dependency closure inferred from the manifest and vcpkg install tree, "
                    "with versions, source checksums, licenses and scanner identifiers. DEPENDS_ON "
-                   "does not assert archive members survived linking. UNSCANNED ports have no "
-                   "native identifier in the inspected scanner database; zero findings for them "
-                   "are not a clean vulnerability result.",
+                   "does not assert archive members survived linking. CONTROLLED pairs have "
+                   "positive controls; LOOKUP_WITHOUT_POSITIVE_CONTROL pairs have no native "
+                   "historical advisory to test. UNSCANNED ports have no native identifier. "
+                   "Zero findings without controlled coverage are not a clean vulnerability result.",
         "annotations": [
             {"annotator": f"Tool: {TOOL}", "annotationDate": created, "annotationType": "OTHER",
              "comment": f"{key}: {value}"}
@@ -471,14 +509,20 @@ def check(args: argparse.Namespace) -> list[str]:
                 reasons.append(f"{args.sbom}: {name} lacks its explicit UNSCANNED declaration")
         elif decision:
             version = package.get("versionInfo", "").split("#", 1)[0]
-            expected_cpes = sorted(cpe(identity.vendor, identity.product, version) for identity in decision)
+            expected_cpes = sorted(cpe(vendor, product, version) for vendor, product in cpe_pairs(decision))
             if sorted(recorded_cpes) != expected_cpes:
                 reasons.append(f"{args.sbom}: {name} lacks its exact native CPE identifier set")
         else:
             reasons.append(f"{args.sbom}: {name} has no scanner identifier decision")
-    unscanned = " ".join(name for name in closure if isinstance(CPE_DECISIONS.get(name), str)) or "none"
-    if facts.get("unscanned") != unscanned:
-        reasons.append(f"{args.sbom}: unscanned coverage must name {unscanned!r}")
+        if name in CPE_DECISIONS and package.get("comment") != coverage_comment(name):
+            reasons.append(f"{args.sbom}: {name} lacks its exact {coverage_state(name)} coverage declaration")
+    for state, expected in coverage_annotations(closure).items():
+        declarations = [a for a in doc["annotations"] if isinstance(a, dict)
+                        and str(a.get("comment", "")).startswith(state + ": ")]
+        if len(declarations) != 1:
+            reasons.append(f"{args.sbom}: {state} coverage must be declared exactly once")
+        if facts.get(state) != expected:
+            reasons.append(f"{args.sbom}: {state} coverage must name {expected!r}")
     return reasons
 
 
@@ -510,8 +554,9 @@ def control_document() -> dict:
         "name": "native-closure-scan-controls",
         "documentNamespace": f"https://tensorplate.com/spdxdocs/native-scan-controls/sha256-{identity}",
         "creationInfo": {"created": "2026-10-07T00:00:00Z", "creators": [f"Tool: {TOOL}"]},
-        "comment": "Constructed scanner controls, not recorded build evidence. Each native CPE "
-                   "vendor/product pair is checked at a known affected version from the database.",
+        "comment": "Constructed scanner controls, not recorded build evidence. Each controlled "
+                   "native CPE pair uses a known affected version. Forward lookups without "
+                   "historical advisories are excluded.",
         "packages": packages,
         "relationships": [{"spdxElementId": "SPDXRef-DOCUMENT", "relationshipType": "DESCRIBES",
                            "relatedSpdxElement": p["SPDXID"]} for p in packages],
@@ -523,6 +568,11 @@ def check_control(report: pathlib.Path) -> list[str]:
     if not isinstance(doc, dict) or not isinstance(doc.get("matches"), list):
         return ["scanner control report has no matches list"]
     reasons = []
+    expected_ids = {artifact_id for artifact_id, _, _ in control_entries()}
+    for match in doc["matches"]:
+        artifact = match.get("artifact", {}) if isinstance(match, dict) else {}
+        if not isinstance(artifact, dict) or artifact.get("id") not in expected_ids:
+            reasons.append("scanner control report contains an unexpected control artifact")
     for artifact_id, name, identity in control_entries():
         expected_cpe = cpe(identity.vendor, identity.product, identity.control_version)
         found = False
