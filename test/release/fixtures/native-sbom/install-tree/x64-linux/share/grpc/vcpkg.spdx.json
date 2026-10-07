@@ -3,7 +3,7 @@
   "spdxVersion": "SPDX-2.3",
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
-  "documentNamespace": "https://spdx.org/spdxdocs/grpc-x64-linux-1.81.1-7ef2fbcb-93c5-4090-9a82-29c298f74613",
+  "documentNamespace": "https://spdx.org/spdxdocs/grpc-x64-linux-1.81.1-00000000-0000-4000-8000-000000000003",
   "name": "grpc:x64-linux@1.81.1 71f9f1746935362803ebbfdeca27c32e0b78f8c0d09ca79a461c46551496c46a",
   "creationInfo": {
     "creators": [

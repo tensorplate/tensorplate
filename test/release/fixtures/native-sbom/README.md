@@ -12,7 +12,9 @@ reads from an install tree and nothing else, for all thirteen installed ports
 - each installed port's `x64-linux/share/<port>/vcpkg.spdx.json`, with its
   `files` array and the relationships to those files removed. The tool
   reads a document's `packages` and `creationInfo` only, and the file lists
-  are about a megabyte across the ports. Nothing else is changed.
+  are about a megabyte across the ports.
+
+Document namespace UUIDs are synthetic version-4 values so recorded fixtures contain no random document identifiers.
 
 The headers, libraries and tools of the tree are not kept. The `Abi` values
 in the status file are those of that container's build and match no
@@ -22,7 +24,7 @@ host, account or path.
 To record again after the baseline or the feature changes, run
 `vcpkg install --triplet x64-linux --x-feature=streaming-grpc
 --x-install-root=<dir>` from a vcpkg checkout at the manifest's baseline,
-copy the status file, and reduce each SPDX document the same way.
+copy the status file, reduce each SPDX document and substitute its namespace UUID the same way.
 
 `native-sbom.py control` generates synthetic vulnerable-version documents
 from the identifier table, one package per vendor/product pair. They are

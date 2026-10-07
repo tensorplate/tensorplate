@@ -62,6 +62,7 @@ serial column quoted there is no longer a column the scanner can find.
 | macOS per-user or per-boot directory id, in `/var/folders/<bucket>/<id>/T` or `/var/run/com.apple.launchd.<id>` | 32 zeros, and `00` for the bucket |
 | GPU or MIG UUID | `GPU-00000000-0000-0000-0000-000000000001` (count up the last group) |
 | any other UUID | `00000000-0000-0000-0000-000000000001` |
+| a document UUID whose format requires version 4 | `00000000-0000-4000-8000-000000000001` (count up the final 12 hex digits; keep the first four groups exact) |
 | cloud project in a resource path | `projects/REDACTED/` |
 | IPv4 address | `192.0.2.10`, or anything in `198.51.100.0/24` or `203.0.113.0/24` |
 | IPv6 address | `2001:db8::10` |

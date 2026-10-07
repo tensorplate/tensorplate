@@ -146,6 +146,7 @@ UUID = re.compile(
     r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?![0-9A-Za-z])")
 # The all-zero namespace, as in platform/tests/accelerator_fixtures.rs.
 ZERO_UUID_PREFIX = "00000000-0000-0000-0000-"
+SYNTHETIC_V4_UUID_PREFIX = "00000000-0000-4000-8000-"
 DEVICE_PREFIX = re.compile(r"(?:GPU|MIG)-$")
 # Per-invocation random ids the product mints: cli/src/lib.rs (cli-),
 # agent/src/coordinator.rs (tx-), cli/src/commands/deploy.rs (deploy-).
@@ -406,7 +407,8 @@ def scan_variant(line, literals):
         if DEVICE_PREFIX.search(before):
             if not value.startswith(ZERO_UUID_PREFIX):
                 add("device-uuid", value)
-        elif not RANDOM_ID_PREFIX.search(before) and not value.startswith(ZERO_UUID_PREFIX):
+        elif (not RANDOM_ID_PREFIX.search(before) and not value.startswith(ZERO_UUID_PREFIX)
+              and not value.startswith(SYNTHETIC_V4_UUID_PREFIX)):
             add("uuid", value)
     for m in IPV4.finditer(line):
         value = m.group(1)

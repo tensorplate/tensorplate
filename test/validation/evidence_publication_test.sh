@@ -202,6 +202,7 @@ Mon 2026-09-14 01:42:03 UTC tp-synthetic-host tensorplate-agent[42]: short-full
 evidence under /Users/tp-synthetic-operator/evidence and /Users/Shared/tensorplate
 GPU-00000000-0000-0000-0000-000000000001 MIG-00000000-0000-0000-0000-000000000002
 bundle 00000000-0000-0000-0000-000000000003
+format-constrained UUID 00000000-0000-4000-8000-000000000001
 machine type projects/REDACTED/zones/us-central1-a/machineTypes/g2-standard-8
 metadata from metadata.google.internal
 listening on 127.0.0.1:8080, 0.0.0.0:9090 and [::]:9091
@@ -240,6 +241,7 @@ cat >"${pass}/status.json" <<EOF || die "could not write status.json"
   "cli_request": "cli-${cli_uuid}",
   "transition": "tx-${tx_uuid}",
   "deployment": "deploy-${deploy_uuid}",
+  "documentNamespace": "https://example.invalid/spdx/00000000-0000-4000-8000-00000000000d",
   "endpoint": "http://127.0.0.1:8080"
 }
 EOF
@@ -591,6 +593,45 @@ expect_finding "a bare UUID" uuid "$bare_uuid"
 new_case
 add_line "request mycli-${bare_uuid} accepted"
 expect_finding "a UUID behind a longer word ending in a random-id prefix" uuid "$bare_uuid"
+
+synthetic_v4="00000000-0000-4000-8000-000000000001"
+for group in 0 1 2 3; do
+  near_v4="$(python3 - "$synthetic_v4" "$group" <<'PY'
+import sys
+parts = sys.argv[1].split("-")
+index = int(sys.argv[2])
+parts[index] = format(int(parts[index], 16) + 1, "0" + str(len(parts[index])) + "x")
+print("-".join(parts))
+PY
+  )" || die "could not make a UUID near miss"
+  new_case
+  add_line "https://example.invalid/spdx/${near_v4}"
+  expect_finding "a UUID differing in synthetic prefix group ${group}" uuid "$near_v4"
+done
+
+new_case
+add_line "GPU-${synthetic_v4}"
+expect_finding "the version-4 document form in a GPU UUID" device-uuid "$synthetic_v4"
+
+# Removing the exception must reject its positive control.
+mutant="${work}/scanner-without-synthetic-v4.sh"
+python3 - "$scanner" "$mutant" <<'PY' || die "could not create the UUID guard mutant"
+import pathlib, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+guard = "and not value.startswith(SYNTHETIC_V4_UUID_PREFIX)"
+assert source.count(guard) == 1
+pathlib.Path(sys.argv[2]).write_text(source.replace(guard, "and True"))
+PY
+chmod +x "$mutant" || die "could not make the mutant executable"
+v4_control="${work}/synthetic-v4.json"
+printf '{"documentNamespace":"https://example.invalid/spdx/%s"}\n' "$synthetic_v4" \
+  >"$v4_control" || die "could not write the UUID control"
+check "the synthetic version-4 UUID control passes" "0" \
+  "$(scan "${work}/synthetic-v4.out" --patterns-only "$v4_control")"
+check "removing the synthetic version-4 exception rejects its control" "1" \
+  "$(scanner="$mutant" TP_EVIDENCE_REPO_ROOT="$repo_root" \
+     scan "${work}/synthetic-v4-mutant.out" --patterns-only "$v4_control")"
+check "  on the UUID rule" "yes" "$(has ': uuid ' "${work}/synthetic-v4-mutant.out")"
 
 # --- Addresses.
 public_ipv4="$((11 + RANDOM % 100)).$(random_octet).$(random_octet).$(random_octet)"
