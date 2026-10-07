@@ -483,6 +483,7 @@ def harness_cases(work: Path) -> None:
     off = compile_worker(work, "worker-off")
     heavy = compile_worker(work, "worker-heavy", "-DIDLE_MIB=70")
     exits = compile_worker(work, "worker-exits", "-DEXIT_AT_START")
+    degraded = compile_worker(work, "worker-degraded", "-DNEVER_READY")
     on_pkg = build_package(work, "with", on)
     off_pkg = build_package(work, "without", off, version="0.0.0~fake.off")
 
@@ -620,12 +621,27 @@ def harness_cases(work: Path) -> None:
     exits_pkg = build_package(work, "exits", exits)
     result = run_harness(out, on_pkg, exits_pkg)
     check(
-        "a worker that never becomes ready stops the run with its log kept and no record",
+        "a worker that exits at start stops the run with its log kept and no record",
         result.returncode == 2
-        and "worker not ready" in result.stderr
+        and "run 1: worker not ready (see" in result.stderr
         and not (out / "record.json").exists()
         and (out / "captures/without_streaming/run-1/worker.log").exists()
         and "exiting at start" in (out / "captures/without_streaming/run-1/worker.log").read_text(),
+        result.stderr,
+    )
+
+    out = work / "degraded"
+    degraded_pkg = build_package(work, "degraded", degraded)
+    result = run_harness(out, degraded_pkg, off_pkg)
+    health = out / "captures/with_streaming/run-1/health.json"
+    check(
+        "a worker that stays degraded is never sampled: no record, the last /health body kept",
+        result.returncode == 2
+        and "run 1: worker not ready (see" in result.stderr
+        and not (out / "record.json").exists()
+        and not (out / "captures/with_streaming/run-1/idle-vmrss.tsv").exists()
+        and health.exists()
+        and json.loads(health.read_text())["state"] == "degraded",
         result.stderr,
     )
 
