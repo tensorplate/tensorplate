@@ -864,6 +864,11 @@ def test_run_denied():
     assert m.cli_evidence_name("status-after-deploy") == \
         "offline-cli-probe-status-after-deploy.json"
     refused(lambda: m.cli_evidence_name("logs"), "not an offline CLI call")
+    # A package operation run under the denial is probed and named the same
+    # way, and is not one of the calls the certificate requires.
+    assert m.PACKAGE_CALLS == ("remove", "install")
+    assert m.cli_evidence_name("install") == "offline-cli-probe-install.json"
+    assert not set(m.PACKAGE_CALLS) & set(m.CLI_CALLS)
     passed("a CLI call runs only in a unit whose own probe classified as enforced")
 
 
@@ -1181,6 +1186,44 @@ def test_identity_check():
     passed("platform identity must be logged once, from the record")
 
 
+def test_record_check():
+    import hashlib
+
+    record = b'{"schema_version":2,"machine_type":"g2-standard-8"}\n'
+    digest = hashlib.sha256(record).hexdigest()
+    result, failures = m.record_check(record, digest)
+    assert failures == [], failures
+    assert result == {"record": "pass", "schema_version": 2, "sha256": digest}, result
+
+    assert m.record_check(b'{"schema_version":3}\n', digest)[0]["schema_version"] == 3
+    # The bytes the rollback digested, and nothing else at that path.
+    assert m.record_check(record + b" ", digest)[1] == ["record_bytes_unchanged"]
+    # Each of these is compared against its own digest, so only the layout fails.
+    for other in (b'{"schema_version":3,"machine_type":"g2-standard-8"}\n',
+                  b'{"schema_version":"2"}\n', b'{"schema_version":true}\n',
+                  b'{"schema_version":2.0}\n', b'{"machine_type":"g2-standard-8"}\n'):
+        failures = m.record_check(other, hashlib.sha256(other).hexdigest())[1]
+        assert failures == ["record_schema_version_is_the_predecessors"], (other, failures)
+    for other in (b"", b"[2]\n", b"\xff\xfe"):
+        failures = m.record_check(other, hashlib.sha256(other).hexdigest())[1]
+        assert failures == ["record_is_a_json_object",
+                            "record_schema_version_is_the_predecessors"], (other, failures)
+
+    with tempfile.TemporaryDirectory() as work:
+        out = pathlib.Path(work) / "record.json"
+        done = run("record-check", "--record", "-", "--sha256", digest, "--out", str(out),
+                   input=record.decode())
+        assert done.returncode == 0 and json.loads(out.read_text())["sha256"] == digest, done
+        out.unlink()
+        done = run("record-check", "--record", "-", "--sha256", "0" * 64, "--out", str(out),
+                   input=record.decode())
+        assert done.returncode == m.EXIT_CHECKS_FAILED and not out.exists(), done
+        assert "record_bytes_unchanged" in done.stderr, done.stderr
+        done = run("record-check", "--record", str(out), "--sha256", digest)
+        assert done.returncode == m.EXIT_CHECKS_FAILED and "cannot read" in done.stderr, done
+    passed("a predecessor's record is the digested bytes in the layout it reads")
+
+
 def test_cli_documents():
     status = {"command": "status", "payload": {"severity": "ready", "agent": {
         "agent_state": "ready",
@@ -1353,6 +1396,7 @@ MINIMAL_ARGUMENTS = {
     "infer-check": ["--request", "r", "--response", "s"],
     "doctor-check": ["--doctor", "d", "--status", "0", "--exact-row", ROW],
     "identity-check": ["--agent-journal", "j"],
+    "record-check": ["--record", "r", "--sha256", "0" * 64],
     "evidence": ["--dir", "d", "--deployment", "d"],
     "run-denied": ["--call", "status", "--control", "c", "--evidence-dir", "o", "--", "true"],
 }
@@ -1665,7 +1709,8 @@ def main():
     for test in (test_drop_in, test_check_denial, test_check_no_denial, test_check_policy,
                  test_classify, test_probe_outcomes, test_run_denied,
                  test_controls_checked_as_taken, test_unit_probe_mechanics,
-                 test_doctor_check, test_identity_check, test_cli_documents,
+                 test_doctor_check, test_identity_check, test_record_check,
+                 test_cli_documents,
                  test_command_line, test_command_boundary, test_evidence):
         test()
     print("linux offline runtime: all checks pass")
