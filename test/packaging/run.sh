@@ -33,7 +33,8 @@ verify_systemd_units.sh
 verify_lifecycle_scripts.sh
 verify_descriptor.sh
 verify_installer.sh
-verify_lifecycle_state_guard.sh"
+verify_lifecycle_state_guard.sh
+verify_supervision_restart_wait.sh"
 
 harness="verify_macos_homebrew_lifecycle.sh
 verify_macos_offline_runtime.sh

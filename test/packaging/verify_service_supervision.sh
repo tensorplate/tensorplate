@@ -87,6 +87,21 @@ await_property() {
   return 1
 }
 
+# Observe the unit coming back after its main process was killed; the
+# caller has already sent the signal.
+check_crash_recovery() {
+  local first_pid="$1" state second_pid restarts
+  # Wait for systemd to notice, back off RestartSec, and come back up.
+  state="$(await_property "$AGENT_UNIT" ActiveState "$RESTART_WAIT" active)" ||
+    die "agent did not recover from SIGKILL (state=${state}); Restart=on-failure must recover a hard crash"
+  second_pid="$(systemctl show -p MainPID --value "$AGENT_UNIT")"
+  [[ "$second_pid" != "$first_pid" ]] ||
+    die "MainPID unchanged after SIGKILL; the unit was not actually restarted"
+  restarts="$(systemctl show -p NRestarts --value "$AGENT_UNIT")"
+  [[ "${restarts:-0}" -ge 1 ]] || die "NRestarts=${restarts} after a crash; expected at least 1"
+  pass "recovered as PID ${second_pid} (NRestarts=${restarts})"
+}
+
 note "staging users, directories, and stub binaries"
 packaging/scripts/create-users.sh
 packaging/scripts/install-paths.sh
@@ -136,15 +151,7 @@ pass "agent active as PID ${first_pid}, logs at ${TP_LOG_DIR}"
 
 note "2. a hard crash is recovered"
 kill -9 "$first_pid"
-# Wait for systemd to notice, back off RestartSec, and come back up.
-state="$(await_property "$AGENT_UNIT" ActiveState "$RESTART_WAIT" active)" ||
-  die "agent did not recover from SIGKILL (state=${state}); Restart=on-failure must recover a hard crash"
-second_pid="$(systemctl show -p MainPID --value "$AGENT_UNIT")"
-[[ "$second_pid" != "$first_pid" ]] ||
-  die "MainPID unchanged after SIGKILL; the unit was not actually restarted"
-restarts="$(systemctl show -p NRestarts --value "$AGENT_UNIT")"
-[[ "${restarts:-0}" -ge 1 ]] || die "NRestarts=${restarts} after a crash; expected at least 1"
-pass "recovered as PID ${second_pid} (NRestarts=${restarts})"
+check_crash_recovery "$first_pid"
 
 note "3. a crash loop is given up on, not restarted forever"
 printf 'crash\n' > "$MODE_FILE"
