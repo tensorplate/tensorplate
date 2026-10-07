@@ -33,10 +33,11 @@ mkdir -p "$fakebin"
 
 # `systemctl show -p PROP --value UNIT` answers one line per call from the
 # file PROP under TP_FAKE_ANSWERS, repeating the last line once the file
-# runs out; any other invocation is refused.
+# runs out; any other invocation, or another unit than TP_FAKE_UNIT, is
+# refused.
 cat >"${fakebin}/systemctl" <<'FAKE'
 #!/bin/sh
-[ "${1-}" = show ] && [ "${2-}" = -p ] && [ "${4-}" = --value ] && [ -n "${5-}" ] || exit 9
+[ "${1-}" = show ] && [ "${2-}" = -p ] && [ "${4-}" = --value ] && [ "${5-}" = "${TP_FAKE_UNIT}" ] || exit 9
 file="${TP_FAKE_ANSWERS}/$3"
 [ -f "$file" ] || exit 1
 n=$(cat "${file}.n" 2>/dev/null || echo 0)
@@ -70,7 +71,8 @@ run_case() {
   status=0
   out="$(
     cd "$td" &&
-    PATH="${fakebin}:${PATH}" TP_FAKE_ANSWERS="$answers" bounded bash -c '
+    PATH="${fakebin}:${PATH}" TP_FAKE_ANSWERS="$answers" TP_FAKE_UNIT=tensorplate-agent.service \
+      bounded bash -c '
       set -Eeuo pipefail
       die() { printf "FAIL: %s\n" "$*" >&2; exit 1; }
       note() { :; }
@@ -120,6 +122,11 @@ run_case same-pid 1 2 'ActiveState=active' 'MainPID=4242' 'NRestarts=1'
 # systemctl answering nothing is not a recovery.
 run_case show-fails 1 2 'ActiveState=active' 'MainPID=4243'
 [[ "$out" != *'PASS:'* ]] || failure "show-fails: passed with no NRestarts answer (output: ${out})"
+
+# An answer that is not a number is not a count; the next poll decides.
+run_case unreadable-count 0 10 'ActiveState=active;active' 'MainPID=4290;4290' 'NRestarts=[not set];1'
+[[ "$out" == *'PASS: recovered as PID 4290 (NRestarts=1)'* ]] ||
+  failure "unreadable-count: a non-numeric NRestarts was not waited out (output: ${out})"
 
 # Counted and active, but the main process not yet known: wait for it.
 run_case pid-pending 0 10 'ActiveState=active;active' 'MainPID=0;4280' 'NRestarts=1;1'
