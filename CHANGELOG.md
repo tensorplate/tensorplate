@@ -79,6 +79,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   listener, so a measurement now says nothing about the transport;
   `docs/validation/streaming-footprint.md` says what is measured, how the
   packages are built and where the summary goes. (V030-E04-F02-T01)
+- The vcpkg ports the serving worker links or compiles against (gRPC,
+  protobuf, OpenSSL, abseil, re2, c-ares, zlib, utf8-range and
+  nlohmann-json, from the pinned baseline) are recorded and scanned on
+  every pull request. `tools/release/native-sbom.py collect` reads a
+  build's vcpkg install tree, its status file and each port's own SPDX
+  document, and writes one SPDX 2.3 document with a CPE for every port the
+  NVD dictionary names and a recorded reason for the three it does not; it
+  refuses a tree missing a closure port, a port without its document, a
+  CMake cache without the streaming feature ON, or a port with no CPE
+  decision. `check` fails a document that is absent, was made for another
+  baseline, feature or triplet, or omits a port the manifest or the
+  feature names. The supply-chain workflow gains a leg that restores the
+  release configuration's dependencies without saving, records the
+  document, and scans it with a pinned, digest-verified `grype` after a
+  positive control; any match without a disposition fails it. The
+  disposition file gains the `vcpkg` ecosystem, emitted to grype as ignore
+  rules, with a first entry: CVE-2026-0994 concerns protobuf's Python JSON
+  parser, which the C++ runtime the worker links does not contain. Still
+  required before a final release, and not in this change: the same
+  record for the worker each release job builds, the binary cache's
+  provenance, and the final-tag gate on both. (V030-E01-F03-T01)
 - The Python SDK declares a `speech` extra, `grpcio>=1.81.1,<2` and
   `protobuf>=6.33.5,<7`, for the streaming speech transport, and
   `sdk/python/constraints/speech.txt` pins those floors and grpcio's one

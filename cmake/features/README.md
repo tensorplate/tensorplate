@@ -59,5 +59,8 @@ ports without the project's `-gdwarf-4`, and the worker compiles against the
 manifest's `nlohmann-json` rather than the distribution's package.
 Required before the final release tag, though not before a release
 candidate: the worker SBOM and vulnerability disposition must cover the
-static native closure, including OpenSSL. The current supply-chain workflow
-audits Rust and Python dependencies only.
+static native closure, including OpenSSL. The supply-chain workflow's
+native leg records and scans that closure from the release configuration's
+install tree on every pull request; recording it for the worker each
+release job builds, and refusing a final tag without that record, is not
+done yet. See `docs/release/artifacts.md`, "The native closure".

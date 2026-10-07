@@ -344,13 +344,46 @@ any change here), and on demand. It uses no secrets.
 | `cargo-deny` | licenses of normal and build dependencies (cargo-deny does not license-check crates reached only through dev-dependencies), wildcard version requirements, dependency sources (crates.io only, no git), yanked crates and RustSec advisories for the whole Rust workspace with all features; duplicate crate versions are reported as warnings | `deny.toml` |
 | `SBOM and audit` (`sdk/python`, `sdk/python[vision]`, `sdk/python[speech]`, `backends/python_pytorch`) | a CycloneDX JSON SBOM of the package installed into a clean environment without pip, uploaded as a workflow artifact, and a `pip-audit` run over the package's runtime dependency closure in that environment, after a positive control that requires it to report a pin with published advisories; the `sdk/python[speech]` leg first installs `sdk/python/constraints/speech.txt` with `--require-hashes`, so its closure is the pinned versions | the PyPI entries of the disposition file |
 | `SBOM and audit (speech runtime lock)` | a CycloneDX JSON SBOM of the speech runtime lock, one component per pin with its locked SHA-256, uploaded as a workflow artifact, and a `pip-audit` run over the same pins after the same positive control; the lock is read, not installed, a local version label is dropped for the advisory lookup, and a pin that is not on PyPI is reported as skipped | the PyPI entries of the disposition file |
+| `SBOM and audit (serving worker native closure)` | restores the release configuration's vcpkg dependencies through `.github/actions/release-vcpkg` (never saving), configures the amd64 release profile so that `vcpkg install` runs and nothing of this tree is compiled, and reads the install tree with `tools/release/native-sbom.py collect`: an SPDX 2.3 JSON SBOM of the vcpkg ports the worker links or compiles against, uploaded as a workflow artifact and checked with `native-sbom.py check`; then a `grype` scan of that document by CPE, after a positive control that requires grype to report OpenSSL 3.0.0's published advisories from the same kind of reference. Any match no disposition ignores fails the job, whatever its severity | the vcpkg entries of the disposition file, passed to grype as ignore rules |
 
-cargo-deny runs as a prebuilt binary whose version and SHA-256 are pinned
-in the workflow. `cyclonedx-bom` and `pip-audit` are pinned by version and
+cargo-deny and grype run as prebuilt binaries whose version and SHA-256 are
+pinned in the workflow. `cyclonedx-bom` and `pip-audit` are pinned by version and
 installed in an environment of their own, so their dependencies are never
 part of what is audited; those dependencies are not pinned, and the job log
 lists what they resolved to. The workflow's actions are pinned by commit
 SHA, as in the release workflows.
+
+**The native closure.** The worker links gRPC, protobuf, OpenSSL, abseil,
+re2, c-ares, zlib and utf8-range statically from the vcpkg baseline
+`vcpkg.json` pins, and compiles against the manifest's header-only
+nlohmann-json. `tools/release/native-sbom.py` carries no version list of
+its own: `collect` reads `vcpkg/status` and each port's
+`share/<port>/vcpkg.spdx.json` from a build's install tree, starts from the
+manifest's dependencies and the `streaming-grpc` feature's, follows them
+through the status file, and writes one package per port with the version,
+upstream source, source checksum and license vcpkg recorded. gtest is
+installed and not linked (the release configuration builds no tests); it is
+left out and the document says so. `collect` refuses a tree that lacks a
+closure port, a port without its SPDX document or whose document disagrees
+with the status file, a CMake cache that does not record the feature ON, an
+archive directory that lacks a port's archive, and a closure port the tool
+has no CPE decision for. The CPE decisions are a table in the tool, each
+checked against the NVD CPE dictionary on the date the table gives:
+OpenSSL, gRPC, zlib, c-ares and nlohmann-json (the last two under both
+names NVD uses) carry a CPE at the port's version, and protobuf at its
+upstream release number (33.4 for the port's 6.33.4); abseil, re2 and
+utf8-range have no dictionary entry and are named in the document with that
+fact, so they are listed and not scanned. `check` fails when the document
+is absent, was made for another baseline, feature or triplet, or does not
+name every port the manifest and the feature name with a version, a
+static-link relationship to the worker, and a CPE or a recorded reason for
+none. It checks the document's shape and its agreement with the manifest;
+it cannot tell which build a document came from. The scan is by CPE against
+grype's database: it finds what NVD attributes to a product and is not a
+source audit. Not done yet, and required before a final release: recording
+this document for the worker each release job builds, with the provenance
+of the binary cache it was linked from, and refusing a final tag without
+them.
 
 **License policy.** `deny.toml` allows `Apache-2.0`, `MIT` and
 `Unicode-3.0`, which every Rust dependency satisfies today. A dependency
@@ -386,7 +419,10 @@ dates and RFC 3339 date-times, never the RFC 2822 format the advisory
 concerns, and the fixed `time` needs a newer compiler than the workspace
 pins. It is due for review by 2026-12-23.
 
-Not covered yet: native dependencies of the C++ runtime; an SBOM of the
+Not covered yet: native dependencies of the C++ runtime other than the
+vcpkg ports above (the distribution libraries a package depends on are
+listed by its `Depends`, not by an SBOM), and abseil, re2 and utf8-range
+as far as scanning goes; an SBOM of the
 Rust workspace (cargo-deny checks policy, it lists nothing); the PyTorch
 backend's model stack (`torch`, `transformers`, `lerobot`, `numpy`), which
 it imports only when a model loads and does not declare as dependencies;
