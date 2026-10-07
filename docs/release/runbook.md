@@ -408,6 +408,9 @@ setting when the runner does not use the defaults. Every command of this
 section that runs as the runner account takes the same assignments, and
 `status` takes the `TP_JETSON_RUNNER_*` ones:
 `sudo env TP_JETSON_RUNNER_USER=<account> <checkout>/tools/release/jetson-runner-control.sh status`.
+A command run through `sudo -u` starts in the operator's current directory;
+each of these works even when the runner account cannot enter it, as with
+another account's home directory.
 
 The build runs downloaded build scripts as the runner account, for hours,
 on the operator's terminal. Check that `sudo -l` lists `use_pty` among the

@@ -4079,6 +4079,41 @@ class RunnerVcpkgProvisioningTests(unittest.TestCase):
             self.status(host)[6:8], ["vcpkg_cache_archives: 4", "vcpkg_cache_ready: yes"]
         )
 
+    def from_a_closed_directory(self, host: RunnerHost) -> tuple:
+        """A prefix that starts a command in a directory its account cannot enter."""
+        closed = host.tmp / "closed"
+        closed.mkdir()
+        self.addCleanup(closed.chmod, 0o755)
+        return ("sh", "-c", 'cd "$0" && chmod 0 . && exec "$@"', str(closed))
+
+    def test_provisioning_stamps_the_cache_from_a_directory_the_account_cannot_enter(self):
+        host = self.host
+        result = host.run("provision-vcpkg", prefix=self.from_a_closed_directory(host))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(host.stamp_fields()["archives_sha256"], self.listing_sha256(host))
+        self.assertEqual(host.cache_entries(), ["archives", "provision.lock", "provisioned.stamp"])
+
+    def test_check_passes_from_a_directory_the_account_cannot_enter(self):
+        host = self.provisioned()
+        stamp = host.stamp.read_bytes()
+        result = host.run("provision-vcpkg", "--check", prefix=self.from_a_closed_directory(host))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(host.installs()), 1)
+        self.assertEqual(host.stamp.read_bytes(), stamp)
+        self.assertEqual(host.cache_entries(), ["archives", "provision.lock", "provisioned.stamp"])
+
+    def test_vcpkg_env_answers_from_a_directory_the_account_cannot_enter(self):
+        host = self.provisioned()
+        expected = host.run("vcpkg-env").stdout
+        result = host.run("vcpkg-env", prefix=self.from_a_closed_directory(host))
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        self.assertEqual((result.stdout, len(expected.splitlines())), (expected, 3))
+
+    def test_status_lists_the_cache_from_a_directory_the_account_cannot_enter(self):
+        host = self.provisioned()
+        lines = self.status(host, prefix=self.from_a_closed_directory(host))
+        self.assertEqual(lines[6:8], ["vcpkg_cache_archives: 4", "vcpkg_cache_ready: yes"])
+
     def test_the_script_read_from_standard_input_keeps_its_runner_commands(self):
         """`bash -s -- off < script`: there is no file to find a checkout from."""
         host = self.provisioned()

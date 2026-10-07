@@ -536,7 +536,9 @@ plain_vcpkg_paths() {
 # that lost an archive after the proof stops answering as ready.
 cache_listing_sha256() {
   local digest
-  digest="$(find "${VCPKG_ARCHIVES}/" -type f -printf '%P\n' 2>/dev/null |
+  # From /: GNU find exits 1 after a complete listing when it cannot return
+  # to a start directory this account cannot enter.
+  digest="$(cd / && find "${VCPKG_ARCHIVES}/" -type f -printf '%P\n' 2>/dev/null |
     LC_ALL=C sort | sha256sum)" || return 1
   digest="${digest%% *}"
   [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
@@ -919,11 +921,12 @@ cmd_vcpkg_env() {
   printf 'VCPKG_FORCE_SYSTEM_BINARIES=1\n'
 }
 
+# Counted from /, as in cache_listing_sha256.
 count_cache_archives() {
   local count
   if known_missing "$VCPKG_ARCHIVES"; then
     printf '0\n'
-  elif count="$(find "${VCPKG_ARCHIVES}/" -type f 2>/dev/null | wc -l)"; then
+  elif count="$(cd / && find "${VCPKG_ARCHIVES}/" -type f 2>/dev/null | wc -l)"; then
     printf '%s\n' "$((count))"
   else
     printf 'unreadable\n'
