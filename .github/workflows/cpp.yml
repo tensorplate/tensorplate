@@ -220,7 +220,7 @@ jobs:
       - name: Streaming missing-feature refusal and unary serving
         run: |
           ctest --test-dir build --output-on-failure --no-tests=error \
-            -R 'ServingConfig.StreamingRequiresCompiledFeature|ServingConfig.StreamingDisabledByDefault'
+            -R 'ServingConfig.StreamingRequiresCompiledFeature|ServingConfig.StreamingDisabledByDefault|WorkerVersion.ReportsStreamingSupport'
           ctest --test-dir build --output-on-failure --no-tests=error \
             -R '^ServingE2E\.(HealthRouteReportsReady|InferRouteHappyPath|PolicyInferAndResult)$'
 

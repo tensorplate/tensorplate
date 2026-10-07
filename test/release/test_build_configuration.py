@@ -4962,6 +4962,63 @@ class SourceInstallStreamingTests(unittest.TestCase):
                 for line in said:
                     self.assertIn("VCPKG_ROOT", line)
 
+    def built_package(self, arch: str, version_lines: list[str]) -> Path:
+        """A tensorplate-serving package whose worker prints the given --version lines."""
+        tree = self.root / f"pkg-{arch}"
+        shutil.rmtree(tree, ignore_errors=True)
+        (tree / "DEBIAN").mkdir(parents=True)
+        (tree / "usr/lib/tensorplate").mkdir(parents=True)
+        (tree / "DEBIAN/control").write_text(
+            f"Package: tensorplate-serving\nVersion: 0.2.1~dev.1.abc\nArchitecture: {arch}\n"
+            "Maintainer: tests <tests@tensorplate.invalid>\nDescription: stub\n"
+        )
+        printed = "".join(f"echo '{line}'\n" for line in version_lines)
+        write_executable(tree / "usr/lib/tensorplate/tensorplate-serving", f"#!/bin/sh\n{printed}")
+        package = self.root / f"tensorplate-serving_0.2.1.dev.1.abc_{arch}.deb"
+        subprocess.run(["dpkg-deb", "-b", "--root-owner-group", str(tree), str(package)],
+                       check=True, capture_output=True)
+        return package
+
+    def install_built(self, arch: str, version_lines: list[str]):
+        """The wrapper with a builder that stages the stub package instead of building."""
+        package = self.built_package(arch, version_lines)
+        write_executable(
+            self.source / "tools/release/build-release-artifacts.sh",
+            "#!/bin/sh\n[ \"$1\" != --help ] || { echo '--without-streaming'; exit 0; }\n"
+            "while [ $# -gt 0 ]; do [ \"$1\" = --artifacts-dir ] && out=$2; shift; done\n"
+            f"mkdir -p \"$out\" && cp '{package}' \"$out/\"\n",
+        )
+        return subprocess.run(
+            ["bash", str(SOURCE_INSTALL), "--no-install", "--source-dir", str(self.source),
+             "--artifacts-dir", str(self.root / "out"), "--arch", arch],
+            cwd=self.root, env={"PATH": os.environ["PATH"]},
+            text=True, capture_output=True, timeout=60,
+        )
+
+    def test_a_source_install_says_whether_the_built_worker_has_streaming_support(self):
+        three = ["tensorplate-serving 0.2.1", "protocol 0.1", "bundle-format 0.1"]
+        host = subprocess.run(["dpkg", "--print-architecture"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+        other = "arm64" if host != "arm64" else "amd64"
+        cases = (  # arch, the worker's --version lines, what the wrapper says
+            (host, [*three, "streaming-grpc on"], "streaming gRPC support in the built worker: on"),
+            (host, [*three, "streaming-grpc off"],
+             "streaming gRPC support in the built worker: off"),
+            (host, three, "streaming gRPC support in the built worker: not reported"),
+            (other, [*three, "streaming-grpc on"],
+             f"streaming gRPC support in the built worker: not run (the package is for {other}"),
+        )
+        for arch, lines, said in cases:
+            with self.subTest(arch=arch, last=lines[-1]):
+                result = self.install_built(arch, lines)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                reported = [
+                    line for line in result.stdout.splitlines()
+                    if "streaming gRPC support in the built worker" in line
+                ]
+                self.assertEqual(len(reported), 1, result.stdout)
+                self.assertTrue(reported[0].startswith(said), reported[0])
+
     def test_a_vcpkg_root_that_names_no_checkout_is_refused_before_the_builder_runs(self):
         args, result = self.install("amd64", VCPKG_ROOT=str(self.root))
         self.assertEqual((args, result.returncode), (None, 1), result.stdout)

@@ -25,6 +25,8 @@ add_executable(tp_test_integration
   # The worker binary and the control descriptor it inherits as fd 0.
   control_descriptor_test.cpp
   worker_signal_test.cpp
+  # What --version says about streaming support, in both build flavours.
+  worker_version_test.cpp
 )
 
 target_include_directories(tp_test_integration
@@ -50,6 +52,7 @@ if(TARGET tp_serving_worker)
   target_compile_definitions(tp_test_integration
     PRIVATE
       TP_SERVING_WORKER_BINARY="$<TARGET_FILE:tp_serving_worker>"
+      TP_ENABLE_STREAMING_GRPC=$<BOOL:${TP_ENABLE_STREAMING_GRPC}>
   )
 endif()
 
