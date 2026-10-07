@@ -35,8 +35,20 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034
 
+# `.` with no argument hands this file the caller's own: source it with none left.
+TP_AMD64_STREAMING=ON
+case "$#:${1:-}" in
+  0:) ;;
+  1:--without-streaming) TP_AMD64_STREAMING=OFF ;;
+  *)
+    printf 'error: amd64-build-profile.sh takes no argument but --without-streaming; got "%s"\n' "$*" >&2
+    return 1
+    ;;
+esac
+
 # The streaming feature configures only through a vcpkg toolchain file.
-if [[ -z "${VCPKG_ROOT:-}" || ! -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]]; then
+if [[ "$TP_AMD64_STREAMING" == ON ]] &&
+  [[ -z "${VCPKG_ROOT:-}" || ! -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]]; then
   printf 'error: VCPKG_ROOT must name a vcpkg checkout at the builtin-baseline of vcpkg.json; no scripts/buildsystems/vcpkg.cmake under "%s"\n' \
     "${VCPKG_ROOT:-}" >&2
   return 1
@@ -49,16 +61,24 @@ TP_AMD64_CMAKE_ARGS=(
   -DTP_ENABLE_TENSORRT=OFF
   -DTP_REQUIRE_TENSORRT_SDK=OFF
   -DTP_ENABLE_LIBTORCH=OFF
-  -DTP_ENABLE_STREAMING_GRPC=ON
+  "-DTP_ENABLE_STREAMING_GRPC=${TP_AMD64_STREAMING}"
   -DTP_ENABLE_PYTHON_PYTORCH_SIDECAR=ON
-  -DVCPKG_MANIFEST_FEATURES=streaming-grpc
-  -DVCPKG_TARGET_TRIPLET=x64-linux
-  "-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
 )
+if [[ "$TP_AMD64_STREAMING" == ON ]]; then
+  TP_AMD64_CMAKE_ARGS+=(
+    -DVCPKG_MANIFEST_FEATURES=streaming-grpc
+    -DVCPKG_TARGET_TRIPLET=x64-linux
+    "-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+  )
+fi
 # A publishing build restores every dependency from the binary cache or fails.
-case "${TP_VCPKG_BINARY_ONLY:-0}" in
-  0) ;;
-  1) TP_AMD64_CMAKE_ARGS+=(-DVCPKG_INSTALL_OPTIONS=--only-binarycaching) ;;
+case "${TP_VCPKG_BINARY_ONLY:-0}:${TP_AMD64_STREAMING}" in
+  0:*) ;;
+  1:ON) TP_AMD64_CMAKE_ARGS+=(-DVCPKG_INSTALL_OPTIONS=--only-binarycaching) ;;
+  1:OFF)
+    printf 'error: TP_VCPKG_BINARY_ONLY=1 cannot be combined with --without-streaming\n' >&2
+    return 1
+    ;;
   *)
     printf 'error: TP_VCPKG_BINARY_ONLY must be 0 or 1; got "%s"\n' "$TP_VCPKG_BINARY_ONLY" >&2
     return 1

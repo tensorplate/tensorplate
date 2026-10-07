@@ -99,11 +99,10 @@ no-APT fallback ([external-install.md](docs/install/external-install.md)).
 Before a release exists, build and install an unreleased branch snapshot:
 
 ```bash
-curl -fL https://raw.githubusercontent.com/tensorplate/tensorplate/develop/packaging/scripts/build-install-from-source.sh -o build-install-from-source.sh && sudo VCPKG_ROOT=<vcpkg-dir> bash build-install-from-source.sh --branch develop
+curl -fL https://raw.githubusercontent.com/tensorplate/tensorplate/develop/packaging/scripts/build-install-from-source.sh -o build-install-from-source.sh && sudo bash build-install-from-source.sh --branch develop
 ```
 
-The build needs `VCPKG_ROOT` to name a vcpkg checkout at the manifest's baseline; see
-[Build And Install An Unreleased Branch](docs/install/external-install.md#build-and-install-an-unreleased-branch).
+That worker has no streaming gRPC support unless built with vcpkg: see [Build And Install An Unreleased Branch](docs/install/external-install.md#build-and-install-an-unreleased-branch).
 
 Full guide, troubleshooting, and source-install caveats: [Installation](https://tensorplate.com/docs/installation)
 

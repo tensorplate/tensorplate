@@ -370,6 +370,13 @@ jobs:
             exit 1
           }
 
+      # Before anything is compiled: a publishing run with a cold cache fails
+      # here. Only a branch other than the default one may save what it builds.
+      - name: Pinned vcpkg checkout and binary cache
+        uses: ./.github/actions/release-vcpkg
+        with:
+          mode: ${{ needs.meta.outputs.publish == 'true' && 'restore' || (github.ref_type == 'branch' && github.event.repository.default_branch != '' && github.ref_name != github.event.repository.default_branch) && 'build-and-save' || 'build' }}
+
       - name: Build amd64 Rust binaries
         shell: bash
         env:
@@ -385,13 +392,6 @@ jobs:
             --bin tensorplate-agent \
             --bin tensorplate-observability \
             --bin tensorplate
-
-      # Sets VCPKG_ROOT for the profile the next step reads. A run that
-      # publishes never builds a dependency: a cache miss fails configure.
-      - name: Pinned vcpkg checkout and binary cache
-        uses: ./.github/actions/release-vcpkg
-        with:
-          binary-only: ${{ needs.meta.outputs.publish == 'true' }}
 
       - name: Build amd64 serving worker
         shell: bash
@@ -500,7 +500,8 @@ jobs:
           # gRPC and protobuf are linked statically from vcpkg: neither the
           # package nor the worker may ask for a distribution library.
           tools/release/assert-static-streaming-closure.sh \
-            --deb "$serving" --binary build/release/tensorplate-serving
+            --deb "$serving" --binary build/release/tensorplate-serving \
+            --cmake-cache build/release/CMakeCache.txt
           # The metapackage must stay an empty dependency bundle on this
           # architecture too, now that it is built per architecture.
           # debhelper always adds changelog.Debian.gz and copyright under
@@ -808,7 +809,8 @@ jobs:
         run: |
           set -Eeuo pipefail
           tools/ci/apt-get.sh update
-          tools/ci/apt-get.sh install -y --no-install-recommends \
+          # Nothing installed is upgraded: the vcpkg cache is keyed on this compiler.
+          tools/ci/apt-get.sh install -y --no-install-recommends --no-upgrade \
             build-essential \
             ca-certificates \
             clang \
@@ -934,7 +936,8 @@ jobs:
           # A glob that matches nothing, or twice, names no file: the checker refuses it.
           tools/release/assert-static-streaming-closure.sh \
             --deb "$(echo "${RELEASE_DIR}"/tensorplate-serving_*_arm64.deb)" \
-            --binary build/release/tensorplate-serving
+            --binary build/release/tensorplate-serving \
+            --cmake-cache build/release/CMakeCache.txt
 
       - name: Assert the release package count
         shell: bash

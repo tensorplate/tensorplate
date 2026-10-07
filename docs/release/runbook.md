@@ -174,6 +174,8 @@ The release owner stops immediately unless all prerequisites are true:
   publish environments (`pypi`, `apt`, `homebrew`, `github-release`) each have
   a required reviewer (a reviewer-less environment publishes without a hold).
 - Clean-room validation target is ready.
+- For a final tag, not a release candidate: the worker SBOM and vulnerability
+  disposition cover the static native closure; see `cmake/features/README.md`.
 - No release blocker is open without a signed conditional pass.
 - **Every Production row rests on a recorded run.** Verify with:
 
@@ -234,13 +236,13 @@ The package build runner must have:
 
 - `sudo` access for installing Debian build dependencies.
 - Rust via `rustup`, CMake, Ninja, a C++ compiler, debhelper, `dh-exec`,
-  `dpkg-buildpackage`, `nlohmann-json3-dev`, and GitHub CLI `gh`.
+  `dpkg-buildpackage`, and GitHub CLI `gh`.
 - The vcpkg checkout and binary cache of "Provision the vcpkg checkout and
   binary cache", provisioned ahead for the release's `vcpkg.json`. The
   release job reads `VCPKG_ROOT` and the cache from `vcpkg-env`; nothing has
   to be exported in the runner service's environment. The worker compiles
-  against the manifest's `nlohmann-json`, not the distribution's
-  `nlohmann-json3-dev`.
+  against the manifest's `nlohmann-json`; the distribution's
+  `nlohmann-json3-dev`, which the job's apt step still installs, is unused.
 - JetPack-compatible CUDA/TensorRT development headers and libraries when
   building v0.1.x release packages with `TP_ENABLE_TENSORRT=ON`. Release
   artifact builds default `TP_REQUIRE_TENSORRT_SDK=ON` so they fail during
@@ -300,25 +302,44 @@ cache, and a package the cache lacks fails the configure step.
   prints to its environment and fails there when the runner is not
   provisioned for the checkout's `vcpkg.json`. Its build always runs with
   `TP_VCPKG_BINARY_ONLY=1`, build-only dispatches included: provision the
-  runner first, as below.
+  runner first, as below. Its apt step installs what is missing and upgrades
+  nothing, so the compiler stays the one the cache was built with.
 - **amd64 job.** `.github/actions/release-vcpkg` checks vcpkg out at the
   baseline and restores an Actions cache keyed on the baseline and on a
-  digest of three things: what the manifest says, in the canonical form
-  described below, the first line of `clang --version`, and the SHA-256 of
-  the `clang++` binary. A new or rebuilt compiler therefore opens a new key.
-  It sets `VCPKG_FORCE_DOWNLOADED_BINARIES=1`, so vcpkg runs the CMake and
-  Ninja its checkout pins and not the hosted image's. A run that publishes
-  only restores the cache: it builds nothing and saves nothing. A build-only
-  dispatch builds what is missing, within 180 minutes instead of 60, and
-  saves the cache only when the job succeeds.
+  digest of what the manifest says, in the canonical form described below,
+  the first line of `clang --version`, the SHA-256 of the `clang++` binary,
+  and the bytes of `tools/release/amd64-build-profile.sh` and of the action
+  itself: a change to any of them opens a new key, and only the exact key is
+  ever read. It sets `VCPKG_FORCE_DOWNLOADED_BINARIES=1`, so vcpkg runs the
+  CMake and Ninja its checkout pins and not the hosted image's. A run that
+  publishes restores that key before it compiles anything and fails there on
+  a miss: it builds nothing and saves nothing. A build-only dispatch builds
+  what is missing, within 180 minutes instead of 60, and saves it only on a
+  branch other than `develop`, where no publishing run reads.
 
 `.github/workflows/release-dependencies.yml` warms that cache on `develop`:
 on a push that changes `vcpkg.json`, the action or the build profile, twice a
-week, and on dispatch. A cache saved on `develop` is restored on any tag;
-one saved on another ref only on that ref. After a miss, dispatch that
-workflow on `develop`, or `release.yml` with `publish=false` from `develop`
-or from the tag, then re-run the release. That workflow too saves the cache
-only when its job succeeds.
+week, and on dispatch. It is the only workflow that saves a cache on
+`develop`, which is where a tag's run reads one. Its job ends by configuring
+again from the cache alone, and the cache is saved only when that succeeds.
+The repository's Actions cache is size-capped: it evicts the entries read
+least recently, and any entry unread for seven days, so this one can be gone
+on the day of a release. Before tagging, and after a miss, dispatch the
+workflow on `develop`, wait for it to pass, then tag or re-run the release:
+
+```bash
+gh workflow run release-dependencies.yml --ref develop
+```
+
+The key is computed from the checked-out tree's `vcpkg.json`, build profile
+and action, so that cache serves a tag only while those three files are the
+same on the tag and on `develop`. When one differs, or the tag's own cache
+was evicted, dispatch the workflow on the tag, which builds the tag's tree
+and saves under the tag's scope, then re-run the release:
+
+```bash
+gh workflow run release-dependencies.yml --ref <tag>
+```
 
 The runner needs `git`, `curl`, `zip`, `unzip`, `tar`, `make`, Perl with
 `IPC::Cmd`, the Linux kernel headers (`linux-libc-dev`), Ninja, and the
@@ -534,6 +555,9 @@ sudo -u gha-runner -H env PATH="<runner_path>" \
   <checkout>/tools/release/jetson-runner-control.sh provision-vcpkg --check
 ```
 
+The hosted cache is separate: dispatch `release-dependencies.yml` on
+`develop` as well and wait for it to pass before tagging, as described above.
+
 `status` reports `vcpkg_root`, `vcpkg_baseline`, `vcpkg_commit`,
 `vcpkg_checkout` (`current`, `stale` or `absent`), `vcpkg_tool`,
 `vcpkg_binary_cache`, `vcpkg_cache_archives` and `vcpkg_cache_ready`, which
@@ -572,7 +596,10 @@ has proved nothing either way and leaves the stamp.
 Readiness does not compare toolchains. vcpkg keys each cached package on
 the compiler and on the CMake it ran with, so a compiler or CMake that
 changed after provisioning makes the cache miss while `status` still says
-`yes`. `status` shows the compiler line the stamp recorded; after a
+`yes`. `vcpkg-env` compares one thing, the compiler line the stamp recorded
+with the first line of `${CXX:-c++} --version` in the job's environment, and
+refuses with both lines when they differ; a compiler rebuilt under the same
+line, or another CMake, passes it. `status` shows that line; after a
 toolchain upgrade run `provision-vcpkg --check` with the release build's
 `PATH`, `CC` and `CXX`. If its proof fails it removes the stamp; provision
 again.
@@ -581,8 +608,9 @@ again.
 `VCPKG_ROOT`, a read-only `VCPKG_BINARY_SOURCES` and
 `VCPKG_FORCE_SYSTEM_BINARIES=1`, one per line, for the job to append to its
 environment file. It prints them only when `status` would report the cache
-as ready for the `vcpkg.json` of the checkout it is run from and git
-reports the vcpkg checkout unmodified; otherwise it prints nothing and
+as ready for the `vcpkg.json` of the checkout it is run from, git reports
+the vcpkg checkout unmodified and the compiler line is the stamp's; otherwise
+it prints nothing and
 exits non-zero, so a job cannot pick up a cache made for another baseline
 or other dependencies, or a checkout whose tracked files were edited after
 the proof. git does not report what vcpkg's own `.gitignore` covers, which

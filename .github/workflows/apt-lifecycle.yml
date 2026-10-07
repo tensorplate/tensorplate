@@ -403,7 +403,8 @@ jobs:
       - name: Pinned vcpkg checkout and binary cache
         uses: ./.github/actions/release-vcpkg
         with:
-          binary-only: 'false'
+          # A pull request saves under its own ref, where no release reads.
+          mode: ${{ github.event_name == 'pull_request' && 'build-and-save' || 'build' }}
 
       - name: CPU-only Preview smoke
         shell: bash

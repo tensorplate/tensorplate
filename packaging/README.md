@@ -108,11 +108,10 @@ the local manifest and `SHA256SUMS`, then calls `install.sh
 --local-artifacts --allow-unsigned`:
 
 ```bash
-sudo VCPKG_ROOT=<vcpkg-dir> bash packaging/scripts/build-install-from-source.sh --branch develop
+sudo bash packaging/scripts/build-install-from-source.sh --branch develop
 ```
 
-It needs `VCPKG_ROOT` to name a vcpkg checkout at the manifest's baseline; see
-[`external-install.md`](../docs/install/external-install.md#build-and-install-an-unreleased-branch).
+Its worker has no streaming gRPC support unless built with vcpkg: see [`external-install.md`](../docs/install/external-install.md#build-and-install-an-unreleased-branch).
 
 ## v0.1.0 invariants
 

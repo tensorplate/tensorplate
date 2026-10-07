@@ -87,7 +87,9 @@ bash packaging/scripts/build-install-from-source.sh --branch develop --no-instal
 
 The snapshot now builds the streaming feature's dependencies (gRPC,
 protobuf, OpenSSL) through vcpkg for the `arm64-linux` target; this
-x86-to-Jetson cross-build has not been run with the feature on.
+x86-to-Jetson cross-build has not been run with the feature on. It
+configures through the vcpkg toolchain, so `--without-streaming` is refused
+for it and the wrapper needs `VCPKG_ROOT` here.
 
 The output directory contains snapshot packages versioned
 `X.Y.Z~dev.YYYYMMDD.gitsha` (their file names spell it

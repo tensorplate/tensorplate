@@ -1034,6 +1034,14 @@ tools/release/build-release-artifacts.sh --snapshot --arch amd64 \
   directory that a later build restores from. vcpkg builds those ports
   without the project's `-gdwarf-4`, and the worker compiles against the
   manifest's `nlohmann-json` rather than the distribution's package.
+- Without vcpkg, `--without-streaming` builds a snapshot whose worker has
+  no streaming gRPC support. It is not the release configuration; say so
+  when filing evidence from it:
+
+  ```bash
+  tools/release/build-release-artifacts.sh --snapshot --arch amd64 \
+    --without-streaming --artifacts-dir <assets-dir>
+  ```
 - The manifest and `SHA256SUMS` are written into the assets directory
   under the names `install.sh --local-artifacts` reads. Omit
   `--manifest` and `--checksums`; any other path is refused.

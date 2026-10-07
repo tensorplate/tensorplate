@@ -65,7 +65,7 @@ jobs:
       - name: Pinned vcpkg checkout and binary cache
         uses: ./.github/actions/release-vcpkg
         with:
-          binary-only: 'false'
+          mode: build-and-save
 
       # Configure is what runs `vcpkg install`; nothing of this tree is compiled.
       - name: Configure the release profile
@@ -75,6 +75,81 @@ jobs:
           # shellcheck source=tools/release/amd64-build-profile.sh disable=SC1091
           . tools/release/amd64-build-profile.sh
           CC="$TP_AMD64_CC" CXX="$TP_AMD64_CXX" cmake -S . -B "${RUNNER_TEMP}/release-dependencies" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DTP_BUILD_TESTS=OFF \
+            -DTP_BUILD_EXAMPLES=OFF \
+            -DTP_ENABLE_SANITIZERS=OFF \
+            "${TP_AMD64_CMAKE_ARGS[@]}"
+
+      # The proof: what this job is about to save restores every package.
+      - name: Configure again from the cache alone
+        shell: bash
+        env:
+          TP_VCPKG_BINARY_ONLY: '1'
+          VCPKG_BINARY_SOURCES: clear;files,${{ runner.temp }}/vcpkg-archives,read
+        run: |
+          set -Eeuo pipefail
+          # shellcheck source=tools/release/amd64-build-profile.sh disable=SC1091
+          . tools/release/amd64-build-profile.sh
+          CC="$TP_AMD64_CC" CXX="$TP_AMD64_CXX" cmake -S . -B "${RUNNER_TEMP}/release-dependencies-proof" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DTP_BUILD_TESTS=OFF \
+            -DTP_BUILD_EXAMPLES=OFF \
+            -DTP_ENABLE_SANITIZERS=OFF \
+            "${TP_AMD64_CMAKE_ARGS[@]}"
+
+  # What a publishing run does: the exact key or a failure at the cache step,
+  # and a configure that may build nothing.
+  restore:
+    name: release dependency cache restores (x64-linux)
+    needs: warm
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # A stalled mirror holds a connection open without failing; a response
+      # timeout turns the stall into an error that a retry can recover.
+      - name: Make apt fail fast and retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
+          apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
+            echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
+
+      - name: Install the release profile's compilers
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
+            ca-certificates \
+            clang-15 \
+            llvm-15 \
+            ninja-build
+          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+
+      - name: Pinned vcpkg checkout and the cache the first job saved
+        uses: ./.github/actions/release-vcpkg
+        with:
+          mode: restore
+
+      - name: Configure the release profile from the cache alone
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # shellcheck source=tools/release/amd64-build-profile.sh disable=SC1091
+          . tools/release/amd64-build-profile.sh
+          CC="$TP_AMD64_CC" CXX="$TP_AMD64_CXX" cmake -S . -B "${RUNNER_TEMP}/release-dependencies-restore" \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DTP_BUILD_TESTS=OFF \

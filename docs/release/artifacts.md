@@ -108,8 +108,11 @@ through the vcpkg checkout `VCPKG_ROOT` names, at the `builtin-baseline` of
 `vcpkg.json`, and link gRPC, protobuf and their dependencies statically. A
 run that publishes restores those packages from a binary cache and fails on
 a miss; each job then runs `tools/release/assert-static-streaming-closure.sh`
-on its serving package and worker. See "Provision the vcpkg checkout and
-binary cache" in [`runbook.md`](runbook.md).
+on its serving package and worker, which also fails a worker whose
+`CMakeCache.txt` does not record the feature ON. `--without-streaming`
+builds a snapshot without the feature and without vcpkg; no release job
+passes it. See "Provision the vcpkg checkout and binary cache" in
+[`runbook.md`](runbook.md).
 
 Because a release build cannot cross-compile, the secondary Ubuntu `x86_64`
 set is built by its own hosted job and pre-staged in the repository parent

@@ -25,6 +25,8 @@ die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 note() { printf '==> %s\n' "$*"; }
 pass() { printf 'PASS: %s\n' "$*"; }
 
+# The build profile is sourced below with this script's own arguments.
+[[ $# -eq 0 ]] || die "verify_cpu_only_smoke.sh takes no argument; got: $*"
 [[ "${CI:-}" == "true" || "${TP_CPU_SMOKE_ALLOW:-0}" == "1" ]] ||
   die "this smoke installs system packages; run on a disposable host with TP_CPU_SMOKE_ALLOW=1"
 [[ "$(id -u)" -eq 0 ]] || die "run as root (dpkg and systemd operations)"
@@ -95,8 +97,8 @@ repo_parent="$(dirname "$repo_root")"
 # ask the distribution for either.
 tools/release/assert-static-streaming-closure.sh \
   --deb "${repo_parent}/tensorplate-serving_${version}_${host_arch}.deb" \
-  --binary build/release/tensorplate-serving ||
-  die "the serving package or its worker depends on a distribution gRPC or protobuf library"
+  --binary build/release/tensorplate-serving --cmake-cache build/release/CMakeCache.txt ||
+  die "the worker lacks the streaming feature, or it or its package asks for a distribution gRPC library"
 # tensorplate-common carries the layout helpers every other package
 # Pre-Depends on, so it must be configured before the rest.
 dpkg -i "${repo_parent}/tensorplate-common_${version}_all.deb" >>"${work}/install.log" 2>&1 ||

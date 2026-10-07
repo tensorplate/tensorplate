@@ -179,7 +179,13 @@ pass "serving binary ships from the package"
 # gRPC and protobuf are linked statically: the package must not depend on the
 # distribution's, and the checker must refuse the cases it exists to catch.
 closure=tools/release/assert-static-streaming-closure.sh
-"$closure" --deb "$serving" --binary build/release/tensorplate-serving >/dev/null ||
+fixtures="${saved_dir}/closure"
+mkdir -p "${fixtures}/pkg/DEBIAN"
+# The binaries here are stubs no CMake built: a cache line stands in for theirs.
+printf 'TP_ENABLE_STREAMING_GRPC:BOOL=ON\n' >"${fixtures}/on"
+printf 'TP_ENABLE_STREAMING_GRPC:BOOL=OFF\n' >"${fixtures}/off"
+worker=(--binary build/release/tensorplate-serving --cmake-cache "${fixtures}/on")
+"$closure" --deb "$serving" "${worker[@]}" >/dev/null ||
   die "the serving package or its worker depends on a distribution gRPC or protobuf library"
 pass "serving package and worker ask for no distribution gRPC or protobuf"
 
@@ -192,20 +198,20 @@ refuses() {
   grep -qF -- "$name" <<<"$out" ||
     die "the closure checker refused ${name} for another reason: ${out}"
 }
-fixtures="${saved_dir}/closure"
-mkdir -p "${fixtures}/pkg/DEBIAN"
 for dependency in libgrpc++1 libprotobuf23; do
   printf 'Package: fixture\nVersion: 1\nArchitecture: all\nMaintainer: Fixture <fixture@example.invalid>\nDescription: fixture\nDepends: libc6, %s (>= 1)\n' \
     "$dependency" >"${fixtures}/pkg/DEBIAN/control"
   dpkg-deb --root-owner-group -b "${fixtures}/pkg" "${fixtures}/${dependency}.deb" >/dev/null
-  refuses "$dependency" --deb "${fixtures}/${dependency}.deb" --binary build/release/tensorplate-serving
+  refuses "$dependency" --deb "${fixtures}/${dependency}.deb" "${worker[@]}"
 done
+refuses TP_ENABLE_STREAMING_GRPC --deb "$serving" \
+  --binary build/release/tensorplate-serving --cmake-cache "${fixtures}/off"
 # A library with gRPC's soname stands in for it; nothing needs gRPC installed.
 cc -shared -fPIC -Wl,-soname,libgrpc++.so.1 -o "${fixtures}/libgrpc++.so.1" "$stub_src"
 cc -o "${fixtures}/worker" "$stub_src" \
   -Wl,--no-as-needed "${fixtures}/libgrpc++.so.1" -Wl,-rpath,"$fixtures"
-refuses libgrpc++.so.1 --deb "$serving" --binary "${fixtures}/worker"
-pass "closure checker refuses a libgrpc++1 or libprotobuf23 dependency and a linked libgrpc++.so.1"
+refuses libgrpc++.so.1 --deb "$serving" --binary "${fixtures}/worker" --cmake-cache "${fixtures}/on"
+pass "closure checker refuses a feature-off worker, a libgrpc++1 or libprotobuf23 dependency and a needed libgrpc++.so.1"
 
 # The agent config is selected per architecture by a dh-exec filter, which is
 # only exercised by a real build. Read it back out of the archive: a filter

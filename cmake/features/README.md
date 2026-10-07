@@ -57,7 +57,7 @@ baseline, compiler and triplet and fails on a miss; see
 [`docs/release/runbook.md`](../../docs/release/runbook.md). vcpkg builds the
 ports without the project's `-gdwarf-4`, and the worker compiles against the
 manifest's `nlohmann-json` rather than the distribution's package.
-Still required before a release ships the feature: the worker SBOM and
-vulnerability disposition must cover the static native closure, including
-OpenSSL. The current supply-chain workflow audits Rust and Python
-dependencies only.
+Required before the final release tag, though not before a release
+candidate: the worker SBOM and vulnerability disposition must cover the
+static native closure, including OpenSSL. The current supply-chain workflow
+audits Rust and Python dependencies only.

@@ -143,6 +143,8 @@ that file, and the digest covers vcpkg.json alone.
 vcpkg-env prints the three environment lines a release job needs to use that
 checkout and cache. It prints nothing and fails unless the runner is ready
 for this checkout's vcpkg.json and git reports the vcpkg checkout unmodified.
+It fails as well when the first line of "\${CXX:-c++} --version" is not the
+compiler line the stamp records.
 It asks git as the runner account and refuses to run as root.
 
 Environment overrides:
@@ -693,6 +695,11 @@ bootstrap_vcpkg() {
     die "the vcpkg bootstrap left no executable ${VCPKG_TOOL}"
 }
 
+# The line the stamp records; vcpkg-env compares it with the job's own.
+compiler_line() {
+  first_version_line "${CXX:-c++}" --version
+}
+
 first_version_line() {
   local out
   out="$("$@" 2>/dev/null)" || return 1
@@ -814,8 +821,7 @@ cmd_provision_vcpkg() {
     return
   fi
 
-  compiler="$(first_version_line "${CXX:-c++}" --version)" ||
-    die "no C++ compiler: '${CXX:-c++} --version' failed"
+  compiler="$(compiler_line)" || die "no C++ compiler: '${CXX:-c++} --version' failed"
   started_sha256="$DEPENDENCIES_SHA256"
   take_provisioning_lock
   note "vcpkg baseline ${MANIFEST_BASELINE} from ${MANIFEST}"
@@ -840,6 +846,7 @@ cmd_provision_vcpkg() {
 
 # Not as root: git obeys the configuration of the repository it inspects.
 cmd_vcpkg_env() {
+  local recorded current
   [[ "$#" -eq 0 ]] || die "vcpkg-env takes no arguments"
   [[ "${EUID}" -ne 0 ]] ||
     die "vcpkg-env asks git about the vcpkg checkout and does not do that as root; run it as the runner account"
@@ -847,6 +854,11 @@ cmd_vcpkg_env() {
     die "the runner's vcpkg is not ready for this checkout: ${NOT_READY_REASON}"
   forget_git_environment
   require_clean_checkout
+  # vcpkg keys every package on the compiler: another one restores nothing.
+  recorded="$(stamp_value compiler)" || die "the stamp at ${VCPKG_STAMP} records no compiler"
+  current="$(compiler_line)" || die "no C++ compiler: '${CXX:-c++} --version' failed"
+  [[ "$current" == "$recorded" ]] ||
+    die "the binary cache was built with '${recorded//[^[:print:]]/?}' and this environment's compiler is '${current//[^[:print:]]/?}'; provision again with this compiler, or set CXX to the one the cache was built with"
   printf 'VCPKG_ROOT=%s\n' "$VCPKG_CHECKOUT"
   printf 'VCPKG_BINARY_SOURCES=clear;files,%s,read\n' "$VCPKG_ARCHIVES"
   printf 'VCPKG_FORCE_SYSTEM_BINARIES=1\n'

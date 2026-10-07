@@ -27,8 +27,8 @@ SNAPSHOT_TAG=""
 usage() {
   cat <<'EOF'
 Usage:
-  sudo VCPKG_ROOT=DIR bash build-install-from-source.sh --branch develop [options]
-VCPKG_ROOT must name a vcpkg checkout at the builtin-baseline of vcpkg.json.
+  sudo bash build-install-from-source.sh --branch develop [options]
+Without VCPKG_ROOT the worker has no streaming gRPC support; see docs/install/external-install.md.
 
 Options:
   --branch BRANCH            Source branch, tag, or ref to build. Defaults to develop.
@@ -145,12 +145,11 @@ if [[ "$CLI_ONLY" -eq 1 && "$WITH_PYTHON_BACKEND" -eq 1 ]]; then
   die "--with-python-backend cannot be combined with --cli-only"
 fi
 if [[ "$NO_INSTALL" -eq 0 && "${EUID}" -ne 0 ]]; then
-  die "run as root for install, for example: sudo VCPKG_ROOT=<vcpkg-dir> bash build-install-from-source.sh --branch ${BRANCH}; pass --no-install to build only"
+  die "run as root for install, for example: sudo bash build-install-from-source.sh --branch ${BRANCH}; pass --no-install to build only"
 fi
-# The builder refuses the same way, after the clone; arm64 alone takes the override.
-if [[ -z "${TP_CMAKE_TOOLCHAIN_FILE:-}" || "$TARGET_ARCH" == "amd64" ]]; then
-  [[ -n "${VCPKG_ROOT:-}" && -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]] ||
-    die "VCPKG_ROOT must name a vcpkg checkout at the builtin-baseline of vcpkg.json; no scripts/buildsystems/vcpkg.cmake under '${VCPKG_ROOT:-}'"
+# A VCPKG_ROOT that is given must be a checkout: a typo is not a request to build without it.
+if [[ -n "${VCPKG_ROOT:-}" && ! -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]]; then
+  die "VCPKG_ROOT must name a vcpkg checkout at the builtin-baseline of vcpkg.json; no scripts/buildsystems/vcpkg.cmake under '${VCPKG_ROOT}'"
 fi
 for cmd in git bash date; do
   command_exists "$cmd" || die "required command not found: $cmd"
@@ -232,6 +231,16 @@ printf 'Commit: %s\n' "$short_sha"
 printf 'Snapshot version: %s\n' "$SNAPSHOT_VERSION"
 printf 'Artifact directory: %s\n' "$ARTIFACTS_DIR"
 
+builder_args=()
+if [[ -z "${VCPKG_ROOT:-}" && ( -z "${TP_CMAKE_TOOLCHAIN_FILE:-}" || "$TARGET_ARCH" == "amd64" ) ]]; then
+  # A branch whose builder predates the flag is built as that builder builds.
+  builder_help="$("${SOURCE_ROOT}/tools/release/build-release-artifacts.sh" --help 2>/dev/null)" ||
+    builder_help=""
+  if [[ "$builder_help" == *"--without-streaming"* ]]; then
+    builder_args=(--without-streaming)
+    note "building the serving worker without streaming gRPC support; set VCPKG_ROOT to a vcpkg checkout at the builtin-baseline of vcpkg.json to build with it"
+  fi
+fi
 (
   cd "$SOURCE_ROOT"
   tools/release/build-release-artifacts.sh \
@@ -242,7 +251,7 @@ printf 'Artifact directory: %s\n' "$ARTIFACTS_DIR"
     --artifacts-dir "$ARTIFACTS_DIR" \
     --manifest "$MANIFEST" \
     --checksums "$CHECKSUMS" \
-    --arch "$TARGET_ARCH"
+    --arch "$TARGET_ARCH" ${builder_args[@]+"${builder_args[@]}"}
 )
 
 install_args=(

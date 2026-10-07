@@ -89,6 +89,11 @@ Options:
                          the tag-driven release path.
   --build-dir DIR        CMake build directory. Defaults to build/release, or build/snapshot-ARCH for snapshots.
   --sdk-dist-dir DIR     Directory holding the tensorplate-python wheel + sdist to include in the release.
+  --without-streaming    Build a worker without streaming gRPC support, through
+                         no vcpkg. Not the release configuration; refused with
+                         TP_VCPKG_BINARY_ONLY=1, TP_CMAKE_TOOLCHAIN_FILE, a
+                         cross-build or without --snapshot. Only this flag
+                         selects it.
   --with-speech-runtime  Collect the speech runtime package family, staged
                          in the repository parent by its own build job, and
                          require all of it. Without the flag the family is
@@ -160,6 +165,7 @@ BRANCH=""
 CHANGELOG_BACKUP=""
 SDK_DIST_DIR=""
 WITH_SPEECH_RUNTIME=0
+WITHOUT_STREAMING=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -178,6 +184,7 @@ while [[ $# -gt 0 ]]; do
     --build-dir) BUILD_DIR="${2:-}"; shift 2 ;;
     --sdk-dist-dir) SDK_DIST_DIR="${2:-}"; shift 2 ;;
     --with-speech-runtime) WITH_SPEECH_RUNTIME=1; shift ;;
+    --without-streaming) WITHOUT_STREAMING=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option '$1'" ;;
   esac
@@ -395,6 +402,28 @@ if [[ -z "$BUILD_DIR" ]]; then
   fi
 fi
 
+streaming=ON
+if ((WITHOUT_STREAMING)); then
+  streaming=OFF
+  ((SNAPSHOT)) ||
+    die "--without-streaming is for a --snapshot build; a release is never configured without the streaming feature"
+  # It has no vcpkg: nothing to restore from, and no toolchain to chainload through.
+  [[ "${TP_VCPKG_BINARY_ONLY:-0}" != 1 ]] ||
+    die "--without-streaming builds no vcpkg dependency; TP_VCPKG_BINARY_ONLY=1 cannot be combined with it"
+  [[ -z "${TP_CMAKE_TOOLCHAIN_FILE:-}" ]] ||
+    die "--without-streaming configures without a toolchain file; unset TP_CMAKE_TOOLCHAIN_FILE"
+  ((! CROSS_BUILD)) ||
+    die "--without-streaming cannot be combined with a cross-build, which configures through the vcpkg toolchain; set VCPKG_ROOT and build with the feature"
+fi
+# A build directory keeps its toolchain file and manifest features, so one
+# configured with the other choice cannot be turned into this one.
+if [[ -f "${BUILD_DIR}/CMakeCache.txt" ]]; then
+  cached_streaming="$(sed -n 's/^TP_ENABLE_STREAMING_GRPC:[A-Z]*=//p' "${BUILD_DIR}/CMakeCache.txt")" ||
+    cached_streaming=""
+  if [[ -n "$cached_streaming" && "$cached_streaming" != "$streaming" ]]; then
+    die "$BUILD_DIR was configured with TP_ENABLE_STREAMING_GRPC=${cached_streaming}; remove $BUILD_DIR or pass another --build-dir"
+  fi
+fi
 # The amd64 serving worker is configured from the profile the release
 # workflow's amd64 job reads, so a snapshot is built the way the release is.
 if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
@@ -404,7 +433,11 @@ if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
     die "cannot read tools/release/amd64-build-profile.sh"
   fi
   # shellcheck source=tools/release/amd64-build-profile.sh disable=SC1091
-  . tools/release/amd64-build-profile.sh
+  if ((WITHOUT_STREAMING)); then
+    . tools/release/amd64-build-profile.sh --without-streaming
+  else
+    . tools/release/amd64-build-profile.sh
+  fi
   for override in TP_ENABLE_TENSORRT TP_REQUIRE_TENSORRT_SDK TP_ENABLE_LIBTORCH \
                   TP_ENABLE_PYTHON_PYTORCH_SIDECAR TP_CMAKE_TOOLCHAIN_FILE; do
     if [[ -n "${!override:-}" ]]; then
@@ -428,7 +461,7 @@ if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
 else
   # A hosted image's VCPKG_INSTALLATION_ROOT is not read: it is not pinned.
   vcpkg_toolchain="${TP_CMAKE_TOOLCHAIN_FILE:-}"
-  if [[ -z "$vcpkg_toolchain" ]]; then
+  if ((! WITHOUT_STREAMING)) && [[ -z "$vcpkg_toolchain" ]]; then
     vcpkg_toolchain="${VCPKG_ROOT:-}/scripts/buildsystems/vcpkg.cmake"
     [[ -n "${VCPKG_ROOT:-}" && -f "$vcpkg_toolchain" ]] ||
       die "VCPKG_ROOT must name a vcpkg checkout at the builtin-baseline of vcpkg.json; no scripts/buildsystems/vcpkg.cmake under '${VCPKG_ROOT:-}'"
@@ -534,12 +567,16 @@ else
     -DTP_ENABLE_TENSORRT="${TP_ENABLE_TENSORRT:-ON}"
     -DTP_REQUIRE_TENSORRT_SDK="${TP_REQUIRE_TENSORRT_SDK:-ON}"
     -DTP_ENABLE_LIBTORCH="${TP_ENABLE_LIBTORCH:-OFF}"
-    -DTP_ENABLE_STREAMING_GRPC=ON
+    "-DTP_ENABLE_STREAMING_GRPC=${streaming}"
     -DTP_ENABLE_PYTHON_PYTORCH_SIDECAR="${TP_ENABLE_PYTHON_PYTORCH_SIDECAR:-ON}"
-    -DVCPKG_MANIFEST_FEATURES=streaming-grpc
-    -DVCPKG_TARGET_TRIPLET=arm64-linux
-    "-DCMAKE_TOOLCHAIN_FILE=${vcpkg_toolchain}"
   )
+  if ((! WITHOUT_STREAMING)); then
+    cmake_args+=(
+      -DVCPKG_MANIFEST_FEATURES=streaming-grpc
+      -DVCPKG_TARGET_TRIPLET=arm64-linux
+      "-DCMAKE_TOOLCHAIN_FILE=${vcpkg_toolchain}"
+    )
+  fi
   # The same rule as the amd64 profile: restore from the cache or fail.
   if [[ "${TP_VCPKG_BINARY_ONLY:-}" == 1 ]]; then
     cmake_args+=(-DVCPKG_INSTALL_OPTIONS=--only-binarycaching)
