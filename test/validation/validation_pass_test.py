@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,7 +40,7 @@ ENVELOPE = {
     "notes": "",
     "settings": {"startup_timeout_ms": 120000},
 }
-REQUIRED = ("platform_row", "runner_profiles")
+REQUIRED = {"platform_row": ("ok",), "runner_profiles": ("ok",)}
 
 
 def record_path(candidate: str, run: int) -> Path:
@@ -344,7 +345,7 @@ def check_index_file_and_cli(lines: dict[str, dict]) -> None:
         again["run_id"] += "-again"
         same = write_index(tmp / "same.jsonl", [again])
         completed = run_tool("compare", "--previous", str(whisper_next), "--current", str(same))
-        assert completed.returncode == 0 and "unchanged: 53 of 53" in completed.stdout, completed
+        assert completed.returncode == 0 and "unchanged: 54 of 54" in completed.stdout, completed
 
         # The newest earlier line is the one compared with, and only the latest
         # session's subjects are owed.
@@ -426,14 +427,10 @@ def check_index_file_and_cli(lines: dict[str, dict]) -> None:
         doctor.write_text(json.dumps({"payload": synthetic_doctor()}), encoding="utf-8")
         completed = run_tool("index", *envelope_arguments, "--doctor", str(doctor))
         assert completed.returncode == 2 and "--interpreter-override" in completed.stderr
-        completed = run_tool(
-            "index",
-            *envelope_arguments,
-            "--doctor",
-            str(doctor),
-            "--interpreter-override",
-            "absent",
-        )
+        stated = ("--doctor", str(doctor), "--interpreter-override", "absent")
+        completed = run_tool("index", *envelope_arguments, *stated)
+        assert completed.returncode == 2 and "--speech-family" in completed.stderr
+        completed = run_tool("index", *envelope_arguments, *stated, "--speech-family", "in-assets")
         assert completed.returncode == 0, completed
         doctor_line = json.loads(completed.stdout)
         assert doctor_line["checks"]["finding.runner_launch_environment"] == "absent"
@@ -625,7 +622,7 @@ def check_more_cli(lines: dict[str, dict]) -> None:
             path.write_text(json.dumps(payload), encoding="utf-8")
             return run_tool("index", *envelope_arguments, "--doctor", str(path), *extra)
 
-        absent = ("--interpreter-override", "absent")
+        absent = ("--interpreter-override", "absent", "--speech-family", "host-built")
         completed = doctor_result({"payload": synthetic_doctor(**FIVE_OK)}, *absent)
         assert completed.returncode == 0 and json.loads(completed.stdout)["result"] == "pass"
         for finding_id in FIVE_OK:
@@ -633,7 +630,10 @@ def check_more_cli(lines: dict[str, dict]) -> None:
             line = json.loads(doctor_result({"payload": payload}, *absent).stdout)
             assert line["result"] == "fail" and line["metrics"]["failing"] == 0, finding_id
         completed = doctor_result(
-            {"payload": synthetic_doctor(**FIVE_OK)}, "--interpreter-override", "present"
+            {"payload": synthetic_doctor(**FIVE_OK)},
+            "--interpreter-override",
+            "present",
+            *absent[2:],
         )
         line = json.loads(completed.stdout)
         assert line["result"] == "fail" and line["checks"]["interpreter_override"] == "present"
@@ -666,10 +666,140 @@ def check_more_cli(lines: dict[str, dict]) -> None:
             assert completed.returncode == 2 and needle in completed.stderr, completed
 
 
+RUNNER_FINDINGS = ("runner_profiles", "runner_profile_dependencies", "runner_launch_environment")
+NO_FAMILY = {**FIVE_OK, **dict.fromkeys(RUNNER_FINDINGS, "skipped")}
+
+
+def doctor_result_for(mode: str, **status_by_id: str) -> str:
+    required = index_mod.DOCTOR_REQUIREMENTS[index_mod.SPEECH_FAMILY_MODES[mode]]
+    return index_mod.doctor_line(synthetic_doctor(**status_by_id), envelope(), False, required)[
+        "result"
+    ]
+
+
+def check_doctor_by_speech_family() -> None:
+    for mode in ("in-assets", "host-built"):
+        assert doctor_result_for(mode, **FIVE_OK) == "pass"
+        # A host that serves only speech has no PyTorch in the descriptor's own interpreter.
+        assert doctor_result_for(mode, **{**FIVE_OK, "python_pytorch_runtime": "missing"}) == "pass"
+        assert doctor_result_for(mode, **{**FIVE_OK, "platform_row": "missing"}) == "fail"
+        for finding_id in RUNNER_FINDINGS:
+            for status in ("skipped", "warning", "missing"):
+                assert doctor_result_for(mode, **{**FIVE_OK, finding_id: status}) == "fail"
+    assert doctor_result_for("none", **NO_FAMILY) == "pass"
+    assert doctor_result_for("none", **{**NO_FAMILY, "python_pytorch_runtime": "missing"}) == "fail"
+    for finding_id in RUNNER_FINDINGS:
+        # `ok` here is a family on a machine the operator said has none.
+        assert doctor_result_for("none", **{**NO_FAMILY, finding_id: "ok"}) == "fail", finding_id
+    assert doctor_result_for("none", **FIVE_OK) == "fail"
+
+    # Every id and status the table names is one doctor can report.
+    source = (ROOT / "cli/src/commands/doctor/finding.rs").read_text(encoding="utf-8")
+
+    def spelled_by(type_name: str) -> set[str]:
+        body = source.split(f"impl {type_name} {{", 1)[1].split("\nimpl ", 1)[0]
+        return set(re.findall(r'Self::\w+ => "([a-z_]+)",', body))
+
+    doctor_ids, statuses = spelled_by("FindingId"), spelled_by("FindingStatus")
+    assert {"ok", "missing", "skipped"} <= statuses and len(doctor_ids) > 30
+    for mode, required in index_mod.DOCTOR_REQUIREMENTS.items():
+        assert set(required) == set(FIVE_OK), mode
+        for finding_id, accepted in required.items():
+            assert finding_id in doctor_ids and accepted and set(accepted) <= statuses, finding_id
+    assert set(index_mod.SPEECH_FAMILY_MODES.values()) == set(index_mod.DOCTOR_REQUIREMENTS)
+
+
+def cold_deploy_of(record: dict, **changes: object) -> dict:
+    deploy = {
+        "deployment_id": "cold",
+        "status": "ok",
+        "phase": "active",
+        "bundle_digest": record["lifecycle"]["deploy"]["bundle_digest"],
+        "wall_ms": 17900,
+        "failure": None,
+    }
+    deploy.update(changes)
+    return {"subject": "stt-whisper", "page_cache": "dropped", "deploy": deploy}
+
+
+def check_first_request_and_cold_deploy(lines: dict[str, dict]) -> None:
+    # The values the session's notes give by hand: 0.67 s and 2.75 s.
+    assert lines["stt-whisper-1"]["metrics"]["first_request_ms"] == 677.8
+    assert lines["tts-kokoro-1"]["metrics"]["first_request_ms"] == 2775.2
+    record = load(record_path("whisper", 1))
+    for field, value in (("status", "failed"), ("phase", "load"), ("iteration", 1)):
+        changed = copy.deepcopy(record)
+        changed["fixtures"][0]["samples"][0][field] = value
+        if field == "status":
+            changed["fixtures"][0]["summary"]["failed_count"] = 1
+        line = index_mod.qualification_line(changed, envelope(), "stt-whisper")
+        assert "first_request_ms" not in line["metrics"], field
+    doubled = copy.deepcopy(record)
+    doubled["fixtures"][0]["samples"][1].update(phase="timing", iteration=0)
+    refused(
+        lambda: index_mod.qualification_line(doubled, envelope(), "stt-whisper"),
+        "'first_request_ms' twice",
+    )
+    emptied = copy.deepcopy(record)
+    emptied["fixtures"] = []
+    line = index_mod.qualification_line(emptied, envelope(), "stt-whisper")
+    assert "first_request_ms" not in line["metrics"]
+
+    def with_cold(cold: dict, source: dict = record) -> dict:
+        return index_mod.qualification_line(source, envelope(), "stt-whisper", None, cold)
+
+    line = with_cold(cold_deploy_of(record))
+    assert line["metrics"]["deploy_wall_cold_cache_ms"] == 17900
+    assert line["checks"]["cold_deploy"] == "ok"
+    assert line["metrics"]["deploy_wall_ms"] == 16583, "the record's own deploy is kept"
+    assert "cold_deploy" not in lines["stt-whisper-1"]["checks"]
+
+    failure = {"code": "load_failed", "message": "synthetic"}
+    line = with_cold(cold_deploy_of(record, status="failed", phase="failed", failure=failure))
+    assert line["checks"]["cold_deploy"] == "failed (load_failed)"
+    assert "deploy_wall_cold_cache_ms" not in line["metrics"]
+
+    kept = cold_deploy_of(record)
+    kept["page_cache"] = "kept"
+    assert "deploy_wall_cold_cache_ms" not in with_cold(kept)["metrics"]
+    assert (
+        "deploy_wall_cold_cache_ms"
+        not in with_cold(cold_deploy_of(record, bundle_digest=None))["metrics"]
+    )
+    undeployed = copy.deepcopy(record)
+    undeployed["lifecycle"]["deploy"]["bundle_digest"] = None
+    assert (
+        "deploy_wall_cold_cache_ms" not in with_cold(cold_deploy_of(record), undeployed)["metrics"]
+    )
+    other = cold_deploy_of(record, bundle_digest="sha256:" + "0" * 64)
+    refused(lambda: with_cold(other), "another bundle")
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        cold = Path(raw_tmp) / "cold-deploy.json"
+        cold.write_text(json.dumps(cold_deploy_of(record)), encoding="utf-8")
+        arguments = (
+            "index", "--date", "2026-10-01", "--session", "s", "--row", ROW, "--machine", "m",
+            "--build", "b", "--qualification-record", f"stt-whisper={record_path('whisper', 1)}",
+        )  # fmt: skip
+        completed = run_tool(*arguments, "--cold-deploy", f"stt-whisper={cold}")
+        assert json.loads(completed.stdout)["metrics"]["deploy_wall_cold_cache_ms"] == 17900
+        for extra, needle in (
+            (("--cold-deploy", f"tts-kokoro={cold}"), "no indexed record"),
+            (
+                ("--cold-deploy", f"stt-whisper={cold}", "--cold-deploy", f"stt-whisper={cold}"),
+                "twice",
+            ),
+        ):
+            completed = run_tool(*arguments, *extra)
+            assert completed.returncode == 2 and needle in completed.stderr, completed
+
+
 def main() -> int:
     lines = check_derivation()
     check_derivation_guards()
     check_doctor()
+    check_doctor_by_speech_family()
+    check_first_request_and_cold_deploy(lines)
     check_comparison(lines)
     check_index_file_and_cli(lines)
     check_more_guards(lines)

@@ -25,6 +25,23 @@ DEFAULT_TOLERANCE_PCT = 10.0
 COST_SUFFIXES = ("_ms", "_s", "_mib", ".rtf_median")
 EXIT_UNCHANGED, EXIT_MOVED, EXIT_NOT_COMPARABLE = 0, 1, 2
 
+_RUNNER_FINDINGS = ("runner_profiles", "runner_profile_dependencies", "runner_launch_environment")
+# The statuses a pass accepts per finding, by whether a speech runtime family
+# is installed: `failing == 0` alone lets a warning or a skipped check through.
+DOCTOR_REQUIREMENTS: dict[str, dict[str, tuple[str, ...]]] = {
+    "installed": {
+        "platform_row": ("ok",),
+        "python_pytorch_runtime": ("ok", "missing"),
+        **{finding: ("ok",) for finding in _RUNNER_FINDINGS},
+    },
+    "none": {
+        "platform_row": ("ok",),
+        "python_pytorch_runtime": ("ok",),
+        **{finding: ("skipped",) for finding in _RUNNER_FINDINGS},
+    },
+}
+SPEECH_FAMILY_MODES = {"in-assets": "installed", "host-built": "installed", "none": "none"}
+
 
 class IndexLineError(Exception):
     """A line cannot be derived, does not conform, or cannot be compared."""
@@ -122,7 +139,9 @@ def qualification_line(
     envelope: dict[str, Any],
     subject: str,
     family_build: str | None = None,
+    cold_deploy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """`cold_deploy` is the pass driver's `cold-deploy.json` for this candidate, when it ran."""
     try:
         candidate_record.validate_record(record)
     except candidate_record.RecordError as exc:
@@ -138,6 +157,8 @@ def qualification_line(
     checks["deploy"] = deploy["status"]
     if deploy["status"] == "ok":
         metrics["deploy_wall_ms"] = deploy["wall_ms"]
+    if cold_deploy is not None:
+        _cold_deploy(subject, cold_deploy, deploy, metrics, checks)
 
     # The runner reports its one load with every answer; two values mean two loads.
     loads = {
@@ -150,6 +171,11 @@ def qualification_line(
         raise IndexLineError(f"{subject}: {len(loads)} runner load timings in one record")
     if loads:
         metrics["runner_load_ms"] = round(loads.pop() / 1000, 1)
+
+    # The recipe's first request after the deploy is its first fixture's first timing sample.
+    for sample in record["fixtures"][0]["samples"] if record["fixtures"] else []:
+        if (sample["phase"], sample["iteration"], sample["status"]) == ("timing", 0, "ok"):
+            _put(metrics, "first_request_ms", round(sample["exchange_wall_us"] / 1000, 1))
 
     with_failures = 0
     for fixture in record["fixtures"]:
@@ -202,13 +228,39 @@ def qualification_line(
     return new_line(envelope, subject, record["result"]["status"], metrics, checks, family_build)
 
 
+def _cold_deploy(
+    subject: str,
+    cold: dict[str, Any],
+    deploy: dict[str, Any],
+    metrics: dict[str, float],
+    checks: dict[str, str],
+) -> None:
+    """A deploy the driver timed right after dropping the page cache."""
+    outcome = cold["deploy"]
+    failure = outcome["failure"]
+    code = f" ({failure['code']})" if failure is not None else ""
+    checks["cold_deploy"] = outcome["status"] + code
+    if outcome["status"] != "ok" or cold["page_cache"] != "dropped":
+        return
+    ours, theirs = outcome["bundle_digest"], deploy["bundle_digest"]
+    if ours is not None and theirs is not None and ours != theirs:
+        raise IndexLineError(f"{subject}: the cold deploy measured another bundle ({ours})")
+    # Without both digests nothing says the two deploys were of one bundle.
+    if ours is not None and theirs is not None:
+        metrics["deploy_wall_cold_cache_ms"] = outcome["wall_ms"]
+
+
 def doctor_line(
     payload: dict[str, Any],
     envelope: dict[str, Any],
     interpreter_override: bool,
-    required_ok: tuple[str, ...] = (),
+    required: dict[str, tuple[str, ...]] | None = None,
 ) -> dict[str, Any]:
-    """`payload` is the `payload` object of `tensorplate doctor --output json`."""
+    """`payload` is the `payload` object of `tensorplate doctor --output json`.
+
+    `required` maps a finding id to the statuses a pass accepts for it.
+    """
+    required = required or {}
     findings = payload["findings"]
     checks = {f"finding.{finding['id']}": finding["status"] for finding in findings}
     if len(checks) != len(findings):
@@ -218,13 +270,15 @@ def doctor_line(
         raise IndexLineError(
             f"doctor's total says {payload['failing']} failing and its findings say {failed}"
         )
-    for finding_id in required_ok:
+    for finding_id in required:
         checks.setdefault(f"finding.{finding_id}", "absent")
     checks["interpreter_override"] = "present" if interpreter_override else "absent"
     passed = (
         payload["failing"] == 0
         and not interpreter_override
-        and all(checks[f"finding.{finding_id}"] == "ok" for finding_id in required_ok)
+        and all(
+            checks[f"finding.{finding_id}"] in accepted for finding_id, accepted in required.items()
+        )
     )
     metrics = {"findings_total": len(findings), "failing": payload["failing"]}
     return new_line(envelope, "doctor", "pass" if passed else "fail", metrics, checks)
