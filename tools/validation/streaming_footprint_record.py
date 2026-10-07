@@ -161,7 +161,7 @@ def _first_difference(claimed: Any, derived: Any, pointer: str = "") -> str:
     if isinstance(claimed, list) and isinstance(derived, list):
         if len(claimed) != len(derived):
             return f"{pointer}: {len(claimed)} items claimed, {len(derived)} derived"
-        for index, (left, right) in enumerate(zip(claimed, derived)):
+        for index, (left, right) in enumerate(zip(claimed, derived, strict=True)):
             found = _first_difference(left, right, f"{pointer}/{index}")
             if found:
                 return found
@@ -183,7 +183,10 @@ def check_record(record: Any, thresholds_path: Path = THRESHOLDS_PATH) -> tuple[
         return "invalid", str(exc)
     if record["thresholds"] != canonical:
         found = _first_difference(record["thresholds"], canonical)
-        return "invalid", f"thresholds in the record differ from {_display(thresholds_path)}: {found}"
+        return (
+            "invalid",
+            f"thresholds in the record differ from {_display(thresholds_path)}: {found}",
+        )
     for side in SIDES:
         runs = record["sides"][side]["runs"]
         if len(runs) > canonical["runs"]:
@@ -205,7 +208,10 @@ def check_record(record: Any, thresholds_path: Path = THRESHOLDS_PATH) -> tuple[
                 if not steady["reason"]:
                     return "invalid", f"{side} run {position}: steady state not run with no reason"
                 if steady["streams"] is not None or steady["samples_kib"]:
-                    return "invalid", f"{side} run {position}: a steady state not run carries samples"
+                    return (
+                        "invalid",
+                        f"{side} run {position}: a steady state not run carries samples",
+                    )
     derived = derive_result(canonical, record["sides"])
     if record["result"] != derived:
         found = _first_difference(record["result"], derived)

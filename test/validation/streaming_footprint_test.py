@@ -377,12 +377,294 @@ def checker_cases(work: Path) -> dict:
     return good
 
 
+# --- the harness, against fake packages -------------------------------------------
+
+FAST = [
+    "--settle-seconds",
+    "0.3",
+    "--samples",
+    "3",
+    "--sample-interval",
+    "0.1",
+    "--ready-timeout",
+    "5",
+]
+
+
+def compile_worker(work: Path, name: str, *defines: str) -> Path:
+    binary = work / name
+    subprocess.run(
+        [
+            os.environ.get("CC", "cc"),
+            "-O1",
+            "-Wall",
+            "-Wextra",
+            "-pthread",
+            *defines,
+            "-o",
+            str(binary),
+            str(FAKES / "worker.c"),
+        ],
+        check=True,
+    )
+    return binary
+
+
+def build_package(
+    work: Path,
+    name: str,
+    worker: Path | None,
+    version: str = "0.0.0~fake",
+    architecture: str | None = None,
+    script: str | None = None,
+) -> Path:
+    """A tensorplate-serving package shaped like the real one around the given worker."""
+    tree = work / f"{name}.tree"
+    shutil.rmtree(tree, ignore_errors=True)
+    (tree / "DEBIAN").mkdir(parents=True)
+    (tree / "usr/lib/tensorplate").mkdir(parents=True)
+    (tree / "etc/tensorplate").mkdir(parents=True)
+    if architecture is None:
+        architecture = subprocess.run(
+            ["dpkg", "--print-architecture"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+    (tree / "DEBIAN/control").write_text(
+        f"Package: tensorplate-serving\nVersion: {version}\nArchitecture: {architecture}\n"
+        "Maintainer: test <test@example.com>\nDescription: fake serving worker\n"
+    )
+    target = tree / "usr/lib/tensorplate/tensorplate-serving"
+    if worker is not None:
+        shutil.copy2(worker, target)
+    else:
+        target.write_text(script or "#!/bin/sh\nexit 0\n")
+    target.chmod(0o755)
+    (tree / "etc/tensorplate/serving_worker.json").write_text("{}\n")
+    package = work / f"{name}.deb"
+    subprocess.run(
+        ["dpkg-deb", "-b", "--root-owner-group", str(tree), str(package)],
+        check=True,
+        capture_output=True,
+    )
+    return package
+
+
+def run_harness(
+    out: Path, with_pkg: Path, without_pkg: Path, *extra: str
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [
+            str(HARNESS),
+            "--with-streaming",
+            str(with_pkg),
+            "--without-streaming",
+            str(without_pkg),
+            "--out",
+            str(out),
+            "--provenance",
+            "synthetic",
+            *FAST,
+            *extra,
+        ],
+        text=True,
+        capture_output=True,
+    )
+
+
+def harness_cases(work: Path) -> None:
+    work.mkdir()
+    driver = FAKES / "driver.sh"
+    on = compile_worker(
+        work, "worker-on", "-DPAYLOAD_BYTES=2097152", "-DIDLE_MIB=8", "-DSTREAM_MIB=1"
+    )
+    off = compile_worker(work, "worker-off")
+    heavy = compile_worker(work, "worker-heavy", "-DIDLE_MIB=70")
+    exits = compile_worker(work, "worker-exits", "-DEXIT_AT_START")
+    on_pkg = build_package(work, "with", on)
+    off_pkg = build_package(work, "without", off, version="0.0.0~fake.off")
+
+    out = work / "pass"
+    result = run_harness(out, on_pkg, off_pkg, "--stream-driver", str(driver))
+    record_path = out / "record.json"
+    record = json.loads(record_path.read_text()) if record_path.exists() else {}
+    budgets = record.get("result", {}).get("budgets", {})
+    check(
+        "a driven run against the fakes passes and the check agrees",
+        result.returncode == 0
+        and record.get("result", {}).get("status") == "pass"
+        and "pass:" in result.stdout,
+        result.stdout + result.stderr,
+    )
+    size_delta = budgets.get("installed_size", {}).get("max_delta_bytes")
+    check(
+        "the stripped-size delta is the fake's 2 MiB payload",
+        size_delta is not None and 2 * MIB - 4096 <= size_delta <= 2 * MIB + 8192,
+        f"delta {size_delta}",
+    )
+    idle_delta = budgets.get("idle_rss", {}).get("max_delta_bytes")
+    check(
+        "the idle resident-set delta is the fake's 8 MiB, within 2 MiB",
+        idle_delta is not None and 8 * MIB <= idle_delta <= 10 * MIB,
+        f"delta {idle_delta}; {json.dumps(budgets.get('idle_rss'))}",
+    )
+    steady_delta = budgets.get("steady_rss", {}).get("max_delta_bytes")
+    check(
+        "the steady-state delta is the fake's 8 MiB plus 16 held MiB, within 3 MiB",
+        steady_delta is not None and 24 * MIB <= steady_delta <= 27 * MIB,
+        f"delta {steady_delta}; {json.dumps(budgets.get('steady_rss'))}",
+    )
+    runs = {
+        side: len(record.get("sides", {}).get(side, {}).get("runs", []))
+        for side in record_mod.SIDES
+    }
+    check(
+        "three runs were captured per side",
+        runs == {"with_streaming": 3, "without_streaming": 3},
+        str(runs),
+    )
+    side = record.get("sides", {}).get("with_streaming", {})
+    check(
+        "the package identity and the worker's --version lines are recorded",
+        side.get("package", {}).get("file") == "with.deb"
+        and side.get("package", {}).get("sha256") == hashlib.sha256(on_pkg.read_bytes()).hexdigest()
+        and side.get("package", {}).get("version") == "0.0.0~fake"
+        and side.get("version_output")
+        == ["tensorplate-serving 0.0.0-fake", "protocol 0.1", "bundle-format 0.1"]
+        and record.get("provenance") == "synthetic",
+        json.dumps(side.get("package")) + str(side.get("version_output")),
+    )
+    captures = out / "captures/with_streaming/run-3"
+    check(
+        "raw captures are kept: health, idle and steady samples, the stream count, the worker log",
+        all(
+            (captures / name).exists()
+            for name in (
+                "health.json",
+                "idle-vmrss.tsv",
+                "steady-vmrss.tsv",
+                "steady-streams.txt",
+                "worker.log",
+                "elf-files.tsv",
+                "size.txt",
+                "worker-exit.txt",
+                "driver.log",
+            )
+        )
+        and (captures / "steady-streams.txt").read_text().strip() == "16"
+        and json.loads((captures / "health.json").read_text())["state"] == "ready"
+        and len((captures / "idle-vmrss.tsv").read_text().splitlines()) == 3,
+        str(sorted(p.name for p in captures.iterdir())) if captures.exists() else "no captures",
+    )
+    summary_path = out / "summary.json"
+    summary = json.loads(summary_path.read_text()) if summary_path.exists() else {}
+    check(
+        "the summary names the record's digest and result",
+        record_path.exists()
+        and summary.get("record_sha256") == hashlib.sha256(record_path.read_bytes()).hexdigest()
+        and summary.get("result") == record.get("result"),
+        json.dumps(summary)[:300],
+    )
+    result = run_harness(out, on_pkg, off_pkg)
+    check(
+        "a record directory is never captured into twice",
+        result.returncode == 2 and "never over another" in result.stderr,
+        result.stderr,
+    )
+
+    out = work / "undriven"
+    result = run_harness(out, on_pkg, off_pkg)
+    record = json.loads((out / "record.json").read_text()) if (out / "record.json").exists() else {}
+    steady = record.get("result", {}).get("budgets", {}).get("steady_rss", {})
+    check(
+        "without a stream driver the record is incomplete, naming the steady state",
+        result.returncode == 2
+        and record.get("result", {}).get("status") == "incomplete"
+        and steady.get("status") == "incomplete"
+        and "no stream driver was given" in (steady.get("reason") or "")
+        and record["result"]["budgets"]["idle_rss"]["status"] == "within"
+        and (out / "summary.json").exists(),
+        result.stdout + result.stderr,
+    )
+
+    out = work / "over"
+    heavy_pkg = build_package(work, "heavy", heavy)
+    result = run_harness(out, heavy_pkg, off_pkg, "--stream-driver", str(driver))
+    record = json.loads((out / "record.json").read_text()) if (out / "record.json").exists() else {}
+    budgets = record.get("result", {}).get("budgets", {})
+    check(
+        "an idle resident set 70 MiB above the baseline fails the 64 MiB budget",
+        result.returncode == 1
+        and record.get("result", {}).get("status") == "fail"
+        and budgets.get("idle_rss", {}).get("status") == "exceeded"
+        and budgets.get("installed_size", {}).get("status") == "within"
+        and "idle_rss exceeded" in result.stderr
+        and (out / "summary.json").exists(),
+        result.stdout + result.stderr,
+    )
+
+    out = work / "exits"
+    exits_pkg = build_package(work, "exits", exits)
+    result = run_harness(out, on_pkg, exits_pkg)
+    check(
+        "a worker that never becomes ready stops the run with its log kept and no record",
+        result.returncode == 2
+        and "worker not ready" in result.stderr
+        and not (out / "record.json").exists()
+        and (out / "captures/without_streaming/run-1/worker.log").exists()
+        and "exiting at start" in (out / "captures/without_streaming/run-1/worker.log").read_text(),
+        result.stderr,
+    )
+
+    out = work / "script"
+    script_pkg = build_package(work, "script", None)
+    result = run_harness(out, on_pkg, script_pkg)
+    check(
+        "a package whose worker is not an ELF executable is refused",
+        result.returncode == 2 and "is not an ELF executable" in result.stderr,
+        result.stderr,
+    )
+
+    out = work / "foreign"
+    foreign_pkg = build_package(work, "foreign", on, architecture="riscv64")
+    result = run_harness(out, foreign_pkg, off_pkg)
+    check(
+        "a package for another architecture is refused",
+        result.returncode == 2 and "is not this host's" in result.stderr,
+        result.stderr,
+    )
+
+    out = work / "silent"
+    silent = work / "silent-driver.sh"
+    silent.write_text("#!/bin/sh\nexit 0\n")
+    silent.chmod(0o755)
+    result = run_harness(out, on_pkg, off_pkg, "--stream-driver", str(silent))
+    check(
+        "a stream driver that exits without holding the streams stops the run",
+        result.returncode == 2 and "did not report 'held'" in result.stderr,
+        result.stderr,
+    )
+
+    shellcheck = shutil.which("shellcheck")
+    if shellcheck:
+        result = subprocess.run(
+            [shellcheck, str(HARNESS), str(driver)], capture_output=True, text=True
+        )
+        check(
+            "shellcheck accepts the harness and the fake driver",
+            result.returncode == 0,
+            result.stdout,
+        )
+    else:
+        print("  skip shellcheck (not installed)")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="tp-footprint-test-") as tmp:
         work = Path(tmp)
         (work / "checker").mkdir()
         print("checker")
         checker_cases(work / "checker")
+        print("harness")
+        harness_cases(work / "harness")
     if failures:
         print(f"streaming_footprint_test: {failures} check(s) failed")
         return 1
