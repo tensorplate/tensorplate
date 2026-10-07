@@ -608,6 +608,11 @@ Prerequisites:
    | `packages.txt`, `packages-baseline.txt`, `packages-after-upgrade.txt`, `packages-before-remove.txt`, `packages-after-remove.txt`, `packages-after-rollback.txt`, `checksums.txt`, `baseline-checksums.txt`, `baseline-digest.txt`, `upgrade-path.json`, `status*.json`, `deploy-result.json`, `restart-result.json`, `crash-loop-*.json`, `upgrade-*.json`, `rollback-*.json`, `agent-cli.log` | package versions and states, file names, release tags and digests, the deployment ids and loopback serving URLs; scan them as well |
    | `lifecycle-report.json` | a **failing** stage's `detail` is the tail of its log and may copy identifiers from the commands or records it quotes |
 
+The streaming footprint measurement is also taken on this row, as its own
+run with its own harness and record, not as a lifecycle stage:
+[`streaming-footprint.md`](streaming-footprint.md) says what it measures,
+how the two packages are built and where its summary is filed.
+
 ## MacBook Pro M1 Pro
 
 Prerequisites: Homebrew present, the tap reachable, and **no TensorPlate

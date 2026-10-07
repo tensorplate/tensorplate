@@ -59,6 +59,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   is for another architecture or the worker predates the line;
   `docs/install/external-install.md` says how to ask an installed worker.
   (V030-E04-F02-T04)
+- `tools/validation/streaming-footprint.sh` measures what the streaming
+  feature adds to the serving worker from two packaged builds of the same
+  configuration, one with the feature and one without: the stripped size of
+  every ELF file the package installs, the worker's resident set once
+  `/health` reports ready, and its resident set while the declared number
+  of synthetic streams is held open through a driver hook. The budgets
+  (32 MiB, 64 MiB and 128 MiB), the three runs per side and the 16 streams
+  are declared in `tools/validation/streaming-footprint-thresholds.json`
+  before anything is measured and copied into every record as read;
+  `tools/validation/streaming_footprint_record.py check` validates the
+  record against `config/schemas/streaming_footprint_record.json`,
+  recomputes every delta from the raw samples and gives no verdict for a
+  record with a missing run, a missing sample, an edited or absent
+  threshold, or a result it cannot derive. The summary it writes, the
+  record minus its samples with the record's SHA-256, is what gets filed.
+  No stream driver exists yet, so a record today is incomplete at the
+  steady state, and a worker built with the feature today links no
+  listener, so a measurement now says nothing about the transport;
+  `docs/validation/streaming-footprint.md` says what is measured, how the
+  packages are built and where the summary goes. (V030-E04-F02-T01)
 - The Python SDK declares a `speech` extra, `grpcio>=1.81.1,<2` and
   `protobuf>=6.33.5,<7`, for the streaming speech transport, and
   `sdk/python/constraints/speech.txt` pins those floors and grpcio's one

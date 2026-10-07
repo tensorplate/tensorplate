@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "record_kind": "streaming_footprint_thresholds",
+  "link_model": "static",
+  "runs": 3,
+  "budgets": {
+    "installed_size": {
+      "max_delta_bytes": 33554432,
+      "what": "stripped installed worker binaries and libraries, with streaming minus without"
+    },
+    "idle_rss": {
+      "max_delta_bytes": 67108864,
+      "what": "worker VmRSS once /health reports ready and no stream is open, with streaming minus without"
+    },
+    "steady_rss": {
+      "max_delta_bytes": 134217728,
+      "streams": 16,
+      "what": "worker VmRSS while the declared number of bounded synthetic streams is held open, with streaming minus without"
+    }
+  }
+}
