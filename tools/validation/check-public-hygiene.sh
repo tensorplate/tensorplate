@@ -715,7 +715,7 @@ def load_allowlist(data):
             # made publishable by sanitizing it (rule 3), never by exception.
             fault("allowlist line %d: an evidence-only %s finding is sanitized, "
                   "never allowlisted" % (number, cls))
-        if is_evidence(path):
+        if holds_evidence(path):
             # Evidence is sanitized (rule 3), never excepted. And the
             # evidence scanner reports one finding per line, class and
             # length, so a value only it decodes (a byte array, a JSON

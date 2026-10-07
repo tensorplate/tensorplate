@@ -855,6 +855,29 @@ for link in test/platform test; do
   expect_finding "a symlink at ${link}" symlink "" --base base
 done
 
+native_root=test/release/fixtures/native-sbom
+for link in "$native_root" test/release/fixtures test/release test; do
+  new_case
+  linked_uuid="$(random_uuid)"
+  suffix="${native_root#"$link"}"
+  put "fixtures/unscanned${suffix}/capture.json" "{\"documentNamespace\": \"https://spdx.org/spdxdocs/example-${linked_uuid}\"}"
+  mkdir -p "$(dirname "${r}/${link}")" || die "mkdir failed"
+  ln -s "$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], os.path.dirname(sys.argv[2])))' \
+    "${r}/fixtures/unscanned" "${r}/${link}")" "${r}/${link}" || die "ln failed"
+  g add "$link" || die "git add failed"
+  put "$allowlist" "${link} symlink 1 A directory link."
+  commit "Add a linked recording"
+  for scope in branch tree; do
+    args=(--base base)
+    [[ "$scope" != tree ]] || args=(--tree)
+    check "a symlink allowlist at ${link} is no verdict (${scope})" "2" \
+      "$(scan "${r}.out" "${args[@]}")"
+    check "  rejected by the evidence allowlist guard" "yes" \
+      "$(has "names a file under an evidence path" "${r}.out")"
+    check "  without printing the linked UUID" "no" "$(printed "$linked_uuid" "${r}.out")"
+  done
+done
+
 # An address is judged by its value, not its spelling: mixed notation
 # (a dotted quad for the last 32 bits), with and without compression,
 # and all hex. Only an IPv4-mapped address takes the IPv4 rules, as
