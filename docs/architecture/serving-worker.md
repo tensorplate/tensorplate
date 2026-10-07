@@ -44,6 +44,10 @@ vcpkg feature, with shared libraries or with generators from elsewhere. The
 checks and the build setup are documented in
 [`cmake/features/README.md`](../../cmake/features/README.md).
 
+`tensorplate-serving --version` prints, after the runtime, protocol and
+bundle-format lines, `streaming-grpc on` or `streaming-grpc off`, from the
+same CMake option the runtime's config check is compiled with.
+
 `streaming.enabled` in the worker config defaults to false. A true value in
 a feature-OFF build returns `unsupported` before runtime construction. Null,
 non-boolean values and unknown keys in `streaming` return `config_invalid`.
