@@ -39,10 +39,13 @@
 #                 each service's own control group, and inside the unit
 #                 each CLI call runs in, before that call is made -- each
 #                 against a control that ran first and completed every
-#                 operation
+#                 operation. Then the agent is restarted while denied:
+#                 it is a new instance that still enforces the denial,
+#                 again takes its machine type from the record, and serves
+#                 the deployment made under the denial
 #
 # With --baseline-assets-dir, two more stages run after offline. The
-# baseline is a published, signed predecessor set, always installed with
+# baseline is a published, signed predecessor set, installed online with
 # its signature verified:
 #   upgrade       over a fresh baseline install serving a deployment, with
 #                 an operator edit to /etc/tensorplate/cli.json, the
@@ -60,11 +63,19 @@
 #                 machine-type record and the instance binding byte for
 #                 byte, starts with no active deployment, and deploys and
 #                 serves again
-# The six stages above are always about a clean candidate install, and a
-# run with a baseline leaves the baseline installed when it finishes.
-# Install and upgrade are always online: both fetch nothing but still run
-# the shipped installer as an operator would, and denying them would
-# validate a procedure nobody follows.
+# With a baseline the offline stage also rolls back and then upgrades
+# before it lifts the denial, each package operation in a denied transient
+# unit: the machine-type record must be in place, unchanged and in the
+# baseline's layout before the baseline's installer runs, and the baseline
+# and then the candidate must start on it and serve. An installer cannot
+# reach the signature verifier there, so those two installs pass
+# --allow-unsigned and stay pinned to the SHA256SUMS digest.
+#
+# Up to the offline stage's sub-steps the stages are about a clean
+# candidate install, and a run with a baseline leaves the baseline
+# installed when it finishes. The install, upgrade and rollback stages are
+# always online: they run the shipped installer as an operator with a
+# network does.
 #
 # WHAT IT DOES NOT PROVE
 #   The deploy-smoke bundle selects the device-neutral `fixture` backend
@@ -218,10 +229,12 @@ Options:
   --baseline-assets-dir DIR
                          A published, signed predecessor release set, laid
                          out like --assets-dir with every file SHA256SUMS
-                         lists. Runs the upgrade and rollback stages; without
-                         it they are skipped. Every runtime package must be
-                         older than the candidate's. Always installed with
-                         its signature verified, even with --allow-unsigned.
+                         lists. Runs the upgrade and rollback stages, and the
+                         offline stage's rollback and upgrade under the
+                         denial; without it they are skipped. Every runtime
+                         package must be older than the candidate's. Installed
+                         online with its signature verified, even with
+                         --allow-unsigned.
                          Preflight needs public GitHub API and release-asset
                          access, even when the signature bundle is local.
                          The run then ends with the baseline installed.
@@ -697,6 +710,8 @@ clear_install() {
 # changed since is refused rather than installed under the old identity.
 install_set() {
   local dir="$1" expected_digest="$2" allow_unsigned="$3" digest
+  # Anything further is the command the installer is run through.
+  shift 3
   # An unreadable file reads as an empty digest, which never matches.
   digest="$( cd "$dir" && sha256sum SHA256SUMS | awk '{print $1}' )" || digest=""
   if [[ "$digest" != "$expected_digest" ]]; then
@@ -708,7 +723,7 @@ install_set() {
   if ((allow_unsigned)); then
     flags+=(--allow-unsigned)
   fi
-  step "install.sh" sudo bash "${dir}/install.sh" "${flags[@]}" || return
+  step "install.sh" "$@" sudo bash "${dir}/install.sh" "${flags[@]}" || return
 }
 
 stage_install() {
@@ -1460,6 +1475,11 @@ OFFLINE_DENIAL_PATHS=()
 # `systemctl show` reports the drop-in from `daemon-reload` onwards
 # whether or not anything restarted under it.
 OFFLINE_DENIAL_WAS=()
+# Where the denied calls and the in-service probes file their documents:
+# the evidence directory, or a sub-step's own directory under it.
+OFFLINE_STEP_DIR=""
+# `--was <unit>=<invocation>` for each service as a sub-step began.
+OFFLINE_STEP_WAS=()
 
 offline_helper() {
   python3 "$OFFLINE_HELPER" "$@"
@@ -1512,7 +1532,7 @@ run_denied_cli() {
   shift
   run_denied python3 "$OFFLINE_HELPER" run-denied --call "$call" \
     --control "${EVIDENCE_DIR}/offline-control.json" \
-    --evidence-dir "$EVIDENCE_DIR" -- "$@"
+    --evidence-dir "$OFFLINE_STEP_DIR" -- "$@"
 }
 
 # The redirection belongs to the transient unit's own output, so a step
@@ -1632,7 +1652,7 @@ cleanup_offline_denial() {
   if ((${#OFFLINE_DENIAL_UNITS[@]} == 0)); then
     return 0
   fi
-  local index unit path invocation status=0 step_status absent=() was=()
+  local index unit path invocation state status=0 step_status absent=() was=() gone=()
   note "removing the offline denial drop-ins"
   for index in "${!OFFLINE_DENIAL_UNITS[@]}"; do
     unit="${OFFLINE_DENIAL_UNITS[$index]}"
@@ -1646,6 +1666,19 @@ cleanup_offline_denial() {
     # which is not this run's to remove.
     sudo rmdir "$(dirname "$path")" >/dev/null 2>&1 || true
   done
+  # Before the unit states are read: a unit whose file is gone still reads
+  # as loaded until the next reload.
+  step_status=0
+  step "reload systemd" sudo systemctl daemon-reload || step_status=$?
+  if ((step_status != 0 && status == 0)); then status="$step_status"; fi
+  for unit in "${OFFLINE_DENIAL_UNITS[@]}"; do
+    state="$(systemctl show -p LoadState --value "$unit")" || state=""
+    if [[ "$state" == not-found || "$state" == masked ]]; then gone+=("$unit"); fi
+  done
+  if ((${#gone[@]} > 0)); then
+    cleanup_offline_denial_uninstalled "$status" "${gone[@]}"
+    return
+  fi
   for unit in "${OFFLINE_DENIAL_UNITS[@]}"; do
     # Captured before the restart, for the same reason the denial side
     # captures before the install: removing the file and reloading empty
@@ -1661,9 +1694,6 @@ cleanup_offline_denial() {
       status="$step_status"
     fi
   done
-  step_status=0
-  step "reload systemd" sudo systemctl daemon-reload || step_status=$?
-  if ((step_status != 0 && status == 0)); then status="$step_status"; fi
   step_status=0
   step "restart both services without denial" \
     sudo systemctl restart "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || step_status=$?
@@ -1685,6 +1715,28 @@ cleanup_offline_denial() {
   OFFLINE_DENIAL_WAS=()
 }
 
+# The rest of the cleanup when a unit is not installed: a package sub-step
+# failed between its removal and the next install. Nothing is restarted or
+# read back; what is shown is that every drop-in is gone.
+cleanup_offline_denial_uninstalled() {
+  local status="$1" path
+  shift
+  for path in "${OFFLINE_DENIAL_PATHS[@]}"; do
+    # -L too: a dangling symlink is still a file at that path.
+    if [[ -e "$path" || -L "$path" ]] && ((status == 0)); then status=1; fi
+  done
+  if ((status != 0)); then
+    printf 'the offline network denial may still be in place; remove it with: sudo rm -f %s && sudo systemctl daemon-reload\n' \
+      "${OFFLINE_DENIAL_PATHS[*]}" >&2
+    return "$status"
+  fi
+  printf 'not installed: %s. The denial drop-ins are removed and nothing was restarted; a service that is still installed keeps the denial until it is restarted\n' \
+    "$*" >&2
+  OFFLINE_DENIAL_UNITS=()
+  OFFLINE_DENIAL_PATHS=()
+  OFFLINE_DENIAL_WAS=()
+}
+
 # The datagram probe, run from inside a service's own control group.
 #
 # Joining the group takes root. The module refuses any control group that
@@ -1699,7 +1751,7 @@ offline_unit_probe() {
     sudo python3 "$OFFLINE_HELPER" "${kind}-unit" \
     --unit "$unit" --control-group "$group" \
     --uid "$OPERATOR_UID" --gid "$OPERATOR_GID" \
-    --out "${EVIDENCE_DIR}/${name}" || return
+    --out "${OFFLINE_STEP_DIR}/${name}" || return
 }
 
 # Classify a service's own probe against its own control, and file it.
@@ -1710,8 +1762,8 @@ offline_unit_classify() {
   classification="$(offline_helper unit-evidence-name --kind classification --unit "$unit")" || return
   step "the denial is enforced inside the ${unit} control group" \
     offline_helper classify --scope unit \
-    --probe "${EVIDENCE_DIR}/${probe}" --control "${EVIDENCE_DIR}/${control}" \
-    --out "${EVIDENCE_DIR}/${classification}" || return
+    --probe "${OFFLINE_STEP_DIR}/${probe}" --control "${EVIDENCE_DIR}/${control}" \
+    --out "${OFFLINE_STEP_DIR}/${classification}" || return
 }
 
 # Every TensorPlate CLI call this stage makes, each one inside its own
@@ -1801,6 +1853,10 @@ stage_offline() {
     --dir "$EVIDENCE_DIR" --deployment "$OFFLINE_DEPLOYMENT_ID" \
     --out "${EVIDENCE_DIR}/offline-runtime.json" || return
   pass "both services and every CLI call denied all IP traffic but 127.0.0.1/32 and ::1/128; enforcement probed in a transient unit, inside each service's control group and inside each CLI call's own unit before the call, each against a control that completed the same operations; ${ROW} resolved from the boot-bound machine-type record; fresh deploy and inference answered; drop-ins removed"
+  pass "agent restarted under the denial: a new instance, both services still denied, machine type from the record, the deployment made under the denial served again"
+  if ((BASELINE_REQUESTED)); then
+    pass "rolled back and upgraded under the denial, each installer in a denied unit: the record in place and unchanged before the baseline started; baseline and candidate each started on it, and each served"
+  fi
 }
 
 stage_offline_in() {
@@ -1810,6 +1866,7 @@ stage_offline_in() {
   OPERATOR_UID="$(id -u)" || return
   OPERATOR_GID="$(id -g)" || return
   OFFLINE_DEPLOYMENT_ID="${DEPLOYMENT_ID}${OFFLINE_DEPLOYMENT_SUFFIX}"
+  OFFLINE_STEP_DIR="$EVIDENCE_DIR"
 
   # Offline detection has nothing to fall back on without this file, and
   # only the install stage's online start could have written it.
@@ -1874,6 +1931,12 @@ stage_offline_in() {
     --out "${EVIDENCE_DIR}/offline-identity.json" || return
 
   offline_cli_under_denial "$work" || return
+
+  offline_restart_under_denial "$work" || return
+  if ((BASELINE_REQUESTED)); then
+    offline_rollback_under_denial "$work" || return
+    offline_upgrade_under_denial "$work" || return
+  fi
 }
 
 # --- upgrade and rollback ------------------------------------------------
@@ -2109,11 +2172,11 @@ check_record_kept() {
 }
 
 check_binding_kept() {
-  local now
+  local what="${1:-the rollback}" now
   now="$(privileged_sha256 "$INSTANCE_BINDING")" || return
   if [[ "$now" != "$INSTANCE_BINDING_SHA256" ]]; then
-    printf 'the rollback did not keep the instance binding %s: sha256 was %s, now %s\n' \
-      "$INSTANCE_BINDING" "$INSTANCE_BINDING_SHA256" "$now" >&2
+    printf '%s did not keep the instance binding %s: sha256 was %s, now %s\n' \
+      "$what" "$INSTANCE_BINDING" "$INSTANCE_BINDING_SHA256" "$now" >&2
     return 1
   fi
 }
@@ -2241,8 +2304,22 @@ print("every TensorPlate package is removed with its conffiles kept")
 PY
 }
 
+# Every installed TensorPlate package, not a fixed list: the backend
+# only Recommends the agent, so a list without it leaves it at the
+# candidate's version for the older installer's apt-get -y to refuse to
+# downgrade.
+removable_packages() {
+  local pkg status
+  while read -r pkg status _; do
+    if [[ -n "$pkg" && "$pkg" != "tensorplate-apt-source" &&
+          "$status" != "not-installed" && "$status" != "config-files" ]]; then
+      printf '%s\n' "$pkg"
+    fi
+  done < <(tensorplate_packages)
+}
+
 stage_rollback() {
-  local remove=() pkg status
+  local remove=() pkg
   # Checked before anything changes. A state.bak from before the run is
   # already gone -- install and upgrade delete /var/lib/tensorplate while
   # clearing the host -- so this does not keep an earlier copy. It makes
@@ -2262,16 +2339,9 @@ stage_rollback() {
   step "set durable state aside" sudo mv -T "$STATE_DIR" "$STATE_ASIDE_DIR" || return
   step "restore the machine-type record for the baseline" restore_machine_type_record || return
 
-  # Every installed TensorPlate package, not a fixed list: the backend
-  # only Recommends the agent, so a list without it leaves it at the
-  # candidate's version for the older installer's apt-get -y to refuse to
-  # downgrade.
-  while read -r pkg status _; do
-    if [[ -n "$pkg" && "$pkg" != "tensorplate-apt-source" &&
-          "$status" != "not-installed" && "$status" != "config-files" ]]; then
-      remove+=("$pkg")
-    fi
-  done < <(tensorplate_packages)
+  while read -r pkg; do
+    remove+=("$pkg")
+  done < <(removable_packages)
   if ((${#remove[@]} > 0)); then
     step "remove ${remove[*]}" \
       sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y "${remove[@]}" || return
@@ -2307,6 +2377,155 @@ PY
   note "deploying on the rolled-back version"
   deploy_bundle "${EVIDENCE_DIR}/rollback-result.json" || return
   pass "rolled back to the baseline; operator edit kept; state set aside unchanged and not loaded; machine-type record restored and instance binding kept; deploy and inference answered"
+}
+
+# --- restart, rollback and upgrade under the denial ----------------------
+#
+# Sub-steps of the offline stage, run before the drop-ins are removed.
+# Each files its documents in a directory of its own under the names the
+# stage uses, so nothing the offline certificate reads is replaced.
+
+# $1 is the sub-step's directory; the rest are the units it will replace.
+offline_step_begin() {
+  local unit invocation
+  OFFLINE_STEP_DIR="${EVIDENCE_DIR}/$1"
+  shift
+  mkdir -p "$OFFLINE_STEP_DIR" || return
+  OFFLINE_STEP_WAS=()
+  for unit in "$@"; do
+    invocation="$(unit_invocation "$unit")" || return
+    OFFLINE_STEP_WAS+=(--was "${unit}=${invocation}")
+  done
+}
+
+# The units the sub-step replaced are new instances, both services still
+# carry the denial and enforce it, and the agent's machine type came from
+# the record.
+offline_step_started_denied() {
+  local unit
+  offline_check_policy denied "${OFFLINE_STEP_DIR}/offline-denial.json" \
+    "${OFFLINE_STEP_WAS[@]}" || return
+  for unit in "$AGENT_UNIT" "$OBSERVABILITY_UNIT"; do
+    offline_unit_probe probe "$unit" || return
+    offline_unit_classify "$unit" || return
+  done
+  capture_current_journal "$AGENT_UNIT" "${OFFLINE_STEP_DIR}/offline-agent-journal.txt" || return
+  step "the machine type came from the record, not from metadata" offline_helper identity-check \
+    --agent-journal "${OFFLINE_STEP_DIR}/offline-agent-journal.txt" \
+    --out "${OFFLINE_STEP_DIR}/offline-identity.json" || return
+}
+
+# The scratch names are the sub-step's, so an earlier sub-step's response
+# cannot stand in for this one's.
+offline_step_serves() {
+  local work="$1" deployment="$2" name="${OFFLINE_STEP_DIR##*/}"
+  step "status under denial" run_denied_cli_out "${OFFLINE_STEP_DIR}/offline-status.json" status \
+    tensorplate status --output json || return
+  step "status checks" offline_helper status-check \
+    --status "${OFFLINE_STEP_DIR}/offline-status.json" --deployment "$deployment" \
+    --out "${OFFLINE_STEP_DIR}/offline-status-check.json" || return
+  step "build the inference request" offline_helper infer-request \
+    --request-id "cloud-${name}-1" --out "${work}/${name}-request.json" || return
+  step "infer under denial" run_denied_cli infer tensorplate infer \
+    --input "${work}/${name}-request.json" --output-file "${work}/${name}-response.json" || return
+  step "inference checks" offline_helper infer-check \
+    --request "${work}/${name}-request.json" --response "${work}/${name}-response.json" \
+    --out "${OFFLINE_STEP_DIR}/offline-infer-check.json" || return
+}
+
+offline_restart_under_denial() {
+  local work="$1"
+  # The agent alone: each unit allows five starts in 300 seconds, and the
+  # observability unit's are not reset by the crash-loop stage.
+  offline_step_begin offline-restart "$AGENT_UNIT" || return
+  note "restarting the agent with the denial in place"
+  step "restart the agent while denied" sudo systemctl restart "$AGENT_UNIT" || return
+  step "services ready after the denied restart" await_services_ready || return
+  offline_step_started_denied || return
+  # The restart ended every process in the agent's unit, so the worker
+  # answering now is one the restarted agent started while denied.
+  offline_step_serves "$work" "$OFFLINE_DEPLOYMENT_ID" || return
+}
+
+# Read once, so the bytes parsed are the bytes digested.
+check_predecessor_record() {
+  sudo cat "$MACHINE_TYPE_RECORD" | offline_helper record-check --record - \
+    --sha256 "$MACHINE_TYPE_RECORD_SHA256" \
+    --out "${OFFLINE_STEP_DIR}/offline-record-before-start.json"
+}
+
+offline_rollback_under_denial() {
+  local work="$1" remove=() pkg
+  offline_step_begin offline-rollback "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
+  step "refuse to replace an existing ${STATE_ASIDE_DIR}" sudo test ! -e "$STATE_ASIDE_DIR" || return
+
+  note "rolling back by the documented procedure with the denial in place"
+  step "stop the services" sudo systemctl stop "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
+  step "digest the durable state before setting it aside" capture_state_manifest || return
+  step "digest the machine-type record and the instance binding" \
+    capture_identity_digests binding || return
+  step "set durable state aside" sudo mv -T "$STATE_DIR" "$STATE_ASIDE_DIR" || return
+  step "restore the machine-type record for the baseline" restore_machine_type_record || return
+  while read -r pkg; do
+    remove+=("$pkg")
+  done < <(removable_packages)
+  if ((${#remove[@]} > 0)); then
+    step "remove ${remove[*]} under denial" run_denied_cli remove \
+      sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y "${remove[@]}" || return
+  fi
+  # After the removal and before the installer, which is what starts the
+  # baseline agent: nothing has run that could have put the record back.
+  step "the record the baseline reads is in place before it starts" \
+    check_predecessor_record || return
+
+  note "installing the baseline through its own installer, in a denied unit"
+  install_set "$BASELINE_DIR" "$BASELINE_DIGEST" 1 run_denied_cli install || return
+  step "services ready after the denied rollback" await_services_ready || return
+  check_installed_versions from offline-after-rollback || return
+  step "the machine-type record is byte-identical with the denied baseline up" \
+    check_record_kept "under the denied baseline" || return
+  step "the denied rollback left the instance binding alone" \
+    check_binding_kept "the denied rollback" || return
+  step "the set-aside state is preserved, file by file" check_state_preserved || return
+  offline_step_started_denied || return
+
+  # Not the id the candidate was serving when state was set aside, so
+  # status can only name this one if the baseline deployed it.
+  note "deploying on the denied baseline"
+  step "fresh deploy under denial" \
+    run_denied_cli_out "${OFFLINE_STEP_DIR}/offline-deploy.json" deploy \
+    tensorplate deploy "$BUNDLE_STAGING_DIR" \
+    --deployment-id "$DEPLOYMENT_ID" --output json || return
+  step "deploy checks" offline_helper deploy-check \
+    --deploy "${OFFLINE_STEP_DIR}/offline-deploy.json" --deployment "$DEPLOYMENT_ID" \
+    --out "${OFFLINE_STEP_DIR}/offline-deploy-check.json" || return
+  offline_step_serves "$work" "$DEPLOYMENT_ID" || return
+}
+
+offline_upgrade_under_denial() {
+  local work="$1" doctor_status=0
+  offline_step_begin offline-upgrade "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
+
+  # The record and the binding are compared against the digests the
+  # rollback took before it set state aside.
+  note "upgrading to the candidate over the denied baseline, in a denied unit"
+  install_set "$ASSETS_DIR" "$ARTIFACT_DIGEST" 1 run_denied_cli install || return
+  step "services ready after the denied upgrade" await_services_ready || return
+  check_installed_versions to offline-after-upgrade || return
+  step "the machine-type record is byte-identical across the denied upgrade" \
+    check_record_kept "across the denied upgrade" || return
+  step "the denied upgrade left the instance binding alone" \
+    check_binding_kept "the denied upgrade" || return
+  offline_step_started_denied || return
+
+  run_denied_cli_out "${OFFLINE_STEP_DIR}/offline-doctor.json" doctor \
+    tensorplate doctor --output json || doctor_status=$?
+  step "doctor resolves ${ROW} from the recorded machine type" offline_helper doctor-check \
+    --doctor "${OFFLINE_STEP_DIR}/offline-doctor.json" --status "$doctor_status" \
+    --exact-row "$ROW" --out "${OFFLINE_STEP_DIR}/offline-doctor-check.json" || return
+  # No deploy: the candidate has to have re-warmed what the denied
+  # baseline recorded in durable state.
+  offline_step_serves "$work" "$DEPLOYMENT_ID" || return
 }
 
 # --- run ---------------------------------------------------------------
@@ -2357,10 +2576,10 @@ main() {
   # about the candidate this stage certifies.
   lifecycle_stage offline stage_offline
 
-  # After crash-loop, so every stage above is about a clean candidate
-  # install and no crash-loop restore can still be pending once packages
-  # start being purged and removed. A failure here exits with the stages
-  # above already recorded.
+  # After crash-loop, so the five stages before offline are about a clean
+  # candidate install and no crash-loop restore can still be pending once
+  # packages start being purged and removed. A failure here exits with the
+  # stages above already recorded.
   if ((BASELINE_REQUESTED)); then
     lifecycle_stage upgrade stage_upgrade
     lifecycle_stage rollback stage_rollback

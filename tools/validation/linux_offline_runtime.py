@@ -80,6 +80,7 @@ Standard library only; Python 3.9 or newer.
 
 import argparse
 import errno
+import hashlib
 import ipaddress
 import json
 import os
@@ -685,6 +686,10 @@ def run_unit_probe(metadata_address=METADATA_ADDRESS):
 # The TensorPlate CLI calls the offline stage makes, in the order it makes
 # them, each in its own denied transient unit.
 CLI_CALLS = ("status", "doctor", "deploy", "status-after-deploy", "infer")
+# The package operations a harness runs under the denial, each in a denied
+# transient unit like a CLI call. The certificate does not read them.
+PACKAGE_CALLS = ("remove", "install")
+DENIED_CALLS = CLI_CALLS + PACKAGE_CALLS
 
 
 def cli_evidence_name(call):
@@ -692,7 +697,7 @@ def cli_evidence_name(call):
     ran `call` took of itself, before running it. `run-denied` files it
     under this name and the certificate reads it back by it, so the name
     is worked out here and nowhere else."""
-    if call not in CLI_CALLS:
+    if call not in DENIED_CALLS:
         raise CheckFailed("not an offline CLI call: {!r}".format(call))
     return "offline-cli-probe-{}.json".format(call)
 
@@ -1129,6 +1134,31 @@ def identity_check(journal_text, expect_source=RECORDED_SOURCE,
             sorted(name for name, passed in checks.items() if not passed))
 
 
+RECORD_SCHEMA_VERSION = 2
+
+
+def record_check(data, expected_sha256):
+    """The machine-type record a predecessor agent is about to start on:
+    the bytes digested before the rollback set state aside, in the one
+    layout that agent reads. `data` is the file's bytes, so what is
+    parsed is what was digested."""
+    digest = hashlib.sha256(data).hexdigest()
+    try:
+        record = json.loads(data.decode("utf-8"))
+    except ValueError:
+        record = None
+    version = record.get("schema_version") if isinstance(record, dict) else None
+    checks = {
+        "record_is_a_json_object": isinstance(record, dict),
+        "record_bytes_unchanged": digest == expected_sha256,
+        # By type as well as value: 2.0 equals 2 and is not what that agent reads.
+        "record_schema_version_is_the_predecessors": (
+            type(version) is int and version == RECORD_SCHEMA_VERSION),
+    }
+    return ({"record": "pass", "schema_version": version, "sha256": digest},
+            sorted(name for name, passed in checks.items() if not passed))
+
+
 # --- evidence -----------------------------------------------------------
 
 
@@ -1338,6 +1368,17 @@ def _read(path):
             os.path.basename(path), _read_error(error)))
 
 
+def _read_bytes(path):
+    if path == "-":
+        return sys.stdin.buffer.read()
+    try:
+        with open(path, "rb") as handle:
+            return handle.read()
+    except OSError as error:
+        raise CheckFailed("cannot read {}: {}".format(
+            os.path.basename(path), _read_error(error)))
+
+
 def _emit(result, out, failures=(), what="checks"):
     text = json.dumps(result, indent=2, sort_keys=True)
     print(text)
@@ -1420,12 +1461,14 @@ def build_parser():
             opt("--expect-source", default=RECORDED_SOURCE),
             opt("--expect-record", default=RECORD_NOT_APPLICABLE),
             opt("--forbid-source", default=LIVE_SOURCE))
+    command("record-check", opt("--record", required=True),
+            opt("--sha256", required=True))
     command("evidence", opt("--dir", required=True), opt("--deployment", required=True))
     # run-denied ... -- COMMAND...: the command is split off before
     # parsing rather than left to argparse, whose handling of `--` has
     # changed between Python releases.
     wrapper = commands.add_parser("run-denied")
-    wrapper.add_argument("--call", choices=CLI_CALLS, required=True)
+    wrapper.add_argument("--call", choices=DENIED_CALLS, required=True)
     wrapper.add_argument("--control", required=True)
     wrapper.add_argument("--evidence-dir", required=True)
     wrapper.add_argument("--metadata-address", type=_metadata_address,
@@ -1544,6 +1587,9 @@ def _run(args):
         result, failures = identity_check(_read(args.agent_journal), args.expect_source,
                                           args.expect_record, args.forbid_source)
         _emit(result, args.out, failures, "platform identity checks")
+    elif name == "record-check":
+        result, failures = record_check(_read_bytes(args.record), args.sha256)
+        _emit(result, args.out, failures, "machine-type record checks")
     elif name == "evidence":
         _emit(evidence(args.dir, args.deployment), args.out)
     return 0
