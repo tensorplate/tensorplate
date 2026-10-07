@@ -310,6 +310,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   missing, instead of treating it as unchanged.
   `docs/validation/rolling-validation.md` describes both.
   (V030-E06-F02-T01)
+- The L4 cloud lifecycle harness's `offline` stage goes on, before it
+  lifts the denial, to restart the agent and, when a baseline set is
+  supplied, to run the documented rollback and then the candidate's
+  installer, with every package operation in a denied transient unit that
+  probed itself first. After each start the services it replaced must be
+  new instances, both must still enforce the denial and the agent must
+  take its machine type from the record; before the baseline's installer
+  runs, the machine-type record must be at its path with the bytes
+  digested before state was set aside and `schema_version` 2; the baseline
+  and then the candidate must serve under the denial. The two installers
+  under the denial pass `--allow-unsigned`, since they cannot reach the
+  signature verifier, and stay pinned to the checksum digest the same run
+  verifies online. Each sub-step files its checks into its own directory
+  (`offline-restart/`, `offline-rollback/`, `offline-upgrade/`); the stage
+  set and the report schema are unchanged. A package sub-step that fails
+  with a unit not installed ends with the drop-ins removed and checked
+  gone, nothing restarted, and a line naming the units that are not
+  installed. Exercised on the stubbed appliance only so far.
+  (V030-E01-F01-T03)
 
 ### Changed
 
