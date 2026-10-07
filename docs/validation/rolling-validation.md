@@ -36,7 +36,9 @@ tools/validation/validation-pass.py run \
   --out-dir ~/pass --confirm RESET-TENSORPLATE
 ```
 
-`--predecessor-bundle`, `--sampler`, `--oom-ballast-bytes`,
+A candidate's subject is its index subject and names its directories, so it
+is lower-case letters, digits and hyphens, and not `lifecycle`, `doctor` or
+`logs`. `--predecessor-bundle`, `--sampler`, `--oom-ballast-bytes`,
 `--oom-ballast-python` and each `--qualify-arg` go to the recipe unchanged.
 The path above is where the harness leaves its own deploy bundle staged for
 the agent to read, which makes it a predecessor every pass has.
@@ -49,16 +51,21 @@ subject there through `sudo`, owned by the operator.
 
 The steps run in this order. Each one's commands, exit code, wall time and
 log path go into `pass-report.json` in the output directory, which is
-rewritten after every step, so a pass that is interrupted still leaves a
-report. A step is `ok` when every command in it exited 0, `failed` or
-`timeout` otherwise, and `not_run` when a step it needs did not end `ok`.
+replaced when a step starts and when it ends, so the report always shows the
+step that is `running`. A step is `ok` when every command in it exited 0,
+`failed` or `timeout` otherwise, and `not_run` when a step it needs did not
+end `ok`. A pass that receives `SIGINT`, `SIGTERM` or `SIGHUP`, for example
+when its connection drops, stops the running command the way a time limit
+does, marks the step `interrupted` and runs nothing more. The report also
+lists the variable names the agent's environment file set at preflight and
+when doctor ran, so what an earlier pass left there is visible.
 The `lifecycle` and `qualify` steps also carry `result`: the outcome the
 harness's report or the recipe's record states itself, or null when the
 command left none.
 
 | Step | What it runs | When it does not end `ok` |
 | --- | --- | --- |
-| `preflight` | Verifies every file the two sets' `SHA256SUMS` list; that the candidate set's manifest and the checkout are both at `--source-commit`, with no uncommitted change; that the agent's environment file names no interpreter yet; that the staging directory is not hidden from the agent; and that the pass is not run as root | Nothing else runs |
+| `preflight` | Verifies every file the two sets' `SHA256SUMS` list; that the candidate set's manifest and the checkout are both at `--source-commit`, with no uncommitted change; that the agent's environment file names no interpreter yet; that the staging directory is not hidden from the agent; that the pass is not run as root; and, last, that `sudo` does not ask for a password | Nothing else runs |
 | `lifecycle` | [`ubuntu-l4-cloud-lifecycle.sh`](cloud-row-runbooks.md) on the candidate set, with the upgrade and rollback stages when `--baseline-assets-dir` is given | The pass goes on, and a report the harness wrote is still indexed |
 | `install` | The candidate set's own `install.sh`, then enables both services and waits for the agent to answer. A run with a baseline ends with the baseline installed, so this is an upgrade over it | No later step runs |
 | `speech-family` | With `--speech-family host-built` only: builds the speech runtime packages from a scratch clone of the checkout, as [the family's README](../../packaging/speech-runtime/README.md) describes, at the version of the candidate set's serving package, and installs them with `apt-get` | Doctor still runs; no candidate does |
@@ -75,7 +82,14 @@ so a `lifecycle` or `qualify` step is `failed` when the subject failed, and
 the line indexed from its record says how. The pass exits 0 when every step
 but `streaming-latency` ended `ok`, 1 when one did not, and 2 when it could
 not start: an argument is refused, or the output or scratch directory is not
-new or empty.
+new or empty. Exit 0 says the steps ran, not that the indexed lines passed:
+a `doctor` line can read `fail` after a `doctor` step that ended `ok`, and
+the comparison is what judges the lines.
+
+A pass leaves behind the subjects' directories under `--staging-dir`, the
+scratch directory of the family build (`<out-dir>-work` unless `--work-dir`
+names another), the installed packages including the speech runtime family,
+and any lines it appended to the agent's environment file.
 
 Every command a step runs has that step's time limit (`--step-timeout
 STEP=SECONDS` changes one). A command that reaches it is sent `SIGTERM`, so
@@ -87,7 +101,10 @@ that the harness removes what it put in place. Once it has ended, or after
 goes on as for any other failed step. A command that outlives both signals
 leaves its step `failed`, and no later step but `index` runs, because it may
 still be changing the machine. What the harness started as transient units
-is outside the group and is the harness's own cleanup to remove. Commands
+is outside the group and is the harness's own cleanup to remove. Whether the
+group's `SIGKILL` reaches a command that `sudo` runs on a terminal of its
+own (`use_pty`) has not been observed on hardware; check it on the first
+pass. Commands
 that need root run through `sudo`, which must not ask for a password.
 
 ### The speech runtime family

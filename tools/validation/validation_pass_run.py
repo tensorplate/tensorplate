@@ -5,8 +5,8 @@ Steps, in order: preflight, lifecycle, install, speech-family,
 agent-environment, doctor, then provision, cold-deploy and qualify per
 candidate, streaming-latency, index.
 Each step's commands, exit code and log are recorded in `pass-report.json`,
-which is rewritten after every step. A step whose prerequisite did not end
-`ok` is `not_run`. The pass creates, starts and deletes no machine and names
+which is rewritten when a step starts and when it ends. A step whose
+prerequisite did not end `ok` is `not_run`. The pass creates, starts and deletes no machine and names
 none. docs/validation/rolling-validation.md describes a pass.
 """
 
@@ -17,6 +17,7 @@ import datetime as _dt
 import json
 import os
 import re
+import signal
 import subprocess
 import time
 from collections.abc import Callable
@@ -51,6 +52,9 @@ STOP_GRACE_S = 240
 # What the agent's unit cannot read: it runs with ProtectHome and PrivateTmp.
 AGENT_HIDDEN_ROOTS = ("/home", "/root", "/run/user", "/tmp", "/var/tmp")
 STREAMING_LATENCY = "streaming-latency"
+# A candidate's subject names a directory and an index subject beside these.
+RESERVED_SUBJECTS = ("lifecycle", "doctor", "logs")
+BUNDLE_NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 EXIT_OK, EXIT_STEP_FAILED = 0, 1
 
 
@@ -96,6 +100,10 @@ class StepTimeout(Exception):
     pass
 
 
+class Interrupted(BaseException):
+    """The pass itself was told to stop; not an Exception, so no step swallows it."""
+
+
 def verify_checksums(directory: Path) -> int:
     """Every file `SHA256SUMS` lists is inside the directory with that digest."""
     sums = directory / "SHA256SUMS"
@@ -120,12 +128,12 @@ def verify_checksums(directory: Path) -> int:
     return len(lines)
 
 
-def interpreter_override(environment_file: Path) -> bool:
-    """Whether the agent's environment file names an interpreter, read as the unit reads it."""
+def environment_variables(environment_file: Path) -> dict[str, str]:
+    """What the agent's environment file sets, read as the unit reads it."""
     try:
         text = environment_file.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return False
+        return {}
     variables: dict[str, str] = {}
     for line in map(str.strip, text.splitlines()):
         name, separator, value = line.partition("=")
@@ -135,6 +143,11 @@ def interpreter_override(environment_file: Path) -> bool:
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
         variables[name.strip()] = value
+    return variables
+
+
+def interpreter_override(environment_file: Path) -> bool:
+    variables = environment_variables(environment_file)
     return any(variables.get(name) for name in OWN_INTERPRETER_VARIABLES)
 
 
@@ -180,6 +193,13 @@ class Candidate:
                 f"--candidate takes SUBJECT:BUNDLE[:CLIPS], not {spec!r}"
             )
         self.subject, self.bundle = parts[0], parts[1]
+        rule = index_mod.load_schema()["properties"]["subject"]["pattern"]
+        if self.subject in RESERVED_SUBJECTS or not re.fullmatch(rule.strip("^$"), self.subject):
+            raise index_mod.IndexLineError(
+                f"--candidate subject {self.subject!r} is reserved or does not match {rule}"
+            )
+        if not re.fullmatch(BUNDLE_NAME, self.bundle):
+            raise index_mod.IndexLineError(f"--candidate bundle {self.bundle!r} is not a name")
         self.clips = Path(parts[2]).resolve() if len(parts) == 3 else None
         self.bundle_dir: Path | None = None
 
@@ -232,6 +252,9 @@ class Pass:
         self.started_at = _dt.datetime.now(tz=_dt.timezone.utc)
         self.override: bool | None = None
         self.stuck: str | None = None
+        self.stopping = False
+        self.pending: str | None = None
+        self.environment: dict[str, list[str]] = {}
         self.sets: dict[str, str] = {}
 
     # -- running --
@@ -240,15 +263,17 @@ class Pass:
         report = {
             "source_commit": self.args.source_commit,
             "artifact_sets": self.sets,
+            "agent_environment": self.environment,
             "row": self.args.row,
             "speech_family": self.args.speech_family,
             "started_at": self.started_at.isoformat(timespec="seconds"),
             "finished": finished,
             "steps": self.steps,
         }
-        (self.out / "pass-report.json").write_text(
-            json.dumps(report, indent=2) + "\n", encoding="utf-8"
-        )
+        # Replaced whole: a reader never sees half a report.
+        scratch = self.out / "pass-report.json.tmp"
+        scratch.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        os.replace(scratch, self.out / "pass-report.json")
 
     def status_of(self, name: str) -> str | None:
         return next((step["status"] for step in self.steps if step["name"] == name), None)
@@ -279,10 +304,15 @@ class Pass:
         elif unmet:
             step["reason"] = f"{unmet[0]} is {self.status_of(unmet[0])}"
         else:
+            step["status"] = "running"
+            self.write_report()
             started = time.monotonic()
             try:
                 body(step)
                 step.update(status="ok", exit_code=0)
+            except Interrupted as exc:
+                step.update(status="interrupted", reason=f"the pass received {exc}")
+                raise
             except StepFailed as exc:
                 step.update(status="failed", reason=str(exc), exit_code=exc.exit_code)
                 if isinstance(exc, Unstoppable):
@@ -325,20 +355,28 @@ class Pass:
         with (self.out / step["log"]).open("a", encoding="utf-8") as log:
             log.write(f"$ {' '.join(argv)}\n")
             log.flush()
-            process = subprocess.Popen(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE if capture else log,
-                stderr=subprocess.PIPE if capture else log,
-                text=True,
-                cwd=cwd,
-                env={**os.environ, **(env or {})},
-                start_new_session=True,
-            )
+            process = None
             try:
+                process = subprocess.Popen(
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE if capture else log,
+                    stderr=subprocess.PIPE if capture else log,
+                    text=True,
+                    cwd=cwd,
+                    env={**os.environ, **(env or {})},
+                    start_new_session=True,
+                )
                 stdout, stderr = process.communicate(timeout=limit)
+            except Interrupted:
+                # Its own session: nothing but this ends it when the pass is interrupted.
+                if process is not None:
+                    self.stop(process, log)
+                raise
             except subprocess.TimeoutExpired:
                 ended = self.stop(process, log)
+                if self.pending:
+                    raise Interrupted(self.pending) from None
                 if ended is None:
                     raise Unstoppable(
                         f"`{Path(argv[0]).name}` had no end within {limit} s and could not be stopped"
@@ -358,6 +396,7 @@ class Pass:
         Through sudo, because the group holds root-owned children this account cannot signal.
         """
         ended = None
+        self.stopping = True
         for name, wait_s in (("SIGTERM", self.args.stop_grace_s), ("SIGKILL", 10)):
             kill = ["sudo", "kill", f"-{name[3:]}", "--", f"-{process.pid}"]
             log.write(f"$ {' '.join(kill)}\n")
@@ -370,7 +409,15 @@ class Pass:
             except (OSError, subprocess.TimeoutExpired):
                 continue
             ended = ended or name
+        self.stopping = False
         return ended
+
+    def on_signal(self, number: int, _frame: Any) -> None:
+        name = signal.Signals(number).name
+        if self.stopping:
+            self.pending = self.pending or name
+        else:
+            raise Interrupted(name)
 
     def wait_for_agent(self, step: dict[str, Any]) -> None:
         deadline = time.monotonic() + self.args.agent_wait_s
@@ -409,6 +456,7 @@ class Pass:
             if candidate.clips is not None and not candidate.clips.is_dir():
                 raise StepFailed(f"{candidate.subject}: {candidate.clips} is not a directory")
         environment_file = Path(self.args.agent_environment_file)
+        self.environment["at_preflight"] = sorted(environment_variables(environment_file))
         # The harness purges the family such a line points into, then deploys its own bundle.
         if interpreter_override(environment_file):
             raise StepFailed(
@@ -420,6 +468,9 @@ class Pass:
         # Not the predecessor bundle: the harness may be what stages it.
         if self.args.sampler and not Path(self.args.sampler).exists():
             raise StepFailed(f"--sampler {self.args.sampler} does not exist")
+        # Last, so a refused pass has run nothing through sudo.
+        if self.run(step, ["sudo", "-n", "true"], check=False).returncode != 0:
+            raise StepFailed("sudo would ask for a password, which the pass cannot answer")
 
     def lifecycle(self, step: dict[str, Any]) -> None:
         argv = [str(self.repo / "tools/validation/ubuntu-l4-cloud-lifecycle.sh")]
@@ -479,7 +530,12 @@ class Pass:
 
     def agent_environment(self, step: dict[str, Any]) -> None:
         """Append the operator's variables to the agent's environment file and restart it."""
-        append = 'printf "%s\\n" "$@" >>"$0"'
+        # A new file is world-readable like the packaged one; a last line gets its newline.
+        append = (
+            '[ -e "$0" ] || install -m 0644 /dev/null "$0"; '
+            '[ -z "$(tail -c 1 "$0")" ] || echo >>"$0"; '
+            'printf "%s\\n" "$@" >>"$0"'
+        )
         target = self.args.agent_environment_file
         self.run(step, ["sudo", "sh", "-c", append, target, *self.args.agent_environment])
         self.run(step, ["sudo", "systemctl", "restart", SERVICE_UNITS[0]])
@@ -490,7 +546,9 @@ class Pass:
         doctor = [self.args.tensorplate, "doctor", "--output", "json"]
         done = self.run(step, doctor, capture=True, check=False)
         (self.out / "doctor.json").write_text(done.stdout, encoding="utf-8")
-        self.override = interpreter_override(Path(self.args.agent_environment_file))
+        environment_file = Path(self.args.agent_environment_file)
+        self.environment["at_doctor"] = sorted(environment_variables(environment_file))
+        self.override = interpreter_override(environment_file)
         if done.returncode != 0:
             raise StepFailed(f"doctor exited {done.returncode}", done.returncode)
 
@@ -614,6 +672,16 @@ class Pass:
             raise StepFailed("no step left anything to index")
 
     def run_pass(self) -> int:
+        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(number, self.on_signal)
+        try:
+            return self.run_steps()
+        except Interrupted as exc:
+            self.write_report()
+            print(f"interrupted by {exc}; pass report: {self.out / 'pass-report.json'}")
+            return EXIT_STEP_FAILED
+
+    def run_steps(self) -> int:
         self.step("preflight", self.preflight)
         self.step("lifecycle", self.lifecycle, requires=("preflight",))
         self.step("install", self.install, requires=("preflight",))

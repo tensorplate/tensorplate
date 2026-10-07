@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -36,7 +37,7 @@ sys.path.insert(0, str(ROOT / "tools/validation"))
 import validation_index as index_mod  # noqa: E402
 import validation_pass_run as run_mod  # noqa: E402
 
-DEB_VERSION = "0.3.1~dev.1"
+DEB_VERSION = "0.3.1~rc.1"
 RUNNER_FINDINGS = ("runner_profiles", "runner_profile_dependencies", "runner_launch_environment")
 
 # Every fake logs its call, then exits with the code FAKE_FAIL gives its name, if any.
@@ -47,7 +48,7 @@ code=$(sed -n "s/^$name //p" "$FAKE_FAIL" | head -1)
 """
 EXIT = '[ -z "$code" ] || exit "$code"\n'
 FAKES = {
-    "sudo": 'exec "$@"\n',
+    "sudo": 'if [ "$1" = -n ]; then\n  [ -z "$code" ] || exit "$code"\n  shift\nfi\nexec "$@"\n',
     "kill": EXIT + 'exec /bin/kill "$@"\n',
     "systemctl": EXIT,
     "sysctl": EXIT,
@@ -63,17 +64,21 @@ code=$(sed -n "s/^$name //p" "$FAKE_FAIL" | head -1)
 case "$name" in
   status)
     [ -z "$code" ] || { echo '{"status":"ok","payload":{"agent":{"available":false}}}'; exit 0; }
-    echo '{"status":"ok","payload":{"agent":{"available":true}}}' ;;
+    cat "$FILED_LIFECYCLE/status-after-upgrade.json" ;;
   doctor) cat "$FAKE_DOCTOR"; exit "${code:-0}" ;;
   provision)
     [ -z "$code" ] || exit "$code"
-    printf '{"status":"ok","payload":{"name":"%s","path":"%s"}}\\n' "$3" "$FAKE_BUNDLES/$3" ;;
+    if [ -f "$FAKE_BUNDLES/$3/provision.json" ]; then
+      cat "$FAKE_BUNDLES/$3/provision.json"
+    else
+      printf '{"status":"ok","payload":{"bundle":"%s","path":"%s"}}\\n' "$3" "$FAKE_BUNDLES/$3"
+    fi ;;
   deploy)
     if [ -n "$code" ]; then
       echo '{"status":"ok","payload":{"phase":"failed","failure":{"error_code":"load_failed","message":"synthetic"}}}'
       exit "$code"
     fi
-    printf '{"status":"ok","payload":{"phase":"active","bundle_digest":"%s"}}\\n' "$(cat "$2/bundle-digest")" ;;
+    cat "$(cat "$2/filed-deploy")" ;;
 esac
 """,
 }
@@ -169,10 +174,14 @@ class Machine:
         self.baseline = artifact_set(tmp / "baseline", "0" * 40)
         self.bundles = tmp / "bundles"
         for name, record in FILED_RECORDS.items():
-            (self.bundles / name).mkdir(parents=True)
-            digest = json.loads(record.read_text(encoding="utf-8"))["lifecycle"]["deploy"]
-            (self.bundles / name / "bundle-digest").write_text(digest["bundle_digest"])
-            (self.bundles / name / "filed-record").write_text(str(record))
+            bundle, host = self.bundles / name, record.parents[1] / "host"
+            bundle.mkdir(parents=True)
+            (bundle / "filed-record").write_text(str(record))
+            (bundle / "filed-deploy").write_text(str(host / "cold-deploy/deploy.json"))
+            # The filed envelope, pointed at this machine's copy of the bundle.
+            provisioned = json.loads((host / f"provision/provision-{name}.json").read_text())
+            provisioned["payload"]["path"] = str(bundle)
+            (bundle / "provision.json").write_text(json.dumps(provisioned))
         (tmp / "clips").mkdir()
         self.environment_file = tmp / "tensorplate-agent"
         self.runs = 0
@@ -186,6 +195,7 @@ class Machine:
         family: str = "host-built",
         candidates: bool = True,
         staging: bool = True,
+        interrupt: int | None = None,
     ) -> Result:
         self.runs += 1
         out = self.tmp / f"pass-{self.runs}"
@@ -225,9 +235,29 @@ class Machine:
             command += ["--staging-dir", str(self.tmp / f"staging-{self.runs}")]
         if "--confirm" not in arguments:
             command += ["--confirm", "RESET-TENSORPLATE"]
-        done = subprocess.run(
-            [*command, *arguments], capture_output=True, text=True, env=environment, check=False
-        )
+        mid = None
+        if interrupt is None:
+            done = subprocess.run(
+                [*command, *arguments], capture_output=True, text=True, env=environment, check=False
+            )
+        else:
+            # Signal the driver once the harness fake is waiting, and keep the report as it was then.
+            process = subprocess.Popen(
+                [*command, *arguments],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=environment,
+            )
+            deadline = time.monotonic() + 30
+            while not scratch["pids"].exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            time.sleep(0.3)
+            mid = json.loads((out / "pass-report.json").read_text(encoding="utf-8"))
+            process.send_signal(interrupt)
+            stdout, stderr = process.communicate(timeout=60)
+            done = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        self.mid = mid
         return Result(done, out, scratch["calls"], scratch["pids"])
 
 
@@ -289,6 +319,7 @@ def check_full_pass(machine: Machine) -> None:
     assert [result.steps[name]["result"] for name in qualify] == ["fail", "fail"]
     assert result.steps["doctor"]["result"] is None
     assert result.report["finished"] is True and result.report["source_commit"] == machine.commit
+    assert not (result.out / "pass-report.json.tmp").exists()
     assert set(result.report["artifact_sets"]) == {"candidate", "baseline"}
     for step in result.steps.values():
         assert "log" not in step or (result.out / step["log"]).is_file(), step
@@ -436,13 +467,19 @@ def check_modes(machine: Machine) -> None:
         "LD_LIBRARY_PATH=/opt/family",
     )
     stated = [flag for variable in variables for flag in ("--agent-environment", variable)]
-    machine.environment_file.write_text("TMPDIR=/var/tmp\n", encoding="utf-8")
+    machine.environment_file.write_text("LD_LIBRARY_PATH=/earlier/pass", encoding="utf-8")
     result = machine.run(*stated)
     assert list(result.steps)[3:6] == ["speech-family", "agent-environment", "doctor"]
     assert len(result.called("tensorplate status")) == 4
     assert result.statuses("agent-environment", "provision:stt-whisper") == ["ok", "ok"]
     written = machine.environment_file.read_text(encoding="utf-8")
-    assert written == "TMPDIR=/var/tmp\n" + "".join(f"{variable}\n" for variable in variables)
+    lines = "".join(f"{variable}\n" for variable in variables)
+    assert written == "LD_LIBRARY_PATH=/earlier/pass\n" + lines
+    # What an earlier pass left is in the report, interpreter variable or not.
+    assert result.report["agent_environment"] == {
+        "at_preflight": ["LD_LIBRARY_PATH"],
+        "at_doctor": ["LD_LIBRARY_PATH", "TP_PYTHON_PYTORCH_EXECUTABLE"],
+    }
     result.order("apt-get", "systemctl restart tensorplate-agent", "tensorplate doctor")
     doctor = result.lines["doctor"]
     assert doctor["checks"]["interpreter_override"] == "present" and doctor["result"] == "fail"
@@ -451,8 +488,14 @@ def check_modes(machine: Machine) -> None:
         "agent_environment": "LD_LIBRARY_PATH,TP_PYTHON_PYTORCH_EXECUTABLE",
     }
     machine.environment_file.unlink()
+    # Under a private umask, so the mode is the step's doing and not the shell's default.
+    umask = os.umask(0o077)
     result = machine.run(*stated[:2], family="in-assets")
+    os.umask(umask)
     assert list(result.steps)[2:5] == ["install", "agent-environment", "doctor"]
+    assert machine.environment_file.read_text(encoding="utf-8") == f"{variables[0]}\n"
+    assert machine.environment_file.stat().st_mode & 0o777 == 0o644
+    assert result.report["agent_environment"]["at_preflight"] == []
     # The pass leaves its line behind, and a second pass on the machine refuses it.
     assert machine.run().steps["preflight"]["status"] == "failed"
     machine.environment_file.unlink()
@@ -533,6 +576,10 @@ def check_preflight(machine: Machine) -> None:
     version.write_text("0.3.1\n", encoding="utf-8")
     refused("is not a directory", "--candidate", f"extra:extra:{machine.tmp / 'absent'}")
     refused("--sampler", "--sampler", str(machine.tmp / "absent"))
+    result = machine.run(fail={"sudo": 1})
+    assert result.statuses("preflight", "lifecycle") == ["failed", "not_run"]
+    assert "sudo would ask for a password" in result.steps["preflight"]["reason"]
+    assert [call for call in result.calls if not call.startswith("git")] == ["sudo -n true"]
     assert machine.run(candidates=False, family="none").statuses("preflight") == ["ok"]
 
 
@@ -699,6 +746,32 @@ def check_root_is_refused_before_anything_runs(machine: Machine) -> None:
             raise AssertionError("preflight ran as root")
 
 
+def check_an_interrupted_pass(machine: Machine) -> None:
+    hang = {"ubuntu-l4-cloud-lifecycle.sh": "hang"}
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        result = machine.run(fail=hang, interrupt=number)
+        # While the harness ran, the report already showed its step.
+        assert [step["status"] for step in machine.mid["steps"]] == ["ok", "running"]
+        assert result.code == 1 and result.report["finished"] is False, result.done
+        assert result.statuses("preflight", "lifecycle") == ["ok", "interrupted"]
+        reason = f"the pass received {signal.Signals(number).name}"
+        assert result.steps["lifecycle"]["reason"] == reason and len(result.steps) == 2
+        assert not result.called("install.sh") and not result.lines
+        pids = result.pids.read_text().split()
+        signals = [call.split()[2:] for call in result.called("sudo kill")]
+        assert signals == [[name, "--", f"-{pids[0]}"] for name in ("-TERM", "-KILL")], signals
+        assert Path(f"{result.pids}.cleaned").exists(), "the harness got to clean up"
+        for pid in map(int, pids):
+            for _ in range(50):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError(f"process {pid} outlived the interrupted pass")
+
+
 def check_a_command_that_cannot_be_stopped(machine: Machine) -> None:
     hang = {"ubuntu-l4-cloud-lifecycle.sh": "hang", "kill": 1}
     result = machine.run("--step-timeout", "lifecycle=1", fail=hang)
@@ -723,6 +796,11 @@ def check_arguments(machine: Machine) -> None:
     no_pass("names one subject twice", "--candidate", "stt-whisper:other")
     no_pass("SUBJECT:BUNDLE[:CLIPS]", "--candidate", "stt-whisper")
     no_pass("SUBJECT:BUNDLE[:CLIPS]", "--candidate", ":bundle")
+    # A subject names a directory made through sudo and an index subject.
+    for subject in ("..", "a/b", "lifecycle", "doctor", "logs", "Upper", "-flag", "a b"):
+        no_pass("is reserved or does not match", f"--candidate={subject}:bundle")
+    for bundle in ("-flag", "../x", "a/b"):
+        no_pass("is not a name", "--candidate", f"other:{bundle}")
     no_pass("--speech-family none installs none", family="none")
     no_pass("a candidate needs --staging-dir", staging=False)
     for bad in ("lifecycle", "lifecycle=0", "lifecycle=soon", "index=5"):
@@ -831,6 +909,7 @@ def main() -> int:
         check_each_step_failing(machine)
         check_an_environment_file_that_turns_unreadable(machine)
         check_root_is_refused_before_anything_runs(machine)
+        check_an_interrupted_pass(machine)
         check_a_command_that_cannot_be_stopped(machine)
         check_arguments(machine)
     print("validation pass: the driver runs its steps in order and records each failure")
