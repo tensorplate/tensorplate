@@ -67,7 +67,9 @@ jobs:
         run: python test/release/test_vulnerability_dispositions.py
 
       - name: Native closure SBOM tool tests
-        run: python test/release/test_native_sbom.py
+        run: |
+          python test/release/test_native_sbom.py
+          python test/release/test_native_code_absence.py
 
       - name: Every disposition is current and agrees with deny.toml
         run: python tools/release/check-vulnerability-dispositions.py
@@ -355,7 +357,6 @@ jobs:
         with:
           mode: build
 
-      # Configure is what runs `vcpkg install`; nothing of this tree is compiled.
       - name: Configure the release profile
         shell: bash
         run: |
@@ -368,6 +369,7 @@ jobs:
             -DTP_BUILD_TESTS=OFF \
             -DTP_BUILD_EXAMPLES=OFF \
             -DTP_ENABLE_SANITIZERS=OFF \
+            "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-Map,${RUNNER_TEMP}/native/worker.map" \
             "${TP_AMD64_CMAKE_ARGS[@]}"
 
       - name: Set up Python 3.12
@@ -375,16 +377,33 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Build the worker and check absent native code
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f "${RUNNER_TEMP}/native/worker.map" "${RUNNER_TEMP}/native/serving_worker/tensorplate-serving"
+          cmake --build "${RUNNER_TEMP}/native" --target tp_serving_worker --parallel 2
+          python3 tools/release/check-native-code-absence.py \
+            --worker "${RUNNER_TEMP}/native/serving_worker/tensorplate-serving" \
+            --link-map "${RUNNER_TEMP}/native/worker.map" \
+            --install-root "${RUNNER_TEMP}/native/vcpkg_installed" --triplet x64-linux \
+            --port grpc --port openssl --port zlib \
+            --output "${RUNNER_TEMP}/native-code-absence.json"
+
       - name: SPDX SBOM of the native closure, from the install tree
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p sbom
+          created="$(date -u -d "@$(git show -s --format=%ct HEAD)" +%Y-%m-%dT%H:%M:%SZ)"
           python3 tools/release/native-sbom.py collect \
             --install-root "${RUNNER_TEMP}/native/vcpkg_installed" \
             --manifest vcpkg.json --feature streaming-grpc --triplet x64-linux \
             --cmake-cache "${RUNNER_TEMP}/native/CMakeCache.txt" \
             --archives "${RUNNER_TEMP}/vcpkg-archives" \
+            --worker "${RUNNER_TEMP}/native/serving_worker/tensorplate-serving" \
+            --version "$(cat packaging/VERSION)" \
+            --created "$created" \
             --output sbom/tensorplate-serving-native-closure-x64-linux.spdx.json
           python3 tools/release/native-sbom.py check \
             --sbom sbom/tensorplate-serving-native-closure-x64-linux.spdx.json \
@@ -418,26 +437,22 @@ jobs:
           echo "${RUNNER_TEMP}/bin" >>"$GITHUB_PATH"
           "${RUNNER_TEMP}/bin/grype" version
 
-      # The closure may well be clean, and a clean result would prove
-      # nothing about the scanner; the positive control first requires it
-      # to report a release with published advisories, matched by the same
-      # kind of CPE reference the real document carries. grype exits 2
-      # when a match reaches --fail-on.
+      # A known vulnerable version for every identifier must match by CPE.
       - name: grype positive control
         shell: bash
         env:
           GRYPE_CHECK_FOR_APP_UPDATE: 'false'
         run: |
           set -Eeuo pipefail
-          control=test/release/fixtures/native-sbom/positive-control.spdx.json
+          control="${RUNNER_TEMP}/positive-control.spdx.json"
+          python3 tools/release/native-sbom.py control --output "$control"
           status=0
           grype "sbom:${control}" --fail-on negligible -o json="${RUNNER_TEMP}/control.json" -q || status=$?
-          found="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["matches"]))' "${RUNNER_TEMP}/control.json")"
-          if [ "$status" -ne 2 ] || [ "$found" -eq 0 ]; then
-            echo "positive control failed (exit ${status}, ${found} matches): grype did not report OpenSSL 3.0.0's published advisories from a CPE reference" >&2
+          if [ "$status" -ne 2 ]; then
+            echo "positive control failed: expected threshold exit 2, got ${status}" >&2
             exit 1
           fi
-          echo "positive control: grype reports ${found} advisories against OpenSSL 3.0.0 by CPE"
+          python3 tools/release/native-sbom.py check-control --report "${RUNNER_TEMP}/control.json"
 
       - name: Install release tooling requirements
         run: python3 -m pip install --quiet -r tools/release/requirements.txt
@@ -451,7 +466,11 @@ jobs:
           GRYPE_CHECK_FOR_APP_UPDATE: 'false'
         run: |
           set -Eeuo pipefail
-          python3 tools/release/check-vulnerability-dispositions.py --grype-ignore >"${RUNNER_TEMP}/grype.yaml"
+          proof=(--worker "${RUNNER_TEMP}/native/serving_worker/tensorplate-serving"
+                 --link-map "${RUNNER_TEMP}/native/worker.map"
+                 --install-root "${RUNNER_TEMP}/native/vcpkg_installed" --triplet x64-linux)
+          python3 tools/release/check-vulnerability-dispositions.py \
+            --grype-ignore "${proof[@]}" >"${RUNNER_TEMP}/grype.yaml"
           cat "${RUNNER_TEMP}/grype.yaml"
           status=0
           grype --config "${RUNNER_TEMP}/grype.yaml" \
@@ -462,23 +481,16 @@ jobs:
             echo "grype did not complete the scan (exit ${status})" >&2
             exit 1
           fi
-          python3 - "${RUNNER_TEMP}/native-scan.json" <<'PY'
-          import json, sys
-          report = json.load(open(sys.argv[1]))
-          matches = report["matches"]
-          for match in matches:
-              print(match["vulnerability"]["id"], match["vulnerability"].get("severity"),
-                    match["artifact"]["name"], match["artifact"]["version"], file=sys.stderr)
-          print(len(matches), "undispositioned,", len(report.get("ignoredMatches", [])), "dispositioned")
-          if matches:
-              sys.exit("advisories against the native closure with no disposition; fix the pin or "
-                       "record one in tools/release/vulnerability-dispositions.json")
-          PY
+          python3 tools/release/check-vulnerability-dispositions.py \
+            --grype-report "${RUNNER_TEMP}/native-scan.json" "${proof[@]}"
 
       - name: Upload the scan report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: grype-tensorplate-serving-native-closure
-          path: ${{ runner.temp }}/native-scan.json
+          path: |
+            ${{ runner.temp }}/native-scan.json
+            ${{ runner.temp }}/control.json
+            ${{ runner.temp }}/native-code-absence.json
           if-no-files-found: ignore

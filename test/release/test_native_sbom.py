@@ -81,7 +81,7 @@ class Collect(Fixture):
             self.assertNotEqual(package["licenseConcluded"], "NOASSERTION", name)
             self.assertTrue(package["downloadLocation"].startswith("git+https://github.com/"), name)
         linked = {r["relatedSpdxElement"] for r in doc["relationships"]
-                  if r["relationshipType"] == "STATIC_LINK"}
+                  if r["relationshipType"] == "DEPENDS_ON"}
         self.assertEqual(linked, {p["SPDXID"] for p in ports.values()})
 
     def test_what_the_worker_does_not_link_is_left_out_and_named_as_left_out(self) -> None:
@@ -94,10 +94,12 @@ class Collect(Fixture):
 
     def test_the_manifests_own_dependency_the_worker_compiles_against_is_in(self) -> None:
         ports = {p["name"]: p for p in self.document()["packages"][1:]}
-        cpes = [r["referenceLocator"] for r in ports["nlohmann-json"]["externalRefs"]
-                if r["referenceType"] == "cpe23Type"]
-        self.assertEqual(cpes, ["cpe:2.3:a:json-for-modern-cpp_project:json-for-modern-cpp:3.12.0:*:*:*:*:*:*:*",
-                                "cpe:2.3:a:nlohmann:json:3.12.0:*:*:*:*:*:*:*"])
+        package = ports["nlohmann-json"]
+        self.assertIn("Header-only", package["comment"])
+        self.assertIn("UNSCANNED:", package["comment"])
+        self.assertEqual([r["referenceLocator"] for r in package["externalRefs"]
+                          if r["referenceType"] == "purl"],
+                         ["pkg:vcpkg/nlohmann-json@3.12.0%232"])
 
     def test_the_same_tree_yields_the_same_document_name_and_no_random_one(self) -> None:
         first = self.document()["documentNamespace"]
@@ -108,6 +110,28 @@ class Collect(Fixture):
         doc["packages"][2]["checksums"][0]["checksumValue"] = "0" * 128
         openssl.write_text(json.dumps(doc))
         self.assertNotEqual(self.document()["documentNamespace"], first)
+
+    def test_the_same_inputs_are_byte_reproducible(self) -> None:
+        self.document()
+        first = self.sbom.read_bytes()
+        self.document()
+        self.assertEqual(self.sbom.read_bytes(), first)
+
+    def test_created_is_required_and_validated(self) -> None:
+        result = run("collect", "--install-root", self.tree, "--manifest", MANIFEST,
+                     "--triplet", TRIPLET, "--output", self.sbom)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("--created", result.stderr)
+        self.assert_refused(self.collect("--created", "not-a-timestamp"),
+                            "created must be an explicit UTC timestamp")
+
+    def test_native_package_urls_do_not_leak_into_other_ecosystems(self) -> None:
+        ports = self.document()["packages"][1:]
+        for package in ports:
+            refs = [r["referenceLocator"] for r in package["externalRefs"]
+                    if r["referenceType"] == "purl"]
+            self.assertEqual(refs, [tool.purl(package["name"], package["versionInfo"])])
+        self.assertEqual(tool.purl("some+port", "1.2.3#4"), "pkg:vcpkg/some%2Bport@1.2.3%234")
 
     def test_each_port_carries_its_source_checksum(self) -> None:
         ports = {p["name"]: p for p in self.document()["packages"][1:]}
@@ -137,14 +161,6 @@ class Collect(Fixture):
         (self.tree / "vcpkg/status").write_text("\n\n".join(kept))
         self.assert_refused(self.collect(), "the closure reaches re2, which the status file does not record")
 
-    def test_an_upstream_version_that_is_not_the_ports_tail(self) -> None:
-        path = self.tree / TRIPLET / "share/protobuf/vcpkg.spdx.json"
-        doc = json.loads(path.read_text())
-        resource = next(p for p in doc["packages"] if p["SPDXID"] == "SPDXRef-resource-0")
-        resource["downloadLocation"] = resource["downloadLocation"].rsplit("@", 1)[0] + "@v31.1"
-        path.write_text(json.dumps(doc))
-        self.assert_refused(self.collect(), "protobuf: its source resource names 31.1")
-
     def test_an_archive_asked_for_and_absent(self) -> None:
         (self.root / "archives").mkdir()
         self.assert_refused(self.collect("--archives", self.root / "archives"),
@@ -160,13 +176,18 @@ class Collect(Fixture):
         self.assertEqual(cpes["openssl"], [f"cpe:2.3:a:openssl:openssl:{version['openssl']}:*:*:*:*:*:*:*"])
         self.assertEqual(cpes["grpc"], [f"cpe:2.3:a:grpc:grpc:{version['grpc']}:*:*:*:*:*:*:*"])
         self.assertEqual(cpes["zlib"], [f"cpe:2.3:a:zlib:zlib:{version['zlib']}:*:*:*:*:*:*:*"])
-        self.assertEqual(len(cpes["c-ares"]), 2)
-        # NVD numbers protobuf by the upstream release, one field shorter than the port's.
-        self.assertTrue(version["protobuf"].endswith("." + cpes["protobuf"][0].split(":")[5]))
-        self.assertNotIn(version["protobuf"], cpes["protobuf"][0])
-        for name in ("abseil", "re2", "utf8-range"):
+        self.assertEqual(len(cpes["c-ares"]), 3)
+        self.assertEqual(cpes["protobuf"], [
+            "cpe:2.3:a:google:protobuf:6.33.4:*:*:*:*:*:*:*",
+            "cpe:2.3:a:google:protobuf-cpp:6.33.4:*:*:*:*:*:*:*",
+        ])
+        self.assertEqual(cpes["abseil"],
+                         [f"cpe:2.3:a:abseil:common_libraries:{version['abseil']}:*:*:*:*:*:*:*"])
+        for name in ("nlohmann-json", "re2", "utf8-range"):
             self.assertEqual(cpes[name], [])
-            self.assertTrue(ports[name]["comment"].startswith("no CPE: "), name)
+            self.assertIn("UNSCANNED: ", ports[name]["comment"], name)
+        self.assertEqual(tool.document_annotations(self.document())["unscanned"],
+                         "nlohmann-json re2 utf8-range")
 
     def test_the_worker_and_the_archives_are_digested_when_given(self) -> None:
         worker = self.root / "tensorplate-serving"
@@ -314,20 +335,20 @@ class Gate(Fixture):
             doc["relationships"] = [r for r in doc["relationships"]
                                     if r["relatedSpdxElement"] != "SPDXRef-port-openssl"]
         self.assert_refused(self.check(self.changed(unlink)),
-                            "openssl is not recorded as statically linked")
+                            "openssl is not recorded as a build dependency")
 
     def test_a_port_related_to_the_worker_some_other_way_or_to_something_else(self) -> None:
         def retype(doc: dict) -> None:
             for r in doc["relationships"]:
                 if r["relatedSpdxElement"] == "SPDXRef-port-openssl":
-                    r["relationshipType"] = "DEPENDS_ON"
-        self.assert_refused(self.check(self.changed(retype)), "openssl is not recorded as statically linked")
+                    r["relationshipType"] = "STATIC_LINK"
+        self.assert_refused(self.check(self.changed(retype)), "openssl is not recorded as a build dependency")
 
         def resource(doc: dict) -> None:
             for r in doc["relationships"]:
                 if r["relatedSpdxElement"] == "SPDXRef-port-openssl":
                     r["spdxElementId"] = "SPDXRef-port-zlib"
-        self.assert_refused(self.check(self.changed(resource)), "openssl is not recorded as statically linked")
+        self.assert_refused(self.check(self.changed(resource)), "openssl is not recorded as a build dependency")
 
     def test_a_cpe_reference_that_is_not_a_cpe(self) -> None:
         def garble(doc: dict) -> None:
@@ -336,7 +357,7 @@ class Gate(Fixture):
                     for r in package["externalRefs"]:
                         if r["referenceType"] == "cpe23Type":
                             r["referenceLocator"] = "openssl 3"
-        self.assert_refused(self.check(self.changed(garble)), "openssl has neither a CPE nor a recorded reason")
+        self.assert_refused(self.check(self.changed(garble)), "openssl lacks its exact native CPE identifier set")
 
     def test_a_document_whose_lists_are_not_lists(self) -> None:
         self.sbom.write_text(json.dumps({"spdxVersion": "SPDX-2.3", "annotations": 5}))
@@ -349,13 +370,57 @@ class Gate(Fixture):
                     package["externalRefs"] = [r for r in package["externalRefs"]
                                                if r["referenceType"] != "cpe23Type"]
         self.assert_refused(self.check(self.changed(uncpe)),
-                            "openssl has neither a CPE nor a recorded reason")
+                            "openssl lacks its exact native CPE identifier set")
 
         def uncomment(doc: dict) -> None:
             for package in doc["packages"]:
                 package.pop("comment", None)
         self.assert_refused(self.check(self.changed(uncomment)),
-                            "abseil has neither a CPE nor a recorded reason")
+                            "nlohmann-json lacks its explicit UNSCANNED declaration")
+
+    def test_a_name_collision_is_not_accepted_as_a_native_identifier(self) -> None:
+        def npm(doc: dict) -> None:
+            for package in doc["packages"]:
+                if package["name"] == "nlohmann-json":
+                    for ref in package["externalRefs"]:
+                        if ref["referenceType"] == "purl":
+                            ref["referenceLocator"] = "pkg:npm/nlohmann-json@3.12.0"
+        self.assert_refused(self.check(self.changed(npm)), "nlohmann-json lacks its versioned vcpkg purl")
+
+    def test_an_unscanned_port_is_not_reported_as_scanned(self) -> None:
+        def cpe(doc: dict) -> None:
+            package = next(p for p in doc["packages"] if p["name"] == "nlohmann-json")
+            package["externalRefs"].append({"referenceType": "cpe23Type",
+                                           "referenceLocator": "cpe:2.3:a:nlohmann:json:3.12.0:*:*:*:*:*:*:*"})
+        self.assert_refused(self.check(self.changed(cpe)), "nlohmann-json lacks its explicit UNSCANNED declaration")
+
+        def erase(doc: dict) -> None:
+            doc["annotations"] = [a for a in doc["annotations"] if not a["comment"].startswith("unscanned:")]
+        self.assert_refused(self.check(self.changed(erase)), "unscanned coverage must name")
+
+    def test_a_plausible_but_wrong_cpe_vendor_is_rejected(self) -> None:
+        def vendor(doc: dict) -> None:
+            for package in doc["packages"]:
+                if package["name"] == "protobuf":
+                    for ref in package["externalRefs"]:
+                        if ref["referenceType"] == "cpe23Type":
+                            ref["referenceLocator"] = ref["referenceLocator"].replace(":google:", ":other:")
+        self.assert_refused(self.check(self.changed(vendor)), "protobuf lacks its exact native CPE identifier set")
+
+    def test_each_native_cpe_version_must_match_the_package_version(self) -> None:
+        for name in CLOSURE:
+            if isinstance(tool.CPE_DECISIONS[name], str):
+                continue
+            with self.subTest(port=name):
+                def wrong_version(doc: dict) -> None:
+                    package = next(p for p in doc["packages"] if p["name"] == name)
+                    for ref in package["externalRefs"]:
+                        if ref["referenceType"] == "cpe23Type":
+                            fields = ref["referenceLocator"].split(":")
+                            fields[5] = "99.99.99"
+                            ref["referenceLocator"] = ":".join(fields)
+                self.assert_refused(self.check(self.changed(wrong_version)),
+                                    f"{name} lacks its exact native CPE identifier set")
 
     def test_a_port_without_a_version(self) -> None:
         def unversion(doc: dict) -> None:
@@ -382,6 +447,86 @@ class Gate(Fixture):
         self.assert_refused(self.check(), "is not an SPDX-2.3 document")
         self.sbom.write_text("not json")
         self.assert_refused(self.check(), "SBOM ")
+
+
+class ScannerControls(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = pathlib.Path(self.temp.name)
+        self.report = self.root / "report.json"
+
+    def report_matches(self) -> dict:
+        matches = []
+        for artifact_id, name, identity in tool.control_entries():
+            value = tool.cpe(identity.vendor, identity.product, identity.control_version)
+            matches.append({
+                "artifact": {"id": artifact_id, "name": name, "type": "vcpkg",
+                             "purl": tool.purl(name, identity.control_version)},
+                "vulnerability": {"id": identity.control_advisory},
+                "matchDetails": [{"type": "cpe-match",
+                                  "searchedBy": {"namespace": "nvd:cpe", "cpes": [value]},
+                                  "found": {"vulnerabilityID": identity.control_advisory,
+                                            "cpes": [tool.cpe(identity.vendor, identity.product, "*")]}}],
+            })
+        return {"matches": matches}
+
+    def check(self, report: dict) -> subprocess.CompletedProcess:
+        self.report.write_text(json.dumps(report))
+        return run("check-control", "--report", self.report)
+
+    def test_controls_cover_every_emitted_pair_at_its_affected_version(self) -> None:
+        output = self.root / "controls.json"
+        result = run("control", "--output", output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        doc = json.loads(output.read_text())
+        pairs = set()
+        for package in doc["packages"]:
+            refs = package["externalRefs"]
+            self.assertEqual(refs[0]["referenceLocator"],
+                             tool.purl(package["name"], package["versionInfo"]))
+            values = refs[1]["referenceLocator"].split(":")
+            self.assertEqual(values[5], package["versionInfo"])
+            pairs.add(tuple(values[3:5]))
+        self.assertEqual(pairs, {(i.vendor, i.product) for _, _, i in tool.control_entries()})
+        self.assertEqual(len(doc["packages"]), 9)
+        self.assertEqual(len({p["SPDXID"] for p in doc["packages"]}), 9)
+        self.assertIn("not recorded build evidence", doc["comment"])
+        result = self.check(self.report_matches())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("9/9", result.stdout)
+
+    def test_every_pair_must_independently_match(self) -> None:
+        for missing in range(len(tool.control_entries())):
+            with self.subTest(missing=missing):
+                report = self.report_matches()
+                removed = report["matches"].pop(missing)
+                result = self.check(report)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(removed["artifact"]["id"], result.stderr)
+
+    def test_name_match_or_wrong_identity_does_not_satisfy_a_cpe_control(self) -> None:
+        mutations = (
+            lambda m: m["artifact"].update(type=""),
+            lambda m: m["artifact"].update(purl="pkg:npm/zlib@1.2.11"),
+            lambda m: m["artifact"].update(id="another-control"),
+            lambda m: m["vulnerability"].update(id="CVE-2000-0000"),
+            lambda m: m["matchDetails"][0].update(type="exact-direct-match"),
+            lambda m: m["matchDetails"][0]["searchedBy"].update(cpes=[]),
+            lambda m: m["matchDetails"][0]["found"].update(cpes=[]),
+        )
+        for index, mutation in enumerate(mutations):
+            with self.subTest(mutation=index):
+                report = self.report_matches()
+                mutation(report["matches"][0])
+                result = self.check(report)
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("no typed native CPE match", result.stderr)
+
+    def test_a_report_without_a_matches_list_is_not_success(self) -> None:
+        result = self.check({})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no matches list", result.stderr)
 
 
 if __name__ == "__main__":

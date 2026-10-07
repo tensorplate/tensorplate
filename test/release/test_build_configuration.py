@@ -4842,24 +4842,52 @@ class ReleaseWorkflowVcpkgTests(unittest.TestCase):
 
 
 class NativeClosureScanTests(unittest.TestCase):
-    """The supply-chain workflow's scan of the worker's native closure, against a stub grype."""
+    """Run workflow steps with a stub scanner and real linked absence controls."""
 
-    setUp = ReleaseWorkflowVcpkgTests.setUp
     job = ReleaseWorkflowVcpkgTests.job
     only_step = ReleaseWorkflowVcpkgTests.only_step
 
-    def grype(self, exit_status: int, matches: int, ignored: int = 0) -> str:
-        """A grype that writes a report with that many matches where -o json= says, then exits."""
+    def setUp(self):
+        ReleaseWorkflowVcpkgTests.setUp(self)
+        from test_native_code_absence import build_fixture
+        build_fixture(self.root / "temp")
+
+    def scan_report(self, matches: int = 0) -> dict:
+        dispositions = json.loads((REPO_ROOT / "tools/release/vulnerability-dispositions.json").read_text())
+        ignored = [{"vulnerability": {"id": e["id"], "severity": "High"},
+                    "artifact": {"name": e["package"], "version": "1.0", "type": "vcpkg"}}
+                   for e in dispositions["dispositions"] if e["ecosystem"] == "vcpkg"]
         match = {"vulnerability": {"id": "CVE-2000-0001", "severity": "Unknown"},
-                 "artifact": {"name": "openssl", "version": "3.0.0"}}
-        report = json.dumps({"matches": [match] * matches, "ignoredMatches": [match] * ignored})
+                 "artifact": {"name": "openssl", "version": "3.0.0", "type": "vcpkg"}}
+        return {"source": {"type": "sbom-file"}, "matches": [match] * matches,
+                "ignoredMatches": ignored}
+
+    def control_report(self) -> dict:
+        from test_native_sbom import tool
+        matches = []
+        for artifact_id, name, identity in tool.control_entries():
+            cpe = tool.cpe(identity.vendor, identity.product, identity.control_version)
+            matches.append({
+                "artifact": {"id": artifact_id, "name": name, "type": "vcpkg",
+                             "purl": tool.purl(name, identity.control_version)},
+                "vulnerability": {"id": identity.control_advisory},
+                "matchDetails": [{"type": "cpe-match",
+                                  "searchedBy": {"namespace": "nvd:cpe", "cpes": [cpe]},
+                                  "found": {"cpes": [cpe], "vulnerabilityID": identity.control_advisory}}],
+            })
+        return {"matches": matches}
+
+    def grype(self, exit_status: int, report: dict) -> str:
+        """Record the scanner arguments and return the test's constructed report."""
         (self.root / "bin").mkdir(exist_ok=True)
+        report_path = self.root / "stub-report.json"
+        report_path.write_text(json.dumps(report))
         write_executable(
             self.root / "bin/grype",
             "#!/bin/sh\n"
             f"printf '%s\\n' \"$*\" >>'{self.root / 'grype-calls'}'\n"
             "for arg in \"$@\"; do case \"$arg\" in json=*) "
-            f"printf '%s' '{report}' >\"${{arg#json=}}\" ;; esac; done\n"
+            f"cp '{report_path}' \"${{arg#json=}}\" ;; esac; done\n"
             f"exit {exit_status}\n",
         )
         return f"{self.root / 'bin'}{os.pathsep}{os.environ['PATH']}"
@@ -4867,44 +4895,65 @@ class NativeClosureScanTests(unittest.TestCase):
     def run_named(self, name: str, path: str) -> subprocess.CompletedProcess:
         job = self.job("supply-chain.yml", "native")
         step = job["steps"][self.only_step(job, name)]
-        (self.root / "temp").mkdir(exist_ok=True)
         return run_step(step, REPO_ROOT, PATH=path, RUNNER_TEMP=str(self.root / "temp"))
 
-    def test_the_positive_control_needs_grypes_threshold_exit_and_a_match(self):
-        cases = {(2, 3): True, (2, 0): False, (0, 3): False, (1, 3): False, (0, 0): False}
-        for (status, matches), passes in cases.items():
-            with self.subTest(grype_exits=status, matches=matches):
-                result = self.run_named("grype positive control", self.grype(status, matches))
+    def test_the_positive_control_needs_threshold_exit_and_every_pair(self):
+        complete = self.control_report()
+        incomplete = {"matches": complete["matches"][:-1]}
+        cases = [(2, complete, True), (2, incomplete, False),
+                 (2, {"matches": []}, False), (0, complete, False), (1, complete, False)]
+        for status, report, passes in cases:
+            with self.subTest(status=status, matches=len(report["matches"])):
+                result = self.run_named("grype positive control", self.grype(status, report))
                 self.assertEqual(result.returncode == 0, passes, result.stderr)
-        calls = (self.root / "grype-calls").read_text()
-        self.assertIn("sbom:test/release/fixtures/native-sbom/positive-control.spdx.json", calls)
-        control = json.loads((REPO_ROOT / "test/release/fixtures/native-sbom"
-                              / "positive-control.spdx.json").read_text())
-        refs = control["packages"][0]["externalRefs"]
-        self.assertEqual([r["referenceType"] for r in refs], ["cpe23Type"])
+        control = json.loads((self.root / "temp/positive-control.spdx.json").read_text())
+        self.assertEqual(len(control["packages"]), len(complete["matches"]))
 
-    def test_the_scan_fails_on_any_match_whatever_its_severity_and_on_a_scan_that_did_not_finish(self):
-        cases = {(0, 0, 0): True, (0, 0, 2): True, (0, 1, 0): False, (1, 0, 0): False, (2, 0, 0): False}
-        for (status, matches, ignored), passes in cases.items():
-            with self.subTest(grype_exits=status, matches=matches, ignored=ignored):
-                result = self.run_named("grype, with the recorded dispositions",
-                                        self.grype(status, matches, ignored))
+    def test_scan_refuses_any_severity_incomplete_scan_and_unused_dispositions(self):
+        valid = self.scan_report()
+        unused = self.scan_report()
+        unused["ignoredMatches"].pop()
+        cases = [(0, valid, True), (0, unused, False), (0, self.scan_report(1), False),
+                 (1, valid, False), (2, valid, False)]
+        for status, report, passes in cases:
+            with self.subTest(status=status, report=report):
+                result = self.run_named("grype, with the recorded dispositions", self.grype(status, report))
                 self.assertEqual(result.returncode == 0, passes, result.stdout + result.stderr)
-        result = self.run_named("grype, with the recorded dispositions", self.grype(0, 1))
-        self.assertIn("CVE-2000-0001 Unknown openssl 3.0.0", result.stderr)
+        result = self.run_named("grype, with the recorded dispositions", self.grype(0, self.scan_report(1)))
+        self.assertIn("CVE-2000-0001", result.stderr)
+        self.assertIn("Unknown", result.stderr)
         self.assertNotIn("--fail-on", (self.root / "grype-calls").read_text().splitlines()[-1])
         config = yaml.safe_load((self.root / "temp/grype.yaml").read_text())
-        self.assertIn("CVE-2026-0994", [rule["vulnerability"] for rule in config["ignore"]])
+        self.assertNotIn("CVE-2026-0994", [rule["vulnerability"] for rule in config["ignore"]])
 
-    def test_the_sbom_is_uploaded_before_the_scan_and_the_control_runs_first(self):
+    def test_the_workflow_cannot_ignore_an_advisory_once_its_code_is_linked(self):
+        from test_native_code_absence import build_fixture
+        for port in ("openssl", "zlib"):
+            with self.subTest(port=port):
+                build_fixture(self.root / "temp", included_port=port)
+                result = self.run_named("grype, with the recorded dispositions",
+                                        self.grype(0, self.scan_report()))
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(f"{port}: worker extracted archive members", result.stderr)
+                self.assertFalse((self.root / "grype-calls").exists())
+
+    def test_build_sbom_control_and_scan_run_in_order(self):
         job = self.job("supply-chain.yml", "native")
         order = [self.only_step(job, text) for text in (
+            "Configure the release profile", "Build the worker and check absent native code",
             "native-sbom.py collect", "Upload the SBOM", "grype positive control",
             "grype, with the recorded dispositions")]
         self.assertEqual(order, sorted(order))
-        collect = job["steps"][order[0]]["run"]
-        self.assertIn("native-sbom.py check", collect)
-        self.assertIn("--cmake-cache", collect)
+        self.assertIn("-DCMAKE_EXE_LINKER_FLAGS=-Wl,-Map,", job["steps"][order[0]]["run"])
+        build = job["steps"][order[1]]["run"]
+        self.assertIn("cmake --build", build)
+        self.assertIn("--target tp_serving_worker", build)
+        self.assertIn("--port grpc --port openssl --port zlib", build)
+        collect = job["steps"][order[2]]["run"]
+        for arg in ("native-sbom.py check", "--cmake-cache", "--worker", "--created"):
+            self.assertIn(arg, collect)
+        self.assertIn("git show -s --format=%ct HEAD", collect)
+        self.assertIn("--grype-report", job["steps"][order[-1]]["run"])
 
 
 class StaticStreamingClosureTests(unittest.TestCase):

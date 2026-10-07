@@ -60,7 +60,11 @@ manifest's `nlohmann-json` rather than the distribution's package.
 Required before the final release tag, though not before a release
 candidate: the worker SBOM and vulnerability disposition must cover the
 static native closure, including OpenSSL. The supply-chain workflow's
-native leg records and scans that closure from the release configuration's
-install tree on every pull request; recording it for the worker each
-release job builds, and refusing a final tag without that record, is not
-done yet. See `docs/release/artifacts.md`, "The native closure".
+native leg records the inferred build dependency closure from the release
+configuration's install tree, builds the worker and checks its linker map
+before accepting dispositions based on absent archive code. The SBOM does
+not assert that every dependency contributes code; header-only nlohmann-json
+is compiled into the worker. The leg scans the recognized native identifiers
+on every pull request; recording it for the worker each release job builds,
+and refusing a final tag without that record, is not done yet. See
+`docs/release/artifacts.md`, "The native build dependencies".

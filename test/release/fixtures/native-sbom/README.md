@@ -5,7 +5,7 @@ manifest in this repository at its `builtin-baseline`, feature
 `streaming-grpc`, triplet `x64-linux`, installed on 2026-10-07 in an Ubuntu
 22.04 container with clang 15 by vcpkg `2026-07-27` (a cold build, no
 binary cache). It holds the two things `tools/release/native-sbom.py`
-reads from an install tree and nothing else, for all fifteen installed ports
+reads from an install tree and nothing else, for all thirteen installed ports
 (the closure's nine, gtest, and vcpkg's own helper ports):
 
 - `vcpkg/status`, as written;
@@ -24,5 +24,7 @@ To record again after the baseline or the feature changes, run
 --x-install-root=<dir>` from a vcpkg checkout at the manifest's baseline,
 copy the status file, and reduce each SPDX document the same way.
 
-`positive-control.spdx.json` is not a record of any build; its own comment
-says what it is for.
+`native-sbom.py control` generates synthetic vulnerable-version documents
+from the identifier table, one package per vendor/product pair. They are
+scanner controls, not recordings of a build. `check-control` requires each
+pair to match its native advisory through the CPE matcher.

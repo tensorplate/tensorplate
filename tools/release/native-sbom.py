@@ -1,27 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""The serving worker's native closure: its SBOM and the check on it.
+"""Record and check the serving worker's native build dependency closure.
 
-The worker links gRPC, protobuf, OpenSSL and the rest of the `streaming-grpc`
-feature's closure statically from the vcpkg baseline, and compiles against
-the manifest's nlohmann-json. What was installed for it is recorded by the
-build itself: vcpkg writes `vcpkg/status` under its install
-tree and an SPDX document per installed port under `share/<port>/`. This
-tool reads those, never a version list of its own.
-
-collect  reads a build's install tree and writes one SPDX 2.3 JSON document
-         for the closure of the manifest's dependencies and the feature's,
-         less the ports the worker does not link. It refuses a tree that
-         lacks any of those ports, a port without vcpkg's SPDX document, a
-         closure port without a CPE decision, and a CMake cache that does
-         not record the streaming feature ON.
-check    fails unless the document exists, was made for the manifest's
-         baseline, feature and triplet, and names every port the manifest
-         and the feature name, each with a CPE or a recorded reason for
-         having none. It checks the document's shape and its agreement with
-         the manifest; it cannot tell which build a document came from.
-
-Exit 0: done. Exit 1: refused, with each reason on stderr. Exit 2: usage.
+Versions, source checksums and licenses come from the vcpkg install tree.
+The manifest and installed dependency records infer the closure; this
+inventory does not assert which archive members the linker retains.
 """
 
 from __future__ import annotations
@@ -33,6 +16,8 @@ import json
 import pathlib
 import re
 import sys
+from typing import NamedTuple
+from urllib.parse import quote
 
 TOOL = "tensorplate-native-sbom"
 WORKER = "tensorplate-serving"
@@ -40,32 +25,35 @@ BASELINE_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 INSTALLED = "install ok installed"
 
-# CPE vendor and product for each closure port, verified against the NVD CPE
-# dictionary (services.nvd.nist.gov/rest/json/cpes/2.0, cpeMatchString) on
-# 2026-10-07. `version` says which version the CPE carries: the vcpkg port's
-# version without its port-version, or the upstream release the port's
-# resource names when the two numberings differ. A port the dictionary has no
-# entry for is listed with None and the fact, so it is named in the document
-# and not scanned by CPE; a closure port absent from this table refuses the
-# document, because an unmapped port would be silently unscanned.
-CPE_DECISIONS: dict[str, list[tuple[str, str, str]] | str] = {
-    "grpc": [("grpc", "grpc", "port")],
-    # NVD numbers protobuf by its upstream release (33.4), the port by the
-    # Python-style version (6.33.4).
-    "protobuf": [("google", "protobuf", "resource")],
-    "openssl": [("openssl", "openssl", "port")],
-    # NVD has used both vendors for c-ares over the years.
-    "c-ares": [("c-ares", "c-ares", "port"), ("c-ares_project", "c-ares", "port")],
-    "zlib": [("zlib", "zlib", "port")],
-    # NVD has entries under both names for nlohmann's JSON library.
-    "nlohmann-json": [("json-for-modern-cpp_project", "json-for-modern-cpp", "port"),
-                      ("nlohmann", "json", "port")],
-    "abseil": "no entry in the NVD CPE dictionary for abseil under any vendor on 2026-10-07",
-    "re2": "no entry in the NVD CPE dictionary for re2 under any vendor on 2026-10-07",
-    "utf8-range": (
-        "no entry in the NVD CPE dictionary for utf8-range under any vendor on 2026-10-07; "
-        "it is built from protobuf's source tree, whose CPE is on the protobuf package"
-    ),
+
+class CPEIdentity(NamedTuple):
+    vendor: str
+    product: str
+    control_version: str
+    control_advisory: str
+
+
+# Verified in Grype's v6.1.10 database built 2026-10-07T06:31:48Z, using
+# cpes/affected_cpe_handles/blobs. Each emitted pair has a vulnerable control.
+CPE_DECISIONS: dict[str, list[CPEIdentity] | str] = {
+    "grpc": [CPEIdentity("grpc", "grpc", "1.51.0", "CVE-2023-1428")],
+    "protobuf": [
+        CPEIdentity("google", "protobuf", "3.14.0", "CVE-2021-22570"),
+        CPEIdentity("google", "protobuf-cpp", "3.21.5", "CVE-2022-1941"),
+    ],
+    "openssl": [CPEIdentity("openssl", "openssl", "1.0.1", "CVE-2014-0160")],
+    "c-ares": [
+        CPEIdentity("c-ares", "c-ares", "1.26.0", "CVE-2024-25629"),
+        CPEIdentity("c-ares_project", "c-ares", "1.26.0", "CVE-2024-25629"),
+        CPEIdentity("daniel_stenberg", "c-ares", "1.3.2", "CVE-2007-3152"),
+    ],
+    "zlib": [CPEIdentity("zlib", "zlib", "1.2.11", "CVE-2018-25032")],
+    "abseil": [
+        CPEIdentity("abseil", "common_libraries", "20240722.0", "CVE-2025-0838"),
+    ],
+    "nlohmann-json": "no native CPE in the 2026-10-07 Grype database; the npm namesake is unrelated",
+    "re2": "no native CPE in the 2026-10-07 Grype database; distro and npm namesakes do not identify this port",
+    "utf8-range": "no package or CPE in the 2026-10-07 Grype database; protobuf's identifier does not cover this port",
 }
 
 
@@ -216,28 +204,6 @@ def spdx_package(doc: dict, spdx_id: str) -> dict | None:
     return None
 
 
-def resource_version(doc: dict, name: str) -> str:
-    """The upstream release the port's first source resource names, as a bare version."""
-    resource = spdx_package(doc, "SPDXRef-resource-0")
-    location = resource.get("downloadLocation", "") if resource else ""
-    ref = location.rsplit("@", 1)[1] if "@" in location else ""
-    match = re.match(r"^(?:[A-Za-z-]+[-_])?v?([0-9][0-9A-Za-z.]*)$", ref)
-    if not match:
-        raise Refused([f"{name}: cannot read an upstream version from resource {location!r}"])
-    return match.group(1)
-
-
-def cpe_version(name: str, source: str, port: dict, doc: dict) -> str:
-    """The version a port's CPE carries; an upstream numbering must be the tail of the port's."""
-    if source == "port":
-        return port["version"]
-    upstream = resource_version(doc, name)
-    if port["version"] != upstream and not port["version"].endswith("." + upstream):
-        raise Refused([f"{name}: its source resource names {upstream}, which is not the port "
-                       f"version {port['version']} or its tail"])
-    return upstream
-
-
 def cpe(vendor: str, product: str, version: str) -> str:
     return f"cpe:2.3:a:{vendor}:{product}:{version}:*:*:*:*:*:*:*"
 
@@ -271,14 +237,28 @@ def cmake_records_streaming(cache: pathlib.Path) -> None:
         raise Refused([f"{cache} does not record TP_ENABLE_STREAMING_GRPC:BOOL=ON"])
 
 
-def created_now() -> str:
-    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def validate_created(value: str) -> str:
+    try:
+        dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        raise Refused(["created must be an explicit UTC timestamp (YYYY-MM-DDTHH:MM:SSZ)"]) from None
+    return value
+
+
+def purl(name: str, version: str) -> str:
+    return f"pkg:vcpkg/{quote(name, safe='')}@{quote(version, safe='')}"
+
+
+def purl_reference(name: str, version: str) -> dict:
+    return {"referenceCategory": "PACKAGE-MANAGER", "referenceType": "purl",
+            "referenceLocator": purl(name, version)}
 
 
 # --- collect ----------------------------------------------------------------
 
 
 def collect(args: argparse.Namespace) -> dict:
+    created = validate_created(args.created)
     baseline, roots = manifest_facts(args.manifest, args.feature)
     if args.cmake_cache:
         cmake_records_streaming(args.cmake_cache)
@@ -344,16 +324,16 @@ def collect(args: argparse.Namespace) -> dict:
         port = spdx_package(doc, "SPDXRef-port") or {}
         resource = spdx_package(doc, "SPDXRef-resource-0") or {}
         spdx_id = f"SPDXRef-port-{name}"
-        refs: list[dict] = []
+        refs: list[dict] = [purl_reference(name, full_version(ports[name]))]
         decision = CPE_DECISIONS[name]
         if isinstance(decision, str):
             cpe_note = decision
         else:
             cpe_note = None
-            for vendor, product, source in decision:
-                version = cpe_version(name, source, ports[name], doc)
+            for identity in decision:
+                version = ports[name]["version"]
                 refs.append({"referenceCategory": "SECURITY", "referenceType": "cpe23Type",
-                             "referenceLocator": cpe(vendor, product, version)})
+                             "referenceLocator": cpe(identity.vendor, identity.product, version)})
         refs.append({"referenceCategory": "OTHER", "referenceType": "vcpkg-port",
                      "referenceLocator": port.get("downloadLocation", "NOASSERTION")})
         if ports[name]["abi"]:
@@ -377,11 +357,16 @@ def collect(args: argparse.Namespace) -> dict:
         }
         if resource.get("checksums"):
             package["checksums"] = resource["checksums"]
+        notes = []
+        if name == "nlohmann-json":
+            notes.append("Header-only build dependency; code is compiled from its headers.")
         if cpe_note:
-            package["comment"] = f"no CPE: {cpe_note}"
+            notes.append(f"UNSCANNED: {cpe_note}")
+        if notes:
+            package["comment"] = " ".join(notes)
         packages.append(package)
         relationships.append(
-            {"spdxElementId": "SPDXRef-worker", "relationshipType": "STATIC_LINK",
+            {"spdxElementId": "SPDXRef-worker", "relationshipType": "DEPENDS_ON",
              "relatedSpdxElement": spdx_id}
         )
     annotations = {
@@ -389,9 +374,9 @@ def collect(args: argparse.Namespace) -> dict:
         "vcpkg-feature": args.feature,
         "vcpkg-triplet": args.triplet,
         "closure": " ".join(closure),
+        "unscanned": " ".join(name for name in closure if isinstance(CPE_DECISIONS[name], str)) or "none",
         "not-linked": "; ".join(f"{name} ({NOT_LINKED[name]})" for name in left_out) or "none",
     }
-    created = args.created or created_now()
     # Named by what the document says, so the same build yields the same name.
     identity = hashlib.sha256(json.dumps(
         [annotations, [(p["name"], p["versionInfo"], p.get("checksums")) for p in packages]],
@@ -404,10 +389,11 @@ def collect(args: argparse.Namespace) -> dict:
         "documentNamespace": f"https://tensorplate.com/spdxdocs/{WORKER}-native-closure/"
                              f"{args.triplet}/{baseline}/sha256-{identity}",
         "creationInfo": {"created": created, "creators": sorted(creators)},
-        "comment": "The vcpkg ports the serving worker links or compiles against, read from the "
-                   "install tree of a build: each port's version, source, license and CPE. "
-                   "Annotations record the manifest baseline, feature and triplet, and the "
-                   "installed ports left out because the worker does not link them.",
+        "comment": "Build dependency closure inferred from the manifest and vcpkg install tree, "
+                   "with versions, source checksums, licenses and scanner identifiers. DEPENDS_ON "
+                   "does not assert archive members survived linking. UNSCANNED ports have no "
+                   "native identifier in the inspected scanner database; zero findings for them "
+                   "are not a clean vulnerability result.",
         "annotations": [
             {"annotator": f"Tool: {TOOL}", "annotationDate": created, "annotationType": "OTHER",
              "comment": f"{key}: {value}"}
@@ -456,7 +442,7 @@ def check(args: argparse.Namespace) -> list[str]:
         r.get("relatedSpdxElement")
         for r in doc.get("relationships", [])
         if isinstance(r, dict) and r.get("spdxElementId") == "SPDXRef-worker"
-        and r.get("relationshipType") == "STATIC_LINK"
+        and r.get("relationshipType") == "DEPENDS_ON"
     }
     closure = facts.get("closure", "").split()
     if not closure:
@@ -470,15 +456,101 @@ def check(args: argparse.Namespace) -> list[str]:
             reasons.append(f"{args.sbom}: closure names {name} but no package describes it")
             continue
         if package.get("SPDXID") not in linked:
-            reasons.append(f"{args.sbom}: {name} is not recorded as statically linked by the worker")
+            reasons.append(f"{args.sbom}: {name} is not recorded as a build dependency of the worker")
         if not package.get("versionInfo"):
             reasons.append(f"{args.sbom}: {name} has no version")
-        has_cpe = any(
-            r.get("referenceType") == "cpe23Type" and str(r.get("referenceLocator", "")).startswith("cpe:2.3:a:")
-            for r in package.get("externalRefs", []) if isinstance(r, dict)
-        )
-        if not has_cpe and not str(package.get("comment", "")).startswith("no CPE: "):
-            reasons.append(f"{args.sbom}: {name} has neither a CPE nor a recorded reason for none")
+        refs = [r for r in package.get("externalRefs", []) if isinstance(r, dict)]
+        recorded_purls = [r.get("referenceLocator") for r in refs if r.get("referenceType") == "purl"]
+        if recorded_purls != [purl(name, package.get("versionInfo", ""))]:
+            reasons.append(f"{args.sbom}: {name} lacks its versioned vcpkg purl")
+        decision = CPE_DECISIONS.get(name)
+        recorded_cpes = [str(r.get("referenceLocator", "")) for r in refs
+                         if r.get("referenceType") == "cpe23Type"]
+        if isinstance(decision, str):
+            if recorded_cpes or f"UNSCANNED: {decision}" not in str(package.get("comment", "")):
+                reasons.append(f"{args.sbom}: {name} lacks its explicit UNSCANNED declaration")
+        elif decision:
+            version = package.get("versionInfo", "").split("#", 1)[0]
+            expected_cpes = sorted(cpe(identity.vendor, identity.product, version) for identity in decision)
+            if sorted(recorded_cpes) != expected_cpes:
+                reasons.append(f"{args.sbom}: {name} lacks its exact native CPE identifier set")
+        else:
+            reasons.append(f"{args.sbom}: {name} has no scanner identifier decision")
+    unscanned = " ".join(name for name in closure if isinstance(CPE_DECISIONS.get(name), str)) or "none"
+    if facts.get("unscanned") != unscanned:
+        reasons.append(f"{args.sbom}: unscanned coverage must name {unscanned!r}")
+    return reasons
+
+
+# --- scanner controls -------------------------------------------------------
+
+
+def control_entries() -> list[tuple[str, str, CPEIdentity]]:
+    return [(f"control-{name}-{index}", name, identity)
+            for name, decision in sorted(CPE_DECISIONS.items()) if isinstance(decision, list)
+            for index, identity in enumerate(decision)]
+
+
+def control_document() -> dict:
+    packages = []
+    for artifact_id, name, identity in control_entries():
+        packages.append({
+            "SPDXID": f"SPDXRef-{artifact_id}", "name": name,
+            "versionInfo": identity.control_version, "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": False, "licenseConcluded": "NOASSERTION",
+            "licenseDeclared": "NOASSERTION", "copyrightText": "NOASSERTION",
+            "externalRefs": [purl_reference(name, identity.control_version),
+                             {"referenceCategory": "SECURITY", "referenceType": "cpe23Type",
+                              "referenceLocator": cpe(identity.vendor, identity.product,
+                                                      identity.control_version)}],
+        })
+    identity = hashlib.sha256(json.dumps(packages, sort_keys=True).encode()).hexdigest()
+    return {
+        "spdxVersion": "SPDX-2.3", "dataLicense": "CC0-1.0", "SPDXID": "SPDXRef-DOCUMENT",
+        "name": "native-closure-scan-controls",
+        "documentNamespace": f"https://tensorplate.com/spdxdocs/native-scan-controls/sha256-{identity}",
+        "creationInfo": {"created": "2026-10-07T00:00:00Z", "creators": [f"Tool: {TOOL}"]},
+        "comment": "Constructed scanner controls, not recorded build evidence. Each native CPE "
+                   "vendor/product pair is checked at a known affected version from the database.",
+        "packages": packages,
+        "relationships": [{"spdxElementId": "SPDXRef-DOCUMENT", "relationshipType": "DESCRIBES",
+                           "relatedSpdxElement": p["SPDXID"]} for p in packages],
+    }
+
+
+def check_control(report: pathlib.Path) -> list[str]:
+    doc = read_json(report, "scanner control report")
+    if not isinstance(doc, dict) or not isinstance(doc.get("matches"), list):
+        return ["scanner control report has no matches list"]
+    reasons = []
+    for artifact_id, name, identity in control_entries():
+        expected_cpe = cpe(identity.vendor, identity.product, identity.control_version)
+        found = False
+        for match in doc["matches"]:
+            if not isinstance(match, dict):
+                continue
+            artifact = match.get("artifact", {})
+            vulnerability = match.get("vulnerability", {})
+            if (artifact.get("id") != artifact_id or artifact.get("name") != name
+                    or artifact.get("type") != "vcpkg"
+                    or artifact.get("purl") != purl(name, identity.control_version)
+                    or vulnerability.get("id") != identity.control_advisory):
+                continue
+            for detail in match.get("matchDetails", []):
+                searched = detail.get("searchedBy", {})
+                matched = detail.get("found", {})
+                pairs = {":".join(value.split(":")[3:5]) for value in matched.get("cpes", [])}
+                if (detail.get("type") == "cpe-match"
+                        and searched.get("namespace") == "nvd:cpe"
+                        and expected_cpe in searched.get("cpes", [])
+                        and f"{identity.vendor}:{identity.product}" in pairs
+                        and matched.get("vulnerabilityID") == identity.control_advisory):
+                    found = True
+                    break
+        if not found:
+            reasons.append(f"control {artifact_id}: no typed native CPE match for "
+                           f"{identity.vendor}:{identity.product} at {identity.control_version} "
+                           f"({identity.control_advisory})")
     return reasons
 
 
@@ -499,7 +571,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--cmake-cache", type=pathlib.Path, help="refuse unless it records the feature ON")
     p.add_argument("--archives", type=pathlib.Path, help="the binary cache, for each port's archive digest")
     p.add_argument("--version", help="the worker's version, recorded on its package")
-    p.add_argument("--created", help="the document's creation time (default: now, UTC)")
+    p.add_argument("--created", required=True, help="stable creation time, YYYY-MM-DDTHH:MM:SSZ")
 
     p = commands.add_parser("check", help="fail unless the document is the gate's SBOM for this manifest")
     p.add_argument("--sbom", type=pathlib.Path, required=True)
@@ -507,12 +579,28 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--feature", default="streaming-grpc")
     p.add_argument("--triplet", required=True)
 
+    p = commands.add_parser("control", help="generate one vulnerable control per native CPE pair")
+    p.add_argument("--output", type=pathlib.Path, required=True)
+
+    p = commands.add_parser("check-control", help="require every native CPE control to match")
+    p.add_argument("--report", type=pathlib.Path, required=True)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "collect":
             doc = collect(args)
             args.output.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
             print(f"{TOOL}: {args.output}: {len(doc['packages']) - 1} ports in the closure")
+        elif args.command == "control":
+            doc = control_document()
+            args.output.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+            print(f"{TOOL}: {len(doc['packages'])} native CPE pair controls written")
+        elif args.command == "check-control":
+            reasons = check_control(args.report)
+            if reasons:
+                raise Refused(reasons)
+            count = len(control_entries())
+            print(f"{TOOL}: native CPE controls verified: {count}/{count}")
         else:
             reasons = check(args)
             if reasons:

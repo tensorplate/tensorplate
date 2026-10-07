@@ -100,6 +100,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   required before a final release, and not in this change: the same
   record for the worker each release job builds, the binary cache's
   provenance, and the final-tag gate on both. (V030-E01-F03-T01)
+- The serving worker's native build dependencies are inventoried from the
+  vcpkg install tree in SPDX and scanned with pinned Grype. Native package
+  identifiers avoid matches against same-name packages in other ecosystems;
+  every emitted CPE vendor/product pair has a positive control. Unscanned
+  ports are explicit. A built-worker linker-map check enforces dispositions
+  based on absent archive code, and stale dispositions that match nothing
+  fail. Release tooling supports Python 3.10. Records for both release jobs,
+  cache provenance and the final-tag gate remain separate follow-up work.
+  (V030-E01-F03-T01)
 - The Python SDK declares a `speech` extra, `grpcio>=1.81.1,<2` and
   `protobuf>=6.33.5,<7`, for the streaming speech transport, and
   `sdk/python/constraints/speech.txt` pins those floors and grpcio's one

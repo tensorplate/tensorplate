@@ -76,6 +76,8 @@ python3 "$verify_build_source_identity"
 python3 "$verify_build_configuration"
 python3 "$verify_changelog_fold"
 python3 "$verify_native_sbom"
+python3 test/release/test_native_code_absence.py
+python3 test/release/test_vulnerability_dispositions.py
 python3 "$verify_speech_runtime_release"
 
 # Manifest generation reads each package's control Version with dpkg-deb,
