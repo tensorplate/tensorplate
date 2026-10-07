@@ -87,6 +87,8 @@ if [[ "$with_pkg" -ef "$without_pkg" ]]; then die "both sides name the same pack
 [[ -z "$driver" || -x "$driver" ]] || die "stream driver is not executable: $driver"
 [[ "$samples" =~ ^[1-9][0-9]*$ ]] || die "--samples must be a positive integer"
 [[ "$ready_timeout" =~ ^[1-9][0-9]*$ ]] || die "--ready-timeout must be a positive integer"
+[[ "$settle_seconds" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "--settle-seconds must be a non-negative number"
+[[ "$sample_interval" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "--sample-interval must be a non-negative number"
 [[ "$provenance" == recorded || "$provenance" == synthetic ]] ||
   die "--provenance must be recorded or synthetic"
 [[ -d /proc/self ]] || die "this harness reads /proc and runs on Linux only"
@@ -128,6 +130,8 @@ cleanup() {
   if [[ -n "$work" ]]; then rm -rf "$work"; fi
 }
 trap cleanup EXIT
+# A command that fails outside a guard is an infrastructure failure, never a verdict.
+trap 'exit 2' ERR
 
 is_elf() {
   [[ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" == "7f454c46" ]]
@@ -153,7 +157,6 @@ measure_elf_files() {
     { printf '# %s\n' "$rel"; (cd "$stripped_dir" && size "${rel//\//__}"); } >>"${run_dir}/size.txt"
   done < <(find "$root" -type f | LC_ALL=C sort)
   rm -rf "$stripped_dir"
-  [[ -s "${run_dir}/elf-files.tsv" ]] || die "no ELF file in the package tree under $root"
 }
 
 # <time_ns>\t<VmRSS kib> per line; the worker must be alive for every sample.

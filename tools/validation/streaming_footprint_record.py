@@ -403,6 +403,9 @@ def wait_ready(url: str, timeout_s: float) -> tuple[bool, str]:
                     return True, body
             except ValueError:
                 pass
+        except urllib.error.HTTPError as exc:
+            # A 503 is a state the worker reports in its body; keep the body, not the status line.
+            last = exc.read().decode("utf-8", errors="replace") or str(exc)
         except (urllib.error.URLError, OSError, ValueError) as exc:
             last = str(exc)
         if time.monotonic() >= deadline:
@@ -443,6 +446,8 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_NO_VERDICT
         status, detail = check_record(record)
         stream = sys.stdout if status == "pass" else sys.stderr
+        if status != "invalid" and record.get("provenance") == "synthetic":
+            print(f"{TOOL_NAME}: provenance synthetic: these numbers measure nothing", file=stream)
         print(f"{TOOL_NAME}: {status}: {detail}", file=stream)
         return exit_status(status)
     if args.command == "assemble":

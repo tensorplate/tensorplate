@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import http.server
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -273,6 +275,25 @@ def checker_cases(work: Path) -> dict:
         honest=True,
     )
     mutate(
+        "a measured steady state carrying a reason is refused",
+        lambda r: r["sides"]["with_streaming"]["runs"][0]["steady"].update(reason="held"),
+        2,
+        "a measured steady state has a reason",
+        honest=True,
+    )
+
+    def not_run_with_samples(record):
+        steady_not_run(record)
+        record["sides"]["with_streaming"]["runs"][2]["steady"]["samples_kib"] = [1]
+
+    mutate(
+        "a steady state not run that carries samples is refused",
+        not_run_with_samples,
+        2,
+        "a steady state not run carries samples",
+        honest=True,
+    )
+    mutate(
         "a steady state that held fewer streams than declared is refused",
         lambda r: r["sides"]["with_streaming"]["runs"][0]["steady"].update(streams=8),
         2,
@@ -354,6 +375,30 @@ def checker_cases(work: Path) -> dict:
         "an absent thresholds file gives no verdict",
         status == "invalid" and detail.startswith("thresholds file"),
         f"{status}: {detail}",
+    )
+
+    class Starting(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"schema_version":"0.1","state":"starting"}'
+            self.send_response(503)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Starting)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        ready, body = record_mod.wait_ready(f"http://127.0.0.1:{server.server_port}/health", 0.5)
+    finally:
+        server.shutdown()
+    check(
+        "a worker answering 503 is not ready and its body, not the status line, is kept",
+        not ready and json.loads(body).get("state") == "starting",
+        f"{ready} {body!r}",
     )
 
     summary_path = work / "summary.json"
@@ -672,6 +717,46 @@ def harness_cases(work: Path) -> None:
         "a stream driver that exits without holding the streams stops the run",
         result.returncode == 2 and "did not report 'held'" in result.stderr,
         result.stderr,
+    )
+
+    out = work / "option"
+    result = run_harness(out, on_pkg, off_pkg, "--settle-seconds", "abc")
+    check(
+        "an option that is not a number is refused before anything runs",
+        result.returncode == 2
+        and "--settle-seconds must be a non-negative number" in result.stderr
+        and not out.exists(),
+        result.stderr,
+    )
+
+    out = work / "size-fails"
+    broken_bin = work / "broken-bin"
+    broken_bin.mkdir()
+    (broken_bin / "size").write_text("#!/bin/sh\necho 'size: broken' >&2\nexit 1\n")
+    (broken_bin / "size").chmod(0o755)
+    result = subprocess.run(
+        [
+            str(HARNESS),
+            "--with-streaming",
+            str(on_pkg),
+            "--without-streaming",
+            str(off_pkg),
+            "--out",
+            str(out),
+            "--provenance",
+            "synthetic",
+            *FAST,
+        ],
+        text=True,
+        capture_output=True,
+        env={**os.environ, "PATH": f"{broken_bin}{os.pathsep}{os.environ['PATH']}"},
+    )
+    check(
+        "a tool failing outside a guard gives no verdict (exit 2), never a budget failure",
+        result.returncode == 2
+        and "size: broken" in result.stderr
+        and not (out / "record.json").exists(),
+        f"exit {result.returncode}; {result.stderr}",
     )
 
     shellcheck = shutil.which("shellcheck")

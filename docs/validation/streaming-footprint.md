@@ -54,10 +54,12 @@ tools/release/build-release-artifacts.sh --snapshot --branch develop \
   --without-streaming --artifacts-dir /var/tmp/footprint/without
 ```
 
-A worker configured by hand with `-DTP_ENABLE_STREAMING_GRPC=OFF` and
+`--without-streaming` arrives with the release-builder change that builds
+the feature in both release jobs; until that change is in the tree, a
+worker configured by hand with `-DTP_ENABLE_STREAMING_GRPC=OFF` and
 packaged with `packaging/scripts/build-deb.sh` is the same without-streaming
-package; `test/packaging/verify_cpu_only_smoke.sh` shows that build, step
-by step.
+package, and `test/packaging/verify_cpu_only_smoke.sh` shows that build,
+step by step.
 
 The harness does not know which package is which beyond what it is told.
 It records each package's file name, SHA-256, version and architecture,
@@ -171,7 +173,9 @@ summary holds the machine architecture, the kernel version string, package
 file names and digests, and numbers; it holds no host name, path or
 account, so the publication scanner has nothing in it to replace, but it is
 still scanned before it is committed, with the private literal file, like
-every other recorded file.
+every other recorded file. A filed summary carries `provenance: recorded`;
+a `synthetic` one comes from the tool's own tests, and `check` says so
+when it reads one.
 
 ## What cannot be measured yet
 
