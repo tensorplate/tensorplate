@@ -42,12 +42,18 @@ file="${TP_FAKE_ANSWERS}/$3"
 n=$(cat "${file}.n" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "$n" >"${file}.n"
-total=$(wc -l <"$file")
+total=$(( $(wc -l <"$file") ))
 [ "$n" -gt "$total" ] && n=$total
 sed -n "${n}p" "$file"
 FAKE
 printf '#!/bin/sh\nexit 0\n' >"${fakebin}/journalctl"
 chmod 0755 "${fakebin}/systemctl" "${fakebin}/journalctl"
+
+# A check that outlives its bound is killed and counted as a failure, not
+# waited for, where coreutils' timeout exists (macOS dev hosts run bare).
+bounded() {
+  if command -v timeout >/dev/null 2>&1; then timeout 30 "$@"; else "$@"; fi
+}
 
 # run_case NAME WANT-STATUS RESTART_WAIT ANSWERS...   (ANSWERS: PROP=line;line;...)
 # Sets `out` and `status`.
@@ -64,7 +70,7 @@ run_case() {
   status=0
   out="$(
     cd "$td" &&
-    PATH="${fakebin}:${PATH}" TP_FAKE_ANSWERS="$answers" bash -c '
+    PATH="${fakebin}:${PATH}" TP_FAKE_ANSWERS="$answers" bounded bash -c '
       set -Eeuo pipefail
       die() { printf "FAIL: %s\n" "$*" >&2; exit 1; }
       note() { :; }
@@ -99,7 +105,7 @@ run_case never-restarted 1 2 'ActiveState=failed' 'MainPID=0' 'NRestarts=0'
 elapsed=$SECONDS
 [[ "$out" == *'NRestarts=0'* && "$out" == *'ActiveState=failed'* ]] ||
   failure "never-restarted: the failure does not name the state seen (output: ${out})"
-(( elapsed <= 6 )) || failure "never-restarted: took ${elapsed}s against a bound of 2"
+(( elapsed >= 2 && elapsed <= 6 )) || failure "never-restarted: took ${elapsed}s against a bound of 2s"
 
 # Active with a new process but never restarted by systemd: not a recovery.
 run_case replaced-not-restarted 1 2 'ActiveState=active' 'MainPID=4300' 'NRestarts=0'
@@ -114,6 +120,41 @@ run_case same-pid 1 2 'ActiveState=active' 'MainPID=4242' 'NRestarts=1'
 # systemctl answering nothing is not a recovery.
 run_case show-fails 1 2 'ActiveState=active' 'MainPID=4243'
 [[ "$out" != *'PASS:'* ]] || failure "show-fails: passed with no NRestarts answer (output: ${out})"
+
+# Counted and active, but the main process not yet known: wait for it.
+run_case pid-pending 0 10 'ActiveState=active;active' 'MainPID=0;4280' 'NRestarts=1;1'
+[[ "$out" == *'PASS: recovered as PID 4280 (NRestarts=1)'* ]] ||
+  failure "pid-pending: reported before the main process was known (output: ${out})"
+
+# Counted, with a process, but on its way down again: wait for active.
+run_case restarted-then-stopping 0 10 \
+  'ActiveState=deactivating;active' 'MainPID=4260;4270' 'NRestarts=1;1'
+[[ "$out" == *'PASS: recovered as PID 4270 (NRestarts=1)'* ]] ||
+  failure "restarted-then-stopping: reported while not active (output: ${out})"
+
+# The bound comes from the unit file's RestartSec.
+wait_for="$(sed -n '/^restart_wait_for() {$/,/^}$/p' "$script")"
+[[ -n "$wait_for" ]] || failure "restart_wait_for is not defined in ${script}"
+bound_case() {
+  local name="$1" want_status="$2" want_out="$3"
+  local unit="${td}/${name}.service"
+  printf '[Service]\n%s\n' "$4" >"$unit"
+  status=0
+  out="$(bash -c '
+    set -Eeuo pipefail
+    die() { printf "FAIL: %s\n" "$*" >&2; exit 1; }
+    '"$wait_for"'
+    restart_wait_for "$1"
+  ' _ "$unit" 2>&1)" || status=$?
+  [[ "$status" -eq "$want_status" && "$out" == "$want_out"* ]] ||
+    failure "${name}: exit ${status}, output '${out}'; expected ${want_status} and '${want_out}'"
+}
+bound_case plain-seconds 0 40 'RestartSec=5'
+bound_case suffixed-seconds 0 48 'RestartSec=7s'
+bound_case minutes 1 'FAIL: RestartSec= in' 'RestartSec=1min'
+bound_case absent 1 'FAIL: RestartSec= in' 'Restart=on-failure'
+grep -q '^RESTART_WAIT="[$](restart_wait_for "packaging/debian/[$]{AGENT_UNIT}")"$' "$script" ||
+  failure "the script does not take its restart bound from the shipped unit"
 
 if ((fail)); then
   printf 'verify_supervision_restart_wait: FAIL\n' >&2
