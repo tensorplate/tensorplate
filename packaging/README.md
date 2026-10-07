@@ -108,8 +108,11 @@ the local manifest and `SHA256SUMS`, then calls `install.sh
 --local-artifacts --allow-unsigned`:
 
 ```bash
-sudo bash packaging/scripts/build-install-from-source.sh --branch develop
+sudo VCPKG_ROOT=<vcpkg-dir> bash packaging/scripts/build-install-from-source.sh --branch develop
 ```
+
+It needs `VCPKG_ROOT` to name a vcpkg checkout at the manifest's baseline; see
+[`external-install.md`](../docs/install/external-install.md#build-and-install-an-unreleased-branch).
 
 ## v0.1.0 invariants
 

@@ -121,8 +121,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   follows what the manifest says, which `python3` reads, and neither the
   project's own version nor the layout of the file, so a release's version
   bump leaves the runner ready, and only one provisioning run or check runs
-  at a time. The runner's sudo allowance is unchanged, release jobs do not
-  use the cache yet, and the Jetson release job no longer sets a
+  at a time. The runner's sudo allowance is unchanged, and the Jetson
+  release job takes its vcpkg environment from `vcpkg-env` in place of a
   `VCPKG_BINARY_SOURCES` nothing read. (V030-E04-F02-T04)
 
 - Optional static gRPC/protobuf build dependencies from a pinned vcpkg baseline,
@@ -130,7 +130,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `StreamingConfig`, and a typed refusal when the build lacks streaming support.
   Automatic discovery defaults OFF for missing,
   shared or non-vcpkg dependencies; explicit ON retains configure errors.
-  ARM64 and AMD64 release builds explicitly disable the feature.
+  ARM64 and AMD64 release builds enable the feature; see Changed below.
   (V030-E04-F02-T04)
 
 - The sidecar launcher starts a bundle that names a runner profile in that
@@ -370,6 +370,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   not as the CLI's own `timeout`, and its teardown retries a rollback the
   agent refuses as `busy` for up to `--teardown-busy-wait-ms` (60,000 by
   default). (V030-E01-F02-T03)
+- Both release jobs, the CPU-only smoke and every snapshot build compile the
+  serving worker with `TP_ENABLE_STREAMING_GRPC=ON`, linking gRPC and
+  protobuf statically from the vcpkg manifest feature `streaming-grpc`.
+  `build-release-artifacts.sh` and `amd64-build-profile.sh` require
+  `VCPKG_ROOT` to name a vcpkg checkout at the `builtin-baseline` of
+  `vcpkg.json`; `VCPKG_INSTALLATION_ROOT` is no longer read, and
+  `TP_CMAKE_TOOLCHAIN_FILE` is refused on amd64;
+  `build-install-from-source.sh` refuses before it clones anything. A build
+  without a binary cache compiles the dependencies first, about an hour or
+  more. A release that publishes restores them from a cache and fails on a
+  miss: the ARM64 job from the runner's, through `jetson-runner-control.sh
+  vcpkg-env`, and the amd64 job from an Actions cache that the new
+  `release-dependencies.yml` workflow keeps warm on `develop`. The new
+  `tools/release/assert-static-streaming-closure.sh` fails a build whose
+  serving package or worker depends on a distribution gRPC or protobuf
+  library. The worker now compiles against the manifest's `nlohmann-json`
+  rather than the distribution's package, and vcpkg builds the ports without
+  the project's `-gdwarf-4`. `jetson-runner-control.sh` also lists the binary
+  cache from `/`: run through `sudo -u` from a directory the runner account
+  cannot enter, its vcpkg commands failed with "cannot list the binary
+  cache". (V030-E04-F02-T04)
 
 ## [0.3.1] - 2026-10-01
 

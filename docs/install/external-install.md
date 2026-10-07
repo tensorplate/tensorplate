@@ -180,14 +180,22 @@ before release. On a Jetson with the native build dependencies installed,
 paste:
 
 ```bash
-curl -fL https://raw.githubusercontent.com/tensorplate/tensorplate/develop/packaging/scripts/build-install-from-source.sh -o build-install-from-source.sh && sudo bash build-install-from-source.sh --branch develop
+curl -fL https://raw.githubusercontent.com/tensorplate/tensorplate/develop/packaging/scripts/build-install-from-source.sh -o build-install-from-source.sh && sudo VCPKG_ROOT=<vcpkg-dir> bash build-install-from-source.sh --branch develop
 ```
 
 From an existing TensorPlate checkout, the equivalent command is:
 
 ```bash
-sudo bash packaging/scripts/build-install-from-source.sh --branch develop
+sudo VCPKG_ROOT=<vcpkg-dir> bash packaging/scripts/build-install-from-source.sh --branch develop
 ```
+
+The build needs `VCPKG_ROOT` to name a vcpkg checkout at the
+`builtin-baseline` of `vcpkg.json` and refuses to start without one; `sudo`
+drops the variable unless the command sets it
+(`sudo VCPKG_ROOT=<vcpkg-dir> bash ...`). Without a binary cache it first
+compiles gRPC, protobuf and OpenSSL, about two hours on a Jetson. See
+"Producing the candidate artifact set" in
+[`cloud-row-runbooks.md`](../validation/cloud-row-runbooks.md).
 
 The wrapper clones or checks out the requested branch, builds snapshot
 packages versioned `X.Y.Z~dev.YYYYMMDD.gitsha` (their file names spell it

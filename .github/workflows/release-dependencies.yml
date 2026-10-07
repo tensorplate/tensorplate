@@ -1,0 +1,83 @@
+name: Release dependencies
+
+# Keeps the release configuration's vcpkg binary cache warm on the default
+# branch, where a release tag's run restores it or fails on the miss.
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'vcpkg.json'
+      - '.github/actions/release-vcpkg/**'
+      - 'tools/release/amd64-build-profile.sh'
+      - '.github/workflows/release-dependencies.yml'
+  # The hosted image's compiler changes without any change here, and an
+  # Actions cache nothing reads for seven days is evicted.
+  schedule:
+    - cron: '41 4 * * 1,4'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancelled: a cold build saves its cache only when the job ends.
+concurrency:
+  group: release-dependencies-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    name: release dependency cache (x64-linux)
+    runs-on: ubuntu-22.04
+    # Sized for a cold build of gRPC, protobuf and OpenSSL.
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # A stalled mirror holds a connection open without failing; a response
+      # timeout turns the stall into an error that a retry can recover.
+      - name: Make apt fail fast and retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
+          apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
+            echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
+
+      - name: Install the release profile's compilers
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
+            ca-certificates \
+            clang-15 \
+            llvm-15 \
+            ninja-build
+          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+
+      - name: Pinned vcpkg checkout and binary cache
+        uses: ./.github/actions/release-vcpkg
+        with:
+          binary-only: 'false'
+
+      # Configure is what runs `vcpkg install`; nothing of this tree is compiled.
+      - name: Configure the release profile
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # shellcheck source=tools/release/amd64-build-profile.sh disable=SC1091
+          . tools/release/amd64-build-profile.sh
+          CC="$TP_AMD64_CC" CXX="$TP_AMD64_CXX" cmake -S . -B "${RUNNER_TEMP}/release-dependencies" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DTP_BUILD_TESTS=OFF \
+            -DTP_BUILD_EXAMPLES=OFF \
+            -DTP_ENABLE_SANITIZERS=OFF \
+            "${TP_AMD64_CMAKE_ARGS[@]}"

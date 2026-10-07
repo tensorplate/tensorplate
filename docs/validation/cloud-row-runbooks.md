@@ -1006,14 +1006,34 @@ tools/release/build-release-artifacts.sh --snapshot --arch amd64 \
 - The serving worker's CMake configuration comes from
   `tools/release/amd64-build-profile.sh`, the file the release job's
   amd64 build reads: clang, `-gdwarf-4`, TensorRT off with no SDK
-  requirement, and the python_pytorch sidecar on. Nothing needs to be
-  set in the environment, and `VCPKG_ROOT`, `VCPKG_INSTALLATION_ROOT`
-  and `TP_CMAKE_TOOLCHAIN_FILE` must be unset: with any of them the
-  builder adds a CMake toolchain file the release build does not use.
-  `TP_ENABLE_TENSORRT`, `TP_REQUIRE_TENSORRT_SDK`, `TP_ENABLE_LIBTORCH`
-  and `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` are refused on amd64, and so is
-  a build directory already configured with another compiler: remove it
-  or pass another `--build-dir`.
+  requirement, the python_pytorch sidecar on, and the streaming feature
+  on, with gRPC and protobuf linked statically from the vcpkg manifest
+  feature `streaming-grpc`. `TP_ENABLE_TENSORRT`,
+  `TP_REQUIRE_TENSORRT_SDK`, `TP_ENABLE_LIBTORCH`,
+  `TP_ENABLE_PYTHON_PYTORCH_SIDECAR` and `TP_CMAKE_TOOLCHAIN_FILE` are
+  refused on amd64, and so is a build directory already configured with
+  another compiler: remove it or pass another `--build-dir`.
+- The build needs a vcpkg checkout at the `builtin-baseline` of
+  `vcpkg.json`, named by `VCPKG_ROOT`. The builder refuses before
+  compiling anything without one and does not read
+  `VCPKG_INSTALLATION_ROOT`. From the TensorPlate checkout:
+
+  ```bash
+  baseline="$(python3 -c 'import json; print(json.load(open("vcpkg.json"))["builtin-baseline"])')"
+  git clone https://github.com/microsoft/vcpkg.git <vcpkg-dir>
+  git -C <vcpkg-dir> checkout --detach "$baseline"
+  <vcpkg-dir>/bootstrap-vcpkg.sh -disableMetrics
+  export VCPKG_ROOT=<vcpkg-dir>
+  export VCPKG_BINARY_SOURCES="clear;files,<cache-dir>,readwrite"
+  ```
+
+  Configure builds gRPC, protobuf, OpenSSL and the rest of the
+  dependency closure from source, about an hour or more on a typical
+  build host, unless the binary cache `VCPKG_BINARY_SOURCES` names
+  already holds them; `<cache-dir>` is the absolute path of an existing
+  directory that a later build restores from. vcpkg builds those ports
+  without the project's `-gdwarf-4`, and the worker compiles against the
+  manifest's `nlohmann-json` rather than the distribution's package.
 - The manifest and `SHA256SUMS` are written into the assets directory
   under the names `install.sh --local-artifacts` reads. Omit
   `--manifest` and `--checksums`; any other path is refused.

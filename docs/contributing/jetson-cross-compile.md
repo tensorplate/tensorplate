@@ -85,6 +85,10 @@ export VCPKG_ROOT=/opt/vcpkg
 bash packaging/scripts/build-install-from-source.sh --branch develop --no-install --arch arm64
 ```
 
+The snapshot now builds the streaming feature's dependencies (gRPC,
+protobuf, OpenSSL) through vcpkg for the `arm64-linux` target; this
+x86-to-Jetson cross-build has not been run with the feature on.
+
 The output directory contains snapshot packages versioned
 `X.Y.Z~dev.YYYYMMDD.gitsha` (their file names spell it
 `X.Y.Z.dev.YYYYMMDD.gitsha`, as a release names its packages),

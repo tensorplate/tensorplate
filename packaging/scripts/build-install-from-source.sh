@@ -27,7 +27,8 @@ SNAPSHOT_TAG=""
 usage() {
   cat <<'EOF'
 Usage:
-  sudo bash build-install-from-source.sh --branch develop [options]
+  sudo VCPKG_ROOT=DIR bash build-install-from-source.sh --branch develop [options]
+VCPKG_ROOT must name a vcpkg checkout at the builtin-baseline of vcpkg.json.
 
 Options:
   --branch BRANCH            Source branch, tag, or ref to build. Defaults to develop.
@@ -144,7 +145,12 @@ if [[ "$CLI_ONLY" -eq 1 && "$WITH_PYTHON_BACKEND" -eq 1 ]]; then
   die "--with-python-backend cannot be combined with --cli-only"
 fi
 if [[ "$NO_INSTALL" -eq 0 && "${EUID}" -ne 0 ]]; then
-  die "run as root for install, for example: sudo bash build-install-from-source.sh --branch ${BRANCH}; pass --no-install to build only"
+  die "run as root for install, for example: sudo VCPKG_ROOT=<vcpkg-dir> bash build-install-from-source.sh --branch ${BRANCH}; pass --no-install to build only"
+fi
+# The builder refuses the same way, after the clone; arm64 alone takes the override.
+if [[ -z "${TP_CMAKE_TOOLCHAIN_FILE:-}" || "$TARGET_ARCH" == "amd64" ]]; then
+  [[ -n "${VCPKG_ROOT:-}" && -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]] ||
+    die "VCPKG_ROOT must name a vcpkg checkout at the builtin-baseline of vcpkg.json; no scripts/buildsystems/vcpkg.cmake under '${VCPKG_ROOT:-}'"
 fi
 for cmd in git bash date; do
   command_exists "$cmd" || die "required command not found: $cmd"

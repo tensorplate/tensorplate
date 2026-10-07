@@ -59,6 +59,10 @@ on:
       # environment from these; python.yml covers the module's sources.
       - 'backends/python_pytorch/pyproject.toml'
       - 'backends/python_pytorch/README.md'
+      # The CPU-only smoke builds the serving worker against the manifest's
+      # dependencies, from the checkout and cache this action prepares.
+      - 'vcpkg.json'
+      - '.github/actions/release-vcpkg/**'
   workflow_dispatch:
 
 permissions:
@@ -343,7 +347,8 @@ jobs:
     # machine_type, which is how the schema spells "any instance", so a hosted
     # runner matches it and the smoke resolves the row by live detection.
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    # Sized for a cold build of the vcpkg dependencies; a warm cache restores them.
+    timeout-minutes: 150
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -395,12 +400,18 @@ jobs:
         with:
           shared-key: cpu-smoke-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
+      - name: Pinned vcpkg checkout and binary cache
+        uses: ./.github/actions/release-vcpkg
+        with:
+          binary-only: 'false'
+
       - name: CPU-only Preview smoke
         shell: bash
         env:
           CC: clang
           CXX: clang++
-        run: sudo --preserve-env=CI,CC,CXX,PATH bash test/packaging/verify_cpu_only_smoke.sh
+        # sudo resets the environment; vcpkg needs every variable the action exported.
+        run: sudo --preserve-env=CI,CC,CXX,PATH,VCPKG_ROOT,VCPKG_BINARY_SOURCES,VCPKG_FORCE_DOWNLOADED_BINARIES bash test/packaging/verify_cpu_only_smoke.sh
 
       - name: Upload smoke evidence
         if: always()

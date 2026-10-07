@@ -235,12 +235,12 @@ The package build runner must have:
 - `sudo` access for installing Debian build dependencies.
 - Rust via `rustup`, CMake, Ninja, a C++ compiler, debhelper, `dh-exec`,
   `dpkg-buildpackage`, `nlohmann-json3-dev`, and GitHub CLI `gh`.
-- A system `nlohmann_json` package (`nlohmann-json3-dev`). The current
-  release builds use it, and the runner must export neither `VCPKG_ROOT` nor
-  `VCPKG_INSTALLATION_ROOT` until the release jobs enable the streaming
-  feature: the release builder configures through vcpkg as soon as either
-  names a vcpkg checkout. The vcpkg checkout that release will use is
-  provisioned ahead; see "Provision the vcpkg checkout and binary cache".
+- The vcpkg checkout and binary cache of "Provision the vcpkg checkout and
+  binary cache", provisioned ahead for the release's `vcpkg.json`. The
+  release job reads `VCPKG_ROOT` and the cache from `vcpkg-env`; nothing has
+  to be exported in the runner service's environment. The worker compiles
+  against the manifest's `nlohmann-json`, not the distribution's
+  `nlohmann-json3-dev`.
 - JetPack-compatible CUDA/TensorRT development headers and libraries when
   building v0.1.x release packages with `TP_ENABLE_TENSORRT=ON`. Release
   artifact builds default `TP_REQUIRE_TENSORRT_SDK=ON` so they fail during
@@ -287,18 +287,38 @@ TensorRT on the target architecture.
 
 #### Provision the vcpkg checkout and binary cache
 
-The release line will link gRPC and protobuf statically from the vcpkg
-manifest feature `streaming-grpc`, at the vcpkg commit `vcpkg.json` pins as
-its `builtin-baseline`. A cold build of that feature is expected to take
-this runner hours, so the operator does it ahead of a release and it never
-happens inside a release job. **Release jobs do not use the result yet:**
-both release builds configure with `TP_ENABLE_STREAMING_GRPC=OFF`, and
-nothing in `release.yml` sets `VCPKG_ROOT` or reads the cache. The change
-that turns the feature on in the release jobs will. Until then, do not set
-`VCPKG_ROOT` or `VCPKG_INSTALLATION_ROOT` in the runner service's
-environment either: the release builder configures through vcpkg as soon as
-one of them names a checkout, and today's Jetson build uses the system
-`nlohmann_json` package.
+Both release builds configure the serving worker with
+`TP_ENABLE_STREAMING_GRPC=ON` and link gRPC and protobuf statically from the
+vcpkg manifest feature `streaming-grpc`, at the vcpkg commit `vcpkg.json`
+pins as its `builtin-baseline`. A cold build of that feature takes this
+runner about two hours and a hosted runner about three quarters of an hour
+or more, so a release
+that publishes never starts one: it restores the packages from a binary
+cache, and a package the cache lacks fails the configure step.
+
+- **ARM64 job.** It appends what `jetson-runner-control.sh vcpkg-env`
+  prints to its environment and fails there when the runner is not
+  provisioned for the checkout's `vcpkg.json`. Its build always runs with
+  `TP_VCPKG_BINARY_ONLY=1`, build-only dispatches included: provision the
+  runner first, as below.
+- **amd64 job.** `.github/actions/release-vcpkg` checks vcpkg out at the
+  baseline and restores an Actions cache keyed on the baseline and on a
+  digest of three things: what the manifest says, in the canonical form
+  described below, the first line of `clang --version`, and the SHA-256 of
+  the `clang++` binary. A new or rebuilt compiler therefore opens a new key.
+  It sets `VCPKG_FORCE_DOWNLOADED_BINARIES=1`, so vcpkg runs the CMake and
+  Ninja its checkout pins and not the hosted image's. A run that publishes
+  only restores the cache: it builds nothing and saves nothing. A build-only
+  dispatch builds what is missing, within 180 minutes instead of 60, and
+  saves the cache only when the job succeeds.
+
+`.github/workflows/release-dependencies.yml` warms that cache on `develop`:
+on a push that changes `vcpkg.json`, the action or the build profile, twice a
+week, and on dispatch. A cache saved on `develop` is restored on any tag;
+one saved on another ref only on that ref. After a miss, dispatch that
+workflow on `develop`, or `release.yml` with `publish=false` from `develop`
+or from the tag, then re-run the release. That workflow too saves the cache
+only when its job succeeds.
 
 The runner needs `git`, `curl`, `zip`, `unzip`, `tar`, `make`, Perl with
 `IPC::Cmd`, the Linux kernel headers (`linux-libc-dev`), Ninja, and the
@@ -557,7 +577,7 @@ toolchain upgrade run `provision-vcpkg --check` with the release build's
 `PATH`, `CC` and `CXX`. If its proof fails it removes the stamp; provision
 again.
 
-`vcpkg-env` is for the release job that will use the cache. It prints
+`vcpkg-env` is for the ARM64 release job, which uses the cache. It prints
 `VCPKG_ROOT`, a read-only `VCPKG_BINARY_SOURCES` and
 `VCPKG_FORCE_SYSTEM_BINARIES=1`, one per line, for the job to append to its
 environment file. It prints them only when `status` would report the cache

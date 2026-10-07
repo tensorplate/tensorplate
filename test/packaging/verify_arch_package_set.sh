@@ -176,6 +176,37 @@ grep -qE ' \./usr/lib/tensorplate/tensorplate-serving$' <<<"$serving_contents" |
   die "tensorplate-serving must ship /usr/lib/tensorplate/tensorplate-serving"
 pass "serving binary ships from the package"
 
+# gRPC and protobuf are linked statically: the package must not depend on the
+# distribution's, and the checker must refuse the cases it exists to catch.
+closure=tools/release/assert-static-streaming-closure.sh
+"$closure" --deb "$serving" --binary build/release/tensorplate-serving >/dev/null ||
+  die "the serving package or its worker depends on a distribution gRPC or protobuf library"
+pass "serving package and worker ask for no distribution gRPC or protobuf"
+
+refuses() {
+  local name="$1" out
+  shift
+  if out="$("$closure" "$@" 2>&1)"; then
+    die "the closure checker accepted ${name}"
+  fi
+  grep -qF -- "$name" <<<"$out" ||
+    die "the closure checker refused ${name} for another reason: ${out}"
+}
+fixtures="${saved_dir}/closure"
+mkdir -p "${fixtures}/pkg/DEBIAN"
+for dependency in libgrpc++1 libprotobuf23; do
+  printf 'Package: fixture\nVersion: 1\nArchitecture: all\nMaintainer: Fixture <fixture@example.invalid>\nDescription: fixture\nDepends: libc6, %s (>= 1)\n' \
+    "$dependency" >"${fixtures}/pkg/DEBIAN/control"
+  dpkg-deb --root-owner-group -b "${fixtures}/pkg" "${fixtures}/${dependency}.deb" >/dev/null
+  refuses "$dependency" --deb "${fixtures}/${dependency}.deb" --binary build/release/tensorplate-serving
+done
+# A library with gRPC's soname stands in for it; nothing needs gRPC installed.
+cc -shared -fPIC -Wl,-soname,libgrpc++.so.1 -o "${fixtures}/libgrpc++.so.1" "$stub_src"
+cc -o "${fixtures}/worker" "$stub_src" \
+  -Wl,--no-as-needed "${fixtures}/libgrpc++.so.1" -Wl,-rpath,"$fixtures"
+refuses libgrpc++.so.1 --deb "$serving" --binary "${fixtures}/worker"
+pass "closure checker refuses a libgrpc++1 or libprotobuf23 dependency and a linked libgrpc++.so.1"
+
 # The agent config is selected per architecture by a dh-exec filter, which is
 # only exercised by a real build. Read it back out of the archive: a filter
 # that silently matched the wrong line would ship a config declaring a device

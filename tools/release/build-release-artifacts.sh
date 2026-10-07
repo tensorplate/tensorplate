@@ -73,8 +73,9 @@ Options:
                          amd64 configures the serving worker from
                          tools/release/amd64-build-profile.sh, as the release
                          workflow does, and refuses TP_ENABLE_TENSORRT,
-                         TP_REQUIRE_TENSORRT_SDK, TP_ENABLE_LIBTORCH and
-                         TP_ENABLE_PYTHON_PYTORCH_SIDECAR overrides.
+                         TP_REQUIRE_TENSORRT_SDK, TP_ENABLE_LIBTORCH,
+                         TP_ENABLE_PYTHON_PYTORCH_SIDECAR and
+                         TP_CMAKE_TOOLCHAIN_FILE overrides.
   --skip-tag-verify      Verify manifest/checksums without requiring an annotated tag.
   --snapshot             Build unreleased local-source snapshot artifacts.
   --branch BRANCH        Provenance label recorded in the manifest's
@@ -404,7 +405,8 @@ if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
   fi
   # shellcheck source=tools/release/amd64-build-profile.sh disable=SC1091
   . tools/release/amd64-build-profile.sh
-  for override in TP_ENABLE_TENSORRT TP_REQUIRE_TENSORRT_SDK TP_ENABLE_LIBTORCH TP_ENABLE_PYTHON_PYTORCH_SIDECAR; do
+  for override in TP_ENABLE_TENSORRT TP_REQUIRE_TENSORRT_SDK TP_ENABLE_LIBTORCH \
+                  TP_ENABLE_PYTHON_PYTORCH_SIDECAR TP_CMAKE_TOOLCHAIN_FILE; do
     if [[ -n "${!override:-}" ]]; then
       die "$override is set; an $SECONDARY_ARCH build takes it from tools/release/amd64-build-profile.sh, as the release does. Unset it"
     fi
@@ -423,6 +425,17 @@ if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
       die "$BUILD_DIR was configured with C++ compiler '${cached_cxx}', not $TP_AMD64_CXX; remove $BUILD_DIR or pass another --build-dir"
     fi
   fi
+else
+  # A hosted image's VCPKG_INSTALLATION_ROOT is not read: it is not pinned.
+  vcpkg_toolchain="${TP_CMAKE_TOOLCHAIN_FILE:-}"
+  if [[ -z "$vcpkg_toolchain" ]]; then
+    vcpkg_toolchain="${VCPKG_ROOT:-}/scripts/buildsystems/vcpkg.cmake"
+    [[ -n "${VCPKG_ROOT:-}" && -f "$vcpkg_toolchain" ]] ||
+      die "VCPKG_ROOT must name a vcpkg checkout at the builtin-baseline of vcpkg.json; no scripts/buildsystems/vcpkg.cmake under '${VCPKG_ROOT:-}'"
+  fi
+  # Any other value would be read as 0 and let a cold dependency build start.
+  [[ "${TP_VCPKG_BINARY_ONLY:-0}" == [01] ]] ||
+    die "TP_VCPKG_BINARY_ONLY must be 0 or 1; got '${TP_VCPKG_BINARY_ONLY}'"
 fi
 
 if ((SNAPSHOT)); then
@@ -521,18 +534,16 @@ else
     -DTP_ENABLE_TENSORRT="${TP_ENABLE_TENSORRT:-ON}"
     -DTP_REQUIRE_TENSORRT_SDK="${TP_REQUIRE_TENSORRT_SDK:-ON}"
     -DTP_ENABLE_LIBTORCH="${TP_ENABLE_LIBTORCH:-OFF}"
-    -DTP_ENABLE_STREAMING_GRPC=OFF
+    -DTP_ENABLE_STREAMING_GRPC=ON
     -DTP_ENABLE_PYTHON_PYTORCH_SIDECAR="${TP_ENABLE_PYTHON_PYTORCH_SIDECAR:-ON}"
+    -DVCPKG_MANIFEST_FEATURES=streaming-grpc
+    -DVCPKG_TARGET_TRIPLET=arm64-linux
+    "-DCMAKE_TOOLCHAIN_FILE=${vcpkg_toolchain}"
   )
-fi
-
-vcpkg_toolchain=""
-if [[ -n "${TP_CMAKE_TOOLCHAIN_FILE:-}" ]]; then
-  vcpkg_toolchain="$TP_CMAKE_TOOLCHAIN_FILE"
-elif [[ -n "${VCPKG_ROOT:-}" && -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]]; then
-  vcpkg_toolchain="${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
-elif [[ -n "${VCPKG_INSTALLATION_ROOT:-}" && -f "${VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake" ]]; then
-  vcpkg_toolchain="${VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake"
+  # The same rule as the amd64 profile: restore from the cache or fail.
+  if [[ "${TP_VCPKG_BINARY_ONLY:-}" == 1 ]]; then
+    cmake_args+=(-DVCPKG_INSTALL_OPTIONS=--only-binarycaching)
+  fi
 fi
 
 if ((CROSS_BUILD)); then
@@ -540,23 +551,21 @@ if ((CROSS_BUILD)); then
   [[ -n "${TP_JETSON_SYSROOT:-}" ]] || die "TP_JETSON_SYSROOT is required for x86-to-Jetson snapshot cross-builds"
   [[ -n "${TP_JETSON_CC:-}" ]] || die "TP_JETSON_CC is required for x86-to-Jetson snapshot cross-builds"
   [[ -n "${TP_JETSON_CXX:-}" ]] || die "TP_JETSON_CXX is required for x86-to-Jetson snapshot cross-builds"
-  [[ -n "$vcpkg_toolchain" ]] || die "vcpkg toolchain is required for x86-to-Jetson snapshot cross-builds; set VCPKG_ROOT or TP_CMAKE_TOOLCHAIN_FILE"
-  cmake_args+=(
-    "-DCMAKE_TOOLCHAIN_FILE=${vcpkg_toolchain}"
-    "-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${repo_root}/cmake/toolchains/aarch64-jetson.cmake"
-    "-DVCPKG_TARGET_TRIPLET=arm64-linux"
-  )
-elif [[ -n "${TP_CMAKE_TOOLCHAIN_FILE:-}" ]]; then
-  cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=${TP_CMAKE_TOOLCHAIN_FILE}")
-elif [[ -n "$vcpkg_toolchain" ]]; then
-  cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=${vcpkg_toolchain}")
+  # The toolchain file and the triplet are already in the arm64 list.
+  cmake_args+=("-DVCPKG_CHAINLOAD_TOOLCHAIN_FILE=${repo_root}/cmake/toolchains/aarch64-jetson.cmake")
 fi
 
+# vcpkg reports a package it could not restore as a build error of its own.
+configure_failed() {
+  if [[ "${TP_VCPKG_BINARY_ONLY:-}" == 1 ]]; then
+    printf 'error: %s\n' "if vcpkg could not restore a package, the binary cache is cold or was built with another compiler; see 'Provision the vcpkg checkout and binary cache' in docs/release/runbook.md" >&2
+  fi
+  die "C++ configure failed"
+}
 if [[ "$TARGET_ARCH" == "$SECONDARY_ARCH" ]]; then
-  CC="$TP_AMD64_CC" CXX="$TP_AMD64_CXX" cmake "${cmake_args[@]}" ||
-    die "C++ configure failed"
+  CC="$TP_AMD64_CC" CXX="$TP_AMD64_CXX" cmake "${cmake_args[@]}" || configure_failed
 else
-  cmake "${cmake_args[@]}"
+  cmake "${cmake_args[@]}" || configure_failed
 fi
 
 note "building serving worker"
