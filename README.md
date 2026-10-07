@@ -102,6 +102,8 @@ Before a release exists, build and install an unreleased branch snapshot:
 curl -fL https://raw.githubusercontent.com/tensorplate/tensorplate/develop/packaging/scripts/build-install-from-source.sh -o build-install-from-source.sh && sudo bash build-install-from-source.sh --branch develop
 ```
 
+That worker has no streaming gRPC support unless built with vcpkg: see [Build And Install An Unreleased Branch](docs/install/external-install.md#build-and-install-an-unreleased-branch).
+
 Full guide, troubleshooting, and source-install caveats: [Installation](https://tensorplate.com/docs/installation)
 
 ### Call Deployed Models From Python

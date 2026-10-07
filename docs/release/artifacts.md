@@ -103,6 +103,17 @@ Jetson-class hardware and the TensorRT/CUDA SDKs come from the self-hosted
 runner's own configuration, and `TP_REQUIRE_TENSORRT_SDK=ON` is what fails
 the build when the SDK is missing.
 
+Both jobs configure the serving worker with `TP_ENABLE_STREAMING_GRPC=ON`
+through the vcpkg checkout `VCPKG_ROOT` names, at the `builtin-baseline` of
+`vcpkg.json`, and link gRPC, protobuf and their dependencies statically. A
+run that publishes restores those packages from a binary cache and fails on
+a miss; each job then runs `tools/release/assert-static-streaming-closure.sh`
+on its serving package and worker, which also fails a worker whose
+`CMakeCache.txt` does not record the feature ON. `--without-streaming`
+builds a snapshot without the feature and without vcpkg; no release job
+passes it. See "Provision the vcpkg checkout and binary cache" in
+[`runbook.md`](runbook.md).
+
 Because a release build cannot cross-compile, the secondary Ubuntu `x86_64`
 set is built by its own hosted job and pre-staged in the repository parent
 directory alongside the other Debian outputs; the release build collects it
@@ -124,7 +135,7 @@ The `x86_64` serving worker is built without the TensorRT adapter — a hosted
 runner has no CUDA/TensorRT SDK, and shipping the adapter without one
 produces a backend that registers and only fails at engine load. The
 `python_pytorch` sidecar path is unaffected and needs no vendor SDK.
-That configuration, with its compiler and DWARF version, lives in
+That configuration, with its compiler, DWARF version and vcpkg arguments, lives in
 `tools/release/amd64-build-profile.sh`, which the release job and
 `build-release-artifacts.sh --arch amd64` both read.
 

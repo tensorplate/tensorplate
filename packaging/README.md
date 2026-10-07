@@ -111,6 +111,8 @@ the local manifest and `SHA256SUMS`, then calls `install.sh
 sudo bash packaging/scripts/build-install-from-source.sh --branch develop
 ```
 
+Its worker has no streaming gRPC support unless built with vcpkg: see [`external-install.md`](../docs/install/external-install.md#build-and-install-an-unreleased-branch).
+
 ## v0.1.0 invariants
 
 - All bind addresses default to loopback / Unix domain sockets. The

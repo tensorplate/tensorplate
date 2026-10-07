@@ -25,6 +25,8 @@ die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 note() { printf '==> %s\n' "$*"; }
 pass() { printf 'PASS: %s\n' "$*"; }
 
+# The build profile is sourced below with this script's own arguments.
+[[ $# -eq 0 ]] || die "verify_cpu_only_smoke.sh takes no argument; got: $*"
 [[ "${CI:-}" == "true" || "${TP_CPU_SMOKE_ALLOW:-0}" == "1" ]] ||
   die "this smoke installs system packages; run on a disposable host with TP_CPU_SMOKE_ALLOW=1"
 [[ "$(id -u)" -eq 0 ]] || die "run as root (dpkg and systemd operations)"
@@ -63,14 +65,15 @@ note "0. host: ${os_id} ${os_version} ${host_arch}, row ${EXPECTED_ROW}"
 } > "${evidence}/host-facts.txt"
 
 note "1. build the real runtime binaries"
+# The x86_64 serving worker is configured from the profile the release job
+# reads. Read before cargo runs, so a missing vcpkg checkout fails at once.
+# shellcheck source=tools/release/amd64-build-profile.sh disable=SC1091
+. tools/release/amd64-build-profile.sh ||
+  die "the amd64 build profile refused this environment; under sudo, name the VCPKG_* variables of .github/actions/release-vcpkg in --preserve-env"
 cargo build --release \
   --bin tensorplate-agent \
   --bin tensorplate-observability \
   --bin tensorplate
-# The x86_64 serving worker is configured from the profile the release
-# workflow's amd64 job reads: compiler, DWARF version and backends.
-# shellcheck source=tools/release/amd64-build-profile.sh disable=SC1091
-. tools/release/amd64-build-profile.sh
 CC="$TP_AMD64_CC" CXX="$TP_AMD64_CXX" cmake -S . -B build/release -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DTP_BUILD_TESTS=OFF -DTP_BUILD_EXAMPLES=OFF -DTP_ENABLE_SANITIZERS=OFF \
@@ -90,6 +93,12 @@ packaging/scripts/build-deb.sh >"${work}/build.log" 2>&1 ||
   { tail -20 "${work}/build.log" >&2; die "package build failed"; }
 version="$(dpkg-parsechangelog -l packaging/debian/changelog -S Version)"
 repo_parent="$(dirname "$repo_root")"
+# gRPC and protobuf are linked statically from vcpkg; the package must not
+# ask the distribution for either.
+tools/release/assert-static-streaming-closure.sh \
+  --deb "${repo_parent}/tensorplate-serving_${version}_${host_arch}.deb" \
+  --binary build/release/tensorplate-serving --cmake-cache build/release/CMakeCache.txt ||
+  die "the worker lacks the streaming feature, or it or its package asks for a distribution gRPC library"
 # tensorplate-common carries the layout helpers every other package
 # Pre-Depends on, so it must be configured before the rest.
 dpkg -i "${repo_parent}/tensorplate-common_${version}_all.deb" >>"${work}/install.log" 2>&1 ||

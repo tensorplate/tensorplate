@@ -1,0 +1,114 @@
+# SPDX-License-Identifier: Apache-2.0
+
+name: Release vcpkg
+description: A vcpkg checkout at the builtin-baseline of vcpkg.json with an x64-linux binary cache.
+
+inputs:
+  mode:
+    description: "'restore' builds nothing and fails on a cold cache; 'build' builds what is missing; 'build-and-save' also saves it."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Read the vcpkg baseline and the cache key digest
+      id: manifest
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -Eeuo pipefail
+        # vcpkg keys every package on the compiler binary: a new one must open a new cache key.
+        for tool in clang clang++; do
+          command -v "$tool" >/dev/null ||
+            { echo "::error::${tool} is not on PATH; use this action after the step that installs it"; exit 1; }
+        done
+        version="$(clang --version)"
+        binary="$(sha256sum "$(readlink -f "$(command -v clang++)")")"
+        # The digest leaves out the manifest's own version, which the release
+        # tooling rewrites: a new version must not make the cache cold.
+        # The profile and this action decide how the packages are built: a change opens a new key.
+        python3 - vcpkg.json "${version%%$'\n'*}" "${binary%% *}" \
+          tools/release/amd64-build-profile.sh "${ACTION_PATH}/action.yml" >>"$GITHUB_OUTPUT" <<'PY'
+        import hashlib
+        import json
+        import re
+        import sys
+
+        with open(sys.argv[1], encoding="utf-8") as manifest_file:
+            manifest = json.load(manifest_file)
+        baseline = manifest.get("builtin-baseline")
+        if not isinstance(baseline, str) or not re.fullmatch("[0-9a-f]{40}", baseline):
+            sys.exit("vcpkg.json names no builtin-baseline of 40 lowercase hex digits")
+        for key in ("version", "version-string", "version-semver", "version-date"):
+            manifest.pop(key, None)
+        canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        files = [hashlib.sha256(open(path, "rb").read()).hexdigest() for path in sys.argv[4:]]
+        keyed = "\n".join((canonical, *sys.argv[2:4], *files)).encode("utf-8")
+        print(f"baseline={baseline}")
+        print(f"digest={hashlib.sha256(keyed).hexdigest()}")
+        PY
+
+    # Only the exact key, in every mode: a cache of other inputs is not this one.
+    - name: Restore the vcpkg binary cache or fail
+      if: inputs.mode == 'restore'
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/vcpkg-archives
+        key: vcpkg-release-${{ runner.os }}-x64-linux-${{ steps.manifest.outputs.baseline }}-${{ steps.manifest.outputs.digest }}
+        fail-on-cache-miss: true
+
+    - name: Restore the vcpkg binary cache if there is one
+      if: inputs.mode == 'build'
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/vcpkg-archives
+        key: vcpkg-release-${{ runner.os }}-x64-linux-${{ steps.manifest.outputs.baseline }}-${{ steps.manifest.outputs.digest }}
+
+    - name: Restore the vcpkg binary cache, and save it when the job succeeds
+      if: inputs.mode == 'build-and-save'
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ runner.temp }}/vcpkg-archives
+        key: vcpkg-release-${{ runner.os }}-x64-linux-${{ steps.manifest.outputs.baseline }}-${{ steps.manifest.outputs.digest }}
+
+    - name: Check out and bootstrap vcpkg at the baseline
+      shell: bash
+      env:
+        BASELINE: ${{ steps.manifest.outputs.baseline }}
+      run: |
+        set -Eeuo pipefail
+        root="${RUNNER_TEMP}/vcpkg"
+        mkdir -p "${RUNNER_TEMP}/vcpkg-archives"
+        # A full clone, as the release runner is provisioned: vcpkg reads the baseline from history.
+        git clone --quiet -- https://github.com/microsoft/vcpkg.git "$root"
+        git -C "$root" checkout --quiet --detach "$BASELINE"
+        head="$(git -C "$root" rev-parse HEAD)"
+        [[ "$head" == "$BASELINE" ]] || {
+          echo "::error::the vcpkg checkout is at ${head}, not the builtin-baseline ${BASELINE}"
+          exit 1
+        }
+        "${root}/bootstrap-vcpkg.sh" -disableMetrics
+
+    - name: Export the vcpkg environment
+      id: export
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        set -Eeuo pipefail
+        case "$MODE" in
+          restore) access="read" ;;
+          build | build-and-save) access="readwrite" ;;
+          *) echo "::error::mode must be 'restore', 'build' or 'build-and-save'; got '${MODE}'"; exit 1 ;;
+        esac
+        {
+          echo "VCPKG_ROOT=${RUNNER_TEMP}/vcpkg"
+          echo "VCPKG_BINARY_SOURCES=clear;files,${RUNNER_TEMP}/vcpkg-archives,${access}"
+          # vcpkg's own pinned cmake and ninja, whatever the image ships: package
+          # identity includes the cmake version.
+          echo "VCPKG_FORCE_DOWNLOADED_BINARIES=1"
+          if [[ "$MODE" == restore ]]; then
+            echo "TP_VCPKG_BINARY_ONLY=1"
+          fi
+        } >>"$GITHUB_ENV"

@@ -189,6 +189,31 @@ From an existing TensorPlate checkout, the equivalent command is:
 sudo bash packaging/scripts/build-install-from-source.sh --branch develop
 ```
 
+This default needs no vcpkg. It builds a serving worker without streaming
+gRPC support and says so in one line; that worker serves as before and
+refuses `streaming.enabled=true` in its config with the typed `unsupported`
+error. Release packages are built with the support.
+
+To build with it, give the wrapper a vcpkg checkout at the
+`builtin-baseline` of `vcpkg.json`. vcpkg needs `git`, `curl`, `zip`,
+`unzip`, `tar`, `make`, Perl, the kernel headers (`linux-libc-dev`), Ninja
+and CMake. From a TensorPlate checkout:
+
+```bash
+baseline="$(python3 -c 'import json; print(json.load(open("vcpkg.json"))["builtin-baseline"])')"
+git clone https://github.com/microsoft/vcpkg.git <vcpkg-dir>
+git -C <vcpkg-dir> checkout --detach "$baseline"
+<vcpkg-dir>/bootstrap-vcpkg.sh -disableMetrics
+sudo VCPKG_ROOT=<vcpkg-dir> bash packaging/scripts/build-install-from-source.sh --branch develop
+```
+
+`sudo` drops an exported `VCPKG_ROOT`, so it is set on the command line; a
+`VCPKG_ROOT` that names no checkout is refused. On arm64 vcpkg also needs
+`VCPKG_FORCE_SYSTEM_BINARIES=1`, for the bootstrap and on that command line.
+The first build compiles gRPC, protobuf and OpenSSL, about two hours on a
+Jetson, unless `VCPKG_BINARY_SOURCES`, set the same way, names a binary cache
+that holds them.
+
 The wrapper clones or checks out the requested branch, builds snapshot
 packages versioned `X.Y.Z~dev.YYYYMMDD.gitsha` (their file names spell it
 `X.Y.Z.dev.YYYYMMDD.gitsha`, as a release names its packages), generates

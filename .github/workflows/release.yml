@@ -295,7 +295,9 @@ jobs:
     # oldest host a binary must run on. Building on noble would raise the
     # floor to 2.39 and lock out 22.04, which is a claimed support row.
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    # A publishing run restores its vcpkg dependencies or fails; only a
+    # build-only run may build them, which is what the longer bound is for.
+    timeout-minutes: ${{ needs.meta.outputs.publish == 'true' && 60 || 180 }}
     permissions:
       contents: read
 
@@ -368,6 +370,13 @@ jobs:
             exit 1
           }
 
+      # Before anything is compiled: a publishing run with a cold cache fails
+      # here. Only a branch other than the default one may save what it builds.
+      - name: Pinned vcpkg checkout and binary cache
+        uses: ./.github/actions/release-vcpkg
+        with:
+          mode: ${{ needs.meta.outputs.publish == 'true' && 'restore' || (github.ref_type == 'branch' && github.event.repository.default_branch != '' && github.ref_name != github.event.repository.default_branch) && 'build-and-save' || 'build' }}
+
       - name: Build amd64 Rust binaries
         shell: bash
         env:
@@ -409,7 +418,13 @@ jobs:
             -DTP_BUILD_TESTS=OFF \
             -DTP_BUILD_EXAMPLES=OFF \
             -DTP_ENABLE_SANITIZERS=OFF \
-            "${TP_AMD64_CMAKE_ARGS[@]}"
+            "${TP_AMD64_CMAKE_ARGS[@]}" || {
+            # vcpkg reports a package it could not restore as a build error of its own.
+            if [[ "${TP_VCPKG_BINARY_ONLY:-}" == 1 ]]; then
+              echo "::error::if vcpkg could not restore a package, the binary cache is cold or was built with another compiler; see 'Provision the vcpkg checkout and binary cache' in docs/release/runbook.md"
+            fi
+            exit 1
+          }
           cmake --build build/release --target tp_serving_worker --parallel
           if [[ -x build/release/serving_worker/tensorplate-serving ]]; then
             install -m 0755 build/release/serving_worker/tensorplate-serving \
@@ -482,6 +497,11 @@ jobs:
             printf '%s\n' "$staged_kind"
             exit 1
           }
+          # gRPC and protobuf are linked statically from vcpkg: neither the
+          # package nor the worker may ask for a distribution library.
+          tools/release/assert-static-streaming-closure.sh \
+            --deb "$serving" --binary build/release/tensorplate-serving \
+            --cmake-cache build/release/CMakeCache.txt
           # The metapackage must stay an empty dependency bundle on this
           # architecture too, now that it is built per architecture.
           # debhelper always adds changelog.Debian.gz and copyright under
@@ -789,7 +809,8 @@ jobs:
         run: |
           set -Eeuo pipefail
           tools/ci/apt-get.sh update
-          tools/ci/apt-get.sh install -y --no-install-recommends \
+          # Nothing installed is upgraded: the vcpkg cache is keyed on this compiler.
+          tools/ci/apt-get.sh install -y --no-install-recommends --no-upgrade \
             build-essential \
             ca-certificates \
             clang \
@@ -810,6 +831,18 @@ jobs:
             exit 1
           }
           rustup show active-toolchain || rustup toolchain install
+
+      # The operator provisions the checkout and its binary cache ahead of a
+      # release; this prints them only when they match this checkout's vcpkg.json.
+      - name: Take the runner's provisioned vcpkg
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! vcpkg_env="$(tools/release/jetson-runner-control.sh vcpkg-env)"; then
+            echo "::error::the runner's vcpkg is not provisioned for this checkout; see 'Provision the vcpkg checkout and binary cache' in docs/release/runbook.md"
+            exit 1
+          fi
+          printf '%s\n' "$vcpkg_env" >>"$GITHUB_ENV"
 
       - name: Stage amd64 runtime packages next to build outputs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -862,6 +895,8 @@ jobs:
           PUBLISH: ${{ needs.meta.outputs.publish }}
           SOURCE_LABEL: ${{ needs.meta.outputs.source_label }}
           SPEECH_RUNTIME: ${{ needs.meta.outputs.speech_runtime }}
+          # A cold dependency build takes this runner hours; a cache miss fails.
+          TP_VCPKG_BINARY_ONLY: '1'
         run: |
           set -Eeuo pipefail
           # The manifest's release.branch is a published, cosign-covered
@@ -891,6 +926,18 @@ jobs:
             args+=(--with-speech-runtime)
           fi
           "${args[@]}"
+
+      - name: Assert the arm64 serving worker links gRPC and protobuf statically
+        shell: bash
+        env:
+          RELEASE_DIR: ${{ needs.meta.outputs.release_dir }}
+        run: |
+          set -Eeuo pipefail
+          # A glob that matches nothing, or twice, names no file: the checker refuses it.
+          tools/release/assert-static-streaming-closure.sh \
+            --deb "$(echo "${RELEASE_DIR}"/tensorplate-serving_*_arm64.deb)" \
+            --binary build/release/tensorplate-serving \
+            --cmake-cache build/release/CMakeCache.txt
 
       - name: Assert the release package count
         shell: bash

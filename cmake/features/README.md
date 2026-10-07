@@ -50,9 +50,14 @@ existing transports.
 
 Hosted C++ tests enable the feature; adapter-shell tests explicitly disable
 it and check both the typed refusal and unary serving. The cold dependency
-build has a 120-minute job budget. Release builds explicitly set
-`TP_ENABLE_STREAMING_GRPC=OFF` on both ARM64 and AMD64.
-Before release enablement, binary caches must be populated for the pinned baseline,
-compiler and triplet, and the worker SBOM and vulnerability disposition must
-cover the static native closure, including OpenSSL. The current supply-chain
-workflow audits Rust and Python dependencies only.
+build has a 120-minute job budget. Release builds set
+`TP_ENABLE_STREAMING_GRPC=ON` on both ARM64 and AMD64, and a release that
+publishes restores the dependencies from a binary cache for the pinned
+baseline, compiler and triplet and fails on a miss; see
+[`docs/release/runbook.md`](../../docs/release/runbook.md). vcpkg builds the
+ports without the project's `-gdwarf-4`, and the worker compiles against the
+manifest's `nlohmann-json` rather than the distribution's package.
+Required before the final release tag, though not before a release
+candidate: the worker SBOM and vulnerability disposition must cover the
+static native closure, including OpenSSL. The current supply-chain workflow
+audits Rust and Python dependencies only.
