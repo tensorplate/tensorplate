@@ -76,6 +76,8 @@ logger = logging.getLogger("tensorplate.sidecar")
 CAPABILITIES: Final[tuple[str, ...]] = (protocol.CAPABILITY_SPEECH_JOBS_V1,)
 #: How long a write may make no progress before the connection is given up.
 WRITE_STALL_TIMEOUT_S: float = 5.0
+#: How long the reader waits for bytes before it looks again at whether the connection ended.
+READ_POLL_S: float = 1.0
 _JOB_KINDS: Final[frozenset[str]] = frozenset(
     {protocol.KIND_JOB_SUBMIT, protocol.KIND_JOB_CANCEL, protocol.KIND_SESSION_RELEASE}
 )
@@ -215,6 +217,8 @@ class SidecarRunner:
         default_backend_name: str = "fixture",
     ) -> None:
         self._sock = sock
+        # The mode, not a per-send flag: macOS blocks a flagged send once the buffer is full.
+        sock.setblocking(False)
         self._factories = backend_factories or default_backend_factories()
         self._default_backend_name = default_backend_name
         self._state = RunnerState()
@@ -265,7 +269,7 @@ class SidecarRunner:
             while not self._ended and (limit is None or count < limit):
                 frame = self._read_one_frame()
                 if frame is None:
-                    break  # peer closed
+                    break  # peer closed, or the connection ended while the reader waited
                 count += 1
                 self._route(frame)
         except (ConnectionError, OSError) as exc:
@@ -310,13 +314,22 @@ class SidecarRunner:
             try:
                 frame, consumed = codec.decode_one(bytes(self._read_buf))
             except codec.IncompleteFrame:
-                chunk = self._sock.recv(65536)
+                chunk = self._receive()
                 if not chunk:
                     return None
                 self._read_buf.extend(chunk)
                 continue
             del self._read_buf[:consumed]
             return frame
+
+    def _receive(self) -> bytes:
+        """The peer's next bytes; none at EOF or once the connection has ended."""
+        while not self._ended:
+            # A bounded wait: no shutdown has to wake the reader for it to see the flag.
+            if select.select([self._sock], [], [], READ_POLL_S)[0]:
+                with contextlib.suppress(BlockingIOError):
+                    return self._sock.recv(65536)
+        return b""
 
     def _write_frame(self, frame: codec.SidecarFrame, originated: bool = False) -> None:
         """Write one whole frame; a write that fails or stalls ends the connection.
@@ -333,9 +346,8 @@ class SidecarRunner:
                 view = memoryview(codec.encode(frame))
                 while view:
                     try:
-                        view = view[self._sock.send(view, socket.MSG_DONTWAIT) :]
+                        view = view[self._sock.send(view) :]
                     except BlockingIOError:
-                        # Not a socket timeout, which would bound reads as well.
                         ready = select.select([], [self._sock], [], WRITE_STALL_TIMEOUT_S)
                         if not ready[1]:
                             raise TimeoutError from None
@@ -347,8 +359,12 @@ class SidecarRunner:
 
     def _end_connection(self) -> None:
         self._ended = True
-        with contextlib.suppress(OSError):
+        try:
             self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            # Refused where the peer has half-closed; the write side alone still sends EOF.
+            with contextlib.suppress(OSError):
+                self._sock.shutdown(socket.SHUT_WR)
 
     # ------------------------------------------------------------------
     # dispatch
