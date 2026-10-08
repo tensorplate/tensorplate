@@ -230,6 +230,33 @@ def test_a_peer_that_stops_reading_ends_the_runner(
     assert not peer.thread.is_alive()
 
 
+class _Asked(FixtureBackend):
+    permits: ClassVar[int]
+
+    def permits_job(self, request: job_objects.JobRequest) -> bool:
+        type(self).permits += 1
+        return True
+
+
+def test_a_frame_read_before_a_write_stalled_is_not_routed(
+    connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner_module, "WRITE_STALL_TIMEOUT_S", 0.2)
+    _Asked.permits = 0
+    peer = connect({"fixture": _Asked})
+    peer.enable_jobs()
+    health = codec.encode(codec.SidecarFrame(message(protocol.KIND_HEALTH_CHECK)))
+    job = submit(1)
+    behind = codec.encode(codec.SidecarFrame(job, bytes(job["input"]["payload_length"])))
+    # Half a send buffer of health checks goes out whole and its answers overflow the
+    # runner's, so the reader stalls with the submit, which would ask the backend, behind it.
+    checks = peer.client.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) // (2 * len(health))
+    peer.client.sendall(health * checks + behind)
+    peer.thread.join(timeout=WAIT_S)
+    assert not peer.thread.is_alive()
+    assert _Asked.permits == 0
+
+
 class _NoClasses(FixtureBackend):
     unloaded: ClassVar[int] = 0
 

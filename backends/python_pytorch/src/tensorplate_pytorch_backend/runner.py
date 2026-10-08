@@ -260,7 +260,8 @@ class SidecarRunner:
         """The reader thread: route frames until EOF, an error or ``limit`` frames."""
         count = 0
         try:
-            while limit is None or count < limit:
+            # A write that ended the connection leaves the frames already read unrouted.
+            while not self._ended and (limit is None or count < limit):
                 frame = self._read_one_frame()
                 if frame is None:
                     break  # peer closed
