@@ -233,8 +233,17 @@ Two workflows live under `.github/workflows/`:
 
 ### Caching
 
-- vcpkg installed packages and download archives are cached per workflow
-  with a key derived from `vcpkg.json`.
+- The three `cpp.yml` build legs share one cache of the vcpkg installed
+  tree. Its key names what vcpkg's package identity depends on there: the
+  triplet, the manifest features, the runner image's vcpkg checkout, the
+  compiler binaries, the image's cmake version (which vcpkg runs once it
+  is new enough) and `vcpkg.json`. The tree is saved as soon as the
+  dependencies are installed. A change to any of those costs at most one
+  cold dependency build, most of it gRPC, on `develop` and on each pull
+  request that runs before `develop` has saved the new tree; packages
+  vcpkg finds unchanged in the previous tree are kept. The clang-tidy and
+  adapter-shell jobs build their two small dependencies each run. The
+  release jobs keep a separate cache (`.github/actions/release-vcpkg`).
 - Cargo build artifacts and registry are cached via
   [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache) keyed on
   `Cargo.lock` and `rust-toolchain.toml`.

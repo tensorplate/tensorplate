@@ -12,7 +12,9 @@ concurrency:
 
 env:
   CMAKE_GENERATOR: Ninja
-  VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+  # No vcpkg binary cache: the build legs carry the installed tree between
+  # runs, and vcpkg no longer has a GitHub Actions cache backend.
+  VCPKG_BINARY_SOURCES: clear
 
 jobs:
   build-test:
@@ -20,6 +22,13 @@ jobs:
     runs-on: ubuntu-22.04
     # A cold streaming dependency build includes gRPC, protobuf and OpenSSL.
     timeout-minutes: 120
+    env:
+      # Read by the dependency cache key as well as by Configure, so a
+      # change to what vcpkg builds, or builds with, opens a new key.
+      CC: clang
+      CXX: clang++
+      TP_VCPKG_TRIPLET: x64-linux
+      TP_VCPKG_FEATURES: streaming-grpc
     strategy:
       fail-fast: false
       matrix:
@@ -70,23 +79,39 @@ jobs:
           sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
 
-      - name: Export vcpkg cache credentials
-        uses: actions/github-script@v7
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      # vcpkg rebuilds a package when a part of its checkout the port names,
+      # a compiler binary or the cmake it runs changes, and each runner image
+      # brings another checkout. A key that names none of them still matches
+      # exactly, and a tree restored on an exact match is not saved again.
+      # vcpkg runs the image's cmake only once that is new enough for it.
+      - name: Identify what builds the dependency packages
+        id: toolchain
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          vcpkg_commit="$(git -C "$VCPKG_INSTALLATION_ROOT" rev-parse HEAD)"
+          c_compiler="$(sha256sum "$(readlink -f "$(command -v "$CC")")")"
+          cxx_compiler="$(sha256sum "$(readlink -f "$(command -v "$CXX")")")"
+          cmake_version="$(cmake --version)"
+          inputs="$(printf 'vcpkg %s\n%s %s\n%s %s\n%s\n' "$vcpkg_commit" \
+            "$CC" "${c_compiler%% *}" "$CXX" "${cxx_compiler%% *}" \
+            "${cmake_version%%$'\n'*}")"
+          printf '%s\n' "$inputs"
+          digest="$(printf '%s\n' "$inputs" | sha256sum)"
+          echo "digest=${digest%% *}" >>"$GITHUB_OUTPUT"
 
-      - name: Cache vcpkg downloads
-        uses: actions/cache@v4
+      # One tree for the three legs: none of what differs between them
+      # reaches vcpkg. The prefixes bring back the newest earlier tree, and
+      # vcpkg keeps every package in it that is still the same.
+      - name: Restore the vcpkg installed tree
+        id: vcpkg-tree
+        uses: actions/cache/restore@v4
         with:
-          path: |
-            ${{ github.workspace }}/build/vcpkg_installed
-            ~/.cache/vcpkg/archives
-          key: vcpkg-${{ runner.os }}-${{ matrix.preset }}-${{ hashFiles('vcpkg.json') }}
+          path: ${{ github.workspace }}/build/vcpkg_installed
+          key: vcpkg-tree-${{ env.TP_VCPKG_TRIPLET }}-${{ env.TP_VCPKG_FEATURES }}-${{ steps.toolchain.outputs.digest }}-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
-            vcpkg-${{ runner.os }}-${{ matrix.preset }}-
-            vcpkg-${{ runner.os }}-
+            vcpkg-tree-${{ env.TP_VCPKG_TRIPLET }}-${{ env.TP_VCPKG_FEATURES }}-${{ steps.toolchain.outputs.digest }}-
+            vcpkg-tree-${{ env.TP_VCPKG_TRIPLET }}-${{ env.TP_VCPKG_FEATURES }}-
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -99,9 +124,6 @@ jobs:
           pip install -e backends/python_pytorch
 
       - name: Configure
-        env:
-          CC: clang
-          CXX: clang++
         run: |
           cmake -S . -B build \
             -G Ninja \
@@ -110,10 +132,19 @@ jobs:
             -DTP_ENABLE_SANITIZERS=${{ matrix.sanitizers }} \
             -DTP_ENABLE_TSAN=${{ matrix.tsan }} \
             -DTP_ENABLE_STREAMING_GRPC=ON \
-            -DVCPKG_MANIFEST_FEATURES=streaming-grpc \
-            -DVCPKG_TARGET_TRIPLET=x64-linux \
+            -DVCPKG_MANIFEST_FEATURES="$TP_VCPKG_FEATURES" \
+            -DVCPKG_TARGET_TRIPLET="$TP_VCPKG_TRIPLET" \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
+
+      # Here, not at the end of the job: a failing test must not cost the
+      # next run an hour of gRPC.
+      - name: Save the vcpkg installed tree
+        if: steps.vcpkg-tree.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/build/vcpkg_installed
+          key: ${{ steps.vcpkg-tree.outputs.cache-primary-key }}
 
       - name: Build
         run: cmake --build build --parallel
@@ -177,23 +208,6 @@ jobs:
             ca-certificates
           sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
           sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
-
-      - name: Export vcpkg cache credentials
-        uses: actions/github-script@v7
-        with:
-          script: |
-            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
-
-      - name: Cache vcpkg downloads
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/vcpkg_installed
-            ~/.cache/vcpkg/archives
-          key: vcpkg-${{ runner.os }}-adapter-shells-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-${{ runner.os }}-
 
       - name: Configure adapter shells
         env:
@@ -308,16 +322,6 @@ jobs:
           sudo update-alternatives --install /usr/bin/clang      clang      /usr/bin/clang-15      100
           sudo update-alternatives --install /usr/bin/clang++    clang++    /usr/bin/clang++-15    100
           sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-15 100
-
-      - name: Cache vcpkg downloads
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ github.workspace }}/vcpkg_installed
-            ~/.cache/vcpkg/archives
-          key: vcpkg-${{ runner.os }}-tidy-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-${{ runner.os }}-
 
       - name: Configure (export compile_commands.json)
         env:
