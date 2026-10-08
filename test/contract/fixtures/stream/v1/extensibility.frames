@@ -1,9 +1,13 @@
 # Recorded by record.sh from the text column. Every value is synthetic.
 # Tab-separated: name, message type, the bytes protoc emitted in hex, the message in text format.
 # Frames of extension.proto, a fixture-only schema with members stream/v1 does not have: what
-# stream/v1 reads when a peer sends a field, a body or a mode it does not know.
+# stream/v1 reads, from a client and from a server, when the peer sends a field, a body, a mode
+# or a capability it does not know.
 
-added_fields	tensorplate.stream.fixture.ClientEvent	08011807200552750a1473796e7468657469632d6465706c6f796d656e7412477368613235363a3030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303018014a1273796e746865746963206164646974696f6e	sequence: 1 generation: 7 added_scalar: 5 open { deployment_id: "synthetic-deployment" descriptor_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000" mode: SESSION_MODE_STT_STREAMING added_text: "synthetic addition" }
-added_client_body	tensorplate.stream.fixture.ClientEvent	0802121373796e7468657469632d73657373696f6e2d311807c202100a0e73796e74686574696320626f6479	sequence: 2 session_id: "synthetic-session-1" generation: 7 added_body { text: "synthetic body" }
+added_client_fields	tensorplate.stream.fixture.ClientEvent	0801200552300a180a1473796e7468657469632d6465706c6f796d656e7410071801521273796e746865746963206164646974696f6e	sequence: 1 added_scalar: 5 open { resolved { deployment_id: "synthetic-deployment" generation: 7 } mode: SESSION_MODE_STT_STREAMING added_text: "synthetic addition" }
+added_server_fields	tensorplate.stream.fixture.ServerEvent	08011005522b0a1373796e7468657469632d73657373696f6e2d311007521273796e746865746963206164646974696f6e	sequence: 1 added_scalar: 5 ready { session_id: "synthetic-session-1" generation: 7 added_text: "synthetic addition" }
+added_client_body	tensorplate.stream.fixture.ClientEvent	0802121373796e7468657469632d73657373696f6e2d31c202100a0e73796e74686574696320626f6479	sequence: 2 session_id: "synthetic-session-1" added_body { text: "synthetic body" }
 added_server_body	tensorplate.stream.fixture.ServerEvent	0802c202100a0e73796e74686574696320626f6479	sequence: 2 added_body { text: "synthetic body" }
-added_mode	tensorplate.stream.fixture.ClientEvent	0801180752610a1473796e7468657469632d6465706c6f796d656e7412477368613235363a303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030301803	sequence: 1 generation: 7 open { deployment_id: "synthetic-deployment" descriptor_digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000" mode: SESSION_MODE_ADDED }
+added_mode	tensorplate.stream.fixture.ClientEvent	0801521c0a180a1473796e7468657469632d6465706c6f796d656e7410071803	sequence: 1 open { resolved { deployment_id: "synthetic-deployment" generation: 7 } mode: SESSION_MODE_ADDED }
+added_client_capability	tensorplate.stream.fixture.ClientEvent	0801521f0a180a1473796e7468657469632d6465706c6f796d656e74100718024a0101	sequence: 1 open { resolved { deployment_id: "synthetic-deployment" generation: 7 } mode: SESSION_MODE_TTS_STREAMING capabilities: CAPABILITY_ADDED }
+added_server_capability	tensorplate.stream.fixture.ServerEvent	0801521a0a1373796e7468657469632d73657373696f6e2d3110074a0101	sequence: 1 ready { session_id: "synthetic-session-1" generation: 7 capabilities: CAPABILITY_ADDED }

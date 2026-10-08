@@ -145,16 +145,22 @@ const pb::Descriptor* schema_type(const Frame& frame) {
   return type != nullptr && type->file() == schema() ? type : nullptr;
 }
 
+// The stream/v1 type that reads the frame: its own, or the one of the same name that a frame
+// of extension.proto is sent to.
+const pb::Descriptor* reader_type(const Frame& frame) {
+  return schema()->FindMessageTypeByName(frame.type.substr(frame.type.rfind('.') + 1));
+}
+
 std::unique_ptr<pb::Message> new_message(const pb::Descriptor* type) {
   return std::unique_ptr<pb::Message>(
       pb::MessageFactory::generated_factory()->GetPrototype(type)->New());
 }
 
-// Decoded frames of stream/v1's own types, in file order.
+// Every frame as stream/v1 reads it, in file order.
 std::vector<std::pair<Frame, std::unique_ptr<pb::Message>>> golden_messages() {
   std::vector<std::pair<Frame, std::unique_ptr<pb::Message>>> messages;
   for (auto& frame : all_frames()) {
-    if (const auto* type = schema_type(frame)) {
+    if (const auto* type = reader_type(frame)) {
       auto message = new_message(type);
       EXPECT_TRUE(message->ParseFromString(frame.bytes)) << frame.file << ": " << frame.name;
       messages.emplace_back(std::move(frame), std::move(message));
@@ -190,6 +196,32 @@ int unknown_field_count(const pb::Message& message) {
     count += part.GetReflection()->GetUnknownFields(part).field_count();
   });
   return count;
+}
+
+// What `message` itself kept without knowing it: "4=5 " for a varint, "10='text' " for bytes.
+std::string unknown_fields(const pb::Message& message) {
+  const pb::UnknownFieldSet& unknown = message.GetReflection()->GetUnknownFields(message);
+  std::string kept;
+  for (int i = 0; i < unknown.field_count(); ++i) {
+    const pb::UnknownField& field = unknown.field(i);
+    kept += std::to_string(field.number()) + "=";
+    if (field.type() == pb::UnknownField::TYPE_VARINT) {
+      kept += std::to_string(field.varint()) + " ";
+    } else if (field.type() == pb::UnknownField::TYPE_LENGTH_DELIMITED) {
+      kept += "'" + std::string{field.length_delimited()} + "' ";
+    } else {
+      kept += "? ";
+    }
+  }
+  return kept;
+}
+
+// Every sequence and every 64-bit id, which the schema bounds by kLargest.
+constexpr std::uint64_t kLargest = (1ULL << 53) - 1;
+bool is_sequence_or_id(const pb::FieldDescriptor* field) {
+  const std::string_view name = field->name();
+  return field->cpp_type() == pb::FieldDescriptor::CPPTYPE_UINT64 &&
+         (name == "generation" || name.ends_with("sequence") || name.ends_with("_id"));
 }
 
 // proto3 keeps an enum number the schema does not name in the field itself,
@@ -314,7 +346,7 @@ std::vector<std::string> names_by_number(const pb::EnumDescriptor* values) {
 }
 
 // A field as the schema declares it: "uint64 Audio.sample_offset = 3",
-// "repeated TranscriptSegment FinalTranscript.segments = 3".
+// "repeated TranscriptSegment FinalTranscript.segments = 2".
 std::string declaration(const pb::FieldDescriptor* field) {
   const std::string package = std::string{schema()->package()} + ".";
   const auto local = [&package](std::string_view name) {
@@ -348,18 +380,28 @@ uint64 Usage.used = 1
 uint64 Usage.limit = 2
 Usage InputCredit.bytes = 1
 Usage InputCredit.waiting_segments = 2
+uint32 SpeechToTextLimits.min_frame_ms = 1
+uint32 SpeechToTextLimits.max_frame_ms = 2
+uint32 SpeechToTextLimits.max_utterance_ms = 3
+uint32 TextToSpeechLimits.max_segment_text_bytes = 1
+uint32 TextToSpeechLimits.max_segment_audio_ms = 2
+uint32 TextToSpeechLimits.max_synthesis_text_bytes = 3
+uint32 TextToSpeechLimits.max_synthesis_audio_ms = 4
 uint32 SessionLimits.idle_timeout_ms = 1
 uint32 SessionLimits.heartbeat_interval_ms = 2
 uint32 SessionLimits.liveness_timeout_ms = 3
 uint32 SessionLimits.max_duration_ms = 4
 uint32 SessionLimits.finalize_deadline_ms = 5
 uint32 SessionLimits.output_stall_timeout_ms = 6
-ErrorCode EndCause.code = 1
-string EndCause.reason = 2
-FailureReason EndCause.failure_reason = 3
+SpeechToTextLimits SessionLimits.speech_to_text = 7
+TextToSpeechLimits SessionLimits.text_to_speech = 8
+FailureReason EndCause.reason = 1
+ErrorCode EndCause.code = 2
+string EndCause.detail = 3
+EndCause OpenRefused.cause = 1
+Admission OpenRefused.admission = 2
 uint64 ClientEvent.sequence = 1
 string ClientEvent.session_id = 2
-uint64 ClientEvent.generation = 3
 Open ClientEvent.open = 10 (oneof body)
 Finalize ClientEvent.finalize = 11 (oneof body)
 Cancel ClientEvent.cancel = 12 (oneof body)
@@ -367,14 +409,20 @@ Ping ClientEvent.ping = 13 (oneof body)
 StatusRequest ClientEvent.status_request = 14 (oneof body)
 Audio ClientEvent.audio = 20 (oneof body)
 TextSegment ClientEvent.text_segment = 21 (oneof body)
-string Open.deployment_id = 1
-string Open.descriptor_digest = 2
+string ResolvedTarget.deployment_id = 1
+uint64 ResolvedTarget.generation = 2
+string ResolvedTarget.descriptor_digest = 3
+string Selector.model = 1
+string Selector.version = 2
+ResolvedTarget Open.resolved = 1 (oneof target)
+Selector Open.selector = 2 (oneof target)
 SessionMode Open.mode = 3
 string Open.language = 4
 AudioFormat Open.input_format = 5
 string Open.voice = 6
 string Open.trace_id = 7
 string Open.turn_id = 8
+repeated Capability Open.capabilities = 9
 bytes Audio.data = 1
 uint32 Audio.sample_count = 2
 uint64 Audio.sample_offset = 3
@@ -384,7 +432,7 @@ string TextSegment.turn_id = 3
 uint64 ServerEvent.sequence = 1
 Ready ServerEvent.ready = 10 (oneof body)
 Accepted ServerEvent.accepted = 11 (oneof body)
-Status ServerEvent.status = 12 (oneof body)
+SessionStatus ServerEvent.status = 12 (oneof body)
 Pong ServerEvent.pong = 13 (oneof body)
 CancelAccepted ServerEvent.cancel_accepted = 14 (oneof body)
 SessionClosed ServerEvent.session_closed = 15 (oneof body)
@@ -401,18 +449,25 @@ SessionLimits Ready.limits = 4
 uint32 Ready.remaining_duration_ms = 5
 AudioFormat Ready.input_format = 6
 AudioFormat Ready.output_format = 7
-Status Ready.status = 8
+SessionStatus Ready.status = 8
+repeated Capability Ready.capabilities = 9
 uint64 Accepted.accepted_sequence = 1
 InputCredit Accepted.input_credit = 2
-SessionState Status.state = 1
-uint32 Status.input_queue_depth = 2
-InputCredit Status.input_credit = 3
-Usage Status.output_pcm_bytes = 4
-Usage Status.output_metadata_bytes = 5
+SessionState SessionStatus.state = 1
+uint32 SessionStatus.input_queue_depth = 2
+InputCredit SessionStatus.input_credit = 3
+Usage SessionStatus.output_pcm_bytes = 4
+Usage SessionStatus.output_metadata_bytes = 5
 SessionState SessionClosed.state = 1
 EndCause SessionClosed.cause = 2
-uint64 SessionClosed.last_accepted_sequence = 3
-uint64 SessionClosed.last_produced_sequence = 4
+Admission SessionClosed.admission = 3
+uint64 SessionClosed.last_accepted_sequence = 4
+SessionTotals SessionClosed.totals = 5
+uint64 SessionTotals.input_audio_samples = 1
+uint64 SessionTotals.input_text_bytes = 2
+uint64 SessionTotals.output_audio_samples = 3
+uint32 SessionTotals.utterances_completed = 4
+uint32 SessionTotals.segments_completed = 5
 uint64 PartialTranscript.utterance_id = 1
 uint32 PartialTranscript.revision = 2
 string PartialTranscript.text = 3
@@ -423,12 +478,12 @@ uint64 TranscriptSegment.start_us = 1
 uint64 TranscriptSegment.end_us = 2
 string TranscriptSegment.text = 3
 uint64 FinalTranscript.utterance_id = 1
-string FinalTranscript.text = 2
-repeated TranscriptSegment FinalTranscript.segments = 3
-uint64 FinalTranscript.end_sample_offset = 4
+repeated TranscriptSegment FinalTranscript.segments = 2
+uint64 FinalTranscript.end_sample_offset = 3
+uint64 FinalTranscript.finalize_sequence = 4
 uint64 AudioChunk.segment_id = 1
 uint32 AudioChunk.chunk_index = 2
-uint64 AudioChunk.sample_offset = 3
+uint64 AudioChunk.segment_sample_offset = 3
 AudioFormat AudioChunk.format = 4
 bytes AudioChunk.data = 5
 uint64 SegmentCompleted.segment_id = 1
@@ -436,23 +491,43 @@ uint64 SegmentCompleted.total_samples = 2
 uint32 SegmentCompleted.chunk_count = 3
 uint32 SynthesisCompleted.segment_count = 1
 uint64 SynthesisCompleted.total_samples = 2
+uint64 SynthesisCompleted.finalize_sequence = 3
 )";
 
-// A property of the recordings: the code and the outcome the session layer
-// gives each end with a cause that the frames show. A timer's reason and code
-// are expiry_error's in runtime/src/serving/session/session_manager.cpp; an
-// expiry of an admitted session takes the abort path and so closes it. The
-// others are in docs/architecture/serving-worker.md ("How sessions end").
+// The ends with a cause that the frames show. The code is the one
+// docs/observability/failure-reasons.md pairs with the reason. The outcome is
+// a property of the recordings, the one the session layer gives that end: an
+// expired timer of an admitted session takes the abort path and so closes it
+// (runtime/src/serving/session/session_manager.cpp); the others are in
+// docs/architecture/serving-worker.md ("How sessions end").
 struct End {
-  std::string_view reason;
+  v1::FailureReason reason;
   v1::ErrorCode code;
   v1::SessionState state;
 };
 constexpr End kEnds[] = {
-    {"client_cancelled", v1::ERROR_CODE_CANCELLED, v1::SESSION_STATE_CLOSED},
-    {"input_credit_exceeded", v1::ERROR_CODE_RESOURCE_EXHAUSTED, v1::SESSION_STATE_FAILED},
-    {"deployment_retired", v1::ERROR_CODE_UNAVAILABLE, v1::SESSION_STATE_CLOSED},
-    {"idle_timeout", v1::ERROR_CODE_TIMEOUT, v1::SESSION_STATE_CLOSED},
+    {v1::FAILURE_REASON_CLIENT_CANCELLED, v1::ERROR_CODE_CANCELLED, v1::SESSION_STATE_CLOSED},
+    {v1::FAILURE_REASON_INPUT_CREDIT_EXCEEDED, v1::ERROR_CODE_RESOURCE_EXHAUSTED,
+     v1::SESSION_STATE_FAILED},
+    {v1::FAILURE_REASON_DEPLOYMENT_RETIRED, v1::ERROR_CODE_UNAVAILABLE, v1::SESSION_STATE_CLOSED},
+    {v1::FAILURE_REASON_IDLE_TIMEOUT, v1::ERROR_CODE_TIMEOUT, v1::SESSION_STATE_CLOSED},
+    {v1::FAILURE_REASON_INTERNAL, v1::ERROR_CODE_INTERNAL, v1::SESSION_STATE_FAILED},
+};
+
+// The reasons the schema's comment on OpenRefused lists as preceding admission,
+// each with the code failure-reasons.md pairs with it.
+struct Refusal {
+  v1::FailureReason reason;
+  v1::ErrorCode code;
+};
+constexpr Refusal kRefusals[] = {
+    {v1::FAILURE_REASON_INVALID_EVENT, v1::ERROR_CODE_CONFIG_INVALID},
+    {v1::FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY, v1::ERROR_CODE_UNSUPPORTED},
+    {v1::FAILURE_REASON_TARGET_UNRESOLVED, v1::ERROR_CODE_UNSUPPORTED},
+    {v1::FAILURE_REASON_TARGET_MISMATCH, v1::ERROR_CODE_NOT_READY},
+    {v1::FAILURE_REASON_STALE_GENERATION, v1::ERROR_CODE_NOT_READY},
+    {v1::FAILURE_REASON_ADMISSION_CLOSED, v1::ERROR_CODE_NOT_READY},
+    {v1::FAILURE_REASON_SESSION_COUNT_LIMIT, v1::ERROR_CODE_RESOURCE_EXHAUSTED},
 };
 
 // No default, and -Wswitch is an error here whatever the build's flags: a
@@ -523,12 +598,15 @@ TEST(StreamEnvelope, GoldenFramesDecodeAndReencodeByteExact) {
 TEST(StreamEnvelope, EveryFieldAndEnumValueHasAGoldenFrame) {
   std::set<std::string> used;
   for (const auto& [frame, message] : golden_messages()) {
-    for_each_message(*message, [&used](const pb::Message& part) {
+    // Only a frame of stream/v1's own type is written with the names of its values.
+    const bool names_values = schema_type(frame) != nullptr;
+    for_each_message(*message, [&used, names_values](const pb::Message& part) {
       std::vector<const pb::FieldDescriptor*> fields;
       part.GetReflection()->ListFields(part, &fields);
       for (const auto* field : fields) {
         used.emplace(field->full_name());
-        if (field->cpp_type() == pb::FieldDescriptor::CPPTYPE_ENUM && !field->is_repeated()) {
+        if (names_values && field->cpp_type() == pb::FieldDescriptor::CPPTYPE_ENUM &&
+            !field->is_repeated()) {
           used.emplace(part.GetReflection()->GetEnum(part, field)->full_name());
         }
       }
@@ -566,10 +644,16 @@ TEST(StreamEnvelope, EveryFieldAndEnumValueHasAGoldenFrame) {
 }
 
 TEST(StreamEnvelope, GoldenFramesKeepTheStatedValueRules) {
-  const auto failure_reasons = schema_enum("failure_reason.json", "reason");
   for (const auto& [frame, message] : golden_messages()) {
     SCOPED_TRACE(frame.file + ": " + frame.name);
-    for_each_message(*message, [&failure_reasons](const pb::Message& part) {
+    for_each_message(*message, [](const pb::Message& part) {
+      std::vector<const pb::FieldDescriptor*> fields;
+      part.GetReflection()->ListFields(part, &fields);
+      for (const auto* field : fields) {
+        if (is_sequence_or_id(field)) {
+          EXPECT_LE(part.GetReflection()->GetUInt64(part, field), kLargest) << field->full_name();
+        }
+      }
       if (const auto* usage = dynamic_cast<const v1::Usage*>(&part)) {
         EXPECT_LE(usage->used(), usage->limit());
       }
@@ -581,6 +665,7 @@ TEST(StreamEnvelope, GoldenFramesKeepTheStatedValueRules) {
                     closed->state() == v1::SESSION_STATE_FAILED);
         EXPECT_TRUE(closed->state() != v1::SESSION_STATE_FAILED || closed->has_cause())
             << "a failed session names its cause";
+        EXPECT_NE(closed->admission(), v1::ADMISSION_UNSPECIFIED) << "admission is always set";
         if (closed->has_cause()) {
           const auto* end = std::find_if(
               std::begin(kEnds), std::end(kEnds),
@@ -590,15 +675,21 @@ TEST(StreamEnvelope, GoldenFramesKeepTheStatedValueRules) {
           EXPECT_EQ(closed->state(), end->state);
         }
       }
+      if (const auto* refused = dynamic_cast<const v1::OpenRefused*>(&part)) {
+        EXPECT_EQ(refused->admission(), v1::ADMISSION_NOT_ADMITTED);
+        const auto* refusal = std::find_if(
+            std::begin(kRefusals), std::end(kRefusals),
+            [refused](const Refusal& known) { return known.reason == refused->cause().reason(); });
+        ASSERT_NE(refusal, std::end(kRefusals)) << "not a reason that precedes admission";
+        EXPECT_EQ(refused->cause().code(), refusal->code);
+      }
       if (const auto* cause = dynamic_cast<const v1::EndCause*>(&part)) {
+        EXPECT_NE(cause->reason(), v1::FAILURE_REASON_UNSPECIFIED);
         EXPECT_NE(cause->code(), v1::ERROR_CODE_UNSPECIFIED);
-        const std::string& reason = cause->reason();
-        EXPECT_TRUE(is_snake_case(reason) && reason.size() <= 64) << reason;
-        // Numbered as the taxonomy lists them, which EnumsMirrorTheirSources holds.
-        const auto listed = std::find(failure_reasons.begin(), failure_reasons.end(), reason);
-        const auto expected =
-            listed == failure_reasons.end() ? 0 : 1 + (listed - failure_reasons.begin());
-        EXPECT_EQ(cause->failure_reason(), expected) << reason;
+        const std::string& detail = cause->detail();
+        const auto printable = [](char c) { return c >= ' ' && c <= '~'; };
+        EXPECT_TRUE(detail.size() <= 64 && std::all_of(detail.begin(), detail.end(), printable))
+            << "not at most 64 ASCII characters: " << detail;
       }
     });
   }
@@ -610,19 +701,34 @@ TEST(StreamEnvelope, SessionScriptsAreSequencedAndAddressed) {
     const auto script = load_script(file);
     ASSERT_TRUE(opens_and_is_ready(script));
     const v1::ClientEvent& open = *script[0].client;
+    const v1::ResolvedTarget& target = open.open().resolved();
     const v1::Ready& ready = script[1].server->ready();
     EXPECT_TRUE(open.session_id().empty());
-    EXPECT_NE(open.generation(), 0U);
+    EXPECT_TRUE(open.open().has_resolved()) << "a server refuses an Open that carries a selector";
+    EXPECT_NE(target.generation(), 0U);
     EXPECT_FALSE(ready.session_id().empty());
-    EXPECT_EQ(ready.generation(), open.generation());
-    // A property of the recordings: the client resolved the descriptor that is served.
-    EXPECT_EQ(ready.descriptor_digest(), open.open().descriptor_digest());
+    EXPECT_EQ(ready.generation(), target.generation());
+    // An Open whose digest is not the served descriptor's is refused.
+    EXPECT_EQ(ready.descriptor_digest(), target.descriptor_digest());
     // The active state is the one in which Ready has been sent (session.hpp).
     EXPECT_EQ(ready.status().state(), v1::SESSION_STATE_ACTIVE);
+    // The deployment's bounds for the session's mode, never the other's.
+    const bool speech = open.open().mode() == v1::SESSION_MODE_STT_STREAMING;
+    EXPECT_EQ(ready.limits().has_speech_to_text(), speech);
+    EXPECT_EQ(ready.limits().has_text_to_speech(), !speech);
+    // A property of the recordings: neither side declares a capability; none is defined yet.
+    EXPECT_TRUE(open.open().capabilities().empty() && ready.capabilities().empty());
 
     std::uint64_t client_sequence = 0;
     std::uint64_t server_sequence = 0;
-    std::uint64_t accepted_sequence = 0;
+    std::set<std::uint64_t> inputs;  // sequences of the Audio and TextSegments sent
+    v1::Accepted accepted;           // the latest one
+    bool segment_credit_returned = false;
+    std::uint64_t audio_samples = 0;  // what the events add up to
+    std::uint64_t text_bytes = 0;
+    std::uint64_t output_bytes = 0;
+    std::uint32_t finals = 0;
+    std::uint32_t segments = 0;
     for (std::size_t i = 0; i < script.size(); ++i) {
       SCOPED_TRACE(script[i].name);
       if (script[i].client) {
@@ -631,33 +737,62 @@ TEST(StreamEnvelope, SessionScriptsAreSequencedAndAddressed) {
         if (i > 0) {
           EXPECT_FALSE(event.has_open());
           EXPECT_EQ(event.session_id(), ready.session_id());
-          EXPECT_EQ(event.generation(), ready.generation());
+        }
+        if (event.has_audio() || event.has_text_segment()) {
+          inputs.insert(event.sequence());
+          audio_samples += event.audio().sample_count();
+          text_bytes += event.text_segment().text().size();
         }
       } else if (script[i].server) {
         const v1::ServerEvent& event = *script[i].server;
         EXPECT_EQ(event.sequence(), ++server_sequence);
         EXPECT_EQ(event.has_ready(), i == 1);
         EXPECT_EQ(event.has_session_closed(), i + 1 == script.size());
+        output_bytes += event.audio_chunk().data().size();
+        finals += event.has_final_transcript() ? 1 : 0;
+        segments += event.has_segment_completed() ? 1 : 0;
         if (event.has_accepted()) {
-          const v1::Accepted& accepted = event.accepted();
-          EXPECT_LE(accepted.accepted_sequence(), client_sequence) << "an event not sent yet";
-          EXPECT_GE(accepted.accepted_sequence(), accepted_sequence) << "acceptance went back";
-          accepted_sequence = accepted.accepted_sequence();
+          const v1::Accepted before = accepted;
+          accepted = event.accepted();
+          const v1::InputCredit& credit = accepted.input_credit();
+          EXPECT_TRUE(inputs.contains(accepted.accepted_sequence()))
+              << "not the sequence of an Audio or a TextSegment already sent";
+          EXPECT_GE(accepted.accepted_sequence(), before.accepted_sequence()) << "it went back";
+          // With no input newly accepted, it is sent because credit returned.
+          if (accepted.accepted_sequence() == before.accepted_sequence()) {
+            const std::uint64_t waiting = credit.waiting_segments().used();
+            const std::uint64_t waiting_before = before.input_credit().waiting_segments().used();
+            EXPECT_LE(credit.bytes().used(), before.input_credit().bytes().used());
+            EXPECT_LE(waiting, waiting_before);
+            EXPECT_FALSE(same(credit, before.input_credit())) << "no credit returned";
+            segment_credit_returned = segment_credit_returned || waiting < waiting_before;
+          }
           // A property of the recordings: a session keeps the budgets its Ready reported.
-          const v1::InputCredit& credit = ready.status().input_credit();
-          EXPECT_EQ(accepted.input_credit().bytes().limit(), credit.bytes().limit());
-          EXPECT_EQ(accepted.input_credit().waiting_segments().limit(),
-                    credit.waiting_segments().limit());
+          const v1::InputCredit& budgets = ready.status().input_credit();
+          EXPECT_EQ(credit.bytes().limit(), budgets.bytes().limit());
+          EXPECT_EQ(credit.waiting_segments().limit(), budgets.waiting_segments().limit());
         }
       }
     }
+    // A property of the recordings: the text-to-speech one shows a waiting segment's credit return.
+    EXPECT_TRUE(speech || segment_credit_returned);
 
     ASSERT_TRUE(script.back().server && script.back().server->has_session_closed());
     const v1::SessionClosed& closed = script.back().server->session_closed();
     EXPECT_EQ(closed.state(), v1::SESSION_STATE_CLOSED);
     EXPECT_FALSE(closed.has_cause());
-    EXPECT_EQ(closed.last_accepted_sequence(), client_sequence);
-    EXPECT_EQ(closed.last_produced_sequence(), server_sequence - 1);
+    EXPECT_EQ(closed.admission(), v1::ADMISSION_ADMITTED);
+    EXPECT_EQ(closed.last_accepted_sequence(), accepted.accepted_sequence());
+    // A property of the recordings: all the input sent was accepted, so the totals count all of it.
+    ASSERT_FALSE(inputs.empty());
+    EXPECT_EQ(accepted.accepted_sequence(), *inputs.rbegin());
+    EXPECT_EQ(closed.totals().input_audio_samples(), audio_samples);
+    EXPECT_EQ(closed.totals().input_text_bytes(), text_bytes);
+    const std::uint64_t sample_bytes = bytes_per_sample(ready.output_format());
+    EXPECT_EQ(closed.totals().output_audio_samples(),
+              sample_bytes == 0 ? 0 : output_bytes / sample_bytes);
+    EXPECT_EQ(closed.totals().utterances_completed(), finals);
+    EXPECT_EQ(closed.totals().segments_completed(), segments);
   }
 }
 
@@ -672,78 +807,111 @@ TEST(StreamEnvelope, SpeechToTextScriptKeepsSampleAndTimeUnits) {
   const std::uint64_t sample_bytes = bytes_per_sample(format);
   ASSERT_NE(rate, 0U);
   ASSERT_NE(sample_bytes, 0U);
+  // The frame lengths the deployment admits, which are never outside 20 to 320 ms.
+  const v1::SpeechToTextLimits& limits = script[1].server->ready().limits().speech_to_text();
+  EXPECT_GE(limits.min_frame_ms(), 20U);
+  EXPECT_LE(limits.min_frame_ms(), limits.max_frame_ms());
+  EXPECT_LE(limits.max_frame_ms(), 320U);
 
+  // Events the client has still to send: after the last, it closes its sending half.
+  auto client_events = std::count_if(script.begin(), script.end(),
+                                     [](const Event& event) { return event.client.has_value(); });
   std::uint64_t sent = 0;          // samples the client has sent
   std::uint64_t covered = 0;       // where the last finished utterance ended, in samples
+  std::uint64_t ended = 0;         // id of the last utterance with an endpoint
   std::uint64_t finished = 0;      // id of the last finished utterance
   std::uint64_t revised = 0;       // utterance of the last partial
   std::uint32_t revision = 0;      // and its revision
+  std::string hypothesis;          // text of the open utterance's last partial
+  std::uint64_t finalize = 0;      // sequence of a Finalize that no FinalTranscript has answered
   bool audio_after_final = false;  // without it nothing shows that offsets are not reset
-  bool finalizing = false;         // a Finalize that no FinalTranscript has answered
+  bool short_body = false;         // the last Audio was shorter than a frame
+  bool short_bodies = false;       // without one nothing shows that a last body may be
   std::optional<v1::EndpointDetected> endpoint;
+  v1::EndpointReason ended_by = v1::ENDPOINT_REASON_UNSPECIFIED;  // the last endpoint's reason
   for (const Event& event : script) {
     SCOPED_TRACE(event.name);
+    if (event.client) {
+      --client_events;
+      EXPECT_TRUE(!short_body || event.client->has_finalize())
+          << "only the last body before a Finalize or the half-close may be shorter than a frame";
+      short_body = false;
+    }
     if (event.client && event.client->has_audio()) {
       const v1::Audio& audio = event.client->audio();
-      EXPECT_FALSE(finalizing) << "input before the FinalTranscript that answers Finalize";
+      EXPECT_EQ(finalize, 0U) << "input before the FinalTranscript that answers Finalize";
       EXPECT_EQ(audio.sample_offset(), sent);
       EXPECT_EQ(audio.data().size(), audio.sample_count() * sample_bytes);
-      EXPECT_GE(audio.sample_count() * 1000ULL, 20 * rate) << "less than 20 ms";
-      EXPECT_LE(audio.sample_count() * 1000ULL, 320 * rate) << "more than 320 ms";
+      EXPECT_LE(audio.sample_count() * 1000ULL, limits.max_frame_ms() * rate) << "a longer frame";
+      short_body = audio.sample_count() * 1000ULL < limits.min_frame_ms() * rate;
+      short_bodies = short_bodies || short_body;
       sent += audio.sample_count();
       audio_after_final = audio_after_final || finished != 0;
     } else if (event.client && event.client->has_finalize()) {
       // A property of this recording: the schema allows a repeat, which starts nothing.
-      EXPECT_FALSE(finalizing) << "a Finalize before the one before it was answered";
-      finalizing = true;
+      EXPECT_EQ(finalize, 0U) << "a Finalize before the one before it was answered";
+      finalize = event.client->sequence();
     } else if (event.server && event.server->has_partial_transcript()) {
       const v1::PartialTranscript& partial = event.server->partial_transcript();
-      EXPECT_GT(partial.utterance_id(), finished) << "a final transcript is never revised";
+      EXPECT_GT(partial.utterance_id(), ended) << "a partial after its utterance's endpoint";
       if (partial.utterance_id() == revised) {
         EXPECT_GT(partial.revision(), revision);
       }
       revised = partial.utterance_id();
       revision = partial.revision();
+      hypothesis = partial.text();
     } else if (event.server && event.server->has_endpoint_detected()) {
-      // Properties of this recording, not of the schema: each utterance's endpoint
-      // comes before its FinalTranscript, ended by a Finalize exactly when one waits.
+      // Exactly one per utterance, before the utterance's FinalTranscript.
       EXPECT_FALSE(endpoint.has_value()) << "the utterance before has no FinalTranscript";
       endpoint = event.server->endpoint_detected();
-      EXPECT_GT(endpoint->utterance_id(), finished);
+      EXPECT_GT(endpoint->utterance_id(), ended);
+      ended = endpoint->utterance_id();
       EXPECT_GE(endpoint->end_sample_offset(), covered);
       EXPECT_LE(endpoint->end_sample_offset(), sent);
-      EXPECT_EQ(endpoint->reason() == v1::ENDPOINT_REASON_CLIENT_FINALIZE, finalizing)
-          << "ended by a Finalize exactly when one is waiting";
+      ended_by = endpoint->reason();
+      EXPECT_TRUE(ended_by != v1::ENDPOINT_REASON_HALF_CLOSE || client_events == 0)
+          << "a half-close before the client's last event";
+      // A property of this recording: a Finalize ends an utterance exactly when one waits.
+      EXPECT_EQ(ended_by == v1::ENDPOINT_REASON_CLIENT_FINALIZE, finalize != 0);
     } else if (event.server && event.server->has_final_transcript()) {
       const v1::FinalTranscript& final_transcript = event.server->final_transcript();
-      // As above: the schema does not order the two events.
       ASSERT_TRUE(endpoint.has_value()) << "FinalTranscript without EndpointDetected";
       EXPECT_EQ(final_transcript.utterance_id(), endpoint->utterance_id());
       EXPECT_EQ(final_transcript.end_sample_offset(), endpoint->end_sample_offset());
+      // Zero when the utterance ended without a Finalize.
+      EXPECT_EQ(final_transcript.finalize_sequence(), finalize);
       // An utterance's audio starts where the one before ended. That its segments
       // are in order, apart and never empty is a property of this recording.
       std::uint64_t from_us = start_us_of(covered, rate);
       const std::uint64_t until_us = end_us_of(final_transcript.end_sample_offset(), rate);
+      std::string text;
       for (const v1::TranscriptSegment& segment : final_transcript.segments()) {
         EXPECT_GE(segment.start_us(), from_us);
         EXPECT_LT(segment.start_us(), segment.end_us());
         EXPECT_LE(segment.end_us(), until_us);
         from_us = segment.end_us();
+        text += segment.text();
       }
-      // A property of this recording, not of the schema: each spoken utterance
-      // lasts to its endpoint, so a time in another unit ends short of it.
+      // Properties of this recording, not of the schema: the last hypothesis is the
+      // transcript, which is the segments' text with nothing between, and each spoken
+      // utterance lasts to its endpoint, so a time in another unit ends short of it.
+      EXPECT_EQ(text, hypothesis);
       if (final_transcript.segments_size() > 0) {
         EXPECT_EQ(final_transcript.segments().rbegin()->end_us(), until_us);
       }
       finished = final_transcript.utterance_id();
       covered = final_transcript.end_sample_offset();
       endpoint.reset();
-      finalizing = false;
+      hypothesis.clear();
+      finalize = 0;
     }
   }
   EXPECT_FALSE(endpoint.has_value()) << "the last utterance has no FinalTranscript";
-  EXPECT_FALSE(finalizing) << "a Finalize has no FinalTranscript";
+  EXPECT_EQ(finalize, 0U) << "a Finalize has no FinalTranscript";
   EXPECT_TRUE(audio_after_final);
+  EXPECT_TRUE(short_bodies);
+  // A property of this recording: the client closes its sending half with an utterance open.
+  EXPECT_EQ(ended_by, v1::ENDPOINT_REASON_HALF_CLOSE);
 }
 
 TEST(StreamEnvelope, TranscriptIntervalsRoundOutward) {
@@ -770,9 +938,13 @@ TEST(StreamEnvelope, TextToSpeechScriptDeliversWholeSegmentsInOrder) {
   const v1::AudioFormat& format = script[1].server->ready().output_format();
   EXPECT_EQ(script[0].client->open().mode(), v1::SESSION_MODE_TTS_STREAMING);
   const std::uint64_t sample_bytes = bytes_per_sample(format);
-  const std::uint64_t full_chunk = format.sample_rate_hz() / 50;  // 20 ms
+  const std::uint64_t rate = format.sample_rate_hz();
+  const std::uint64_t full_chunk = rate / 50;  // 20 ms
   ASSERT_NE(sample_bytes, 0U);
   ASSERT_NE(full_chunk, 0U);
+  // What the deployment admits; a segment is never above 4,096 bytes.
+  const v1::TextToSpeechLimits& limits = script[1].server->ready().limits().text_to_speech();
+  EXPECT_LE(limits.max_segment_text_bytes(), 4096U);
 
   struct Delivery {
     std::uint64_t segment_id = 0;
@@ -783,24 +955,28 @@ TEST(StreamEnvelope, TextToSpeechScriptDeliversWholeSegmentsInOrder) {
   std::optional<Delivery> delivery;  // the segment whose chunks are arriving
   std::uint64_t submitted_id = 0;
   std::uint32_t submitted = 0;
+  std::uint64_t submitted_bytes = 0;
   std::uint64_t completed_id = 0;
   std::uint32_t completed = 0;
   std::uint64_t completed_samples = 0;
   int syntheses_completed = 0;
-  bool finalizing = false;  // a Finalize that no SynthesisCompleted has answered
+  std::uint64_t finalize = 0;  // sequence of a Finalize that no SynthesisCompleted has answered
   bool exact_multiple = false;
   bool short_last_chunk = false;
   for (const Event& event : script) {
     SCOPED_TRACE(event.name);
     if (event.client && event.client->has_text_segment()) {
-      EXPECT_FALSE(finalizing) << "input before the SynthesisCompleted that answers Finalize";
-      EXPECT_GT(event.client->text_segment().segment_id(), submitted_id);
-      submitted_id = event.client->text_segment().segment_id();
+      const v1::TextSegment& segment = event.client->text_segment();
+      EXPECT_EQ(finalize, 0U) << "input before the SynthesisCompleted that answers Finalize";
+      EXPECT_GT(segment.segment_id(), submitted_id);
+      EXPECT_LE(segment.text().size(), limits.max_segment_text_bytes());
+      submitted_id = segment.segment_id();
+      submitted_bytes += segment.text().size();
       ++submitted;
     } else if (event.client && event.client->has_finalize()) {
       // A property of this recording: the schema allows a repeat, which starts nothing.
-      EXPECT_FALSE(finalizing) << "a Finalize before the one before it was answered";
-      finalizing = true;
+      EXPECT_EQ(finalize, 0U) << "a Finalize before the one before it was answered";
+      finalize = event.client->sequence();
     } else if (event.server && event.server->has_audio_chunk()) {
       const v1::AudioChunk& chunk = event.server->audio_chunk();
       if (!delivery) {
@@ -810,7 +986,7 @@ TEST(StreamEnvelope, TextToSpeechScriptDeliversWholeSegmentsInOrder) {
       }
       EXPECT_EQ(chunk.segment_id(), delivery->segment_id) << "segments are interleaved";
       EXPECT_EQ(chunk.chunk_index(), delivery->chunks);
-      EXPECT_EQ(chunk.sample_offset(), delivery->samples);
+      EXPECT_EQ(chunk.segment_sample_offset(), delivery->samples);
       EXPECT_TRUE(same(chunk.format(), format));
       EXPECT_FALSE(delivery->ended_short) << "only a segment's last chunk may be short";
       const std::uint64_t samples = chunk.data().size() / sample_bytes;
@@ -827,6 +1003,7 @@ TEST(StreamEnvelope, TextToSpeechScriptDeliversWholeSegmentsInOrder) {
       EXPECT_EQ(done.total_samples(), delivery->samples);
       EXPECT_EQ(done.chunk_count(), delivery->chunks);
       EXPECT_EQ(done.chunk_count(), (done.total_samples() + full_chunk - 1) / full_chunk);
+      EXPECT_LE(done.total_samples() * 1000, limits.max_segment_audio_ms() * rate);
       (delivery->samples % full_chunk == 0 ? exact_multiple : short_last_chunk) = true;
       completed_id = delivery->segment_id;
       completed_samples += delivery->samples;
@@ -834,17 +1011,21 @@ TEST(StreamEnvelope, TextToSpeechScriptDeliversWholeSegmentsInOrder) {
       delivery.reset();
     } else if (event.server && event.server->has_synthesis_completed()) {
       const v1::SynthesisCompleted& done = event.server->synthesis_completed();
-      EXPECT_TRUE(finalizing) << "SynthesisCompleted answers a Finalize";
-      finalizing = false;
+      EXPECT_NE(finalize, 0U) << "SynthesisCompleted answers a Finalize";
+      EXPECT_EQ(done.finalize_sequence(), finalize);
+      finalize = 0;
       EXPECT_FALSE(delivery.has_value()) << "a segment has chunks and no SegmentCompleted";
       EXPECT_EQ(completed, submitted) << "a submitted segment has no SegmentCompleted";
       EXPECT_EQ(done.segment_count(), completed);
       EXPECT_EQ(done.total_samples(), completed_samples);
+      // The bounds on the segments of one synthesis together; this recording has one.
+      EXPECT_LE(submitted_bytes, limits.max_synthesis_text_bytes());
+      EXPECT_LE(done.total_samples() * 1000, limits.max_synthesis_audio_ms() * rate);
       ++syntheses_completed;
     }
   }
   EXPECT_EQ(syntheses_completed, 1);
-  EXPECT_FALSE(finalizing) << "a Finalize has no SynthesisCompleted";
+  EXPECT_EQ(finalize, 0U) << "a Finalize has no SynthesisCompleted";
   EXPECT_TRUE(exact_multiple) << "no segment ends on a full chunk";
   EXPECT_TRUE(short_last_chunk) << "no segment ends on a short chunk";
 }
@@ -924,6 +1105,16 @@ TEST(StreamEnvelope, OpenReservesTheOperatorOnlyNames) {
   }
 }
 
+// Kept for a cancel scoped to text segments, which is not defined yet.
+TEST(StreamEnvelope, SegmentCancelStaysReserved) {
+  EXPECT_TRUE(v1::ClientEvent::descriptor()->IsReservedNumber(15));
+  EXPECT_TRUE(v1::ClientEvent::descriptor()->IsReservedName("cancel_segments"));
+  EXPECT_TRUE(v1::ServerEvent::descriptor()->IsReservedNumber(16));
+  EXPECT_TRUE(v1::ServerEvent::descriptor()->IsReservedName("segments_cancelled"));
+  EXPECT_TRUE(v1::Capability_descriptor()->IsReservedNumber(1));
+  EXPECT_TRUE(v1::Capability_descriptor()->IsReservedName("CAPABILITY_SEGMENT_CANCEL"));
+}
+
 // Each comparison is of whole lists, so a name, a number or a count that
 // differs on either side fails it.
 TEST(StreamEnvelope, EnumsMirrorTheirSources) {
@@ -957,65 +1148,69 @@ TEST(StreamEnvelope, UnknownAdditionsAreReadAsTheSchemaSays) {
   for (const Frame& frame : all_frames()) {
     of_another_schema += schema_type(frame) == nullptr ? 1 : 0;
   }
-  EXPECT_EQ(of_another_schema, 4U) << "a frame of extension.proto that nothing below reads";
+  EXPECT_EQ(of_another_schema, 7U) << "a frame of extension.proto that nothing below reads";
 
-  const std::string digest = "sha256:" + std::string(64, '0');
-  // extension.proto's AddedBody{text: "synthetic body"}, kept as the bytes it arrived in.
-  const std::string added_body = std::string{"\x0a\x0e"} + "synthetic body";
+  // What a reader is handed is all this shows: ignoring or refusing it is the receiver's to do.
 
-  // An added envelope field and an added field of a known body: the event
-  // decodes, what is known is intact and what is not is kept.
-  v1::ClientEvent added_fields;
-  ASSERT_TRUE(added_fields.ParseFromString(bytes_of("added_fields")));
-  EXPECT_EQ(added_fields.sequence(), 1U);
-  EXPECT_EQ(added_fields.generation(), 7U);
-  ASSERT_TRUE(added_fields.has_open());
-  EXPECT_EQ(added_fields.open().deployment_id(), "synthetic-deployment");
-  EXPECT_EQ(added_fields.open().descriptor_digest(), digest);
-  EXPECT_EQ(added_fields.open().mode(), v1::SESSION_MODE_STT_STREAMING);
-  const pb::UnknownFieldSet& envelope_unknown = added_fields.unknown_fields();
-  ASSERT_EQ(envelope_unknown.field_count(), 1);
-  EXPECT_EQ(envelope_unknown.field(0).number(), 4);
-  ASSERT_EQ(envelope_unknown.field(0).type(), pb::UnknownField::TYPE_VARINT);
-  EXPECT_EQ(envelope_unknown.field(0).varint(), 5U);
-  const pb::UnknownFieldSet& open_unknown = added_fields.open().unknown_fields();
-  ASSERT_EQ(open_unknown.field_count(), 1);
-  EXPECT_EQ(open_unknown.field(0).number(), 9);
-  ASSERT_EQ(open_unknown.field(0).type(), pb::UnknownField::TYPE_LENGTH_DELIMITED);
-  EXPECT_EQ(open_unknown.field(0).length_delimited(), "synthetic addition");
+  // An added envelope field and an added field of a known body, which a receiver ignores:
+  // the event decodes, what is known is intact and what is not is kept.
+  v1::ClientEvent client_fields;
+  ASSERT_TRUE(client_fields.ParseFromString(bytes_of("added_client_fields")));
+  EXPECT_EQ(client_fields.sequence(), 1U);
+  EXPECT_EQ(client_fields.open().resolved().deployment_id(), "synthetic-deployment");
+  EXPECT_EQ(client_fields.open().resolved().generation(), 7U);
+  EXPECT_EQ(client_fields.open().mode(), v1::SESSION_MODE_STT_STREAMING);
+  EXPECT_EQ(unknown_fields(client_fields), "4=5 ");
+  EXPECT_EQ(unknown_fields(client_fields.open()), "10='synthetic addition' ");
 
-  // A body in the reserved range: the event decodes with no body at all.
+  v1::ServerEvent server_fields;
+  ASSERT_TRUE(server_fields.ParseFromString(bytes_of("added_server_fields")));
+  EXPECT_EQ(server_fields.sequence(), 1U);
+  EXPECT_EQ(server_fields.ready().session_id(), "synthetic-session-1");
+  EXPECT_EQ(server_fields.ready().generation(), 7U);
+  EXPECT_EQ(unknown_fields(server_fields), "2=5 ");
+  EXPECT_EQ(unknown_fields(server_fields.ready()), "10='synthetic addition' ");
+
+  // A body in the reserved range, which a server refuses and a client ignores: the event
+  // decodes with no body at all. "\x0a\x0e" and the text are extension.proto's AddedBody.
+  const std::string added_body = "40='\x0a\x0esynthetic body' ";
   v1::ClientEvent client_body;
   ASSERT_TRUE(client_body.ParseFromString(bytes_of("added_client_body")));
   EXPECT_EQ(client_body.body_case(), v1::ClientEvent::BODY_NOT_SET);
   EXPECT_EQ(client_body.sequence(), 2U);
   EXPECT_EQ(client_body.session_id(), "synthetic-session-1");
-  EXPECT_EQ(client_body.generation(), 7U);
-  ASSERT_EQ(client_body.unknown_fields().field_count(), 1);
-  EXPECT_EQ(client_body.unknown_fields().field(0).number(), 40);
-  ASSERT_EQ(client_body.unknown_fields().field(0).type(), pb::UnknownField::TYPE_LENGTH_DELIMITED);
-  EXPECT_EQ(client_body.unknown_fields().field(0).length_delimited(), added_body);
+  EXPECT_EQ(unknown_fields(client_body), added_body);
 
   v1::ServerEvent server_body;
   ASSERT_TRUE(server_body.ParseFromString(bytes_of("added_server_body")));
   EXPECT_EQ(server_body.body_case(), v1::ServerEvent::BODY_NOT_SET);
   EXPECT_EQ(server_body.sequence(), 2U);
-  ASSERT_EQ(server_body.unknown_fields().field_count(), 1);
-  EXPECT_EQ(server_body.unknown_fields().field(0).number(), 40);
-  ASSERT_EQ(server_body.unknown_fields().field(0).type(), pb::UnknownField::TYPE_LENGTH_DELIMITED);
-  EXPECT_EQ(server_body.unknown_fields().field(0).length_delimited(), added_body);
+  EXPECT_EQ(unknown_fields(server_body), added_body);
 
-  // A mode this schema does not name stays the number that was sent.
+  // An enum value this schema does not name stays the number that was sent, in its field. A
+  // receiver reads it as unspecified, and a server refuses an Open with such a mode.
   v1::ClientEvent added_mode;
   ASSERT_TRUE(added_mode.ParseFromString(bytes_of("added_mode")));
-  ASSERT_TRUE(added_mode.has_open());
-  EXPECT_EQ(added_mode.sequence(), 1U);
-  EXPECT_EQ(added_mode.generation(), 7U);
-  EXPECT_EQ(added_mode.open().deployment_id(), "synthetic-deployment");
-  EXPECT_EQ(added_mode.open().descriptor_digest(), digest);
+  EXPECT_EQ(added_mode.open().resolved().deployment_id(), "synthetic-deployment");
   EXPECT_EQ(static_cast<int>(added_mode.open().mode()), 3);
   EXPECT_FALSE(v1::SessionMode_IsValid(added_mode.open().mode()));
   EXPECT_EQ(unknown_field_count(added_mode), 0);
+
+  v1::ClientEvent client_capability;
+  ASSERT_TRUE(client_capability.ParseFromString(bytes_of("added_client_capability")));
+  EXPECT_EQ(client_capability.open().mode(), v1::SESSION_MODE_TTS_STREAMING);
+  ASSERT_EQ(client_capability.open().capabilities_size(), 1);
+  EXPECT_EQ(static_cast<int>(client_capability.open().capabilities(0)), 1);
+  EXPECT_FALSE(v1::Capability_IsValid(client_capability.open().capabilities(0)));
+  EXPECT_EQ(unknown_field_count(client_capability), 0);
+
+  v1::ServerEvent server_capability;
+  ASSERT_TRUE(server_capability.ParseFromString(bytes_of("added_server_capability")));
+  EXPECT_EQ(server_capability.ready().session_id(), "synthetic-session-1");
+  ASSERT_EQ(server_capability.ready().capabilities_size(), 1);
+  EXPECT_EQ(static_cast<int>(server_capability.ready().capabilities(0)), 1);
+  EXPECT_FALSE(v1::Capability_IsValid(server_capability.ready().capabilities(0)));
+  EXPECT_EQ(unknown_field_count(server_capability), 0);
 }
 
 }  // namespace

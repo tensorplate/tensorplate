@@ -16,10 +16,15 @@ enum SessionMode {
   SESSION_MODE_ADDED = 3;
 }
 
+enum Capability {
+  CAPABILITY_UNSPECIFIED = 0;
+  // Added: stream/v1 names no capability and reserves number 1.
+  CAPABILITY_ADDED = 1;
+}
+
 message ClientEvent {
   uint64 sequence = 1;
   string session_id = 2;
-  uint64 generation = 3;
   // Added: an envelope field.
   uint32 added_scalar = 4;
 
@@ -30,21 +35,39 @@ message ClientEvent {
   }
 }
 
-message Open {
+message ResolvedTarget {
   string deployment_id = 1;
-  string descriptor_digest = 2;
+  uint64 generation = 2;
+}
+
+message Open {
+  oneof target {
+    ResolvedTarget resolved = 1;
+  }
   SessionMode mode = 3;
+  repeated Capability capabilities = 9;
   // Added: a field inside a known body.
-  string added_text = 9;
+  string added_text = 10;
 }
 
 message ServerEvent {
   uint64 sequence = 1;
+  // Added: an envelope field.
+  uint32 added_scalar = 2;
 
   oneof body {
+    Ready ready = 10;
     // Added: a body in the range stream/v1 reserves.
     AddedBody added_body = 40;
   }
+}
+
+message Ready {
+  string session_id = 1;
+  uint64 generation = 2;
+  repeated Capability capabilities = 9;
+  // Added: a field inside a known body.
+  string added_text = 10;
 }
 
 message AddedBody {
