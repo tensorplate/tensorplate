@@ -531,6 +531,36 @@ class ReleaseArtifactIdentityTests(unittest.TestCase):
                 else:
                     self.assertEqual({a["version"] for a in sdk}, {fixture.python_version})
 
+    def test_native_records_are_checksummed_verified_and_published(self) -> None:
+        fixture = self._make_fixture("final")
+        files = []
+        for arch in ("amd64", "arm64"):
+            for suffix in (f"native-closure-{arch}.spdx.json", f"vcpkg-cache-provenance-{arch}.json"):
+                path = fixture.artifacts / f"tensorplate-{fixture.tag}-{suffix}"
+                path.write_text("{}\n")
+                files.append(path)
+        self._assert_ok(self._driver("manifest", *self._identity_args(fixture)))
+        self._assert_ok(self._verify(fixture))
+        manifest = json.loads(fixture.manifest.read_text())
+        recorded = {a["file"] for a in manifest["artifacts"] if a.get("kind", "").startswith("native-")}
+        self.assertEqual(recorded, {p.name for p in files})
+        published = self._publish(fixture)
+        self._assert_ok(published)
+        for path in files:
+            self.assertIn(str(path), published.stdout)
+        files[0].write_text("changed\n")
+        refused = self._verify(fixture)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("checksum mismatch", refused.stderr)
+
+    def test_native_records_outside_the_manifest_cannot_be_published(self) -> None:
+        fixture = self._make_fixture("final")
+        path = fixture.artifacts / f"tensorplate-{fixture.tag}-native-closure-amd64.spdx.json"
+        path.write_text("{}\n")
+        refused = self._publish(fixture)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("missing from manifest", refused.stderr)
+
     def test_verify_rejects_stale_debian_filename_and_metadata(self) -> None:
         for mutation in ("filename", "metadata", "both"):
             with self.subTest(mutation=mutation):

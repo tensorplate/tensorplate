@@ -4484,7 +4484,7 @@ def evaluate(expression: object, context: dict) -> object:
         return expression
     body = str(expression).strip().removeprefix("${{").removesuffix("}}")
     body = body.replace("&&", " and ").replace("||", " or ")
-    body = re.sub(r"[a-z_]+(?:\.[a-z_]+)+", lambda name: repr(context[name.group()]), body)
+    body = re.sub(r"[A-Za-z_]+(?:\.[A-Za-z_]+)+", lambda name: repr(context[name.group()]), body)
     return eval(body, {"__builtins__": {}})  # noqa: S307 - the repository's own expressions
 
 
@@ -4548,6 +4548,8 @@ class ReleaseWorkflowVcpkgTests(unittest.TestCase):
         values = {f"github.{key}": value for key, value in given.items()}
         values["needs.meta.outputs.publish"] = given["publish"]
         values["github.event.repository.default_branch"] = given.get("default_branch", "develop")
+        for key, value in job.get("env", {}).items():
+            values[f"env.{key}"] = evaluate(value, values)
         return evaluate(use["with"]["mode"], values)
 
     def appended(self, step: dict, **values: str) -> tuple:

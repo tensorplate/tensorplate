@@ -76,6 +76,8 @@ python3 "$verify_build_source_identity"
 python3 "$verify_build_configuration"
 python3 "$verify_changelog_fold"
 python3 "$verify_native_sbom"
+python3 test/release/test_native_cache_provenance.py
+python3 test/release/test_native_release_record.py
 python3 test/release/test_native_code_absence.py
 python3 test/release/test_vulnerability_dispositions.py
 python3 "$verify_speech_runtime_release"
@@ -111,11 +113,11 @@ export PATH="$tmp/stub-bin:$PATH"
 # plain command create a branch whose tag release.yml rejects for not
 # descending from the trunk.
 cut_dry_run="$("$script" cut --version 0.1.2 --final --dry-run)"
-printf '%s\n' "$cut_dry_run" | grep -q 'trunk branch: develop' || {
+grep -q 'trunk branch: develop' <<<"$cut_dry_run" || {
   echo "FAIL: cut must default to the trunk" >&2
   exit 1
 }
-if printf '%s\n' "$cut_dry_run" | grep -q 'release/'; then
+if grep -q 'release/' <<<"$cut_dry_run"; then
   echo "FAIL: cut must not name a release/X.Y maintenance branch" >&2
   exit 1
 fi
@@ -150,6 +152,7 @@ printf '# TensorPlate v%s\n\nSandbox notes.\n' "$cut_version" \
 mkdir -p "$cut_repo/tools/release"
 printf '#!/bin/sh\nexit 0\n' > "$cut_repo/tools/release/check-evidence-bundles.sh"
 chmod +x "$cut_repo/tools/release/check-evidence-bundles.sh"
+cp "$repo_root"/tools/release/native-*.py "$cut_repo/tools/release/"
 
 git init -q --bare -b develop "$cut_origin"
 (
@@ -207,7 +210,7 @@ HOOK
     echo "FAIL: cut tagged the trunk head instead of the release commit" >&2
     exit 1
   fi
-  printf '%s\n' "$out" | grep -q 'not the expected release commit' || {
+  grep -q 'not the expected release commit' <<<"$out" || {
     echo "FAIL: cut stopped for the wrong reason: $out" >&2; exit 1; }
   [[ -z "$(git tag --list)" ]] || {
     echo "FAIL: a rejected cut still created a tag" >&2; exit 1; }
@@ -232,7 +235,7 @@ HOOK
   if out="$(cut_sandbox --final --execute --confirm "CUT-v${cut_version}" 2>&1)"; then
     echo "FAIL: final cut accepted absent native closure records" >&2; exit 1
   fi
-  printf '%s\n' "$out" | grep -q 'native closure records' || {
+  grep -q 'native closure records' <<<"$out" || {
     echo "FAIL: final cut stopped for the wrong reason: $out" >&2; exit 1; }
   [[ -z "$(git tag --list "v${cut_version}")" ]] || {
     echo "FAIL: rejected final cut created a tag" >&2; exit 1; }
@@ -261,7 +264,7 @@ HOOK
     echo "FAIL: cut tagged a commit origin/develop does not contain" >&2
     exit 1
   fi
-  printf '%s\n' "$out" | grep -q 'is not an ancestor of origin/develop' || {
+  grep -q 'is not an ancestor of origin/develop' <<<"$out" || {
     echo "FAIL: cut stopped for the wrong reason: $out" >&2; exit 1; }
   git tag --list | grep -q "v${cut_version}-rc.3" && {
     echo "FAIL: a rejected cut still created a tag" >&2; exit 1; }
@@ -274,12 +277,100 @@ HOOK
     echo "FAIL: cut tagged a tree whose release metadata is not final" >&2
     exit 1
   fi
-  printf '%s\n' "$out" | grep -q 'is not final for 9.9.9' || {
+  grep -q 'is not final for 9.9.9' <<<"$out" || {
     echo "FAIL: cut stopped for the wrong reason: $out" >&2; exit 1; }
-  printf '%s\n' "$out" | grep -q 'files still needing release preparation' || {
+  grep -q 'files still needing release preparation' <<<"$out" || {
     echo "FAIL: cut did not name the files still needing preparation" >&2; exit 1; }
   [[ -z "$(git status --porcelain)" ]] || {
     echo "FAIL: a refused cut left release metadata changes behind" >&2; exit 1; }
+
+  # Keep the real wrapper; low-level checker stand-ins enforce filed paths.
+  # These JSON inputs are not build evidence; the real absence case is above.
+  git reset -q --hard "$trunk_head"
+  cat > tools/release/native-sbom.py <<'PY'
+import json
+import os
+from pathlib import Path
+import sys
+
+def value(flag):
+    return sys.argv[sys.argv.index(flag) + 1]
+
+assert sys.argv[1] == "check"
+triplet = value("--triplet")
+arch = {"x64-linux": "amd64", "arm64-linux": "arm64"}[triplet]
+version = Path("packaging/VERSION").read_text().strip()
+directory = Path(f"docs/validation/evidence/v{version}/supply-chain")
+sbom = directory / f"tensorplate-v{version}-native-closure-{arch}.spdx.json"
+assert value("--sbom") == str(sbom), "wrong filed SBOM path"
+kind = "provenance" if "--record" in sys.argv else "sbom"
+with open(os.environ["TP_NATIVE_CHECK_TRACE"], "a") as trace:
+    trace.write(f"{arch}:{kind}\n")
+path = sbom
+if kind == "provenance":
+    path = directory / f"tensorplate-v{version}-vcpkg-cache-provenance-{arch}.json"
+    assert value("--record") == str(path), "wrong filed provenance path"
+    assert value("--version") == version, "wrong release version"
+try:
+    document = json.loads(path.read_text())
+except FileNotFoundError:
+    sys.exit(f"unit checker missing {arch} {kind}")
+except ValueError:
+    sys.exit(f"unit checker malformed {arch} {kind}")
+assert document == {"unit_test_architecture": arch}, "wrong architecture test input"
+PY
+  cp tools/release/native-sbom.py tools/release/native-cache-provenance.py
+  supply_chain="docs/validation/evidence/v${cut_version}/supply-chain"
+  mkdir -p "$supply_chain"
+  for arch in amd64 arm64; do
+    for suffix in "native-closure-${arch}.spdx.json" "vcpkg-cache-provenance-${arch}.json"; do
+      printf '{"unit_test_architecture":"%s"}\n' "$arch" \
+        > "${supply_chain}/tensorplate-v${cut_version}-${suffix}"
+    done
+  done
+  arm_record="${supply_chain}/tensorplate-v${cut_version}-vcpkg-cache-provenance-arm64.json"
+  rm "$arm_record"
+  export TP_NATIVE_CHECK_TRACE="$tmp/native-check-calls"
+  # Test setup now models reviewed commits arriving on the trunk. The
+  # protected-push assertions above are complete; cut still never pushes it.
+  rm "$cut_origin/hooks/pre-receive"
+  commit_native_case() {
+    git add -- tools docs
+    git commit -qm "$1"
+    release_commit="$(git rev-parse HEAD)"
+    git push -q origin develop
+    git fetch -q origin
+  }
+  for state in missing malformed accepted; do
+    case "$state" in
+      malformed) printf '{broken JSON\n' > "$arm_record" ;;
+      accepted) printf '{"unit_test_architecture":"arm64"}\n' > "$arm_record" ;;
+    esac
+    commit_native_case "native gate unit input: $state"
+    rm -f "$TP_NATIVE_CHECK_TRACE"
+    if [[ "$state" == accepted ]]; then
+      cut_sandbox --final --execute --confirm "CUT-v${cut_version}" >/dev/null
+      [[ "$(git cat-file -t "v${cut_version}")" == tag &&
+         "$(git rev-list -n1 "v${cut_version}")" == "$release_commit" ]] || {
+        echo "FAIL: accepted native records did not produce the expected annotated final tag" >&2; exit 1; }
+      [[ "$(cat "$TP_NATIVE_CHECK_TRACE")" == $'amd64:sbom\namd64:provenance\narm64:sbom\narm64:provenance' ]] || {
+        echo "FAIL: final cut did not check both architecture record pairs" >&2; exit 1; }
+    else
+      if out="$(cut_sandbox --final --execute --confirm "CUT-v${cut_version}" 2>&1)"; then
+        echo "FAIL: final cut accepted $state ARM64 native provenance" >&2; exit 1
+      fi
+      grep -q "unit checker $state arm64 provenance" <<<"$out" || {
+        echo "FAIL: final cut stopped for the wrong reason: $out" >&2; exit 1; }
+      [[ -z "$(git tag --list "v${cut_version}")" ]] || {
+        echo "FAIL: rejected native records still created a final tag" >&2; exit 1; }
+      if [[ "$state" == missing ]]; then
+        rm "$TP_NATIVE_CHECK_TRACE"
+        cut_sandbox --rc 4 --execute --confirm "CUT-v${cut_version}-rc.4" >/dev/null
+        [[ ! -e "$TP_NATIVE_CHECK_TRACE" ]] || {
+          echo "FAIL: candidate cut consulted the final-only native gate" >&2; exit 1; }
+      fi
+    fi
+  done
 )
 
 # publish-apt-repo argument and path validation fails closed.

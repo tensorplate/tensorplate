@@ -175,7 +175,8 @@ The release owner stops immediately unless all prerequisites are true:
   a required reviewer (a reviewer-less environment publishes without a hold).
 - Clean-room validation target is ready.
 - For a final tag, not a release candidate: the worker SBOM and vulnerability
-  disposition cover the static native closure; see `cmake/features/README.md`.
+  disposition cover the static native closure, and both architectures have
+  accepted native dependency and cache records (procedure below).
 - No release blocker is open without a signed conditional pass.
 - **Every Production row rests on a recorded run.** Verify with:
 
@@ -193,6 +194,40 @@ The release owner stops immediately unless all prerequisites are true:
   row until it exists. Downgrading is cheaper than it sounds:
   `is_supported_combination` admits Production **and** Preview, so a Preview
   row still deploys. It changes the published claim, not what runs.
+
+### Native dependency records before a final cut
+
+Run an owner-approved build-only Release dispatch with the final tag as its
+`tag` input (for example, `v0.3.1`) against the source to be released. The
+amd64 step records the native inventory and exact cache-save job when its
+cache is traceable; a cold build may succeed with a warning and no records.
+The ARM64 step always requires its provisioning stamp. If amd64 recording
+was unavailable, resolve the cache or log-access problem and repeat the
+build before filing evidence. Expired or ambiguous save logs fail closed.
+
+Take the four native JSON files from the unsigned release-assets workflow
+artifact, sanitize and publication-scan them, then file them unchanged as
+far as identities and digests permit under
+`docs/validation/evidence/v<version>/supply-chain/`. For version `0.3.1`:
+
+```bash
+python3 tools/release/native-release-record.py check \
+  --directory docs/validation/evidence/v0.3.1/supply-chain --tag v0.3.1
+tools/validation/check-evidence-publication.sh --patterns-only \
+  docs/validation/evidence/v0.3.1/supply-chain
+```
+
+Supply the private literal file to the publication scanner where available.
+Review and commit the records before cutting. The build commit recorded in
+them precedes that evidence commit; these are the pre-cut build's records,
+not a claim to have already built the final tag. A changed dependency
+baseline, release version or malformed pair fails the checker; review must
+also confirm that later source changes have not invalidated the filed
+build. Final publication independently requires records from its own build.
+This record gate neither replaces vulnerability dispositions nor grants
+hardware qualification. Scanner CI still uses the native `collect`,
+`control`, `check-control` and vulnerability-disposition steps documented
+in the artifact inventory.
 
 ### 2. Verify The Release Runner
 

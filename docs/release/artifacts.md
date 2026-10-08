@@ -369,10 +369,10 @@ status file, a supplied CMake cache without streaming enabled, a supplied
 archive directory missing a port's archive, or a port with no identifier
 decision. `check` validates the document against the manifest, feature and
 triplet. It checks declared facts, not the authenticity of a build.
-Dependency traversal currently drops dependency triplet qualifiers: the
-native amd64 job has identical host and target triplets. A cross build
-must preserve host/target identities separately before using this collector;
-the ARM64 release-record follow-up must address that limitation.
+The release builds are native: each closure uses one triplet. Dependency
+qualifiers are retained until traversal and an explicit foreign triplet is
+refused, including host helper and self-dependencies. Cross compilation
+requires a separate inventory of each host and target identity.
 
 The document and its checker distinguish three coverage states:
 
@@ -412,9 +412,38 @@ with no fixed release listed by that database. The OpenSSL matches list
 the executable absence check, with review due by 2026-11-18. The report and the
 identifier controls are uploaded even when the scan fails.
 
-Still required before a final release: records for both release jobs'
-workers, binary-cache provenance, and a final-tag gate that refuses their
-absence. This CI inventory does not supply that gate.
+Both release jobs use `native-release-record.py` to produce a worker SBOM
+and a cache-provenance JSON record. The record binds the source commit,
+full release version, SBOM digest and each archive's content digest. The
+worker digest comes from the packaged executable extracted from the serving
+Debian package, including any packaging-time stripping. The
+amd64 record identifies an exact Actions cache entry and a successful
+job log that explicitly saved its key within the entry's creation window;
+missing or ambiguous save evidence is refused. The selected entry must
+also match the cache identity selected before restoration and predate its
+start timestamp; concurrent cache creation or eviction cannot silently
+replace the source attribution. It does not infer a writer
+from workflow completion times. The cache-key action is unchanged.
+
+ARM64 records the provisioning stamp and archive content digests. The
+stamp's `archives_sha256` is checked against the archive **names**, not
+contents; the record keeps that distinction and cannot supply a workflow
+run id for operator provisioning. Compiler and vcpkg version text from the
+stamp are represented by digests to avoid publishing operator-controlled
+host details.
+
+Recording is required in binary-only `restore` mode, including ARM64
+build-only runs. In amd64 `build` and `build-and-save` modes it is optional:
+a cold or untraceable cache produces no pair of records and a warning.
+These optional modes also compare archive snapshots before and after the
+build; changed archives cannot be attributed to the earlier cache-saving job.
+Successful pairs are uploaded, staged, and included in the release
+manifest, `SHA256SUMS` and published assets. Partial or stale outputs from
+a failed attempt are removed. The final cut checks the filed records for
+both architectures; final publication checks the new build's pair again.
+Candidate cuts and the candidate publication gate allow missing records;
+this does not waive restore-mode recording. See the
+[release procedure](runbook.md#native-dependency-records-before-a-final-cut).
 
 **License policy.** `deny.toml` allows `Apache-2.0`, `MIT` and
 `Unicode-3.0`, which every Rust dependency satisfies today. A dependency

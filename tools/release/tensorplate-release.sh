@@ -675,6 +675,19 @@ check_evidence_bundles() {
   esac
 }
 
+check_native_sbom() {
+  if [[ "${FINAL:-0}" -ne 1 ]]; then
+    pass "native closure records deferred to the final cut"
+    return 0
+  fi
+  local dir="docs/validation/evidence/v${VERSION}/supply-chain"
+  if python3 tools/release/native-release-record.py check --directory "$dir" --tag "v${VERSION}"; then
+    pass "native closure records cover both release architectures"
+  else
+    fail "native closure records missing or refused at ${dir}; see docs/release/runbook.md"
+  fi
+}
+
 check_artifacts() {
   if [[ ! -d "$ARTIFACTS_DIR" ]]; then
     fail "artifact directory $ARTIFACTS_DIR is missing"
@@ -1158,6 +1171,7 @@ run_source_preflight() {
   check_changelog
   check_release_notes
   check_evidence_bundles
+  check_native_sbom
 
   if ((${#FAILURES[@]})); then
     printf 'source preflight failed with %d failure(s)\n' "${#FAILURES[@]}" >&2
@@ -1570,6 +1584,15 @@ for sdk_kind, sdk_pattern in (
         }
     )
 
+for arch in ("amd64", "arm64"):
+    for kind, suffix in (("native-sbom", f"native-closure-{arch}.spdx.json"),
+                         ("native-cache-provenance", f"vcpkg-cache-provenance-{arch}.json")):
+        path = root / f"tensorplate-{tag}-{suffix}"
+        if path.is_file():
+            artifacts.append({"file": path.name, "kind": kind, "version": version,
+                              "architecture": arch, "size_bytes": path.stat().st_size,
+                              "sha256": sha256(path)})
+
 snapshot = "~dev." in version or tag.startswith("snapshot-")
 # Releases ship a complete second runtime set for Ubuntu x86_64 alongside the
 # primary target; snapshot builds are single-architecture local-source flows
@@ -1744,6 +1767,12 @@ for artifact in manifest.get("artifacts", []):
             raise SystemExit(f"{name}: SDK filename does not match expected artifact {expected_file}")
         if artifact.get("version") != python_version:
             raise SystemExit(f"{name}: SDK version mismatch; expected {python_version}")
+    elif artifact.get("kind") in ("native-sbom", "native-cache-provenance"):
+        arch = artifact.get("architecture")
+        suffix = (f"native-closure-{arch}.spdx.json" if artifact["kind"] == "native-sbom"
+                  else f"vcpkg-cache-provenance-{arch}.json")
+        if arch not in ("amd64", "arm64") or name != f"tensorplate-{tag}-{suffix}" or artifact.get("version") != version:
+            raise SystemExit(f"{name}: native record identity mismatch")
     path = root / name
     if not path.is_file():
         raise SystemExit(f"missing artifact listed in manifest: {name}")
@@ -1761,7 +1790,9 @@ for artifact in manifest.get("artifacts", []):
 # bypass identity and checksum validation just because it is not in JSON.
 staged_assets = {
     path.name
-    for pattern in ("*.deb", "tensorplate_python-*.whl", "tensorplate_python-*.tar.gz")
+    for pattern in ("*.deb", "tensorplate_python-*.whl", "tensorplate_python-*.tar.gz",
+                    "tensorplate-*-native-closure-*.spdx.json",
+                    "tensorplate-*-vcpkg-cache-provenance-*.json")
     for path in root.glob(pattern)
 }
 unlisted = staged_assets - {artifact["file"] for artifact in manifest.get("artifacts", [])}
@@ -1939,6 +1970,9 @@ cmd_publish() {
   ((${#sdk_assets[@]} == 2)) ||
     die "expected tensorplate-python wheel and sdist release assets in $ARTIFACTS_DIR"
   assets+=("${sdk_assets[@]}")
+  local native_assets=("$ARTIFACTS_DIR"/tensorplate-*-native-closure-*.spdx.json
+                       "$ARTIFACTS_DIR"/tensorplate-*-vcpkg-cache-provenance-*.json)
+  assets+=("${native_assets[@]}")
   [[ -f "$ARTIFACTS_DIR/install.sh" ]] || die "missing installer asset: $ARTIFACTS_DIR/install.sh"
   local checksums_bundle="${CHECKSUMS}.cosign.bundle"
   [[ -f "$checksums_bundle" ]] ||
