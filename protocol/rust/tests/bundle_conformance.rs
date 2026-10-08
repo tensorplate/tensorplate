@@ -553,7 +553,293 @@ fn manifest_rule_fixture_pairs_retain_typed_reasons() {
             }
         }
     }
-    assert_eq!(counts, [11, 11]);
+    assert_eq!(counts, [12, 18]);
+}
+
+fn known_bases() -> Vec<tensorplate_protocol::KnownBase> {
+    use tensorplate_protocol::{KnownBase, SupportLevel, VariantIdentity, VariantKind};
+    let facts: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(rules_root().join("lineage_known_bases.json")).unwrap(),
+    )
+    .unwrap();
+    facts["bases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|base| {
+            let bundle = parse_bundle(&rules_root().join(base["fixture"].as_str().unwrap()))
+                .expect("a known base is a bundle that parses");
+            KnownBase {
+                name: bundle.manifest.name,
+                version: bundle.manifest.version,
+                manifest_digest: bundle.manifest_digest,
+                support_level: match base["support_level"].as_str().unwrap() {
+                    "production" => SupportLevel::Production,
+                    "preview" => SupportLevel::Preview,
+                    "experimental" => SupportLevel::Experimental,
+                    other => panic!("unknown support level {other}"),
+                },
+                variants: base["variants"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| VariantIdentity {
+                        id: v["id"].as_str().unwrap().into(),
+                        revision: v["revision"].as_str().unwrap().into(),
+                        kind: VariantKind::ALL
+                            .into_iter()
+                            .find(|k| k.as_str() == v["variant_kind"].as_str().unwrap())
+                            .expect("a variant kind"),
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+fn lineage_profile(manifest: &serde_json::Value) -> tensorplate_protocol::BundleProfile {
+    tensorplate_protocol::BundleProfile::from_manifest_text(&manifest.to_string())
+        .expect("the declaration decodes")
+}
+
+#[test]
+fn variant_lineage_fixtures_are_judged_against_the_known_bases() {
+    use tensorplate_protocol::VariantKind;
+    let bases = known_bases();
+    let mut accepted = Vec::new();
+    let mut refused = Vec::new();
+    for entry in std::fs::read_dir(rules_root()).unwrap() {
+        let path = entry.unwrap().path();
+        let Ok(expected) = std::fs::read_to_string(path.join("expected.json")) else {
+            continue;
+        };
+        let expected: serde_json::Value = serde_json::from_str(&expected).unwrap();
+        let Some(lineage_rule) = expected.get("lineage_rule") else {
+            continue;
+        };
+        let fixture = path.file_name().unwrap().to_str().unwrap().to_owned();
+        let profile = lineage_profile(&rule_manifest(&fixture));
+        let kind = profile
+            .lineage
+            .as_ref()
+            .expect("a declaration")
+            .identity
+            .kind;
+        match (profile.check_lineage(&bases), lineage_rule.as_str()) {
+            (Ok(()), None) => accepted.push(kind),
+            (Err(e), Some(code)) => {
+                assert_eq!(
+                    e.rule_code()
+                        .map(tensorplate_protocol::BundleRuleCode::as_str),
+                    Some(code),
+                    "{fixture}: {e}"
+                );
+                refused.push(code.to_owned());
+            }
+            (result, expected) => panic!("{fixture}: expected {expected:?}, got {result:?}"),
+        }
+        assert_rule(
+            parse_bundle(&path),
+            tensorplate_protocol::BundleRuleCode::ReservedVariant,
+        );
+    }
+    accepted.sort_by_key(|k| k.as_str());
+    let mut every_kind = VariantKind::ALL;
+    every_kind.sort_by_key(|k| k.as_str());
+    assert_eq!(accepted, every_kind);
+    refused.sort();
+    assert_eq!(
+        refused,
+        [
+            "bundle_r8_base_reference",
+            "bundle_r8_variant_identity",
+            "bundle_r8_variant_support_level"
+        ]
+    );
+}
+
+#[test]
+fn variant_lineage_clauses_hold_at_their_boundaries() {
+    use tensorplate_protocol::{BundleRuleCode as Rule, SupportLevel, VariantKind};
+    const VARIANT: &str = "invalid_r8_reserved_speaker_embedding";
+    let bases = known_bases();
+    let judge = |edit: &dyn Fn(&mut serde_json::Value),
+                 bases: &[tensorplate_protocol::KnownBase]| {
+        let mut manifest = rule_manifest(VARIANT);
+        edit(&mut manifest);
+        lineage_profile(&manifest)
+            .check_lineage(bases)
+            .map_err(|e| e.rule_code().expect("a rule refusal"))
+    };
+    assert_eq!(judge(&|_| {}, &bases), Ok(()));
+    assert_eq!(judge(&|_| {}, &[]), Err(Rule::BaseReference));
+    for key in ["name", "version"] {
+        assert_eq!(
+            judge(&|m| m["base_model_ref"][key] = "other".into(), &bases),
+            Err(Rule::BaseReference),
+            "{key}"
+        );
+    }
+
+    let known = bases[0].variants[0].clone();
+    assert_eq!(known.kind, VariantKind::SpeakerEmbedding);
+    let claim = |revision: &'static str, kind: &'static str| {
+        let id = known.id.clone();
+        move |m: &mut serde_json::Value| {
+            m["variant_identity"] =
+                serde_json::json!({"id": id, "revision": revision, "variant_kind": kind});
+        }
+    };
+    assert_eq!(
+        judge(&claim("2", "speaker_embedding"), &bases),
+        Ok(()),
+        "a new revision of a known variant"
+    );
+    assert_eq!(
+        judge(&claim("2", "adapter"), &bases),
+        Err(Rule::VariantIdentity),
+        "an id keeps its kind"
+    );
+    let mut other_base = bases.clone();
+    other_base[0].variants.clear();
+    assert_eq!(judge(&claim("1", "speaker_embedding"), &other_base), Ok(()));
+
+    let holds = |level| {
+        let mut bases = bases.clone();
+        bases[0].support_level = level;
+        bases
+    };
+    let asks =
+        |level: &'static str| move |m: &mut serde_json::Value| m["support_level"] = level.into();
+    assert_eq!(
+        judge(&asks("preview"), &holds(SupportLevel::Preview)),
+        Ok(())
+    );
+    assert_eq!(
+        judge(&asks("experimental"), &holds(SupportLevel::Production)),
+        Ok(())
+    );
+    assert_eq!(
+        judge(&asks("preview"), &holds(SupportLevel::Experimental)),
+        Err(Rule::VariantSupportLevel)
+    );
+    assert_eq!(
+        judge(
+            &|m| {
+                m.as_object_mut().unwrap().remove("support_level");
+            },
+            &bases
+        ),
+        Err(Rule::VariantSupportLevel)
+    );
+
+    assert_eq!(
+        judge(&asks("preview"), &holds(SupportLevel::Production)),
+        Ok(())
+    );
+    let asks_production = |m: &mut serde_json::Value| {
+        m["support_level"] = "production".into();
+        m["capability_requirements"] = serde_json::json!({});
+    };
+    assert_eq!(
+        judge(&asks_production, &holds(SupportLevel::Production)),
+        Ok(())
+    );
+    assert_eq!(
+        judge(&asks_production, &holds(SupportLevel::Preview)),
+        Err(Rule::VariantSupportLevel)
+    );
+
+    let base = lineage_profile(&rule_manifest("valid_r8_base_bundle"));
+    assert!(base.lineage.is_none());
+    base.check_lineage(&[])
+        .expect("no declaration, nothing to judge");
+}
+
+#[test]
+fn a_variant_is_refused_as_reserved_only_after_its_own_manifest_rules() {
+    use tensorplate_protocol::BundleRuleCode as Rule;
+    for fixture in [
+        "invalid_r8_reserved_speaker_embedding",
+        "invalid_r8_reserved_adapter",
+        "invalid_r8_reserved_full_checkpoint",
+    ] {
+        assert_rule(parse_rule_change(fixture, |_| {}), Rule::ReservedVariant);
+        assert_rule(
+            parse_rule_change(fixture, |m| {
+                m.as_object_mut().unwrap().remove("support_level");
+            }),
+            Rule::RequiredField,
+        );
+        assert_rule(
+            parse_rule_change(fixture, |m| m["precision_hint"] = "fp16".into()),
+            Rule::PrecisionConflict,
+        );
+        assert_rule(
+            parse_rule_change(fixture, |m| {
+                m["base_model_ref"]["name"] = m["name"].clone();
+            }),
+            Rule::BaseReference,
+        );
+        for key in ["name", "version"] {
+            assert_rule(
+                parse_rule_change(fixture, |m| {
+                    m["base_model_ref"]["name"] = m["name"].clone();
+                    m["base_model_ref"]["version"] = m["version"].clone();
+                    m["base_model_ref"][key] = "another".into();
+                }),
+                Rule::ReservedVariant,
+            );
+        }
+        assert!(matches!(
+            parse_rule_change(fixture, |m| {
+                m["warmup"]["fixtures"] = serde_json::json!(["missing.txt"]);
+            }),
+            Err(ParseError::ManifestSemantics(e)) if e.rule_code().is_none()
+        ));
+        // The refusal ends manifest validation: artifact digests and the
+        // manifest's own digest are not reached for a variant.
+        assert_rule(
+            parse_rule_change(fixture, |m| {
+                m["artifacts"][1]["digest"] = format!("sha256:{}", "0".repeat(64)).into();
+                m["manifest_digest"] = format!("sha256:{}", "0".repeat(64)).into();
+            }),
+            Rule::ReservedVariant,
+        );
+        parse_rule_change(fixture, |m| {
+            for key in ["base_model_ref", "variant_identity"] {
+                m.as_object_mut().unwrap().remove(key);
+            }
+        })
+        .expect("the same bundle without a declaration deploys");
+    }
+    for key in ["base_model_ref", "variant_identity"] {
+        assert_rule(
+            parse_rule_change("invalid_r8_reserved_adapter", |m| {
+                m.as_object_mut().unwrap().remove(key);
+            }),
+            Rule::BaseReference,
+        );
+    }
+}
+
+#[test]
+fn format_0_1_manifests_keep_lineage_keys_as_extras() {
+    let descriptor = parse_rule_change("valid_r11_vla_payload", |m| {
+        m["format_version"] = "0.1".into();
+        for key in [
+            "support_level",
+            "hardware_compatibility",
+            "memory_budget_breakdown_bytes",
+        ] {
+            m.as_object_mut().unwrap().remove(key);
+        }
+        m["base_model_ref"] = "anything".into();
+        m["variant_identity"] = serde_json::json!({"variant_kind": "unknown"});
+    })
+    .expect("format 0.1 gives these keys no meaning");
+    assert!(descriptor.manifest.profile.is_none());
+    assert!(descriptor.manifest.extra.contains_key("variant_identity"));
 }
 
 #[test]

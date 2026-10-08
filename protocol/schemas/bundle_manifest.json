@@ -535,7 +535,7 @@
       }
     },
     "format_0_2": {
-      "description": "Fields a manifest opts into with `format_version: \"0.2\"`. Under format 0.1 these keys stay forward-compatible extras with no meaning. `memory_budget_breakdown_bytes` and each domain of `memory_budget_by_domain` use the canonical line items of `config/schemas/memory_budget_breakdown.json`, which a validator must be given alongside this document. Beyond this schema, readers also require every `warmup.fixtures` entry to name an `artifacts[].path`, `pipeline_stages` stage names to be unique, `memory_budget_breakdown_bytes` to equal the per-line sum of the declared domains when both are present, the speech contract's `chunking` minimums not to exceed its maximums, and a TTS segment limit not to exceed its synthesis limit. Manifest-local deployment rules additionally require one matching class block, refuse reserved classes and VLA mode selectors, require support and hardware declarations, and require the complete speech profile with explicit matching precision and a runtime minimum of at least 0.3.0. Streaming speech requires nonzero per-session memory; speech and Production profiles require the aggregate budget, and Production profiles require an explicit capability declaration. Legacy runner selectors and competing serving-mode selectors reject. See docs/bundles/compatibility.md for stable rule codes.",
+      "description": "Fields a manifest opts into with `format_version: \"0.2\"`. Under format 0.1 these keys stay forward-compatible extras with no meaning. `memory_budget_breakdown_bytes` and each domain of `memory_budget_by_domain` use the canonical line items of `config/schemas/memory_budget_breakdown.json`, which a validator must be given alongside this document. Beyond this schema, readers also require every `warmup.fixtures` entry to name an `artifacts[].path`, `pipeline_stages` stage names to be unique, `memory_budget_breakdown_bytes` to equal the per-line sum of the declared domains when both are present, the speech contract's `chunking` minimums not to exceed its maximums, and a TTS segment limit not to exceed its synthesis limit. Manifest-local deployment rules additionally require one matching class block, refuse reserved classes and VLA mode selectors, require support and hardware declarations, and require the complete speech profile with explicit matching precision and a runtime minimum of at least 0.3.0. Streaming speech requires nonzero per-session memory; speech and Production profiles require the aggregate budget, and Production profiles require an explicit capability declaration. Legacy runner selectors and competing serving-mode selectors reject. A variant declaration may not name its own bundle as its base, and no declared variant kind deploys: the refusal ends manifest validation, before artifact files and digests are read. See docs/bundles/compatibility.md for stable rule codes.",
       "properties": {
         "runner_profile": {"$ref": "#/definitions/snake_identifier"},
         "hardware_compatibility": {
@@ -570,8 +570,40 @@
           "type": "string",
           "enum": ["production", "preview", "experimental"]
         },
+        "base_model_ref": {"$ref": "#/definitions/base_model_ref"},
+        "variant_identity": {"$ref": "#/definitions/variant_identity"},
         "model_blocks": {
           "properties": {"speech": {"$ref": "#/definitions/speech_contract"}}
+        }
+      },
+      "dependencies": {
+        "base_model_ref": ["variant_identity"],
+        "variant_identity": ["base_model_ref"]
+      }
+    },
+    "base_model_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "manifest_digest"],
+      "description": "The base bundle a variant derives from: that bundle's own `name` and `version`, and the canonical digest of its manifest as the bundle parser computes it (lowercase SHA-256), whether or not the base manifest declares the optional top-level `manifest_digest`. Declared together with `variant_identity`.",
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "manifest_digest": {"$ref": "#/definitions/sha256_digest"}
+      }
+    },
+    "variant_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision", "variant_kind"],
+      "description": "Identity of a variant of the bundle `base_model_ref` names. Every `variant_kind` is reserved: the declaration is recorded and validated, and a bundle that carries one does not deploy.",
+      "properties": {
+        "id": {"$ref": "#/definitions/snake_identifier"},
+        "revision": {"type": "string", "maxLength": 64, "pattern": "^[A-Za-z0-9]+([._-][A-Za-z0-9]+)*$"},
+        "variant_kind": {
+          "type": "string",
+          "enum": ["speaker_embedding", "adapter", "full_checkpoint"],
+          "description": "`speaker_embedding` is input data for the base, `adapter` is state applied on the base, `full_checkpoint` is an independent set of weights derived from the base."
         }
       }
     },

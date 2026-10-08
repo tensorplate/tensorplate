@@ -1,5 +1,5 @@
 {
-  "description": "Single-declaration changes to the format 0.2 fixtures and the verdict each must get: `accept` and `reject` from both the manifest schema and the parser, `reject_beyond_schema` from the parser alone (a reader check the schema's `format_0_2` description lists). Each case removes, then sets, then appends at JSON pointers into the named fixture's manifest.",
+  "description": "Single-declaration changes to the format 0.2 fixtures and the verdict each must get: `accept` and `reject` from both the manifest schema and the parser, `reject_beyond_schema` from the parser alone (a reader check the schema's `format_0_2` description lists). Each case removes, then sets, then appends at JSON pointers into the named fixture's manifest. A case may name the `rule` code the parser's refusal must carry.",
   "cases": [
     {"name": "stt accepts 16 kHz PCM alone", "fixture": "speech_stt_streaming", "verdict": "accept", "set": {"/model_blocks/speech/input_audio_formats": [{"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1}]}},
     {"name": "stt rejects 44.1 kHz PCM", "fixture": "speech_stt_streaming", "verdict": "reject", "set": {"/model_blocks/speech/input_audio_formats": [{"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1}, {"encoding": "pcm_s16le", "sample_rate_hz": 44100, "channels": 1}]}},
@@ -80,6 +80,27 @@
     {"name": "rejects a warmup deadline over 10 minutes", "fixture": "speech_tts_streaming", "verdict": "reject", "set": {"/warmup/timeout_ms": 600001}},
     {"name": "rejects an empty warmup fixture list", "fixture": "speech_tts_streaming", "verdict": "reject", "set": {"/warmup/fixtures": []}},
     {"name": "rejects 17 warmup fixtures", "fixture": "speech_tts_streaming", "verdict": "reject", "set": {"/warmup/fixtures": ["warmup/0.txt", "warmup/1.txt", "warmup/2.txt", "warmup/3.txt", "warmup/4.txt", "warmup/5.txt", "warmup/6.txt", "warmup/7.txt", "warmup/8.txt", "warmup/9.txt", "warmup/10.txt", "warmup/11.txt", "warmup/12.txt", "warmup/13.txt", "warmup/14.txt", "warmup/15.txt", "warmup/16.txt"]}},
-    {"name": "rejects a warmup fixture that is not an artifact", "fixture": "speech_tts_streaming", "verdict": "reject_beyond_schema", "set": {"/warmup/fixtures": ["warmup/missing.txt"]}}
+    {"name": "rejects a warmup fixture that is not an artifact", "fixture": "speech_tts_streaming", "verdict": "reject_beyond_schema", "set": {"/warmup/fixtures": ["warmup/missing.txt"]}},
+    {"name": "lineage: a complete declaration validates and does not deploy", "fixture": "valid_r8_base_bundle", "verdict": "reject_beyond_schema", "rule": "bundle_r8_reserved_variant", "set": {"/base_model_ref": {"name": "speech-tts-foundation", "version": "0.2.0", "manifest_digest": "sha256:9d6bca24ba1d6eecab1aa5643da5d96a48246858688691cc42ef73ed97f06239"}, "/variant_identity": {"id": "guest_voice", "revision": "1", "variant_kind": "speaker_embedding"}}},
+    {"name": "lineage: rejects a base reference without a variant identity", "fixture": "valid_r8_base_bundle", "verdict": "reject", "set": {"/base_model_ref": {"name": "speech-tts-foundation", "version": "0.2.0", "manifest_digest": "sha256:9d6bca24ba1d6eecab1aa5643da5d96a48246858688691cc42ef73ed97f06239"}}},
+    {"name": "lineage: rejects a variant identity without a base reference", "fixture": "valid_r8_base_bundle", "verdict": "reject", "set": {"/variant_identity": {"id": "guest_voice", "revision": "1", "variant_kind": "speaker_embedding"}}},
+    {"name": "lineage: rejects a kind outside the three", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/variant_identity/variant_kind": "static_voice"}},
+    {"name": "lineage: rejects a missing kind", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "remove": ["/variant_identity/variant_kind"]},
+    {"name": "lineage: rejects a missing revision", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "remove": ["/variant_identity/revision"]},
+    {"name": "lineage: rejects an unknown identity key", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/variant_identity/tenant": "acme"}},
+    {"name": "lineage: rejects a kebab-case variant id", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/variant_identity/id": "accent-adapter"}},
+    {"name": "lineage: rejects a revision with a space", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/variant_identity/revision": "2026 1"}},
+    {"name": "lineage: rejects a revision ending in a separator", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/variant_identity/revision": "2026."}},
+    {"name": "lineage: rejects an empty revision", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/variant_identity/revision": ""}},
+    {"name": "lineage: a 64-character revision validates and does not deploy", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject_beyond_schema", "rule": "bundle_r8_reserved_variant", "set": {"/variant_identity/revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+    {"name": "lineage: a 64-byte variant id validates and does not deploy", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject_beyond_schema", "rule": "bundle_r8_reserved_variant", "set": {"/variant_identity/id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+    {"name": "lineage: rejects a 65-character revision", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/variant_identity/revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},
+    {"name": "lineage: rejects a null identity", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/variant_identity": null}},
+    {"name": "lineage: rejects a base without its digest", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "remove": ["/base_model_ref/manifest_digest"]},
+    {"name": "lineage: rejects an uppercase base digest", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/base_model_ref/manifest_digest": "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}},
+    {"name": "lineage: rejects an empty base name", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/base_model_ref/name": ""}},
+    {"name": "lineage: rejects an empty base version", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/base_model_ref/version": ""}},
+    {"name": "lineage: rejects an unknown base key", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/base_model_ref/url": "https://models.example/base"}},
+    {"name": "lineage: rejects a string base reference", "fixture": "invalid_r8_reserved_adapter", "verdict": "reject", "set": {"/base_model_ref": "speech-tts-base"}}
   ]
 }

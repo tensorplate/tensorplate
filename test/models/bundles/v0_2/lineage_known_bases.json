@@ -1,0 +1,16 @@
+{
+  "description": "Test input for the variant lineage fixtures: what a deployment target is taken to know about each base bundle. Each base is read from the named fixture directory; `support_level` is the level the base holds on its row and `variants` are identities other bundles already declared on it. Not a published schema.",
+  "bases": [
+    {
+      "fixture": "valid_r8_base_bundle",
+      "support_level": "experimental",
+      "variants": [
+        {
+          "id": "studio_voice",
+          "revision": "1",
+          "variant_kind": "speaker_embedding"
+        }
+      ]
+    }
+  ]
+}
