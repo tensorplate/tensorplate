@@ -19,7 +19,11 @@ import tempfile
 import unittest
 from unittest import mock
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    sys.exit("FAIL: this suite needs PyYAML to read the release workflow.\n"
+             "Install it with: python3 -m pip install -r tools/release/requirements.txt")
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -53,7 +57,7 @@ class Record(unittest.TestCase):
                     "GITHUB_REPOSITORY": "example/project", "GITHUB_REF": "refs/tags/v0.3.1",
                     "DEFAULT_BRANCH": "develop", "VCPKG_BINARY_SOURCES": f"clear;files,{self.root}/archives,read"}
 
-    def invoke(self, mode="build", arch="amd64", fail=None, command="record", tag="v0.3.1"):
+    def invoke(self, mode="build", arch="amd64", fail=None, command="record", tag="v0.3.1", commit=None):
         def capture(name, *args):
             args = list(map(str, args))
             if args[0] == "snapshot":
@@ -75,7 +79,11 @@ class Record(unittest.TestCase):
             if args[:2] == ["git", "rev-parse"]:
                 return "a" * 40 + "\n"
             if args[:2] == ["git", "show"]:
-                return "2026-10-08T10:30:00-04:00\n"
+                self.git_show_args = args
+                if "--format=%cI" in args:
+                    return "2026-10-08T14:30:00Z\n"
+                self.assertEqual(args, ["git", "show", "-s", "--format=%ct", "HEAD"])
+                return "1791469800\n"
             self.assertIn("key", args)
             return "exact-cache-key\n"
 
@@ -87,14 +95,17 @@ class Record(unittest.TestCase):
             worker.write_bytes(b"packaged worker")
 
         argv = ["native-release-record", command, "--directory", str(self.directory), "--tag", tag]
+        if commit is not None:
+            argv += ["--commit", commit]
         if command == "record":
             argv += ["--architecture", arch, "--mode", mode, "--build-dir", str(self.root / "build"),
                      "--packages", str(self.packages)]
+        self.stderr = io.StringIO()
         with mock.patch.dict(os.environ, self.env, clear=True), mock.patch.object(sys, "argv", argv), \
                 mock.patch.object(tool, "run", side_effect=capture), \
                 mock.patch.object(tool.subprocess, "run", side_effect=extract), \
                 mock.patch.object(tool.subprocess, "check_output", side_effect=output), \
-                contextlib.redirect_stderr(io.StringIO()):
+                contextlib.redirect_stderr(self.stderr):
             return tool.main()
 
     def test_success_preserves_both_checked_records_and_actual_source_arguments(self):
@@ -116,6 +127,8 @@ class Record(unittest.TestCase):
                 self.assertIn("2026-10-08T14:30:00Z", collect)
                 self.assertIn("a" * 40, provenance)
                 self.assertIn("0.3.1", provenance)
+                checked = self.calls[3][1]
+                self.assertEqual(checked[checked.index("--commit") + 1], "a" * 40)
                 if arch == "amd64":
                     for value in ("actions-cache", "exact-cache-key", "example/project", "refs/tags/v0.3.1", "develop"):
                         self.assertIn(value, provenance)
@@ -124,6 +137,17 @@ class Record(unittest.TestCase):
                 else:
                     self.assertIn("runner-filesystem", provenance)
                     self.assertIn(str(self.root / "provisioned.stamp"), provenance)
+
+    def test_utc_committer_date_with_z_records_in_all_modes_on_python310(self):
+        for mode in ("build", "build-and-save", "restore"):
+            with self.subTest(mode=mode):
+                self.calls.clear()
+                self.assertEqual(self.invoke(mode=mode), 0)
+                self.assertEqual(len(self.calls), 4)
+                self.assertIn("--format=%ct", self.git_show_args)
+                self.assertEqual(self.output.read_text().splitlines()[-1], "recorded=true")
+                for _, args in self.calls[:2]:
+                    self.assertEqual(args[args.index("--created") + 1], "2026-10-08T14:30:00Z")
 
     def test_failures_remove_partial_and_stale_records_and_report_false(self):
         for mode in ("build", "build-and-save", "restore"):
@@ -160,6 +184,8 @@ class Record(unittest.TestCase):
                     self.assertEqual(list(self.directory.iterdir()), [])
                     self.assertEqual(self.calls, [])
                     self.assertEqual(self.output.read_text().splitlines()[-1], "recorded=false")
+                    self.assertIn("native-cache-before.json" if content is None else "build changed the restored cache archives",
+                                  self.stderr.getvalue())
 
     def test_missing_restore_source_refuses_required_records_and_omits_optional_records(self):
         for filename in ("native-cache-restore-started.txt", "native-cache-before-source.json"):
@@ -172,6 +198,7 @@ class Record(unittest.TestCase):
                     self.assertEqual(list(self.directory.iterdir()), [])
                     self.assertEqual(self.calls, [])
                     self.assertEqual(self.output.read_text().splitlines()[-1], "recorded=false")
+                    self.assertIn(filename, self.stderr.getvalue())
             path.write_text(original)
 
     def test_check_checks_both_architectures_with_exact_tag_names(self):
@@ -188,6 +215,19 @@ class Record(unittest.TestCase):
         for failure in range(1, 5):
             self.calls.clear()
             self.assertEqual(self.invoke(command="check", fail=failure), 1)
+
+    def test_check_passes_an_expected_commit_only_when_supplied(self):
+        for commit in (None, "b" * 40):
+            self.calls.clear()
+            self.assertEqual(self.invoke(command="check", commit=commit), 0)
+            for _, args in self.calls[1::2]:
+                self.assertEqual("--commit" in args, commit is not None)
+                if commit is not None:
+                    self.assertEqual(args[args.index("--commit") + 1], commit)
+        self.calls.clear()
+        for commit in ("", "B" * 40, "abcd"):
+            self.assertEqual(self.invoke(command="check", commit=commit), 1)
+        self.assertEqual(self.calls, [])
 
     def test_invalid_tags_are_refused_before_collection(self):
         for tag in ("0.3.1", "v0.3", "v0.3.1-rc.0", "../v0.3.1", "v0.3.1\n"):
@@ -265,6 +305,14 @@ class Workflow(unittest.TestCase):
                                 ("--restore-started", marker.strip())):
                 self.assertEqual(args[args.index(flag) + 1], value)
             self.assertEqual(json.loads((root / "native-cache-before-source.json").read_text()), {"id": 11})
+            helper.write_text("import sys\nif sys.argv[1] == 'key': print('exact-cache-key')\n"
+                              "else: raise SystemExit('expected exactly one cache entry')\n")
+            result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+                                    cwd=root, env=env, text=True, capture_output=True, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("expected exactly one cache entry", result.stderr)
+            self.assertIn("docs/release/runbook.md#provision-the-vcpkg-checkout-and-binary-cache", result.stdout)
+            self.assertIn("release-dependencies.yml before retrying", result.stdout)
 
     def test_record_step_gets_the_same_mode_as_the_action_from_declared_environment(self):
         job = self.jobs["build_packages_amd64"]
@@ -318,8 +366,9 @@ class Workflow(unittest.TestCase):
 
     def test_manifest_step_executes_the_real_driver_and_covers_staged_records(self):
         step = self.step("build_packages", "Include native records in the signed artifact inventory")
-        for speech in ("off", "stub"):
-            with self.subTest(speech=speech), tempfile.TemporaryDirectory() as temporary:
+        for speech, publish, tamper in (("off", "true", False), ("off", "false", False),
+                                       ("stub", "false", False), ("off", "true", True)):
+            with self.subTest(speech=speech, publish=publish, tamper=tamper), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 repo = root / "repo"
                 artifact_identity.init_fixture_repo(repo)
@@ -327,6 +376,8 @@ class Workflow(unittest.TestCase):
                 driver.parent.mkdir(parents=True)
                 driver.symlink_to(artifact_identity.RELEASE_DRIVER)
                 fixture = artifact_identity.make_release_set(root / "case", "final", repo, release_layout=True)
+                if publish == "false":
+                    subprocess.run(["git", "tag", "-d", fixture.tag], cwd=repo, check=True, capture_output=True)
                 if speech == "stub":
                     packages = [artifact_identity.write_fixture_package(fixture.built, package,
                                 f"{fixture.deb_version}-1", "amd64", "speech package stand-in")
@@ -340,18 +391,32 @@ class Workflow(unittest.TestCase):
                         path.write_text("unit-test record for artifact hashing\n")
                         records[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
                 self.assertFalse(records.keys() & {item["file"] for item in json.loads(fixture.manifest.read_text())["artifacts"]})
+                if tamper:
+                    driver.unlink()
+                    driver.write_text(f'#!/bin/bash\nset -e\n"{artifact_identity.RELEASE_DRIVER}" "$@"\n'
+                                      'if [[ "$1" == manifest ]]; then printf changed >> "$TEST_CHANGED_RECORD"; fi\n')
+                    driver.chmod(0o755)
                 values = {"version": fixture.version, "deb_version": fixture.deb_version,
                           "python_version": fixture.python_version, "tag": fixture.tag,
                           "release_dir": str(fixture.artifacts), "manifest": str(fixture.manifest),
-                          "checksums": str(fixture.checksums), "source_label": "reviewed-source", "speech_runtime": speech}
+                          "checksums": str(fixture.checksums), "source_label": "reviewed-source", "speech_runtime": speech,
+                          "publish": publish}
                 context = {f"needs.meta.outputs.{key}": value for key, value in values.items()}
                 env = {"PATH": f"{artifact_identity.dpkg_deb_stub_directory()}{os.pathsep}{os.environ['PATH']}",
                        **{key: str(evaluate(value, context)) for key, value in step["env"].items()}}
+                if tamper:
+                    env["TEST_CHANGED_RECORD"] = str(fixture.artifacts / next(iter(records)))
                 result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
                                         cwd=repo, env=env, text=True, capture_output=True, check=False)
+                if tamper:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("manifest checksum mismatch", result.stderr)
+                    continue
                 self.assertEqual(result.returncode, 0, result.stderr)
                 document = json.loads(fixture.manifest.read_text())
                 self.assertEqual(document["release"]["branch"], "reviewed-source")
+                self.assertEqual(document["target"]["os"], "Ubuntu 22.04 / JetPack 6.x (L4T 36.x)")
+                self.assertIn("skipping annotated tag check" if publish == "false" else "annotated tag", result.stdout)
                 by_file = {item["file"]: item for item in document["artifacts"]}
                 self.assertEqual({name: by_file[name]["sha256"] for name in records}, records)
                 self.assertEqual(sum(item["file"].endswith(".deb") for item in document["artifacts"]),
@@ -362,16 +427,18 @@ class Workflow(unittest.TestCase):
 
     def test_final_only_gate_runs_before_signing(self):
         gate = self.step("publish-release", "Require native records for a final release")
-        for prerelease in ("true", "false"):
-            self.assertEqual(evaluate(gate["if"], {"needs.build_packages.outputs.prerelease": prerelease}), prerelease == "false")
+        for prerelease in ("true", "false", "", "unexpected"):
+            self.assertEqual(evaluate(gate["if"], {"needs.build_packages.outputs.prerelease": prerelease}), prerelease != "true")
         names = [step.get("name") for step in self.jobs["publish-release"]["steps"]]
         self.assertLess(names.index(gate["name"]), names.index("Sign SHA256SUMS (keyless)"))
         self.assertIn('native-release-record.py check --directory "$RELEASE_DIR" --tag "$TAG"', gate["run"])
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary) / "repo"
+            artifact_identity.init_fixture_repo(root)
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
             helper = root / "tools/release/native-release-record.py"
             helper.parent.mkdir(parents=True)
-            helper.write_text("import sys\nassert sys.argv[1:] == ['check', '--directory', 'assets', '--tag', 'v0.3.1']\nraise SystemExit(73)\n")
+            helper.write_text(f"import sys\nassert sys.argv[1:] == ['check', '--directory', 'assets', '--tag', 'v0.3.1', '--commit', '{commit}']\nraise SystemExit(73)\n")
             context = {"needs.build_packages.outputs.tag": "v0.3.1", "needs.build_packages.outputs.release_dir": "assets"}
             env = {"PATH": os.environ["PATH"], **{key: str(evaluate(value, context)) for key, value in gate["env"].items()}}
             result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", gate["run"]],

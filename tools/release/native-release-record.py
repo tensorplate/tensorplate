@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -26,13 +27,14 @@ def names(tag: str, arch: str) -> tuple[str, str]:
             f"tensorplate-{tag}-vcpkg-cache-provenance-{arch}.json")
 
 
-def check(directory: Path, tag: str, arches: list[str]) -> None:
+def check(directory: Path, tag: str, arches: list[str], commit: str | None = None) -> None:
     for arch in arches:
         sbom, record = [directory / name for name in names(tag, arch)]
         run("native-sbom.py", "check", "--sbom", sbom, "--manifest", "vcpkg.json",
             "--triplet", TRIPLETS[arch])
         run("native-cache-provenance.py", "check", "--record", record, "--sbom", sbom,
-            "--manifest", "vcpkg.json", "--triplet", TRIPLETS[arch], "--version", tag[1:])
+            "--manifest", "vcpkg.json", "--triplet", TRIPLETS[arch], "--version", tag[1:],
+            *(["--commit", commit] if commit is not None else []))
 
 
 def record(args: argparse.Namespace) -> bool:
@@ -46,9 +48,8 @@ def record(args: argparse.Namespace) -> bool:
             sbom, provenance = [stage / name for name in outputs]
             commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
             created = subprocess.check_output(
-                ["git", "show", "-s", "--format=%cI", "HEAD"], text=True).strip()
-            from datetime import datetime, timezone
-            created = datetime.fromisoformat(created).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                ["git", "show", "-s", "--format=%ct", "HEAD"], text=True).strip()
+            created = datetime.fromtimestamp(int(created), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             if args.architecture == "amd64":
                 archives = Path(os.environ["RUNNER_TEMP"]) / "vcpkg-archives"
                 key = subprocess.check_output([
@@ -99,10 +100,11 @@ def record(args: argparse.Namespace) -> bool:
             run("native-cache-provenance.py", "record", *source, "--archives", archives,
                 "--manifest", "vcpkg.json", "--triplet", triplet, "--created", created,
                 "--commit", commit, "--version", args.tag[1:], "--sbom", sbom, "--output", provenance)
-            check(stage, args.tag, [args.architecture])
+            check(stage, args.tag, [args.architecture], commit)
             for name in outputs:
                 (stage / name).replace(args.directory / name)
-    except (subprocess.CalledProcessError, OSError, ValueError, TypeError, KeyError):
+    except (subprocess.CalledProcessError, OSError, ValueError, TypeError, KeyError) as error:
+        print(f"native closure recording failed: {error}", file=sys.stderr)
         for name in outputs:
             (args.directory / name).unlink(missing_ok=True)
         if args.mode == "restore":
@@ -124,6 +126,8 @@ def main() -> int:
             p.add_argument("--architecture", choices=TRIPLETS, required=True)
             p.add_argument("--build-dir", type=Path, default=Path("build/release"))
             p.add_argument("--packages", type=Path)
+        else:
+            p.add_argument("--commit", help="require records from this source commit")
     args = parser.parse_args()
     try:
         if args.command == "record" and "GITHUB_OUTPUT" in os.environ:
@@ -132,7 +136,9 @@ def main() -> int:
         if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?", args.tag):
             raise ValueError("invalid release tag")
         if args.command == "check":
-            check(args.directory, args.tag, list(TRIPLETS))
+            if args.commit is not None and not re.fullmatch(r"[0-9a-f]{40}", args.commit):
+                raise ValueError("invalid expected source commit")
+            check(args.directory, args.tag, list(TRIPLETS), args.commit)
         else:
             recorded = record(args)
             if "GITHUB_OUTPUT" in os.environ:

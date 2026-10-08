@@ -5,18 +5,26 @@ from __future__ import annotations
 
 import argparse
 import copy
+from contextlib import redirect_stderr
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    sys.exit("FAIL: this suite needs PyYAML to read the release workflow.\n"
+             "      Install the release tooling dependencies with:\n"
+             "        python3 -m pip install -r tools/release/requirements.txt")
 
 ROOT = Path(__file__).resolve().parents[2]
 TOOL = ROOT / "tools/release/native-cache-provenance.py"
@@ -80,17 +88,33 @@ class Provenance(unittest.TestCase):
             field, rows = "jobs", [self.job]
         return json.dumps([{field: [], "total_count": len(rows)}, {field: rows, "total_count": len(rows)}])
 
-    def record(self):
-        with patch.object(tool, "command", side_effect=self.github):
+    def record(self, command=None):
+        with patch.object(tool, "command", side_effect=command or self.github):
             source = tool.actions_source(self.args)
         return {"schema_version": 1, "source": "actions-cache", "architecture": "amd64", "triplet": "x64-linux",
                 "feature": "streaming-grpc", "baseline": self.baseline, "version": self.args.version,
                 "commit": "d" * 40, "created": "2026-10-07T00:00:00Z", "archives": self.archives,
                 "sbom_sha256": tool.native.digest_of(self.args.sbom)["sha256"], **source}
 
+    def record_arguments(self, output):
+        return ["record", "--source", "actions-cache", "--manifest", str(self.args.manifest),
+                "--triplet", self.args.triplet, "--version", self.args.version, "--sbom", str(self.args.sbom),
+                "--archives", str(self.args.archives), "--commit", "d" * 40,
+                "--created", "2026-10-07T00:00:00Z", "--output", str(output),
+                "--cache-key", self.args.cache_key, "--ref", self.args.ref,
+                "--default-branch", self.args.default_branch, "--repository", self.args.repository,
+                "--restore-started", self.args.restore_started, "--restored-cache-id", str(self.args.restored_cache_id)]
+
+    def assert_unavailable(self, record, reason):
+        self.assertEqual(record["log_evidence"], {"status": "unavailable", "reason": reason})
+        self.assertNotIn("saved_by", record)
+        with patch.object(tool, "command", side_effect=AssertionError("offline check attempted a command")):
+            tool.check_record(record, self.args)
+
     def test_exact_save_line_and_paginated_queries_identify_writer(self):
         record = self.record()
         tool.check_record(record, self.args)
+        self.assertEqual(record["log_evidence"], {"status": "available"})
         self.assertEqual(record["saved_by"]["job_id"], 33)
         self.assertEqual(record["saved_by"]["saved_at"], self.log_time)
         self.assertNotIn("private", json.dumps(record))
@@ -133,7 +157,7 @@ class Provenance(unittest.TestCase):
         del record["restore_started"]
         with self.assertRaisesRegex(tool.Refused, "unexpected provenance record fields"):
             tool.check_record(record, self.args)
-        result = subprocess.run(["python3", str(TOOL), "record", "--source", "actions-cache",
+        result = subprocess.run([sys.executable, str(TOOL), "record", "--source", "actions-cache",
             "--manifest", str(self.args.manifest), "--triplet", self.args.triplet, "--version", self.args.version,
             "--sbom", str(self.args.sbom), "--archives", str(self.args.archives), "--commit", "d" * 40,
             "--created", "2026-10-07T00:00:00Z", "--output", str(self.root / "record.json"),
@@ -199,39 +223,133 @@ class Provenance(unittest.TestCase):
             self.assertEqual(tool.timestamp(value).microsecond, int((fraction + "000000")[:6]))
             self.assertEqual(tool.time_ns(value) - seconds, int((fraction + "000000000")[:9]))
 
-    def test_proximity_alone_wrong_key_before_creation_late_and_duplicate_logs_refuse(self):
+    def test_missing_wrong_key_early_and_late_logs_are_unmatched_and_duplicates_ambiguous(self):
         good = self.logs
         cases = ["", good.replace(self.args.cache_key, "different-key"),
                  good.replace(self.log_time, "2026-10-07T18:08:57.483525Z"),
                  good.replace(self.log_time, "2026-10-07T18:09:58Z"), good + good]
         for self.logs in cases:
-            with self.subTest(log=self.logs), self.assertRaisesRegex(tool.Refused, "exactly one successful job"):
-                self.record()
+            reason = "ambiguous" if self.logs == good + good else "unmatched"
+            with self.subTest(log=self.logs), redirect_stderr(io.StringIO()):
+                self.assert_unavailable(self.record(), reason)
         self.logs = good
-        self.record()
+        self.assertEqual(self.record()["log_evidence"], {"status": "available"})
         self.entry["created_at"] = "2026-10-07T18:08:57.6023134Z"
-        with self.assertRaisesRegex(tool.Refused, "exactly one successful job"):
-            self.record()
+        with redirect_stderr(io.StringIO()):
+            self.assert_unavailable(self.record(), "unmatched")
 
-    def test_wrong_workflow_and_unsuccessful_savers_refuse(self):
+    def test_wrong_workflow_and_unsuccessful_savers_are_unmatched(self):
         for subject, key, value in [(self.run, "path", "other.yml"), (self.run, "conclusion", "failure"),
                                     (self.job, "conclusion", "failure")]:
             old = subject[key]
             subject[key] = value
-            with self.subTest(key=key), self.assertRaisesRegex(tool.Refused, "exactly one successful job"):
-                self.record()
+            with self.subTest(key=key), redirect_stderr(io.StringIO()):
+                self.assert_unavailable(self.record(), "unmatched")
             subject[key] = old
 
-    def test_unavailable_logs_and_unbounded_run_queries_refuse(self):
-        def unavailable(argv):
-            if any(a.endswith("/logs") for a in argv):
-                raise tool.Refused(["logs unavailable"])
+    def test_expired_denied_and_rate_limited_logs_write_records_with_diagnostics(self):
+        output = self.root / "record.json"
+        errors = ("gh: Not Found (HTTP 404): logs expired", "gh: Resource not accessible (HTTP 403)",
+                  "gh: API rate limit exceeded (HTTP 403)")
+        for error in errors:
+            def run(argv, **kwargs):
+                if any(a.endswith("/logs") for a in argv):
+                    return subprocess.CompletedProcess(argv, 1, "", error)
+                return subprocess.CompletedProcess(argv, 0, self.github(argv), "")
+            stderr = io.StringIO()
+            with self.subTest(error=error), patch.object(tool.subprocess, "run", side_effect=run), redirect_stderr(stderr):
+                self.assertEqual(tool.main(self.record_arguments(output)), 0, stderr.getvalue())
+            record = json.loads(output.read_text())
+            self.assert_unavailable(record, "lookup-failed")
+            self.assertEqual(record["archives"], self.archives)
+            self.assertEqual(record["cache"]["id"], self.args.restored_cache_id)
+            self.assertIn(error, stderr.getvalue())
+            self.assertNotIn(error, output.read_text())
+            self.assertNotIn("private", output.read_text())
+
+    def test_one_writer_match_plus_an_unavailable_candidate_cannot_claim_uniqueness(self):
+        def github(argv):
+            if any(a.endswith("/jobs") for a in argv):
+                return json.dumps([{"jobs": [self.job, {**self.job, "id": 34}]}])
+            if any(a.endswith("/jobs/34/logs") for a in argv):
+                raise tool.Refused(["second candidate's logs expired"])
             return self.github(argv)
-        with patch.object(tool, "command", side_effect=unavailable), self.assertRaisesRegex(tool.Refused, "logs unavailable"):
-            tool.actions_source(self.args)
-        with patch.object(tool, "command", return_value='[{"workflow_runs": [], "total_count": 1001}]'):
-            with self.assertRaisesRegex(tool.Refused, "result bound"):
-                tool.api(self.args.repository, "runs", "workflow_runs")
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assert_unavailable(self.record(github), "lookup-failed")
+        self.assertTrue(any(any(a.endswith("/jobs/33/logs") for a in call) for call in self.calls))
+        self.assertIn("second candidate's logs expired", stderr.getvalue())
+
+    def test_malformed_remote_writer_data_and_unbounded_queries_are_unavailable(self):
+        for subject, field, value in ((self.job, "started_at", "not-time"),
+                                      (self.job, "run_attempt", None), (self.run, "head_sha", "not-a-sha")):
+            original = subject[field]
+            subject[field] = value
+            with self.subTest(field=field), redirect_stderr(io.StringIO()):
+                self.assert_unavailable(self.record(), "lookup-failed")
+            subject[field] = original
+        self.logs = self.logs.replace(self.log_time, "not-time")
+        with redirect_stderr(io.StringIO()):
+            self.assert_unavailable(self.record(), "lookup-failed")
+        def github(argv):
+            if any(a.endswith("/runs") for a in argv):
+                return '[{"workflow_runs": [], "total_count": 1001}]'
+            return self.github(argv)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assert_unavailable(self.record(github), "lookup-failed")
+        self.assertIn("result bound", stderr.getvalue())
+
+    def test_log_evidence_schema_requires_exact_writer_presence(self):
+        good = self.record()
+        malformed = [None, [], {}, {"status": "unknown"}, {"status": "available", "reason": "unmatched"},
+                     {"status": "unavailable"}, {"status": "unavailable", "reason": "raw error text"}]
+        for evidence in malformed:
+            with self.subTest(evidence=evidence), self.assertRaises(tool.Refused):
+                tool.check_record({**good, "log_evidence": evidence}, self.args)
+        self.logs = ""
+        with redirect_stderr(io.StringIO()):
+            unavailable = self.record()
+        for changed in ({k: v for k, v in good.items() if k != "log_evidence"},
+                        {k: v for k, v in good.items() if k != "saved_by"},
+                        {**unavailable, "saved_by": good["saved_by"]}):
+            with self.assertRaises(tool.Refused):
+                tool.check_record(changed, self.args)
+
+    def test_unavailable_logs_do_not_waive_cache_or_archive_and_sbom_bindings(self):
+        self.logs = ""
+        with redirect_stderr(io.StringIO()):
+            good = self.record()
+        changes = (lambda r: r["cache"].update(id=None), lambda r: r["cache"].update(version="bad"),
+                   lambda r: r.update(restore_started="2026-10-07T18:08:56Z"),
+                   lambda r: r["archives"][0].update(sha256="0" * 64),
+                   lambda r: r.update(sbom_sha256="0" * 64))
+        for change in changes:
+            changed = copy.deepcopy(good)
+            change(changed)
+            with self.assertRaises(tool.Refused):
+                tool.check_record(changed, self.args)
+        (self.args.archives / self.archives[0]["path"]).write_bytes(b"tampered local archive")
+        output, stderr = self.root / "record.json", io.StringIO()
+        with patch.object(tool, "command", side_effect=self.github), redirect_stderr(stderr):
+            self.assertEqual(tool.main(self.record_arguments(output)), 1)
+        self.assertIn("SBOM archive reference does not match provenance", stderr.getvalue())
+        self.assertFalse(output.exists())
+
+    def test_check_commit_is_optional_but_validated_and_bound_when_supplied(self):
+        record = self.record()
+        path = self.root / "record.json"
+        path.write_text(json.dumps(record))
+        argv = ["check", "--record", str(path), "--manifest", str(self.args.manifest),
+                "--triplet", self.args.triplet, "--version", self.args.version, "--sbom", str(self.args.sbom)]
+        self.assertEqual(tool.main(argv), 0)
+        self.assertEqual(tool.main([*argv, "--commit", record["commit"]]), 0)
+        for value, message in (("e" * 40, "source commit mismatch"), ("", "invalid expected source commit"),
+                               ("D" * 40, "invalid expected source commit"), ("bad", "invalid expected source commit")):
+            stderr = io.StringIO()
+            with self.subTest(commit=value), redirect_stderr(stderr):
+                self.assertEqual(tool.main([*argv, "--commit", value]), 1)
+            self.assertIn(message, stderr.getvalue())
 
     def test_record_identity_and_archive_binding_mutations_refuse(self):
         good = self.record()
@@ -273,7 +391,7 @@ class Provenance(unittest.TestCase):
         self.args.triplet = "arm64-linux"
         self.args.stamp.write_text(self.stamp())
         source = tool.runner_source(self.args, self.archives, self.baseline, self.canonical)
-        for key in ("repository", "restore_started", "cache", "saved_by"):
+        for key in ("repository", "restore_started", "cache", "saved_by", "log_evidence"):
             del record[key]
         record.update(source="runner-filesystem", architecture="arm64", triplet="arm64-linux", **source)
         tool.check_record(record, self.args)
@@ -306,7 +424,7 @@ class Provenance(unittest.TestCase):
         output = self.root / "snapshot.json"
         absent = self.root / "absent"
         for directory, expected in ((absent, []), (self.args.archives, self.archives)):
-            result = subprocess.run(["python3", str(TOOL), "snapshot", "--archives", str(directory),
+            result = subprocess.run([sys.executable, str(TOOL), "snapshot", "--archives", str(directory),
                                      "--output", str(output)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(output.read_text()), expected)

@@ -199,11 +199,23 @@ The release owner stops immediately unless all prerequisites are true:
 
 Run an owner-approved build-only Release dispatch with the final tag as its
 `tag` input (for example, `v0.3.1`) against the source to be released. The
-amd64 step records the native inventory and exact cache-save job when its
-cache is traceable; a cold build may succeed with a warning and no records.
-The ARM64 step always requires its provisioning stamp. If amd64 recording
-was unavailable, resolve the cache or log-access problem and repeat the
-build before filing evidence. Expired or ambiguous save logs fail closed.
+amd64 step records the native inventory, the selected cache entry and content
+digests measured from the restored archives. It adds the exact cache-save
+job only when a unique matching save log is available. A cold build may
+succeed with a warning and no records; provision the missing cache using the
+[dependency-cache procedure](#provision-the-vcpkg-checkout-and-binary-cache)
+and repeat the owner-approved build before filing evidence. The ARM64 step
+always requires its provisioning stamp.
+
+Missing cache-writer logs alone do not block recording: `log_evidence.status`
+becomes `unavailable`, its reason describes the lookup result, and no
+`saved_by` claim is made. Read the retained GitHub CLI error in the job log
+for access, rate-limit or expired-log failures. To restore the optional log
+comparison, ensure the workflow token has Actions read access, retry after
+a rate limit resets, or use the owner-approved dependency-cache procedure
+to produce a new cache with retained save logs. An unmatched or ambiguous
+save log also leaves the comparison unavailable. Invalid cache identity,
+archive or SBOM bindings still fail required recording.
 
 Take the four native JSON files from the unsigned release-assets workflow
 artifact, sanitize and publication-scan them, then file them unchanged as
@@ -223,7 +235,11 @@ them precedes that evidence commit; these are the pre-cut build's records,
 not a claim to have already built the final tag. A changed dependency
 baseline, release version or malformed pair fails the checker; review must
 also confirm that later source changes have not invalidated the filed
-build. Final publication independently requires records from its own build.
+build. The check command also accepts `--commit <build-commit>` to compare
+the recorded source explicitly. Final publication independently requires
+records from its own build and compares their commit with its source checkout.
+Every tag push, including a candidate, uses restore mode and requires the
+record step; a candidate is lenient only at cut time.
 This record gate neither replaces vulnerability dispositions nor grants
 hardware qualification. Scanner CI still uses the native `collect`,
 `control`, `check-control` and vulnerability-disposition steps documented

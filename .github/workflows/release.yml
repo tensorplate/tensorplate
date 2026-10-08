@@ -384,6 +384,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          set -Eeuo pipefail
+          trap 'echo "::error::native cache discovery failed; see docs/release/runbook.md#provision-the-vcpkg-checkout-and-binary-cache and warm the exact cache with release-dependencies.yml before retrying"' ERR
           date -u +'%Y-%m-%dT%H:%M:%S.%NZ' > "${RUNNER_TEMP}/native-cache-restore-started.txt"
           key="$(python3 tools/release/native-cache-provenance.py key \
             --manifest vcpkg.json --profile tools/release/amd64-build-profile.sh \
@@ -1018,16 +1020,22 @@ jobs:
           CHECKSUMS: ${{ needs.meta.outputs.checksums }}
           SOURCE_LABEL: ${{ needs.meta.outputs.source_label }}
           SPEECH_RUNTIME: ${{ needs.meta.outputs.speech_runtime }}
+          PUBLISH: ${{ needs.meta.outputs.publish }}
         run: |
           set -Eeuo pipefail
-          args=(tools/release/tensorplate-release.sh manifest --version "$VERSION"
+          args=(--version "$VERSION"
                 --deb-version "$DEB_VERSION" --python-version "$PYTHON_VERSION" --tag "$TAG"
                 --release-branch "$SOURCE_LABEL" --artifacts-dir "$RELEASE_DIR" --arch arm64
+                --target-os "Ubuntu 22.04 / JetPack 6.x (L4T 36.x)"
                 --manifest "$MANIFEST" --checksums "$CHECKSUMS")
           if [[ "$SPEECH_RUNTIME" == stub ]]; then
             args+=(--with-speech-runtime)
           fi
-          "${args[@]}"
+          tools/release/tensorplate-release.sh manifest "${args[@]}"
+          if [[ "$PUBLISH" != true ]]; then
+            args+=(--skip-tag-verify)
+          fi
+          tools/release/tensorplate-release.sh verify "${args[@]}"
 
       - name: Assert the release package count
         shell: bash
@@ -1131,13 +1139,14 @@ jobs:
           (cd "$RELEASE_DIR" && sha256sum -c SHA256SUMS)
 
       - name: Require native records for a final release
-        if: ${{ needs.build_packages.outputs.prerelease == 'false' }}
+        if: ${{ needs.build_packages.outputs.prerelease != 'true' }}
         shell: bash
         env:
           TAG: ${{ needs.build_packages.outputs.tag }}
           RELEASE_DIR: ${{ needs.build_packages.outputs.release_dir }}
         run: |
-          python3 tools/release/native-release-record.py check --directory "$RELEASE_DIR" --tag "$TAG"
+          python3 tools/release/native-release-record.py check --directory "$RELEASE_DIR" --tag "$TAG" \
+            --commit "$(git rev-parse HEAD)"
 
       - name: Install cosign
         shell: bash
@@ -1200,6 +1209,8 @@ jobs:
             ${{ needs.build_packages.outputs.release_dir }}/install.sh
             ${{ needs.build_packages.outputs.release_dir }}/tensorplate_python-*.whl
             ${{ needs.build_packages.outputs.release_dir }}/tensorplate_python-*.tar.gz
+            ${{ needs.build_packages.outputs.release_dir }}/tensorplate-${{ needs.build_packages.outputs.tag }}-native-closure-*.spdx.json
+            ${{ needs.build_packages.outputs.release_dir }}/tensorplate-${{ needs.build_packages.outputs.tag }}-vcpkg-cache-provenance-*.json
             ${{ needs.build_packages.outputs.manifest }}
             ${{ needs.build_packages.outputs.checksums }}
 
@@ -1212,6 +1223,8 @@ jobs:
             ${{ needs.build_packages.outputs.release_dir }}/install.sh
             ${{ needs.build_packages.outputs.release_dir }}/tensorplate_python-*.whl
             ${{ needs.build_packages.outputs.release_dir }}/tensorplate_python-*.tar.gz
+            ${{ needs.build_packages.outputs.release_dir }}/tensorplate-${{ needs.build_packages.outputs.tag }}-native-closure-*.spdx.json
+            ${{ needs.build_packages.outputs.release_dir }}/tensorplate-${{ needs.build_packages.outputs.tag }}-vcpkg-cache-provenance-*.json
             ${{ needs.build_packages.outputs.manifest }}
             ${{ needs.build_packages.outputs.checksums }}
             ${{ needs.build_packages.outputs.bundle }}
@@ -1257,7 +1270,9 @@ jobs:
             echo "::error::expected tensorplate-python wheel and sdist release assets"
             exit 1
           }
-          assets=("${deb_assets[@]}" "$installer" "${sdk_assets[@]}" "$MANIFEST" "$CHECKSUMS" "$BUNDLE")
+          native_assets=("${RELEASE_DIR}"/tensorplate-"${TAG}"-native-closure-*.spdx.json
+                         "${RELEASE_DIR}"/tensorplate-"${TAG}"-vcpkg-cache-provenance-*.json)
+          assets=("${deb_assets[@]}" "$installer" "${sdk_assets[@]}" "${native_assets[@]}" "$MANIFEST" "$CHECKSUMS" "$BUNDLE")
 
           args=(release create "$TAG" "${assets[@]}" --verify-tag --title "TensorPlate ${TAG}" --notes-file "$NOTES")
           if [[ "$PRERELEASE" == "true" ]]; then

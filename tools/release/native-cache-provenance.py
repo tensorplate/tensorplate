@@ -64,15 +64,17 @@ def command(args: list[str]) -> str:
     for attempt in range(2):
         try:
             result = subprocess.run(args, capture_output=True, text=True, timeout=60, check=False)
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired) as error:
+            detail = str(error)
             break
         if result.returncode == 0:
             return result.stdout
+        detail = result.stderr.strip() or f"exit status {result.returncode}"
         if attempt or args[:2] != ["gh", "api"] or "pass --allow-escape-sequences" not in result.stderr:
             break
-        # Newer gh refuses escape bytes even when captured. Nothing raw is emitted.
+        # Newer gh refuses escape bytes even when captured. Successful job logs stay captured.
         args = [*args, "--allow-escape-sequences"]
-    raise Refused([f"{args[0]} could not provide provenance evidence"])
+    raise Refused([f"{args[0]} could not provide provenance evidence: {detail}"])
 
 
 def cache_key(args: argparse.Namespace) -> str:
@@ -149,11 +151,16 @@ def select_cache(args: argparse.Namespace) -> dict:
     return {key: entry[key] for key in ("id", "key", "ref", "version", "created_at")}
 
 
-def actions_source(args: argparse.Namespace) -> dict:
-    identity = getattr(args, "restored_cache_id", None)
-    need(type(identity) is int and identity > 0, "restored cache id must be a positive integer")
-    entry = select_cache(args)
-    need(entry["id"] == identity, "selected cache differs from the cache selected before restore")
+def check_writer(saved: object, cache: dict) -> None:
+    need(isinstance(saved, dict) and set(saved) == {"workflow", "run_id", "run_attempt", "job_id", "head_sha", "saved_at"}, "malformed cache writer")
+    need(isinstance(saved["workflow"], str) and saved["workflow"] in WORKFLOWS
+         and matches(r"[0-9a-f]{40}", saved["head_sha"])
+         and all(type(saved[k]) is int and saved[k] > 0 for k in ("run_id", "run_attempt", "job_id")), "invalid cache writer")
+    need(0 <= time_ns(saved["saved_at"]) - time_ns(cache["created_at"]) <= 60 * 10**9,
+         "cache-save log timestamp is outside its cache creation interval")
+
+
+def cache_writers(args: argparse.Namespace, entry: dict) -> list[dict]:
     created = timestamp(entry["created_at"])
     start = (created - dt.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     end = (created + dt.timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -177,13 +184,32 @@ def actions_source(args: argparse.Namespace) -> dict:
             pattern = r"(?m)^(\S+) Cache saved with key: " + re.escape(args.cache_key) + r"\r?$"
             for match in re.finditer(pattern, logs):
                 if 0 <= time_ns(match[1]) - time_ns(entry["created_at"]) <= 60 * 10**9:
-                    saved.append({"workflow": run["path"], "run_id": run["id"],
-                                  "run_attempt": job.get("run_attempt"), "job_id": job["id"],
-                                  "head_sha": run.get("head_sha"), "saved_at": match[1]})
-    need(len(saved) == 1, "expected exactly one successful job with a matching cache-save log line")
-    return {"repository": args.repository, "restore_started": args.restore_started,
-            "cache": {key: entry.get(key) for key in ("id", "key", "ref", "version", "created_at")},
-            "saved_by": saved[0]}
+                    writer = {"workflow": run["path"], "run_id": run["id"],
+                              "run_attempt": job.get("run_attempt"), "job_id": job["id"],
+                              "head_sha": run.get("head_sha"), "saved_at": match[1]}
+                    check_writer(writer, entry)
+                    saved.append(writer)
+    return saved
+
+
+def actions_source(args: argparse.Namespace) -> dict:
+    identity = getattr(args, "restored_cache_id", None)
+    need(type(identity) is int and identity > 0, "restored cache id must be a positive integer")
+    entry = select_cache(args)
+    need(entry["id"] == identity, "selected cache differs from the cache selected before restore")
+    source = {"repository": args.repository, "restore_started": args.restore_started, "cache": entry}
+    # Cache selection is mandatory. Retained writer logs are supplementary evidence.
+    try:
+        saved = cache_writers(args, entry)
+    except (Refused, OSError, ValueError, TypeError, KeyError, IndexError) as error:
+        reason, detail = "lookup-failed", str(error)
+    else:
+        if len(saved) == 1:
+            return {**source, "log_evidence": {"status": "available"}, "saved_by": saved[0]}
+        reason = "unmatched" if not saved else "ambiguous"
+        detail = f"{len(saved)} successful cache-save log matches"
+    print("native-cache-provenance: writer log evidence unavailable: " + detail, file=sys.stderr)
+    return {**source, "log_evidence": {"status": "unavailable", "reason": reason}}
 
 
 def runner_source(args: argparse.Namespace, archives: list[dict], baseline: str, canonical: str) -> dict:
@@ -210,8 +236,18 @@ def check_record(record: object, args: argparse.Namespace) -> None:
     common = {"schema_version", "architecture", "triplet", "feature", "baseline", "commit", "version",
               "created", "sbom_sha256", "archives", "source"}
     source = record.get("source")
-    additions = {"actions-cache": {"repository", "restore_started", "cache", "saved_by"}, "runner-filesystem": {"stamp", "limitation"}}
+    additions = {"actions-cache": {"repository", "restore_started", "cache", "log_evidence"}, "runner-filesystem": {"stamp", "limitation"}}
     need(isinstance(source, str) and source in additions, "unsupported provenance source")
+    if source == "actions-cache":
+        evidence = record.get("log_evidence")
+        need(isinstance(evidence, dict), "malformed log evidence")
+        if evidence.get("status") == "available":
+            need(set(evidence) == {"status"}, "malformed available log evidence")
+            additions[source].add("saved_by")
+        else:
+            need(set(evidence) == {"status", "reason"} and evidence["status"] == "unavailable"
+                 and isinstance(evidence["reason"], str)
+                 and evidence["reason"] in {"lookup-failed", "unmatched", "ambiguous"}, "malformed unavailable log evidence")
     need(set(record) == common | additions[source], "unexpected provenance record fields")
     expected = {"schema_version": 1, "architecture": ARCHES[args.triplet], "triplet": args.triplet,
                 "feature": "streaming-grpc", "baseline": baseline, "version": args.version,
@@ -219,6 +255,9 @@ def check_record(record: object, args: argparse.Namespace) -> None:
     need(all(type(record.get(k)) is type(v) and record[k] == v for k, v in expected.items()),
          "provenance identity or SBOM digest mismatch")
     need(matches(r"[0-9a-f]{40}", record["commit"]), "invalid source commit")
+    if getattr(args, "commit", None) is not None:
+        need(matches(r"[0-9a-f]{40}", args.commit), "invalid expected source commit")
+        need(record["commit"] == args.commit, "source commit mismatch")
     need(matches(r"[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?", record["version"]), "invalid release version")
     timestamp(record["created"])
     archives = record["archives"]
@@ -254,18 +293,15 @@ def check_record(record: object, args: argparse.Namespace) -> None:
              "SBOM archive reference does not match provenance")
     if source == "actions-cache":
         need(args.triplet == "x64-linux" and matches(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", record["repository"]) and ".." not in record["repository"], "invalid Actions source")
-        cache, saved = record["cache"], record["saved_by"]
+        cache = record["cache"]
         need(isinstance(cache, dict) and set(cache) == {"id", "key", "ref", "version", "created_at"}, "malformed cache identity")
-        need(isinstance(saved, dict) and set(saved) == {"workflow", "run_id", "run_attempt", "job_id", "head_sha", "saved_at"}, "malformed cache writer")
         need(type(cache["id"]) is int and cache["id"] > 0 and matches(r"[0-9a-f]{64}", cache["version"])
              and matches(r"vcpkg-release-Linux-x64-linux-" + baseline + r"-[0-9a-f]{64}", cache["key"])
              and matches(r"refs/(heads|tags)/[A-Za-z0-9_./-]+", cache["ref"]) and ".." not in cache["ref"], "invalid cache identity")
-        need(saved["workflow"] in WORKFLOWS and matches(r"[0-9a-f]{40}", saved["head_sha"])
-             and all(type(saved[k]) is int and saved[k] > 0 for k in ("run_id", "run_attempt", "job_id")), "invalid cache writer")
         need(time_ns(cache["created_at"]) <= time_ns(record["restore_started"]),
              "selected cache entry was created after restore started; its source cannot be established")
-        need(0 <= time_ns(saved["saved_at"]) - time_ns(cache["created_at"]) <= 60 * 10**9,
-             "cache-save log timestamp is outside its cache creation interval")
+        if evidence["status"] == "available":
+            check_writer(record["saved_by"], cache)
     else:
         stamp = record["stamp"]
         expected_stamp = {"baseline": baseline, "dependencies_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
@@ -299,6 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd.add_argument("--sbom", type=pathlib.Path, required=True)
         if command_name == "check":
             cmd.add_argument("--record", type=pathlib.Path, required=True)
+            cmd.add_argument("--commit", help="require this source commit when validating")
             continue
         cmd.add_argument("--source", choices=("actions-cache", "runner-filesystem"), required=True)
         cmd.add_argument("--archives", type=pathlib.Path, required=True)
@@ -333,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
             check_record(record, args)
             args.output.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     except (Refused, OSError, ValueError, TypeError, KeyError, IndexError) as error:
-        print("native-cache-provenance: " + (str(error) if isinstance(error, Refused) else "malformed or unreadable provenance input"), file=sys.stderr)
+        print("native-cache-provenance: " + str(error), file=sys.stderr)
         return 1
     return 0
 
