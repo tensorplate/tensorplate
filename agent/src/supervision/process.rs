@@ -609,7 +609,18 @@ mod tests {
             .spawn()
             .expect("spawn");
         super::send_sigterm(child.id()).expect("signal");
-        assert_eq!(child.wait().expect("wait").signal(), Some(15));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("wait") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().expect("kill");
+                panic!("the child was not signalled");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(status.signal(), Some(15));
 
         // Above every pid a kernel hands out.
         super::send_sigterm(i32::MAX.unsigned_abs()).expect("no such process");
