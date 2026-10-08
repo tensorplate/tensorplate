@@ -113,6 +113,7 @@ def test_golden_frames_round_trip_through_the_codec(path: Path) -> None:
 @pytest.fixture
 def runner_client() -> Iterator[socket.socket]:
     client, server = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(5.0)
     runner = SidecarRunner(server)
     thread = threading.Thread(target=runner.serve_forever, daemon=True)
     thread.start()

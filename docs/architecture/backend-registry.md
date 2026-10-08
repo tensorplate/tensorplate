@@ -224,6 +224,81 @@ or rule edits the header and the vectors in the same commit. There is no
 standalone JSON, and a socket transport carries PCM as frame payload bytes,
 not as buffer handles.
 
+### Job messages in the Python sidecar
+
+The sidecar (`backends/python_pytorch/`) acts on job and session messages on
+a connection whose `load_model` enabled `speech_jobs_v1`. Its
+`job_objects.py` mirrors the objects above: `tests/test_job_seam_replay.py`
+replays the `scope: all` vectors through it, and
+`tests/test_speech_jobs_golden_replay.py` replays the golden frames against a
+live runner. A `job_submit` is checked in the order `JobRequest::create`
+checks it, and every message the sidecar sends for a job passes the
+`JobEventSequence` rules first.
+
+Of the runner profiles, the fixture profiles run `stt_decode` and
+`tts_synthesis`. `faster_whisper` runs `stt_decode` and `kokoro` runs
+`tts_synthesis`, each as one batch decode or synthesis per job. A Whisper
+transcript carries the text and the tokens and no word units; the runner
+permits a job in a language its entry declares whose audio fits one model
+input window. A Kokoro job returns the segment as one `audio_chunk`; the
+runner permits only its entry's language and voice at speed 1000. Either
+declares its class only when the model's sample rate is the job seam's, so a
+load that enables the capability for a model at another rate is answered
+`unsupported`. Both mappings are provisional. No lane runs `vad_frames`, so a
+submit for it fails with `job_class_unsupported`, and no job sends
+`job_progress`. An integer `job_delay_ms` (0 to 60000) in a fixture
+profile's entry file holds each of its jobs open that long: a test hook,
+and one that any entry file of those profiles can set.
+
+- **Threads.** A reader thread reads frames, answers `health_check`, and
+  admits, cancels and releases jobs in the job table (`jobs.py`). The thread
+  that runs the loop, the process's main thread, makes every backend call:
+  unary requests and admitted jobs wait for it in one FIFO, so calls never
+  overlap and run in arrival order. The reader's one backend call is
+  `permits_job`, which reads only what the load established.
+- **Bounds.** One job runs and at most 8 wait; a submit beyond that fails
+  with `resource_exhausted` and `job_capacity_exhausted`. At most 8 unary
+  requests wait; one more is answered `resource_exhausted`.
+- **Admission.** `job_accepted` is sent when the job is admitted, not when it
+  starts. A message the sidecar cannot read, or a submit that reuses the id
+  of an unreleased job or carries a zero in its identity, is answered with an
+  `error_event` (`config_invalid`) that carries the message's `message_id`,
+  and with no job message. A job the sidecar refuses gets `job_failed` with
+  the reason as the error's context, then `job_released`; one whose
+  `permits_job` raises fails with the error edge's code and no context.
+- **Cancellation.** A waiting job is removed, and `job_cancel_acknowledged`,
+  `job_failed` (`cancelled`) and `job_released` follow at once. A running job
+  is acknowledged at once; nothing interrupts the backend call, and when it
+  returns its output is discarded and the job fails `cancelled`. A repeated
+  cancel, or one for a job that is unknown or already ended, gets no message.
+- **Sessions.** `session_release` cancels the session's unfinished jobs in
+  submission order, and `session_released` follows the last `job_released`,
+  at once when the session has no job. A submit for the session in between
+  fails with `session_releasing`. After `session_released` the sidecar has
+  forgotten the session: the same key later is a new session to it.
+- **Unload.** When `unload` or another `load_model` arrives, waiting jobs fail
+  with `unavailable` and `backend_unavailable`, the running job finishes
+  ahead of the unload, and a `job_submit` is refused as on a connection
+  without the capability until a load enables it again. A `job_cancel` or
+  `session_release` still acts while that job is unreleased, so its
+  `job_failed` (`cancelled`), `job_released` and `session_released` come
+  before the `unload_response`; once it is released they are refused too.
+- **Writes.** A frame is written whole under one lock, and a job's messages
+  in the order of its state changes. A write that fails, or makes no progress
+  for 5 s, ends the connection, as a frame error does, and EOF once a load
+  has enabled jobs: the socket is shut down, waiting work is dropped
+  unanswered, and the loop returns once the backend call in progress has.
+  When the peer half-closes a connection that never enabled jobs, the
+  requests already read are run and answered in order, and then the socket
+  is shut down. The rule requires the other side to read continuously, while
+  it writes too. Job messages are written under the job table's lock, so
+  while a large result drains, health and cancel answers wait behind it. A
+  peer that takes bytes slowly keeps a write alive; one that stops reading,
+  for instance to write a second large submit without reading, has its
+  connection ended after the 5 s.
+- **Message ids.** A message the sidecar originates, the `ready_event`
+  included, carries `s<n>` from one counter per connection.
+
 ## Installed backends and runner profiles
 
 The registry above is what a build of the serving worker can run. What a

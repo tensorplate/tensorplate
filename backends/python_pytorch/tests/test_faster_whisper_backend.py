@@ -7,6 +7,7 @@ runner reads, so CI runs the whole profile without either engine installed.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
 import json
 import logging
@@ -16,7 +17,7 @@ import struct
 import sys
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -32,11 +33,24 @@ from tensorplate_pytorch_backend.backends.faster_whisper import (
     DECODE_OPTIONS,
     FasterWhisperBackend,
 )
+from tensorplate_pytorch_backend.job_objects import JobIdentity, JobRequest, TranscriptResult
 from tensorplate_pytorch_backend.runner import SidecarRunner, default_backend_factories
 from tensorplate_pytorch_backend.speech_payload import (
     TEXT_UTF8,
     read_result_json,
     text_utf8_tensor,
+)
+from test_speech_jobs_golden_replay import Peer
+from test_speech_jobs_golden_replay import connect as connect  # the fixture
+from test_speech_jobs_runner import (
+    ACCEPTED,
+    FAILED,
+    digest,
+    ended,
+    exchange,
+    message,
+    read,
+    submit,
 )
 
 _BUNDLE = (
@@ -1241,3 +1255,107 @@ def test_a_transcript_reaches_the_result_and_no_other_surface(
     assert written.count(_CANARY_BYTES) == payload.count(_CANARY_BYTES) == 3
     assert "withheld a WARNING record from faster_whisper" in log
     assert CANARY not in log
+
+
+# ----------------------------------------------------------------------
+# jobs
+# ----------------------------------------------------------------------
+
+_TOKENS = [50365, 2425, 456, 13, 4621, 13]
+
+
+def _job(language: str = "ar", samples: list[int] | None = None) -> JobRequest:
+    payload = _audio(_THREE_SECONDS if samples is None else samples).payload
+    return JobRequest(JobIdentity(1, 1, 1), protocol.JOB_CLASS_STT_DECODE, 0, payload, language)
+
+
+def _job_peer(connect: Callable[..., Peer], entry_path: Path) -> tuple[Peer, dict[str, Any]]:
+    """A live runner, and its answer to a load of ``entry_path`` that enables jobs."""
+    peer = connect()
+    load = _load_frame(entry_path).header
+    return peer, exchange(peer, {**load, "capabilities": [protocol.CAPABILITY_SPEECH_JOBS_V1]})
+
+
+def test_stt_decode_is_declared_for_a_loaded_model_at_the_job_input_rate(
+    engine: _Engine, tmp_path: Path
+) -> None:
+    backend = FasterWhisperBackend()
+    assert backend.job_classes() == ()
+    backend.load(_spec(_bundle(tmp_path)))
+    assert backend.job_classes() == (protocol.JOB_CLASS_STT_DECODE,)
+    engine.sampling_rate = 8000
+    assert _loaded(tmp_path, under="other", sample_rate_hz=8000).job_classes() == ()
+
+
+def test_a_job_is_permitted_in_a_declared_language_within_one_input_window(
+    engine: _Engine, tmp_path: Path
+) -> None:
+    engine.n_samples = 16
+    backend = _loaded(tmp_path)
+    assert backend.permits_job(_job("ar", [7] * 16))
+    assert backend.permits_job(_job("en", [7]))
+    assert not backend.permits_job(_job("fr", [7]))
+    assert not backend.permits_job(_job("ar", [7] * 17))
+    synthesis = dataclasses.replace(_job("ar", [7]), job_class=protocol.JOB_CLASS_TTS_SYNTHESIS)
+    assert not backend.permits_job(synthesis)
+    backend.unload()
+    assert not backend.permits_job(_job("ar", [7]))
+
+
+def test_run_job_returns_the_text_and_tokens_of_the_decode_infer_runs(
+    engine: _Engine, tmp_path: Path
+) -> None:
+    backend = _loaded(tmp_path)
+    samples = [0, 16384, -32768, 32767, *_THREE_SECONDS[4:]]
+    result = backend.run_job(_job("ar", samples))
+    assert result == TranscriptResult(" Hello there. Bye.", _TOKENS)
+    assert result.text == read_result_json(backend.infer(_request("ar", samples)))["text"]
+    job_decode, infer_decode = engine.transcribed
+    assert job_decode == infer_decode
+    assert job_decode[0][:4] == [0.0, 0.5, -1.0, 32767 / 32768]
+    assert job_decode[1] == {"language": "ar", **DECODE_OPTIONS}
+    assert _refusal(lambda: FasterWhisperBackend().run_job(_job())).code == protocol.ERR_NOT_READY
+
+
+def test_a_live_runner_declares_stt_decode_and_runs_a_permitted_job(
+    engine: _Engine, connect: Callable[..., Peer], tmp_path: Path
+) -> None:
+    engine.segments = engine.segments[:1]  # the golden submit is one second long
+    peer, loaded = _job_peer(connect, _bundle(tmp_path))
+    assert (loaded["status"], loaded["job_classes"]) == (protocol.STATUS_OK, ["stt_decode"])
+    peer.send(submit(1))
+    frames = [peer.read().header for _ in range(3)]
+    assert [digest(frame) for frame in frames] == [(ACCEPTED, 1), *ended(1)]
+    assert frames[1]["result"] == {
+        "type": "transcript",
+        "text": " Hello there.",
+        "tokens": _TOKENS[:4],
+        "words": [],
+    }
+    ((decoded, options),) = engine.transcribed
+    assert (len(decoded), options) == (16_000, {"language": "en", **DECODE_OPTIONS})
+    peer.send(submit(2, options={"language": "fr"}))
+    assert read(peer, 2) == ended(2, FAILED, "unsupported", "job_not_permitted")
+    # A model at another rate declares no class, so its job-enabled load is refused.
+    engine.sampling_rate = 8000
+    _, refused = _job_peer(connect, _bundle(tmp_path, under="other", sample_rate_hz=8000))
+    assert (refused["error"]["code"], engine.released) == (protocol.ERR_UNSUPPORTED, 1)
+
+
+def test_a_failed_job_whose_error_carries_a_canary_reaches_no_surface(
+    engine: _Engine, connect: Callable[..., Peer], tmp_path: Path
+) -> None:
+    engine.iteration_error = RuntimeError(f"decode of {CANARY} failed")
+    peer, loaded = _job_peer(connect, _canary_bundle(tmp_path))
+    with _edge_log() as log:
+        peer.send(submit(1))
+        frames = [loaded, *(peer.read().header for _ in range(3))]
+        frames.append(exchange(peer, message(protocol.KIND_HEALTH_CHECK)))
+    assert [digest(frame) for frame in frames[1:4]] == [
+        (ACCEPTED, 1),
+        *ended(1, FAILED, "inference_failed"),
+    ]
+    assert frames[2]["error"]["message"] == "the audio could not be transcribed"
+    assert frames[4]["health"]["last_error"] == "the audio could not be transcribed"
+    assert "withheld a WARNING record from faster_whisper" in log.getvalue()
+    assert CANARY not in json.dumps(frames) + log.getvalue()

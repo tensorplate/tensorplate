@@ -23,6 +23,7 @@ from tensorplate_pytorch_backend.backends.base import (
     RuntimeCapability,
 )
 from tensorplate_pytorch_backend.configuration import ArtifactConfigError, read_artifact_config
+from tensorplate_pytorch_backend.job_objects import AudioChunkResult, JobRequest
 from tensorplate_pytorch_backend.protocol import (
     ERR_CONFIG_INVALID,
     ERR_INFERENCE_FAILED,
@@ -31,6 +32,8 @@ from tensorplate_pytorch_backend.protocol import (
     ERR_OOM_ERROR,
     ERR_SHAPE_MISMATCH,
     ERR_UNSUPPORTED,
+    JOB_CLASS_TTS_SYNTHESIS,
+    LIMIT_JOB_OUTPUT_SAMPLE_RATE_HZ,
 )
 from tensorplate_pytorch_backend.speech_payload import read_text_utf8, result_json_tensor
 
@@ -332,15 +335,13 @@ class KokoroBackend(Backend):
     def prime(self) -> None:
         self._require_loaded()
 
-    def infer(self, inputs: list[NamedTensor]) -> list[NamedTensor]:
-        loaded = self._require_loaded()
-        if len(inputs) != 1:
-            raise BackendError(ERR_SHAPE_MISMATCH, "Kokoro expects exactly one text_utf8 tensor")
-        text = read_text_utf8(inputs)
+    @staticmethod
+    def _synthesize(loaded: _Loaded, text: str) -> tuple[bytes, int, tuple[int, int, int, int]]:
+        """Return the PCM of ``text``, how many samples clipped and the clock around each stage."""
         if (
             not text.strip()
             or len(text) > MAX_TEXT_CHARS
-            or len(inputs[0].payload) > MAX_TEXT_BYTES
+            or len(text.encode("utf-8")) > MAX_TEXT_BYTES
             or "\0" in text
         ):
             raise BackendError(
@@ -400,6 +401,14 @@ class KokoroBackend(Backend):
             raise BackendError(
                 _failure_code(exc, ERR_INFERENCE_FAILED), "the text could not be synthesized"
             ) from None
+        return pcm, clipped, (started, phonemized, synthesized, converted)
+
+    def infer(self, inputs: list[NamedTensor]) -> list[NamedTensor]:
+        loaded = self._require_loaded()
+        if len(inputs) != 1:
+            raise BackendError(ERR_SHAPE_MISMATCH, "Kokoro expects exactly one text_utf8 tensor")
+        pcm, clipped, clock = self._synthesize(loaded, read_text_utf8(inputs))
+        started, phonemized, synthesized, converted = clock
         count = len(pcm) // 2
         return [
             NamedTensor(AUDIO_FRAMES, {"dtype": "int16", "shape": [count]}, pcm),
@@ -436,6 +445,27 @@ class KokoroBackend(Backend):
             torch, device = loaded.torch, loaded.runtime["device"]
             del loaded
             _clear_cache(torch, device)
+
+    def job_classes(self) -> tuple[str, ...]:
+        loaded = self._loaded
+        at_rate = loaded is not None and loaded.sample_rate_hz == LIMIT_JOB_OUTPUT_SAMPLE_RATE_HZ
+        return (JOB_CLASS_TTS_SYNTHESIS,) if at_rate else ()
+
+    def permits_job(self, request: JobRequest) -> bool:
+        loaded = self._loaded  # read once: the reader thread calls this
+        return (
+            loaded is not None
+            and request.job_class == JOB_CLASS_TTS_SYNTHESIS
+            and request.language == loaded.language
+            and request.voice == loaded.voice
+            and request.speed_milli == 1000
+        )
+
+    def run_job(self, request: JobRequest) -> AudioChunkResult:
+        # Provisional mapping: one batch synthesis per job, its segment as one result.
+        loaded = self._require_loaded()
+        pcm, clipped, _clock = self._synthesize(loaded, request.payload.decode("utf-8"))
+        return AudioChunkResult(pcm, clipped)
 
     def _require_loaded(self) -> _Loaded:
         if self._loaded is None:

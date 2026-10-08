@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import copy
+import dataclasses
 import hashlib
 import importlib.metadata
 import json
@@ -11,7 +13,7 @@ import os
 import struct
 import sys
 import weakref
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -19,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from tensorplate_pytorch_backend import protocol
+from tensorplate_pytorch_backend import job_objects, protocol
 from tensorplate_pytorch_backend.backends import kokoro as kokoro_module
 from tensorplate_pytorch_backend.backends.base import BackendError, NamedTensor
 from tensorplate_pytorch_backend.backends.kokoro import KokoroBackend
@@ -33,6 +35,9 @@ from test_faster_whisper_backend import (
     _serving,
     _surfaces,
 )
+from test_speech_jobs_golden_replay import Peer, golden
+from test_speech_jobs_golden_replay import connect as connect  # the fixture
+from test_speech_jobs_runner import ACCEPTED, FAILED, digest, ended, exchange, message, read
 
 CANARY = "tp-canary-kokoro-8d27"
 _BUNDLE = Path(__file__).resolve().parents[3] / "test/models/bundles/v0_1/tts_kokoro_candidate"
@@ -846,3 +851,118 @@ def test_unselected_voice_still_requires_a_verified_artifact(
     }
     _error(lambda: _loaded(tmp_path, voices=voices), "config_invalid")
     assert not _calls(engine, "model")
+
+
+_PCM = (-32768, -32768, -16384, 0, 16384, 32767, 32767)
+_OTHER: list[dict[str, Any]] = [
+    {"language": "fr-FR"},
+    {"voice": "af_bella"},
+    {"speed_milli": 999},
+    {"speed_milli": 1001},
+]
+
+
+def _submit(text: str = "Hello", job_id: int = 1, **options: Any) -> tuple[dict[str, Any], bytes]:
+    """The golden tts_synthesis submit for ``text``, with ``options`` changed."""
+    header = copy.deepcopy(golden("tts_synthesis")[0])
+    header["job_id"] = job_id
+    header["options"].update(options)
+    header["input"]["payload_length"] = len(text.encode())
+    return header, text.encode()
+
+
+def _job(text: str = "Hello", **options: Any) -> job_objects.JobRequest:
+    return job_objects.read_submit(*_submit(text, **options))
+
+
+def _job_peer(connect: Callable[..., Peer], entry_path: Path) -> tuple[Peer, dict[str, Any]]:
+    """A live runner, and its answer to a load of ``entry_path`` that enables jobs."""
+    peer = connect()
+    capabilities = [protocol.CAPABILITY_SPEECH_JOBS_V1]
+    load = _frame(protocol.KIND_LOAD_MODEL, model_spec=_spec(entry_path), capabilities=capabilities)
+    return peer, exchange(peer, load.header)
+
+
+def test_tts_synthesis_is_declared_for_a_loaded_model_at_the_job_output_rate(
+    engine: _Engine, tmp_path: Path
+) -> None:
+    backend = KokoroBackend()
+    assert backend.job_classes() == ()
+    backend.load(_spec(_bundle(tmp_path)))
+    assert backend.job_classes() == (protocol.JOB_CLASS_TTS_SYNTHESIS,)
+    engine.rate = 22050
+    assert _loaded(tmp_path / "other", sample_rate_hz=22050).job_classes() == ()
+
+
+def test_a_job_is_permitted_for_the_entrys_language_and_voice_at_speed_1000(
+    engine: _Engine, tmp_path: Path
+) -> None:
+    backend = _loaded(tmp_path)
+    assert backend.permits_job(_job())
+    for change in _OTHER:
+        assert not backend.permits_job(_job(**change))
+    decode = dataclasses.replace(_job(), job_class=protocol.JOB_CLASS_STT_DECODE)
+    assert not backend.permits_job(decode)
+    assert not KokoroBackend().permits_job(_job())
+
+
+def test_run_job_returns_the_pcm_and_clipping_of_the_synthesis_infer_runs(
+    engine: _Engine, tmp_path: Path
+) -> None:
+    backend = _loaded(tmp_path)
+    result = backend.run_job(_job("Héllo"))
+    audio, _ = backend.infer([text_utf8_tensor("Héllo")])
+    assert result == job_objects.AudioChunkResult(audio.payload, 2)
+    assert struct.unpack("<7h", result.pcm) == _PCM
+    voice = str(tmp_path / CANARY / "model/voices/af_heart.pt")
+    assert _calls(engine, "g2p") == ["Héllo"] * 2
+    assert _calls(engine, "synthesize") == [("hello", voice, 1.0)] * 2
+    _error(lambda: KokoroBackend().run_job(_job()), "not_ready")
+
+
+@pytest.mark.parametrize("text", [" \n\t", "a" * 4097, "é" * 2049, "x\0y"])
+def test_run_job_refuses_the_text_infer_refuses(engine: _Engine, tmp_path: Path, text: str) -> None:
+    request = dataclasses.replace(_job(), payload=text.encode())
+    _error(lambda: _loaded(tmp_path).run_job(request), "config_invalid")
+    assert not _calls(engine, "g2p")
+
+
+def test_a_live_runner_declares_tts_synthesis_and_returns_a_job_as_one_audio_chunk(
+    engine: _Engine, connect: Callable[..., Peer], tmp_path: Path
+) -> None:
+    peer, loaded = _job_peer(connect, _bundle(tmp_path))
+    assert (loaded["status"], loaded["job_classes"]) == (protocol.STATUS_OK, ["tts_synthesis"])
+    peer.send(*_submit("Hello"))
+    accepted, completed, released = (peer.read() for _ in range(3))
+    frames = [digest(frame.header) for frame in (accepted, completed, released)]
+    assert frames == [(ACCEPTED, 1), *ended(1)]
+    assert completed.header["result"] == {
+        "type": "audio_chunk",
+        "format": {"encoding": "pcm_s16le", "sample_rate_hz": 24000, "channels": 1},
+        "clipped_samples": 2,
+        "payload_length": 14,
+    }
+    assert struct.unpack("<7h", completed.payload) == _PCM
+    for job_id, change in enumerate(_OTHER, start=2):
+        peer.send(*_submit("Hello", job_id, **change))
+        assert read(peer, 2) == ended(job_id, FAILED, "unsupported", "job_not_permitted")
+
+
+def test_a_failed_job_whose_error_names_a_canary_voice_and_path_reaches_no_surface(
+    engine: _Engine, connect: Callable[..., Peer], tmp_path: Path
+) -> None:
+    engine.errors["synthesize"] = RuntimeError(f"{CANARY} voice af_heart at /voices/{CANARY}.pt")
+    peer, loaded = _job_peer(connect, _bundle(tmp_path))
+    with _edge_log() as log:
+        peer.send(*_submit(CANARY))
+        frames = [loaded, *(peer.read().header for _ in range(3))]
+        frames.append(exchange(peer, message(protocol.KIND_HEALTH_CHECK)))
+    assert [digest(frame) for frame in frames[1:4]] == [
+        (ACCEPTED, 1),
+        *ended(1, FAILED, "inference_failed"),
+    ]
+    assert frames[2]["error"]["message"] == "the text could not be synthesized"
+    assert frames[4]["health"]["last_error"] == "the text could not be synthesized"
+    said = json.dumps(frames) + log.getvalue()
+    assert CANARY not in said
+    assert "af_heart" not in said

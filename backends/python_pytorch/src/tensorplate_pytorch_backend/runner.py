@@ -2,11 +2,30 @@
 
 The runner is the entry point of the ``tensorplate-backend-python-pytorch``
 process. It connects to a Unix domain socket whose path is supplied by
-the adapter, reads sidecar frames in a loop, dispatches each frame to a
-:class:`Backend`, and serializes the response frame. It does not start
-an HTTP server, does not run a FastAPI app, and does not load arbitrary
-user Python plugins outside the declared backend contract (per the
-V01-E05 closed decisions).
+the adapter, reads sidecar frames, dispatches each one to a
+:class:`Backend` or to the job table, and serializes what answers it. It
+does not start an HTTP server, does not run a FastAPI app, and does not
+load arbitrary user Python plugins outside the declared backend contract
+(per the V01-E05 closed decisions).
+
+Threads
+    ``serve_forever`` starts a reader thread and makes every backend call on
+    the thread that called it, except ``permits_job``, which the reader calls
+    to admit a job. The reader answers ``health_check`` itself and gives job
+    and session messages to the job table
+    (:mod:`~tensorplate_pytorch_backend.jobs`), which admits, cancels and
+    releases without waiting for the backend. Every other frame and every
+    admitted job waits in one FIFO for the calling thread, so its calls
+    never overlap and run in arrival order. At most 8 jobs and 8 unary
+    requests wait; one more is refused with ``resource_exhausted``.
+
+Writes
+    A frame is written whole, under one lock. A write that fails, or makes no
+    progress for ``WRITE_STALL_TIMEOUT_S``, ends the connection, as a frame
+    error does, and EOF once a load has enabled jobs: the socket is shut down,
+    waiting work is dropped unanswered, and ``serve_forever`` returns when the
+    backend call in progress has. At EOF on a connection that never enabled
+    jobs, what was already read is run and answered first, in order.
 
 Lifecycle
     The runner owns at most one active backend at a time (one
@@ -26,22 +45,25 @@ Failure handling
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import os
+import select
 import socket
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final
 
-from tensorplate_pytorch_backend import codec, protocol, sanitize
+from tensorplate_pytorch_backend import codec, jobs, protocol, sanitize
 from tensorplate_pytorch_backend.backends import (
     Backend,
     BackendError,
     CudaFixtureBackend,
     FasterWhisperBackend,
     FixtureBackend,
+    JobBackend,
     KokoroBackend,
     MpsFixtureBackend,
     NamedTensor,
@@ -51,6 +73,16 @@ from tensorplate_pytorch_backend.backends import (
 from tensorplate_pytorch_backend.configuration import ArtifactConfigError, read_artifact_config
 
 logger = logging.getLogger("tensorplate.sidecar")
+
+#: The protocol capabilities the ``ready_event`` lists.
+CAPABILITIES: Final[tuple[str, ...]] = (protocol.CAPABILITY_SPEECH_JOBS_V1,)
+#: How long a write may make no progress before the connection is given up.
+WRITE_STALL_TIMEOUT_S: float = 5.0
+#: How long the reader waits for bytes before it looks again at whether the connection ended.
+READ_POLL_S: float = 1.0
+_JOB_KINDS: Final[frozenset[str]] = frozenset(
+    {protocol.KIND_JOB_SUBMIT, protocol.KIND_JOB_CANCEL, protocol.KIND_SESSION_RELEASE}
+)
 
 
 # Registry of backend implementations selectable by `model_spec.backend_hint`
@@ -175,8 +207,8 @@ def _pack_outputs(
 class SidecarRunner:
     """Connects to one C++ adapter and serves one execution session.
 
-    The runner is a synchronous request/response loop; sidecar IPC
-    serialization is the adapter's responsibility on the C++ side.
+    A reader thread and the thread that calls ``serve_forever`` share the
+    work as the module docstring describes.
     """
 
     def __init__(
@@ -187,40 +219,103 @@ class SidecarRunner:
         default_backend_name: str = "fixture",
     ) -> None:
         self._sock = sock
+        # The mode, not a per-send flag: macOS blocks a flagged send once the buffer is full.
+        sock.setblocking(False)
         self._factories = backend_factories or default_backend_factories()
         self._default_backend_name = default_backend_name
         self._state = RunnerState()
         self._read_buf = bytearray()
         self._write_lock = threading.Lock()
+        self._originated = 0
+        self._ended = False
+        self._at_limit = False
+        self._table = jobs.JobTable(
+            self._write_frame, lambda message: setattr(self._state, "last_error", message)
+        )
 
     @property
     def state(self) -> RunnerState:
         return self._state
 
+    def announce_ready(self) -> bool:
+        """Send the ``ready_event`` with the sidecar's capabilities; False when it failed."""
+        header = {
+            "schema_version": protocol.SCHEMA_VERSION,
+            "message_id": "",
+            "kind": protocol.KIND_READY_EVENT,
+            "capabilities": list(CAPABILITIES),
+        }
+        self._write_frame(codec.SidecarFrame(header), True)
+        return not self._ended
+
     def serve_forever(self, *, max_iterations: int | None = None) -> None:
-        iterations = 0
+        reader = threading.Thread(
+            target=self._read_frames, args=(max_iterations,), name="sidecar-reader", daemon=True
+        )
+        reader.start()
         try:
-            while True:
-                if max_iterations is not None and iterations >= max_iterations:
-                    return
-                iterations += 1
+            while not self._ended and (work := self._table.take()) is not None:
+                if self._ended:
+                    break  # it ended while this thread waited, and the work was queued after
+                if isinstance(work, jobs.Job):
+                    self._table.run(work)
+                elif (response := self._dispatch(work)) is not None:
+                    self._write_frame(response)
+        except Exception as exc:
+            logger.error("sidecar runner exiting on unexpected error: %s", sanitize.describe(exc))
+            self._end_connection()
+        # A caller that set a frame limit keeps the connection it stopped reading at.
+        if not self._at_limit:
+            self._end_connection()
+        reader.join(timeout=2 * WRITE_STALL_TIMEOUT_S)
+
+    def _read_frames(self, limit: int | None) -> None:
+        """The reader thread: route frames until EOF, an error or ``limit`` frames."""
+        count = 0
+        half_closed = False
+        try:
+            # A write that ended the connection leaves the frames already read unrouted.
+            while not self._ended and (limit is None or count < limit):
                 frame = self._read_one_frame()
                 if frame is None:
-                    return  # peer closed
-                response = self._dispatch(frame)
-                if response is not None:
-                    try:
-                        self._write_frame(response)
-                    except (ConnectionError, OSError) as exc:
-                        logger.warning(
-                            "sidecar runner exiting on socket write error: %s",
-                            sanitize.describe(exc),
-                        )
-                        return
+                    half_closed = True  # or the connection ended while the reader waited
+                    break
+                count += 1
+                self._route(frame)
         except (ConnectionError, OSError) as exc:
             logger.warning("sidecar runner exiting on socket error: %s", sanitize.describe(exc))
         except Exception as exc:
             logger.error("sidecar runner exiting on unexpected error: %s", sanitize.describe(exc))
+        finally:
+            # At the frame limit, and at EOF when no load ever enabled jobs, the serving
+            # thread still answers what was read. Otherwise no more writes, then waiting
+            # work is dropped, and only then does the peer see the socket shut down.
+            self._at_limit = count == limit
+            drain = self._at_limit or (half_closed and not self._table.ever_opened)
+            if not drain:
+                self._ended = True
+            self._table.stop(drain=drain)
+            if not drain:
+                self._end_connection()
+
+    def _route(self, frame: codec.SidecarFrame) -> None:
+        kind = frame.header.get("kind")
+        try:
+            self._reject_bad_schema(frame.header)
+        except BackendError:
+            kind = None  # the backend thread answers it, in arrival order
+        if kind == protocol.KIND_HEALTH_CHECK:
+            response = self._dispatch(frame)
+        elif kind in _JOB_KINDS and self._table.handle(frame):
+            return
+        else:
+            if self._table.offer(frame, kind in (protocol.KIND_LOAD_MODEL, protocol.KIND_UNLOAD)):
+                return
+            code = protocol.ERR_RESOURCE_EXHAUSTED
+            busy = sanitize.EdgeError(code, sanitize.MESSAGES[code])
+            response = _typed_error_response(frame.header, busy)
+        if response is not None:
+            self._write_frame(response)
 
     # ------------------------------------------------------------------
     # framing
@@ -231,7 +326,7 @@ class SidecarRunner:
             try:
                 frame, consumed = codec.decode_one(bytes(self._read_buf))
             except codec.IncompleteFrame:
-                chunk = self._sock.recv(65536)
+                chunk = self._receive()
                 if not chunk:
                     return None
                 self._read_buf.extend(chunk)
@@ -239,10 +334,49 @@ class SidecarRunner:
             del self._read_buf[:consumed]
             return frame
 
-    def _write_frame(self, frame: codec.SidecarFrame) -> None:
-        data = codec.encode(frame)
+    def _receive(self) -> bytes:
+        """The peer's next bytes; none at EOF or once the connection has ended."""
+        while not self._ended:
+            # A bounded wait: no shutdown has to wake the reader for it to see the flag.
+            if select.select([self._sock], [], [], READ_POLL_S)[0]:
+                with contextlib.suppress(BlockingIOError):
+                    return self._sock.recv(65536)
+        return b""
+
+    def _write_frame(self, frame: codec.SidecarFrame, originated: bool = False) -> None:
+        """Write one whole frame; a write that fails or stalls ends the connection.
+
+        An ``originated`` frame gets the connection's next ``s<n>`` as its ``message_id``.
+        """
         with self._write_lock:
-            self._sock.sendall(data)
+            if self._ended:
+                return
+            if originated:
+                self._originated += 1
+                frame.header["message_id"] = f"s{self._originated}"
+            try:
+                view = memoryview(codec.encode(frame))
+                while view:
+                    try:
+                        view = view[self._sock.send(view) :]
+                    except BlockingIOError:
+                        ready = select.select([], [self._sock], [], WRITE_STALL_TIMEOUT_S)
+                        if not ready[1]:
+                            raise TimeoutError from None
+            except OSError as exc:
+                logger.warning(
+                    "sidecar runner exiting on socket write error: %s", sanitize.describe(exc)
+                )
+                self._end_connection()
+
+    def _end_connection(self) -> None:
+        self._ended = True
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            # Refused where the peer has half-closed; the write side alone still sends EOF.
+            with contextlib.suppress(OSError):
+                self._sock.shutdown(socket.SHUT_WR)
 
     # ------------------------------------------------------------------
     # dispatch
@@ -333,12 +467,35 @@ class SidecarRunner:
         model_spec = frame.header.get("model_spec")
         if not isinstance(model_spec, dict):
             raise BackendError(protocol.ERR_CONFIG_INVALID, "load_model requires model_spec")
+        enabled = frame.header.get("capabilities", [])
+        if enabled == [] and "capabilities" in frame.header:
+            raise BackendError(protocol.ERR_CONFIG_INVALID, "load_model lists no capability")
+        if not isinstance(enabled, list) or any(item not in CAPABILITIES for item in enabled):
+            raise BackendError(
+                protocol.ERR_UNSUPPORTED, "load_model enables a capability the sidecar did not list"
+            )
+        with_jobs = protocol.CAPABILITY_SPEECH_JOBS_V1 in enabled
         factory_cls = self._resolve_factory(model_spec)
         backend = factory_cls()
+        job_backend = backend if with_jobs and isinstance(backend, JobBackend) else None
+        if with_jobs and job_backend is None:
+            raise BackendError(protocol.ERR_UNSUPPORTED, "the selected runner does not run jobs")
         backend.load(model_spec)
+        classes: tuple[str, ...] = ()
+        if job_backend is not None:
+            declared = job_backend.job_classes()
+            classes = tuple(name for name in jobs.LANE_JOB_CLASSES if name in declared)
+            if not classes:
+                backend.unload()
+                raise BackendError(
+                    protocol.ERR_UNSUPPORTED, "the loaded runner runs no job class that has a lane"
+                )
         self._state.backend = backend
         self._state.backend_factory_name = backend.name
         header = _build_response_header(frame.header, status=protocol.STATUS_OK)
+        if job_backend is not None:
+            self._table.open(job_backend, classes)
+            header["job_classes"] = list(classes)
         if backend.runtime_capability is not None:
             header["runtime_capability"] = backend.runtime_capability.to_wire()
         return codec.SidecarFrame(header=header)
@@ -388,14 +545,15 @@ class SidecarRunner:
 
     def _handle_health_check(self, frame: codec.SidecarFrame) -> codec.SidecarFrame:
         header = _build_response_header(frame.header, status=protocol.STATUS_OK)
+        backend = self._state.backend  # read once: the backend thread may replace it
         header["health"] = {
-            "ready": self._state.backend is not None,
+            "ready": backend is not None,
             "backend_factory": self._state.backend_factory_name,
             "uptime_ns": time.monotonic_ns() - self._state.started_monotonic_ns,
             "last_error": self._state.last_error,
         }
-        if self._state.backend is not None and self._state.backend.runtime_capability is not None:
-            header["runtime_capability"] = self._state.backend.runtime_capability.to_wire()
+        if backend is not None and backend.runtime_capability is not None:
+            header["runtime_capability"] = backend.runtime_capability.to_wire()
         return codec.SidecarFrame(header=header)
 
 
@@ -451,17 +609,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Emit a `ready_event` so the adapter can transition to ready
     # without polling health_check.
-    try:
-        runner._write_frame(
-            codec.SidecarFrame(
-                header={
-                    "schema_version": protocol.SCHEMA_VERSION,
-                    "message_id": uuid.uuid4().hex,
-                    "kind": protocol.KIND_READY_EVENT,
-                }
-            )
-        )
-    except OSError:
+    if not runner.announce_ready():
         sock.close()
         return 3
 
