@@ -162,6 +162,22 @@ def test_session_release_cancels_its_jobs_and_is_then_forgotten(
     assert read(peer, 3) == [(ACCEPTED, 5), *ended(5)]
 
 
+def test_a_repeated_session_release_is_ignored_while_pending_and_answered_afterwards(
+    connect: Callable[..., Peer],
+) -> None:
+    peer = connect()
+    _backend, gate = hold_job(peer)
+    release = message(protocol.KIND_SESSION_RELEASE)
+    assert read_after(peer, release) == (ACKNOWLEDGED, 1)
+    peer.send(release)
+    assert_quiet(peer)
+    gate.set()
+    assert read(peer, 3) == [*ended(1, FAILED, "cancelled"), (SESSION_RELEASED, 1)]
+    # The session is forgotten, so the same message now releases a session with no job.
+    assert read_after(peer, release) == (SESSION_RELEASED, 1)
+    assert_quiet(peer)
+
+
 def test_unload_fails_waiting_jobs_and_disables_job_messages(connect: Callable[..., Peer]) -> None:
     peer = connect()
     _backend, gate = hold_job(peer)
@@ -181,7 +197,7 @@ def test_unload_fails_waiting_jobs_and_disables_job_messages(connect: Callable[.
     peer.enable_jobs()
     peer.send(submit(4))
     assert read(peer, 3) == [(ACCEPTED, 4), *ended(4)]
-    # A load that an unload already waits behind enables nothing.
+    # An unload right behind a load leaves job messages refused, whichever thread is ahead.
     peer.send(golden("negotiation")[1])
     peer.send(message(protocol.KIND_UNLOAD))
     peer.send(submit(5))
@@ -190,6 +206,51 @@ def test_unload_fails_waiting_jobs_and_disables_job_messages(connect: Callable[.
         "unload_response",
         ERROR_EVENT,
     ]
+
+
+def test_a_second_load_fails_waiting_jobs_and_disables_job_messages_until_it_enables_them(
+    connect: Callable[..., Peer],
+) -> None:
+    peer = connect()
+    _backend, gate = hold_job(peer)
+    assert read_after(peer, submit(2)) == (ACCEPTED, 2)
+    peer.send(golden("negotiation")[1])
+    assert read(peer, 2) == ended(2, FAILED, "unavailable", "backend_unavailable")
+    peer.send(submit(3))
+    assert_quiet(peer)  # the reader has queued the refused submit behind the load
+    gate.set()
+    assert read(peer, 4) == [
+        *ended(1),
+        ("load_model_response", "a1"),
+        (ERROR_EVENT, "a3", "unsupported"),
+    ]
+    peer.send(submit(4))
+    assert read(peer, 3) == [(ACCEPTED, 4), *ended(4)]
+
+
+def test_a_result_larger_than_the_socket_buffer_and_health_answers_are_written_whole(
+    connect: Callable[..., Peer],
+) -> None:
+    peer = connect()
+    peer.enable_jobs()
+    header = copy.deepcopy(golden("tts_synthesis")[0])
+    text = b"a" * protocol.LIMIT_TEXT_SEGMENT_MAX_BYTES
+    header["input"]["payload_length"] = len(text)
+    checks = 50
+    health = codec.encode(codec.SidecarFrame(message(protocol.KIND_HEALTH_CHECK)))
+    # Several jobs: a write made outside the lock lands inside the result often, not always.
+    for job_id in range(1, 5):
+        header["job_id"] = job_id
+        assert read_after(peer, header, text) == (ACCEPTED, job_id)
+        # A byte of job_completed has come, so the serving thread is inside that frame
+        # and stays there, the socket buffer full, until the peer reads on.
+        assert peer.client.recv(1, socket.MSG_PEEK)
+        peer.client.sendall(health * checks)
+        frames = [peer.read() for _ in range(2 + checks)]
+        kinds = [frame.header["kind"] for frame in frames]
+        assert sorted(kinds) == sorted([COMPLETED, RELEASED, *["health_check_response"] * checks])
+        assert kinds.index(COMPLETED) < kinds.index(RELEASED)
+        assert max(len(frame.payload) for frame in frames) == 160 * len(text)
 
 
 def test_unary_requests_wait_behind_the_job_and_are_bounded(connect: Callable[..., Peer]) -> None:

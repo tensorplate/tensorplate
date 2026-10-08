@@ -259,10 +259,11 @@ submit for it fails with `job_class_unsupported`, and no job sends
   requests wait; one more is answered `resource_exhausted`.
 - **Admission.** `job_accepted` is sent when the job is admitted, not when it
   starts. A message the sidecar cannot read, or a submit that reuses the id
-  of an unreleased job, is answered with an `error_event` (`config_invalid`)
-  that carries the message's `message_id`, and with no job message. A job
-  the sidecar refuses gets `job_failed` with the reason as the error's
-  context, then `job_released`.
+  of an unreleased job or carries a zero in its identity, is answered with an
+  `error_event` (`config_invalid`) that carries the message's `message_id`,
+  and with no job message. A job the sidecar refuses gets `job_failed` with
+  the reason as the error's context, then `job_released`; one whose
+  `permits_job` raises fails with the error edge's code and no context.
 - **Cancellation.** A waiting job is removed, and `job_cancel_acknowledged`,
   `job_failed` (`cancelled`) and `job_released` follow at once. A running job
   is acknowledged at once; nothing interrupts the backend call, and when it

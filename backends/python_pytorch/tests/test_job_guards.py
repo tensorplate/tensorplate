@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import socket
 import threading
 import time
@@ -13,13 +14,16 @@ from typing import Any, ClassVar
 
 import pytest
 
-from tensorplate_pytorch_backend import job_objects, protocol
-from tensorplate_pytorch_backend.backends import BackendError, FixtureBackend
+from tensorplate_pytorch_backend import job_objects, jobs, protocol
+from tensorplate_pytorch_backend.backends import BackendError, FixtureBackend, NamedTensor
 from test_speech_jobs_golden_replay import WAIT_S, Peer, golden
 from test_speech_jobs_golden_replay import connect as connect  # the fixture
 from test_speech_jobs_runner import (
     ERROR_EVENT,
+    FAILED,
     assert_quiet,
+    ended,
+    exchange,
     hold_job,
     message,
     read,
@@ -68,6 +72,62 @@ def test_a_failed_message_needs_its_error() -> None:
         job_objects.job_event(protocol.KIND_JOB_PROGRESS, identity)
 
 
+@pytest.mark.parametrize("unknown", ["job_id", "extra"])
+def test_a_session_release_with_a_field_it_does_not_have_is_malformed(unknown: str) -> None:
+    header = {**message(protocol.KIND_SESSION_RELEASE), unknown: 1}
+    with pytest.raises(job_objects.MalformedJob):
+        job_objects.read_session_release(header)
+
+
+def test_capabilities_that_are_not_a_list_are_refused(connect: Callable[..., Peer]) -> None:
+    peer = connect()
+    # An object keyed by the capability's name would pass a membership check alone.
+    capabilities = {protocol.CAPABILITY_SPEECH_JOBS_V1: True}
+    load = {**golden("negotiation")[1], "capabilities": capabilities}
+    assert read_after(peer, load) == ("load_model_response", "a1", "unsupported")
+
+
+class _DeclaresVad(FixtureBackend):
+    def job_classes(self) -> tuple[str, ...]:
+        return (protocol.JOB_CLASS_VAD_FRAMES, *reversed(super().job_classes()))
+
+
+def test_a_declared_class_without_a_lane_is_neither_advertised_nor_run(
+    connect: Callable[..., Peer],
+) -> None:
+    peer = connect({"fixture": _DeclaresVad})
+    assert exchange(peer, golden("negotiation")[1])["job_classes"] == list(jobs.LANE_JOB_CLASSES)
+    vad = golden("vad_frames")[0]
+    peer.send(vad)
+    assert read(peer, 2) == ended(vad["job_id"], FAILED, "unsupported", "job_class_unsupported")
+
+
+def test_a_job_message_with_a_bad_envelope_does_not_reach_the_table(
+    connect: Callable[..., Peer],
+) -> None:
+    peer = connect()
+    peer.enable_jobs()
+    refused = submit(1, schema_version="0.2")
+    assert read_after(peer, refused) == (ERROR_EVENT, "a1", "unsupported")
+    assert_quiet(peer)
+
+
+class _Unencodable(FixtureBackend):
+    def infer(self, inputs: list[NamedTensor]) -> list[NamedTensor]:
+        return [NamedTensor("x", {"shape": object()}, b"")]
+
+
+def test_an_exception_on_the_serving_thread_ends_the_connection(
+    connect: Callable[..., Peer],
+) -> None:
+    peer = connect({"fixture": _Unencodable})
+    peer.enable_jobs()
+    peer.send(message(protocol.KIND_INFER))  # no frame can carry what this backend returns
+    assert peer.client.recv(1) == b""
+    peer.thread.join(timeout=WAIT_S)
+    assert not peer.thread.is_alive()
+
+
 class _SlowLoad(FixtureBackend):
     started: ClassVar[threading.Event]
     gate: ClassVar[threading.Event]
@@ -107,6 +167,40 @@ def test_work_waiting_when_the_peer_leaves_is_dropped_unanswered(
     peer.thread.join(timeout=WAIT_S)
     assert not peer.thread.is_alive()
     assert peer.runner.state.backend is backend  # the unload never ran
+
+
+def test_a_job_that_ends_after_the_peer_left_is_not_written(
+    connect: Callable[..., Peer], caplog: pytest.LogCaptureFixture
+) -> None:
+    peer = connect()
+    _backend, gate = hold_job(peer)
+    peer.client.shutdown(socket.SHUT_WR)
+    assert peer.client.recv(1) == b""  # the runner shut the socket down in turn
+    with caplog.at_level(logging.WARNING):
+        gate.set()
+        peer.thread.join(timeout=WAIT_S)
+    assert not peer.thread.is_alive()
+    # A write to the socket that was shut down would fail, and the failure be logged.
+    assert not caplog.records
+
+
+def test_the_fixture_records_a_call_made_while_another_runs() -> None:
+    backend = FixtureBackend()
+    backend.load({})
+    backend.prime()
+    backend.job_gate = threading.Event()
+    request = job_objects.read_submit(golden("stt_decode")[0], bytes(32000))
+    job = threading.Thread(target=backend.run_job, args=(request,), daemon=True)
+    job.start()
+    try:
+        assert backend.job_started.wait(WAIT_S)
+        assert not backend.overlapped
+        backend.infer([NamedTensor("x", {"dtype": "uint8", "shape": [1]}, b"\0")])
+        assert backend.overlapped
+    finally:
+        backend.job_gate.set()
+        job.join(timeout=WAIT_S)
+    assert not job.is_alive()
 
 
 @pytest.mark.parametrize("delay", [True, -1, 60_001, "5"])

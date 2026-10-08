@@ -330,7 +330,8 @@ def job_event(
 ) -> tuple[dict[str, Any], bytes]:
     """Build one job message: its header, whose ``message_id`` the writer sets, and its payload.
 
-    Refuses what the runtime's event factories refuse.
+    Refuses what the runtime's event factories refuse, except an error text past
+    its bound: :func:`error_object` refuses that when the caller builds ``error``.
     """
     envelope = {"schema_version": protocol.SCHEMA_VERSION, "message_id": "", "kind": kind}
     fields: dict[str, Any] = {**envelope, **asdict(_check_identity(identity))}

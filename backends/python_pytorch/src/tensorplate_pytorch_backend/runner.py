@@ -10,11 +10,12 @@ load arbitrary user Python plugins outside the declared backend contract
 
 Threads
     ``serve_forever`` starts a reader thread and makes every backend call on
-    the thread that called it. The reader answers ``health_check`` itself
-    and gives job and session messages to the job table
+    the thread that called it, except ``permits_job``, which the reader calls
+    to admit a job. The reader answers ``health_check`` itself and gives job
+    and session messages to the job table
     (:mod:`~tensorplate_pytorch_backend.jobs`), which admits, cancels and
     releases without waiting for the backend. Every other frame and every
-    admitted job waits in one FIFO for the calling thread, so backend calls
+    admitted job waits in one FIFO for the calling thread, so its calls
     never overlap and run in arrival order. At most 8 jobs and 8 unary
     requests wait; one more is refused with ``resource_exhausted``.
 
