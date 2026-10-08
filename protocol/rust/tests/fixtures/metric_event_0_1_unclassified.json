@@ -1,0 +1,15 @@
+{
+  "schema_version": "0.1",
+  "name": "tp_infer_requests_total",
+  "kind": "counter",
+  "unit": "count",
+  "monotonic_timestamp_ns": 1200,
+  "labels": {
+    "backend": "python_pytorch",
+    "endpoint": "synthetic-deployment",
+    "status": "ok"
+  },
+  "sample": {
+    "value": 7.0
+  }
+}

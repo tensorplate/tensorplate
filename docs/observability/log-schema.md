@@ -23,6 +23,7 @@ Rust mirror: [`protocol::log_event`](../../protocol/rust/src/log_event.rs).
 
 | Field             | When set                                                                |
 | ----------------- | ----------------------------------------------------------------------- |
+| `priority`        | Delivery class: `fatal`, `safety`, `state` or `diagnostic`. See below.  |
 | `correlation_id`  | When the event participates in deploy / inference / supervision threading. |
 | `request_id`      | Serving ingress events.                                                 |
 | `transaction_id`  | Agent deploy transactions.                                              |
@@ -34,6 +35,28 @@ Rust mirror: [`protocol::log_event`](../../protocol/rust/src/log_event.rs).
 | `failure_reason`  | Maps to `protocol/schemas/failure_reason.json`.                         |
 | `duration_ms`     | Monotonic duration covered by the event.                                |
 | `context`         | Bounded structured context map (≤ 16 entries, ≤ 256-byte strings).      |
+
+## Delivery class
+
+`priority` is the class a producer consults when it sheds telemetry by
+class. It is independent of `level`: a `warn` may be `diagnostic` and an
+`info` may be `state`.
+
+| Value        | Meaning                                                             |
+| ------------ | ------------------------------------------------------------------- |
+| `fatal`      | The producer is stopping, or a deployment has failed for good.      |
+| `safety`     | Liveness and overload: heartbeats, readiness, missed deadlines.     |
+| `state`      | A state change another component acts on.                           |
+| `diagnostic` | Detail for a person: profiling samples, traces, debug output.       |
+
+A producer that sheds by class drops only `diagnostic` events, and does
+not treat an event without the field as `diagnostic`. No producer does
+this yet. The retention queue does not read the field: when it is full it
+evicts by age, whatever the class (see
+[retention.md](retention.md#drop-policy)). The field is optional, and a
+reader does not derive a class from `level` or from the event name.
+[`metric_event.json`](../../protocol/schemas/metric_event.json) carries
+the same field with the same values.
 
 ## Event catalog
 
@@ -99,3 +122,10 @@ Readers reject unknown schema versions with a typed
 [`DecodeError::UnsupportedSchemaVersion`](../../protocol/rust/src/lib.rs).
 The CLI `tensorplate logs` reader applies the same sanitiser before
 rendering so a malformed file never panics the operator session.
+
+The Rust mirrors of the log and metric events ignore a field they do not
+know, so a reader built before `priority` existed decodes an event that
+carries it. The schema files are closed objects: a reader that validates
+against a copy of the schema from before the field was added rejects such
+an event until it takes the newer file. Metric label keys are stricter;
+see [metrics.md](metrics.md#labels).

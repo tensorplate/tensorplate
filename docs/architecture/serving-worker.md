@@ -217,7 +217,11 @@ controller. The schema mirrors `protocol/schemas/serving_health.json`.
 `ServingMetrics` is a bounded counter / histogram bag with four
 labels: `endpoint`, `model_class`, `model_name`, `backend`. The
 Prometheus exposition format is the default; JSON mode mirrors
-`protocol/schemas/serving_metrics.json`.
+`protocol/schemas/serving_metrics.json`. That schema also admits the
+optional labels `row` and `mode`, each held to the value list registered
+in [`docs/observability/metrics.md`](../observability/metrics.md#labels),
+and defines the `outcome` and `stage` value lists for per-series labels;
+`ServingMetrics` sets none of them.
 
 `/metrics` refreshes the scheduler gauges from `InferScheduler::metrics()`
 on every request: `scheduler_queue_depth`, `scheduler_in_flight` (the
@@ -231,7 +235,14 @@ reports its completion. `/health` reports `in_flight` as the logical count.
 [`scheduler.md`](scheduler.md#metrics-and-events) defines the counts.
 
 Latency histograms use the same bucket boundaries everywhere:
-`0.5, 1, 2, 5, 10, 25, 50, 100, 250, 1000, 5000, +Inf` ms.
+`0.5, 1, 2, 5, 10, 25, 50, 100, 250, 300, 500, 600, 1000, 1500, 5000, +Inf` ms.
+They are chosen so that a streaming speech latency threshold of 100, 250,
+300, 500, 600, 1000 or 1500 ms falls on a boundary and is read from one
+bucket instead of being interpolated inside a wider one. A scraper that
+stored the boundaries from a build without 300, 500, 600 and 1500 sees four
+more `le` values. The JSON body counts per bucket, so its 1000 and 5000 ms
+buckets no longer include observations at or below 600 and 1500 ms; the
+Prometheus body is cumulative and its existing buckets keep their counts.
 
 ## Graceful shutdown
 

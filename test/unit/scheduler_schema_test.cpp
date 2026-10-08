@@ -288,8 +288,9 @@ TEST(SchedulerSchemas, NoSessionFieldInEventsMetricsOrMetricLabels) {
   const auto labels =
       load("protocol/schemas/serving_metrics.json").at("/properties/labels"_json_pointer);
   EXPECT_EQ(labels.at("additionalProperties"), false);
-  EXPECT_EQ(keys(labels.at("properties")),
-            (std::set<std::string>{"endpoint", "model_class", "model_name", "backend"}));
+  EXPECT_EQ(
+      keys(labels.at("properties")),
+      (std::set<std::string>{"endpoint", "model_class", "model_name", "backend", "row", "mode"}));
 }
 
 TEST(ServingMetricsSchema, NamedGaugesAcceptWhatTheOpenMapAccepts) {

@@ -17,6 +17,8 @@ use crate::correlation_id::validate_correlation_id;
 use crate::error::ErrorCode;
 use crate::failure_reason::FailureReason;
 use crate::model_spec::ModelClass;
+use crate::serde_shape::deserialize_some;
+use crate::telemetry_priority::TelemetryPriority;
 use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// Maximum allowed number of context entries on a single log event.
@@ -144,6 +146,12 @@ pub struct LogEvent {
     pub component: LogComponent,
     pub event: String,
     pub level: LogLevel,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_some",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub priority: Option<TelemetryPriority>,
     pub monotonic_timestamp_ns: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_time_iso8601: Option<String>,
@@ -187,6 +195,7 @@ impl LogEvent {
             component,
             event: event.into(),
             level,
+            priority: None,
             monotonic_timestamp_ns,
             wall_time_iso8601: None,
             correlation_id: None,
@@ -209,6 +218,13 @@ impl LogEvent {
     #[must_use]
     pub fn with_correlation_id(mut self, id: impl Into<String>) -> Self {
         self.correlation_id = Some(id.into());
+        self
+    }
+
+    /// Set the delivery class.
+    #[must_use]
+    pub fn with_priority(mut self, priority: TelemetryPriority) -> Self {
+        self.priority = Some(priority);
         self
     }
 

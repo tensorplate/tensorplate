@@ -48,9 +48,36 @@
       "minimum": 0,
       "description": "Receiver-monotonic timestamp in nanoseconds. NEVER wall-clock."
     },
+    "priority": {
+      "type": "string",
+      "enum": ["fatal", "safety", "state", "diagnostic"],
+      "description": "Optional delivery class, highest first: `fatal`, `safety`, `state`, `diagnostic`. It is independent of `kind`. A producer that sheds telemetry by class drops only `diagnostic` and does not treat an event without the field as `diagnostic`. A bounded queue that evicts by age does not read the field. A reader must not derive a class for an event that has none."
+    },
     "labels": {
       "type": "object",
-      "description": "Bounded label set. v0.1 allows the keys `endpoint`, `model_class`, `model_name`, `backend`, `component`, `status`. Values are bounded to 64 bytes. Unknown keys are rejected by the registry to keep cardinality finite.",
+      "description": "Bounded label set. v0.1 allows the keys `endpoint`, `model_class`, `model_name`, `backend`, `component`, `status`, `row`, `mode`, `outcome`, `stage`. Values are bounded to 64 bytes, and the last four take only the values registered here. This schema holds only those four to their values and accepts any other key: the key set is enforced by the Rust mirror and by the registry, which reject an unknown key to keep cardinality finite. A session, turn, request or voice identifier is never a label.",
+      "properties": {
+        "row": {
+          "type": "string",
+          "enum": ["speech-stt-whisper-turbo-stream-l4", "speech-tts-kokoro-stream-l4"],
+          "description": "Speech model row the series belongs to. Omitted for a deployment that is not one of the registered rows."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["stt_streaming", "tts_streaming"],
+          "description": "Stream serving mode, as a bundle's speech block resolves it."
+        },
+        "outcome": {
+          "type": "string",
+          "enum": ["succeeded", "failed", "cancelled", "rejected"],
+          "description": "How the counted session or request ended. For this label `rejected` is a refusal before admission, and an expiry or a timeout is `failed`."
+        },
+        "stage": {
+          "type": "string",
+          "enum": ["ingress", "queue", "vad", "preprocessing", "backend", "postprocessing", "egress"],
+          "description": "Serving stage a duration covers, in pipeline order. `backend` is the whole backend job; a backend that cannot time its parts reports nothing finer."
+        }
+      },
       "additionalProperties": {
         "type": "string",
         "maxLength": 64

@@ -31,11 +31,54 @@ The bounded v0.1 keys are:
 | `backend`      | Bounded backend label.                                           |
 | `component`    | Producer component (subset of `LogComponent`).                   |
 | `status`       | Bounded outcome label (`ok`, `failed`, `timeout`, `cancelled`).  |
+| `row`          | Speech model row. Registered values only.                        |
+| `mode`         | Stream serving mode. Registered values only.                     |
+| `outcome`      | How a session or request ended. Registered values only.          |
+| `stage`        | Serving stage a duration covers. Registered values only.         |
 
 Values are bounded to
 [`MAX_METRIC_LABEL_BYTES`](../../protocol/rust/src/metric_event.rs).
 Unknown keys or oversize values are rejected with
 `ObservabilityError::InvalidEvent` and counted in the export status.
+
+The last four keys take only the values registered in
+[`metric_event.json`](../../protocol/schemas/metric_event.json) and
+mirrored by `registered_metric_label_values`; any other value is rejected
+the same way.
+
+| Key       | Registered values                                                                 | Where the names come from                                                     |
+| --------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `row`     | `speech-stt-whisper-turbo-stream-l4`, `speech-tts-kokoro-stream-l4`               | Defined here: the two speech model rows the release is validated against. Not a platform support row id. |
+| `mode`    | `stt_streaming`, `tts_streaming`                                                  | The serving mode a bundle's speech block resolves to, and the stream schema's session modes. |
+| `outcome` | `succeeded`, `failed`, `cancelled`, `rejected`                                    | The words the serving worker's request counters use. For this label `rejected` is a refusal before admission, and an expiry or a timeout is `failed`. |
+| `stage`   | `ingress`, `queue`, `vad`, `preprocessing`, `backend`, `postprocessing`, `egress` | The runtime pipeline stages of a bundle profile, with the scheduler queue after `ingress`. |
+
+A deployment that is not one of the registered rows carries no `row`
+label. `backend` covers the whole backend job: a backend that cannot time
+its encode and decode separately reports the one stage and nothing finer.
+A session, turn, request, utterance or voice identifier is never a label
+key or a label value.
+
+`outcome` does not replace `status`: the baseline metrics below keep
+`status` and its four values, and `outcome` labels the speech series. The
+rule for an expiry is the label's own; the worker's request counters are
+unchanged and still count an expiry and a deadline rejection where they
+did. The `queue` and `backend` stages name what the worker's `queue_wait`
+and `execution` histograms already measure for unary requests; those two
+histograms keep their names.
+
+A reader built before a label key was added rejects a metric event that
+carries it: the Rust mirror and this registry refuse a key they do not
+know. They hold a registered key to the values listed when they were
+built, so they also reject a value appended to a list later. No component
+sets the four speech keys yet. The change that first emits one of them,
+or an appended value, must not send it to a reader that may predate it.
+
+## Delivery class
+
+A metric event may carry the optional `priority` field described in
+[log-schema.md](log-schema.md#delivery-class), with the same four values
+and the same rule for a producer that sheds by class.
 
 ## Baseline metrics
 
@@ -69,6 +112,10 @@ defined by
 [`default_latency_buckets_ms`](../../observability/src/metrics.rs):
 `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500]` ms.
 
+The serving worker's own `/metrics` histograms use a different, fixed
+layout, in which every streaming speech latency gate value is a boundary;
+see [serving-worker.md](../architecture/serving-worker.md#health-and-metrics).
+
 Histogram `bucket_counts` are cumulative Prometheus-style counts. The
 last bucket is the implicit `+Inf` bucket and must equal `count`.
 
@@ -93,7 +140,8 @@ The registry tracks:
 
 - `series_rejected_unknown_label` — label key outside the bounded list.
 - `series_rejected_bounded_label` — label value exceeded
-  [`MAX_METRIC_LABEL_BYTES`](../../protocol/rust/src/metric_event.rs).
+  [`MAX_METRIC_LABEL_BYTES`](../../protocol/rust/src/metric_event.rs),
+  or is not a registered value of a key that takes registered values.
 - `series_rejected_full` — series count reached `max_series`.
 - `samples_dropped_queue_full` — reserved for the future async export
   queue.

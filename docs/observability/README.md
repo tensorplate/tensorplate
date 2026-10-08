@@ -33,7 +33,9 @@ The v0.1 baseline preserves these constraints across every component:
   string values are truncated to
   [`MAX_LOG_CONTEXT_STRING_BYTES`](../../protocol/rust/src/log_event.rs).
   Metric labels are restricted to the v0.1 allowed-key list
-  ([`ALLOWED_METRIC_LABEL_KEYS`](../../protocol/rust/src/metric_event.rs)).
+  ([`ALLOWED_METRIC_LABEL_KEYS`](../../protocol/rust/src/metric_event.rs)),
+  and the speech keys `row`, `mode`, `outcome` and `stage` to registered
+  values.
 - **Non-blocking sinks.** Producers never wait on a slow file, scrape,
   or stdout sink. The retention queue
   ([`DiagnosticsRetention`](../../observability/src/retention.rs)) drops

@@ -6,6 +6,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Added
+
+- Log and metric events take an optional `priority` of `fatal`, `safety`,
+  `state` or `diagnostic`: the class a producer consults when it sheds
+  telemetry by class, dropping only `diagnostic`. Nothing sets or reads it
+  yet, and the retention queue still evicts by age whatever the class.
+  Metric labels gain the keys `row`, `mode`, `outcome` and `stage`, each
+  held to a registered value list by `metric_event.json`, the Rust mirror
+  and the Rust metrics registry; `serving_metrics.json` takes `row` and
+  `mode` as optional labels and defines the `outcome` and `stage` lists. A
+  reader built before these keys rejects a metric event that carries one,
+  and a reader rejects a value appended to a list after it was built;
+  nothing emits them yet. The serving worker's latency histograms gain the
+  boundaries 300, 500, 600 and 1500 ms beside the existing ones, so a
+  streaming speech latency threshold at any of 100 to 1500 ms falls on a
+  boundary. A scraper sees four more `le` values per histogram, and in the
+  JSON `/metrics` body the 1000 and 5000 ms buckets no longer count
+  observations at or below 600 and 1500 ms. Additive change inside
+  protocol 0.1; version constants unchanged. (V030-E05-F04-T01)
+
 ## [0.3.1] - 2026-10-01
 
 ### Added

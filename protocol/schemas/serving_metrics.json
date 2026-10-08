@@ -2,10 +2,22 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/serving_metrics.json",
   "title": "TensorPlate Serving Metrics (JSON mode)",
-  "description": "Structured-JSON `/metrics` body produced by the V01-E07 serving worker when `metrics_mode = json`. The Prometheus 0.0.4 text-format body is also accepted as the default exposition; this schema is for agent-side scrapers that prefer machine-friendly bodies. Labels are bounded: only the four documented dimensions appear.\n\nLatency histogram bucket boundaries (milliseconds, inclusive upper bound): 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 1000, 5000, +Inf.",
+  "description": "Structured-JSON `/metrics` body produced by the serving worker when `metrics_mode = json`. The Prometheus 0.0.4 text-format body is also accepted as the default exposition; this schema is for agent-side scrapers that prefer machine-friendly bodies. Labels are bounded: the four required dimensions, and for a speech deployment the optional `row` and `mode`, which take only the values registered here. `outcome` and `stage` label one series, not a worker, so their registered values are under `definitions` for the property that will carry per-series labels; no property references them yet.\n\nLatency histogram bucket boundaries (milliseconds, inclusive upper bound): 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 300, 500, 600, 1000, 1500, 5000, +Inf. A producer older than the 300, 500, 600 and 1500 boundaries reports the other eleven.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "labels", "counters", "gauges", "latency_ms"],
+  "definitions": {
+    "OutcomeLabel": {
+      "type": "string",
+      "enum": ["succeeded", "failed", "cancelled", "rejected"],
+      "description": "How the counted session or request ended. For this label `rejected` is a refusal before admission, and an expiry or a timeout is `failed`."
+    },
+    "StageLabel": {
+      "type": "string",
+      "enum": ["ingress", "queue", "vad", "preprocessing", "backend", "postprocessing", "egress"],
+      "description": "Serving stage a duration covers, in pipeline order."
+    }
+  },
   "properties": {
     "schema_version": {"type": "string", "const": "0.1"},
     "labels": {
@@ -16,7 +28,17 @@
         "endpoint": {"type": "string"},
         "model_class": {"type": "string"},
         "model_name": {"type": "string"},
-        "backend": {"type": "string"}
+        "backend": {"type": "string"},
+        "row": {
+          "type": "string",
+          "enum": ["speech-stt-whisper-turbo-stream-l4", "speech-tts-kokoro-stream-l4"],
+          "description": "Speech model row the worker serves. Omitted for a deployment that is not one of the registered rows."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["stt_streaming", "tts_streaming"],
+          "description": "Stream serving mode, as the bundle's speech block resolves it."
+        }
       }
     },
     "counters": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
@@ -63,7 +85,11 @@
               "required": ["le_ms", "count"],
               "properties": {
                 "le_ms": {"oneOf": [{"type": "number"}, {"type": "string", "const": "+Inf"}]},
-                "count": {"type": "integer", "minimum": 0}
+                "count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Observations in this bucket alone: above the previous boundary and at or below `le_ms`. Not cumulative."
+                }
               }
             }
           }

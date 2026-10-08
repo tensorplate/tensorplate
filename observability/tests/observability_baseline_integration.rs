@@ -401,6 +401,7 @@ fn log_event_validate_payload_rejects_unsafe_context() {
         component: LogComponent::Adapter,
         event: "infer.timeout".into(),
         level: LogLevel::Error,
+        priority: None,
         monotonic_timestamp_ns: 1,
         wall_time_iso8601: None,
         correlation_id: None,

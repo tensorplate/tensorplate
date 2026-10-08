@@ -16,8 +16,9 @@
 //
 // Label cardinality is enforced at registration time: only the keys
 // from [`tensorplate_protocol::metric_event::ALLOWED_METRIC_LABEL_KEYS`]
-// are accepted, and values are bounded by
-// [`tensorplate_protocol::MAX_METRIC_LABEL_BYTES`]. A registration that
+// are accepted, values are bounded by
+// [`tensorplate_protocol::MAX_METRIC_LABEL_BYTES`], and a key with
+// registered values takes only those. A registration that
 // violates the policy is rejected with a typed error and a bounded
 // counter rather than silently expanding the label space.
 
@@ -28,7 +29,9 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use tensorplate_protocol::metric_event::ALLOWED_METRIC_LABEL_KEYS;
+use tensorplate_protocol::metric_event::{
+    registered_metric_label_values, ALLOWED_METRIC_LABEL_KEYS,
+};
 use tensorplate_protocol::{
     MetricEvent, MetricKind, MetricLabels, MetricSample, MetricUnit, MAX_METRIC_LABEL_BYTES,
     SCHEMA_VERSION,
@@ -375,6 +378,15 @@ impl MetricsRegistry {
                     "label value for `{k}` exceeds {MAX_METRIC_LABEL_BYTES} bytes"
                 )));
             }
+            if registered_metric_label_values(k).is_some_and(|values| !values.contains(&v.as_str()))
+            {
+                if let Ok(mut c) = self.counters.lock() {
+                    c.series_rejected_bounded_label += 1;
+                }
+                return Err(ObservabilityError::InvalidEvent(format!(
+                    "label value for `{k}` is not a registered value"
+                )));
+            }
         }
         Ok(())
     }
@@ -515,6 +527,7 @@ impl MetricsRegistry {
                 kind: key.kind,
                 unit: key.unit,
                 monotonic_timestamp_ns: ts,
+                priority: None,
                 labels: key.labels.clone(),
                 sample,
                 correlation_id: None,
@@ -661,6 +674,24 @@ mod tests {
             .expect_err("rejected");
         assert!(err.to_string().contains("exceeds"));
         assert_eq!(registry.counters().series_rejected_bounded_label, 1);
+    }
+
+    #[test]
+    fn registration_holds_a_registered_key_to_its_values() {
+        let (registry, _) = setup();
+        let mut labels = MetricLabels::new();
+        labels.0.insert("stage".into(), "session-7".into());
+        let err = registry
+            .register_counter("tp_x", MetricUnit::Count, labels)
+            .expect_err("rejected");
+        assert!(err.to_string().contains("not a registered value"));
+        assert_eq!(registry.counters().series_rejected_bounded_label, 1);
+
+        let mut labels = MetricLabels::new();
+        labels.0.insert("stage".into(), "backend".into());
+        registry
+            .register_counter("tp_x", MetricUnit::Count, labels)
+            .expect("registered value");
     }
 
     #[test]
