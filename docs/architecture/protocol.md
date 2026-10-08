@@ -189,7 +189,12 @@ fields are never renamed, removed or given a new meaning. The schema, the
 Rust mirror and the sidecar's `protocol.py` literals move in the same change;
 `protocol/rust/tests/python_pytorch_ipc_speech_jobs.rs` holds them to the
 golden frames and to the typed job seam's vectors
-(`protocol/fixtures/job_seam.json`). Retire this exception with the first.
+(`protocol/fixtures/job_seam.json`). The sidecar replays both as well:
+`backends/python_pytorch/tests/test_job_seam_replay.py` runs every vector
+whose scope is `all` through the sidecar's job objects, and
+`tests/test_speech_jobs_golden_replay.py` beside it sends the adapter's side
+of each golden file to a live runner and compares the frames it answers
+with. Retire this exception with the first.
 
 A fifth narrow pre-1.0 exception covers the telemetry events and the serving
 worker's metrics. Under `0.1`, `log_event.json` and `metric_event.json` may
@@ -253,7 +258,7 @@ The stream session envelope's C++ bindings are the one generated set.
 | C++ runtime value objects (Error, Result, ModelSpec, BufferRef, TensorView, InferRequest, InferResult) | `include/tensorplate/core/`, `include/tensorplate/buffer/` | Lands with the runtime types in V01-E02-F01..F06. JSON parsing for these objects lands when the HTTP server (V01-E07) imports a JSON parser. |
 | C++ control-plane value objects (desired_state, worker_status, health_event, deploy_transaction) | `protocol/cpp/` | **Deferred to V01-E07/V01-E10** alongside the components that emit/consume them. The Rust mirror plus the committed JSON fixtures under `protocol/rust/tests/fixtures/` are the v0.1.0 cross-language contract. |
 | C++ Python sidecar IPC binding | `runtime/src/adapters/python_pytorch/python_pytorch_session.cpp` | Reads the header fields it uses by name and ignores the rest. It sends and reads no job or session message yet. |
-| Python sidecar IPC binding | `backends/python_pytorch/src/tensorplate_pytorch_backend/protocol.py` | Kind, status, error-code, capability and job literals. `codec.py` frames headers without interpreting them. |
+| Python sidecar IPC binding | `backends/python_pytorch/src/tensorplate_pytorch_backend/protocol.py` | Kind, status, error-code, capability and job literals, and the job seam's limits. `job_objects.py` validates a `job_submit` and renders job results and messages as the seam's objects do. `codec.py` frames headers without interpreting them. |
 | C++ stream session envelope binding (draft) | build tree only, target `tp::stream_proto` | Generated from `protocol/proto/tensorplate/stream/v1/session.proto` by the pinned `protoc` and gRPC plugin when `TP_ENABLE_STREAMING_GRPC` is ON; never committed. Only `test/contract/stream_envelope_conformance_test.cpp` links it. |
 
 We chose hand-written bindings over code generation because:

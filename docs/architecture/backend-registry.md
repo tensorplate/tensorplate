@@ -224,6 +224,60 @@ or rule edits the header and the vectors in the same commit. There is no
 standalone JSON, and a socket transport carries PCM as frame payload bytes,
 not as buffer handles.
 
+### Job messages in the Python sidecar
+
+The sidecar (`backends/python_pytorch/`) acts on job and session messages on
+a connection whose `load_model` enabled `speech_jobs_v1`. Its
+`job_objects.py` mirrors the objects above: `tests/test_job_seam_replay.py`
+replays the `scope: all` vectors through it, and
+`tests/test_speech_jobs_golden_replay.py` replays the golden frames against a
+live runner. A `job_submit` is checked in the order `JobRequest::create`
+checks it, and every message the sidecar sends for a job passes the
+`JobEventSequence` rules first.
+
+Of the runner profiles, the fixture profiles run `stt_decode` and
+`tts_synthesis`. `faster_whisper` and `kokoro` do not implement the job
+interface yet and answer a load that enables the capability with
+`unsupported`. No lane runs `vad_frames`, so a submit for it fails with
+`job_class_unsupported`, and no job sends `job_progress`.
+
+- **Threads.** A reader thread reads frames, answers `health_check`, and
+  admits, cancels and releases jobs in the job table (`jobs.py`). The thread
+  that runs the loop, the process's main thread, makes every backend call:
+  unary requests and admitted jobs wait for it in one FIFO, so calls never
+  overlap and run in arrival order. The reader's one backend call is
+  `permits_job`, which reads only what the load established.
+- **Bounds.** One job runs and at most 8 wait; a submit beyond that fails
+  with `resource_exhausted` and `job_capacity_exhausted`. At most 8 unary
+  requests wait; one more is answered `resource_exhausted`.
+- **Admission.** `job_accepted` is sent when the job is admitted, not when it
+  starts. A message the sidecar cannot read, or a submit that reuses the id
+  of an unreleased job, is answered with an `error_event` (`config_invalid`)
+  that carries the message's `message_id`, and with no job message. A job
+  the sidecar refuses gets `job_failed` with the reason as the error's
+  context, then `job_released`.
+- **Cancellation.** A waiting job is removed, and `job_cancel_acknowledged`,
+  `job_failed` (`cancelled`) and `job_released` follow at once. A running job
+  is acknowledged at once; nothing interrupts the backend call, and when it
+  returns its output is discarded and the job fails `cancelled`. A repeated
+  cancel, or one for a job that is unknown or already ended, gets no message.
+- **Sessions.** `session_release` cancels the session's unfinished jobs in
+  submission order, and `session_released` follows the last `job_released`,
+  at once when the session has no job. A submit for the session in between
+  fails with `session_releasing`. After `session_released` the sidecar has
+  forgotten the session: the same key later is a new session to it.
+- **Unload.** When `unload` or another `load_model` arrives, waiting jobs fail
+  with `unavailable` and `backend_unavailable`, the running job finishes
+  ahead of the unload, and job messages are refused as on a connection
+  without the capability until a load enables it again.
+- **Writes.** A frame is written whole under one lock, and a job's messages
+  in the order of its state changes. A write that makes no progress for 5 s
+  ends the connection, as EOF or a frame error does: the socket is shut down,
+  waiting work is dropped unanswered, and the loop returns once the backend
+  call in progress has.
+- **Message ids.** A message the sidecar originates, the `ready_event`
+  included, carries `s<n>` from one counter per connection.
+
 ## Installed backends and runner profiles
 
 The registry above is what a build of the serving worker can run. What a
