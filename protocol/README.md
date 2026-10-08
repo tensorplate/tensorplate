@@ -49,7 +49,7 @@ compatibility promise until it is frozen. The JSON contracts under
   emitted in lowercase hex, and the message in protobuf text format. Two
   files are whole sessions in the order their events are sent, one
   speech-to-text and one text-to-speech. One holds the remaining bodies,
-  five ends with a cause, an `Open` with a selector and seven refusals. One
+  five ends with a cause, an `Open` with a selector and nine refusals. One
   holds frames of `extension.proto`, a fixture-only schema with fields, a
   body, a mode and a capability stream/v1 does not have. Every value in
   them is synthetic. After a schema change, record the
@@ -123,17 +123,21 @@ fails it until `SessionState` has it. C++ `Error::Code` is not read here:
 What the draft now fixes:
 
 - **Credit.** `Accepted` counts input only and is cumulative. The server
-  sends one whenever input credit returns; a client never infers credit
-  from time or from other events.
+  announces returned credit: the next `Accepted` carries it, and when none
+  is due the server sends one for it. A client takes its credit from
+  `Ready`'s status and then from each `Accepted`, and never infers it from
+  time or from task events.
 - **Answers.** An utterance's `EndpointDetected` precedes its
   `FinalTranscript`, and no partial follows the endpoint. A
   `FinalTranscript` or `SynthesisCompleted` names the sequence of the
   `Finalize` it answers. An utterance's text is its segments' text, sent
   once. Closing the sending half finalizes the open utterance, with an
   endpoint reason of its own.
-- **Limits.** `Ready` reports the deployment's bounds for the session's
-  mode beside the timers, so a client needs no descriptor to know what it
-  may send.
+- **Limits.** `Ready` reports the deployment's frame, utterance, text and
+  audio bounds for the session's mode beside the timers, none of them zero,
+  so a client reads them from the session and not from a descriptor. Its
+  `Open` still names a language, a format and a voice the deployment
+  declares.
 - **Capabilities.** `Open` declares the client's capabilities and `Ready`
   returns those in force. None is defined yet.
 - **End causes.** A cause is a `FailureReason`, always set, with the code
@@ -143,13 +147,15 @@ What the draft now fixes:
 - **Refusal and admission.** A refused `Open` ends the call with a status
   whose detail is an `OpenRefused`, and every terminal outcome states
   whether a session slot was ever reserved. The schema lists the reasons
-  that precede admission.
+  that precede admission; the admission value, not that list, is the proof
+  that a call was not admitted.
 - **Target.** `Open` names a resolved target (deployment id, generation,
   descriptor digest) or a model selector, and is the only client event that
   names a generation. The server refuses a selector as unresolved, and a
-  digest that is not the served descriptor's. The request metadata names
+  deployment id or digest that is not the served one. The request metadata names
   `tensorplate-model` and `tensorplate-model-version` are reserved for the
-  selector; the server does not read them.
+  selector; the proxy that resolves a selector compares them with it, and
+  the server does not read them.
 - **Bounds.** Sequences, generations and 64-bit ids stop at 2^53 - 1. A client value
   that disagrees with what earlier events determine fails the session.
 - **Totals and recovery.** `SessionClosed` carries the session's totals.

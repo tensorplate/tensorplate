@@ -7,8 +7,9 @@
 // events from 1 without gaps. The client's first event is Open. A refused Open
 // creates no session: the call ends with no event and a status whose detail is
 // one OpenRefused. A session sends Ready first. A session that ends before it
-// is ready sends SessionClosed alone: failed, or closed with reason
-// `client_cancelled` after a Cancel. SessionClosed is always its last event.
+// is ready sends SessionClosed alone, whatever ended it: a failure, a Cancel,
+// a timer, or the worker retiring or shutting down. SessionClosed is always
+// its last event.
 //
 // Every sequence, every generation and every 64-bit id is at most
 // 9,007,199,254,740,991 (2^53 - 1). A client value that earlier events
@@ -207,7 +208,8 @@ message TextToSpeechLimits {
 }
 
 // Limits in force for the session: its timers in whole milliseconds, and the
-// deployment's bounds for the session's mode.
+// deployment's bounds for the session's mode. None of them is zero: every
+// timer runs and every bound of the session's mode is declared.
 message SessionLimits {
   // Longest gap between client events before the session is ended.
   uint32 idle_timeout_ms = 1;
@@ -245,11 +247,15 @@ message EndCause {
 // `invalid_event` (a malformed Open), `backend_unsupported_capability` (a
 // mode, language, format or voice the deployment does not declare),
 // `target_unresolved`, `target_mismatch`, `stale_generation`,
-// `admission_closed` and `session_count_limit`. A reason added later says
-// here whether it precedes admission.
+// `admission_closed`, `session_count_limit`, `config_invalid` (the worker
+// serves no generation) and `internal` (a fault before a slot was reserved,
+// such as an exhausted session key space). A reason added later says here
+// whether it precedes admission. The proof that a call was not admitted is
+// `admission`, not membership of this list.
 message OpenRefused {
   EndCause cause = 1;
-  // ADMISSION_NOT_ADMITTED: the same Open may be sent to another server.
+  // Always ADMISSION_NOT_ADMITTED: the same Open may be sent to another
+  // server.
   Admission admission = 2;
 }
 
@@ -295,12 +301,15 @@ message ResolvedTarget {
 
 // A model by name, for a proxy that resolves it to a ResolvedTarget before the
 // Open reaches a server. A client that sends one also sends it as request
-// metadata, `tensorplate-model` and `tensorplate-model-version`, and the two
-// must agree. The server ignores that metadata and refuses an Open that still
+// metadata, `tensorplate-model` and `tensorplate-model-version`. The proxy
+// that resolves it compares the two and refuses a call in which they differ.
+// The server never reads that metadata: it serves an Open with a resolved
+// target whatever metadata comes with it, and refuses an Open that still
 // carries a selector, with reason `target_unresolved`.
 message Selector {
+  // 1 to 128 ASCII characters.
   string model = 1;
-  // Optional.
+  // Optional, at most 128 ASCII characters.
   string version = 2;
 }
 
@@ -313,18 +322,20 @@ message Open {
     Selector selector = 2;
   }
   SessionMode mode = 3;
-  // A language the deployment declares, for example `en`.
+  // A language the deployment declares, for example `en`: 1 to 64 ASCII
+  // characters.
   string language = 4;
   // Format of every Audio body, one the deployment declares. Speech-to-text
   // only.
   AudioFormat input_format = 5;
-  // A voice the deployment declares. Text-to-speech only.
+  // A voice the deployment declares: 1 to 64 ASCII characters.
+  // Text-to-speech only.
   string voice = 6;
   // Optional, at most 64 ASCII characters each.
   string trace_id = 7;
   string turn_id = 8;
-  // The capabilities the client has. A value the server does not know is
-  // ignored.
+  // The capabilities the client has, at most 32. A value the server does not
+  // know is ignored.
   repeated Capability capabilities = 9;
 }
 
@@ -356,6 +367,11 @@ message TextSegment {
 // sequence; input sent before that answer is refused. A Finalize repeated
 // before the answer, or received while the session drains, starts nothing and
 // has no answer of its own.
+//
+// In a speech-to-text session it ends the utterance that is open when the
+// server reads it, even one that holds no audio yet, and that utterance's
+// FinalTranscript is the answer. A FinalTranscript still owed to an earlier
+// automatic endpoint comes first and names no Finalize.
 message Finalize {}
 
 // Ends the whole session.
@@ -414,8 +430,8 @@ message Ready {
 }
 
 // Every Audio and TextSegment up to `accepted_sequence` was accepted; one
-// Accepted may cover several. Other client events are not counted: each has
-// an answer of its own. Acceptance is not completion.
+// Accepted may cover several. Other client events are not counted; where one
+// has a reply, that reply answers it. Acceptance is not completion.
 //
 // The server announces returned credit. The next Accepted carries it, and
 // when none is due the server sends one for it, with the `accepted_sequence`
@@ -424,6 +440,9 @@ message Ready {
 message Accepted {
   // Sequence of the last Audio or TextSegment accepted.
   uint64 accepted_sequence = 1;
+  // The budgets as they stood once that event was accepted. Input the client
+  // sent after it is not counted here yet: what the client may still send is
+  // what this leaves, less what it has sent since.
   InputCredit input_credit = 2;
 }
 
@@ -433,6 +452,9 @@ message SessionStatus {
   // Accepted audio bodies or text segments the server still holds, the one
   // being processed included.
   uint32 input_queue_depth = 2;
+  // A reading when this was written, tied to no client sequence. In Ready it
+  // is the session's initial credit; later a client keeps its accounts from
+  // Accepted, not from a status.
   InputCredit input_credit = 3;
   // Undelivered output audio, in bytes.
   Usage output_pcm_bytes = 4;
