@@ -159,6 +159,17 @@ posture. No new shared wire error enum is required.
 | `bundle_r12_ambiguous_selector` | A runner-selected profile carries legacy `profile_id`, `backend_profile` or `default_backend`, or a manifest carries a competing top-level `serving_mode`. Present-null selectors also reject. |
 | `bundle_r12_precision_conflict` | Speech precision and compute type disagree. |
 | `bundle_r12_explicit_precision` | Speech uses `auto`, including an omitted precision hint. |
+| `bundle_r8_base_reference` | `base_model_ref` and `variant_identity` are not declared together, or the base reference names the declaring bundle's own name and version. From the lineage check: no known base has that name, version and manifest digest. |
+| `bundle_r8_variant_identity` | From the lineage check only: another bundle already declares this variant id and revision on the base, or the id with another kind. |
+| `bundle_r8_variant_support_level` | From the lineage check only: the variant asks for more support than its base holds, or declares no `support_level`. |
+| `bundle_r8_reserved_variant` | The manifest declares a variant. Every variant kind is reserved. The refusal ends manifest validation: the manifest's other rules and its warmup artifact references are judged first, and the form of its artifact digests is checked, but a variant's artifact digests are not verified against the files and a declared `manifest_digest` is not compared. |
+
+The parser has no facts about other bundles, so a variant declaration that
+reaches it and is otherwise valid always ends in `bundle_r8_reserved_variant`.
+The two codes marked "from the lineage check only", and the unknown-base case
+of `bundle_r8_base_reference`, come from `BundleProfile::check_lineage`, which
+takes the known bases from its caller and has no caller in the deploy path
+yet. See [variant lineage](manifest.md#variant-lineage).
 
 All format 0.2 manifests require `support_level`, `hardware_compatibility` and
 exactly the class block selected by `model_class`. Speech additionally requires
@@ -187,5 +198,7 @@ before descriptor derivation and are not reconstructed from the descriptor.
 The descriptor omits disabled degradation rather than carrying manifest `null`.
 
 The fixture pairs under `test/models/bundles/v0_2/` are synthetic parser tests.
-They do not exercise installed-runner resolution, registry evidence, lineage,
-per-domain admission or real speech execution.
+They do not exercise installed-runner resolution, registry evidence,
+per-domain admission or real speech execution. The lineage fixtures are judged
+against the base facts in `lineage_known_bases.json`, which is test input and
+not a published format.

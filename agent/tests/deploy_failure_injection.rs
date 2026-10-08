@@ -245,7 +245,7 @@ fn manifest_rule_codes_survive_rejection_before_staging() {
         );
         rejected += 1;
     }
-    assert_eq!(rejected, 11);
+    assert_eq!(rejected, 18);
 }
 
 #[test]

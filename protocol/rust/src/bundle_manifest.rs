@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::bundle_profile::{
-    check_model_class, check_speech_precision, check_streaming_state, required, rule,
-    BundleProfile, BundleProfileError, BundleRuleCode, SupportLevel, PROFILE_FORMAT_VERSION,
+    check_model_class, check_speech_precision, check_streaming_state, check_variant_kind, required,
+    rule, BundleProfile, BundleProfileError, BundleRuleCode, SupportLevel, PROFILE_FORMAT_VERSION,
 };
 use crate::model_spec::{ModelClass, PrecisionHint};
 use crate::tensor_view::{DType, Layout};
@@ -967,6 +967,7 @@ impl BundleManifest {
 
         if let Some(profile) = self.profile.as_ref() {
             profile.check_artifact_references(&self.artifacts)?;
+            check_variant_kind(profile)?;
         }
 
         Ok(self)
@@ -1056,6 +1057,15 @@ impl BundleManifest {
             }
             if let Some(compute) = profile.compute_type {
                 check_speech_precision(self.precision_hint, compute)?;
+            }
+        }
+        if let Some(lineage) = &profile.lineage {
+            if lineage.base.name == self.name && lineage.base.version == self.version {
+                return Err(rule(
+                    BundleRuleCode::BaseReference,
+                    "base_model_ref",
+                    "names the bundle that declares it",
+                ));
             }
         }
         Ok(())

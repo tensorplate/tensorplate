@@ -258,11 +258,42 @@ only through the bundle parser; `decode_with_version_check` refuses them.
 | `memory_budget_breakdown_bytes` | The same line items summed across domains; when both are present it must equal the per-line sum. It is a reporting total, not an admission input. |
 | `max_concurrent_sessions` | Declared upper bound, 1–2048. |
 | `degraded_profile` | `null` for no quality-changing degradation, or a reserved profile id. |
+| `base_model_ref` | The base bundle a variant derives from: `{name, version, manifest_digest}`. `name` and `version` are the base manifest's own. `manifest_digest` is the canonical digest the parser computes for the base manifest and `tensorplate-bundle-tool` prints (`sha256:` and 64 lowercase hex digits), whether or not the base declares the optional top-level `manifest_digest`; the deployment descriptor calls the same value `bundle_digest`, and it is what `tensorplate status` and `tensorplate deploy` report as the bundle's digest. Declared together with `variant_identity`. |
+| `variant_identity` | `{id, revision, variant_kind}`: a `lower_snake_case` id that stays the same across revisions of the variant, a revision of at most 64 bytes (alphanumeric segments joined by `.`, `_` or `-`), and one of the three kinds below. |
 
 Manifest-local [deployment rules](compatibility.md#format-02-manifest-rules)
 require the applicable fields, one matching class block, explicit speech
 precision and unambiguous selectors. They refuse reserved classes and VLA modes
 under format 0.2 while retaining format 0.1 behavior.
+
+### Variant lineage
+
+A bundle that is a variant of another declares both lineage fields. The
+three kinds are a closed vocabulary:
+
+| `variant_kind` | What the variant is |
+| --- | --- |
+| `speaker_embedding` | Input data for the base. |
+| `adapter` | State applied on the base. |
+| `full_checkpoint` | An independent set of weights derived from the base. |
+
+Every kind is reserved. The schema accepts the declaration and the parser
+validates it, and then refuses the bundle with
+`bundle_r8_reserved_variant`: no variant bundle deploys in this release,
+whatever its kind. The refusal ends manifest validation, so the manifest's
+other rules are reported first. The form of a variant's artifact digests is
+still checked, but they are not verified against the files and a declared
+`manifest_digest` is not compared. A voice a TTS bundle ships as one of its own hashed
+artifacts and lists under `voices` is part of that bundle, not a variant of
+it, and needs no lineage declaration.
+
+Three further checks need facts no manifest holds, so the bundle parser
+cannot make them: that the base is a bundle the target knows, that no other
+bundle already declares the same variant id and revision (or the same id
+with another kind) on that base, and that the variant asks for no more
+support than the base holds on the target's platform support row. `BundleProfile::check_lineage` makes
+them against base facts its caller supplies. Nothing in the agent supplies
+them yet.
 
 The schema validates the same fields in its `format_0_2` definition; its
 description lists the checks readers make beyond it. A validator must be

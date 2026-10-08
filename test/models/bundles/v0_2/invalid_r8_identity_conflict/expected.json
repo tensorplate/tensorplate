@@ -1,0 +1,4 @@
+{
+  "rule": "bundle_r8_reserved_variant",
+  "lineage_rule": "bundle_r8_variant_identity"
+}

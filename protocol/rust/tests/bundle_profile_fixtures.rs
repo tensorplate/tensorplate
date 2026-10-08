@@ -15,8 +15,8 @@ use tensorplate_protocol::bundle::{
     parse_bundle, parse_bundle_with, BundleDescriptor, ParseError, ParseOptions,
 };
 use tensorplate_protocol::{
-    AudioEncoding, BudgetDomainName, DegradedProfile, SpeechChunking, SpeechServingMode,
-    SpeechTask, StageOwnership, SupportLevel,
+    AudioEncoding, BudgetDomainName, BundleRuleCode, DegradedProfile, SpeechChunking,
+    SpeechServingMode, SpeechTask, StageOwnership, SupportLevel,
 };
 
 const STT: &str = "speech_stt_streaming";
@@ -158,6 +158,18 @@ fn every_case_gets_its_verdict_from_schema_and_parser() {
             parser_expected,
             "{name}: parser verdict {parsed:?}"
         );
+        let refusal = match &parsed {
+            Err(ParseError::ManifestSemantics(error)) => error.rule_code(),
+            _ => None,
+        };
+        // Every variant is refused as reserved, which must not stand in for
+        // the refusal a malformed declaration is recorded to get.
+        if !schema_expected {
+            assert_ne!(refusal, Some(BundleRuleCode::ReservedVariant), "{name}");
+        }
+        if let Some(rule) = case["rule"].as_str() {
+            assert_eq!(refusal.map(BundleRuleCode::as_str), Some(rule), "{name}");
+        }
     }
 }
 

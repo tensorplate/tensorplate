@@ -46,3 +46,30 @@ worker contact and active-deployment changes. These are authored contract
 fixtures derived from the STT schema fixture, not recordings or measurements.
 The vision and VLA examples exercise supported payload shapes. The existing
 format 0.1 fixtures remain unchanged.
+
+## Variant lineage fixtures
+
+`valid_r8_base_bundle/` is a TTS bundle with no lineage declaration; the
+other `*_r8_*` directories are copies of it that declare themselves its
+variants. Every one of them is refused by the parser, which is what `rule`
+records: `bundle_r8_reserved_variant` for an otherwise valid declaration of
+each of the three kinds, and `bundle_r8_base_reference` for the bundle that
+names itself as its base.
+
+Where `expected.json` also carries `lineage_rule`, the declaration is judged
+by `BundleProfile::check_lineage` against `lineage_known_bases.json`: null
+means the declaration is consistent with the known base, a string names the
+refusal.
+
+| Directory | `lineage_rule` |
+| --- | --- |
+| `invalid_r8_reserved_speaker_embedding/`, `invalid_r8_reserved_adapter/`, `invalid_r8_reserved_full_checkpoint/` | null |
+| `invalid_r8_unresolved_base/` | `bundle_r8_base_reference`: the digest is not the base's |
+| `invalid_r8_identity_conflict/` | `bundle_r8_variant_identity`: the id and revision are already declared on the base |
+| `invalid_r8_support_escalation/` | `bundle_r8_variant_support_level`: asks for `preview` on an `experimental` base |
+
+`lineage_known_bases.json` is input to these tests only. It names a base by
+its fixture directory, and the test reads that bundle's name, version and
+manifest digest from the parser, so `base_model_ref.manifest_digest` in the
+fixtures is the real digest of `valid_r8_base_bundle/manifest.json`. Changing
+that manifest changes the digest every variant fixture must carry.

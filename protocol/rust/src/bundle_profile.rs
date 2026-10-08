@@ -13,6 +13,7 @@ use serde::de::{DeserializeOwned, Deserializer, IgnoredAny};
 use serde::{Deserialize, Serialize};
 
 use crate::backend_descriptor::ComputeType;
+use crate::bundle::digests_equal;
 use crate::bundle_manifest::BundleArtifact;
 use crate::json_numbers;
 use crate::member_quota::MAX_MEMBER_SESSIONS;
@@ -74,6 +75,7 @@ const MAX_WARMUP_TIMEOUT_MS: u64 = 600_000;
 const MAX_LANGUAGES: usize = 64;
 const MAX_LANGUAGE_TAG_BYTES: usize = 35;
 const MAX_VOICES: usize = 64;
+const MAX_VARIANT_REVISION_BYTES: usize = 64;
 const STT_FRAME_MS_MIN: u64 = 20;
 const STT_FRAME_MS_MAX: u64 = 320;
 const STT_MAX_UTTERANCE_MS: u64 = 30_000;
@@ -96,6 +98,10 @@ pub enum BundleRuleCode {
     AmbiguousSelector,
     PrecisionConflict,
     ExplicitPrecision,
+    BaseReference,
+    VariantIdentity,
+    VariantSupportLevel,
+    ReservedVariant,
 }
 
 impl BundleRuleCode {
@@ -112,6 +118,10 @@ impl BundleRuleCode {
             Self::AmbiguousSelector => "bundle_r12_ambiguous_selector",
             Self::PrecisionConflict => "bundle_r12_precision_conflict",
             Self::ExplicitPrecision => "bundle_r12_explicit_precision",
+            Self::BaseReference => "bundle_r8_base_reference",
+            Self::VariantIdentity => "bundle_r8_variant_identity",
+            Self::VariantSupportLevel => "bundle_r8_variant_support_level",
+            Self::ReservedVariant => "bundle_r8_reserved_variant",
         }
     }
 }
@@ -207,6 +217,23 @@ pub(crate) fn check_model_class(class: ModelClass) -> Result<(), BundleProfileEr
     Ok(())
 }
 
+/// Ends manifest validation, so a declaration is refused as reserved only
+/// once the manifest's own rules pass. Artifact digests are not yet
+/// verified against the files.
+pub(crate) fn check_variant_kind(profile: &BundleProfile) -> Result<(), BundleProfileError> {
+    match &profile.lineage {
+        Some(lineage) => Err(rule(
+            BundleRuleCode::ReservedVariant,
+            "variant_identity.variant_kind",
+            format!(
+                "`{}` variants are reserved and cannot deploy",
+                lineage.identity.kind.as_str()
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
 pub(crate) fn check_speech_precision(
     precision: PrecisionHint,
     compute: ComputeType,
@@ -269,6 +296,82 @@ pub enum SupportLevel {
     Production,
     Preview,
     Experimental,
+}
+
+impl SupportLevel {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Experimental => 0,
+            Self::Preview => 1,
+            Self::Production => 2,
+        }
+    }
+}
+
+/// What a variant is relative to its base. Every kind is reserved: it is
+/// declared and validated, and never deploys.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VariantKind {
+    /// Input data for the base.
+    SpeakerEmbedding,
+    /// State applied on the base.
+    Adapter,
+    /// An independent set of weights derived from the base.
+    FullCheckpoint,
+}
+
+impl VariantKind {
+    pub const ALL: [Self; 3] = [Self::SpeakerEmbedding, Self::Adapter, Self::FullCheckpoint];
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SpeakerEmbedding => "speaker_embedding",
+            Self::Adapter => "adapter",
+            Self::FullCheckpoint => "full_checkpoint",
+        }
+    }
+}
+
+/// The base bundle a variant derives from, pinned by the canonical digest
+/// the parser computes for its manifest.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BaseModelRef {
+    pub name: String,
+    pub version: String,
+    pub manifest_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VariantIdentity {
+    /// Stable across revisions of the variant.
+    pub id: String,
+    pub revision: String,
+    pub kind: VariantKind,
+}
+
+/// A manifest's `base_model_ref` and `variant_identity`, declared together.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VariantLineage {
+    pub base: BaseModelRef,
+    pub identity: VariantIdentity,
+}
+
+/// What a deployment target knows about one base bundle. The caller
+/// supplies it; no manifest can.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KnownBase {
+    pub name: String,
+    pub version: String,
+    pub manifest_digest: String,
+    /// The level the base holds on the target's platform support row, not
+    /// the one its manifest asks for. A base on a planned row, or on no
+    /// row, has no level here and must not be listed.
+    pub support_level: SupportLevel,
+    /// Identities other bundles already declared on this base. An entry
+    /// carries no declarer, so the caller leaves out what the judged bundle
+    /// itself declared before.
+    pub variants: Vec<VariantIdentity>,
 }
 
 /// `degraded_profile` as declared: `null` disables quality-changing
@@ -475,6 +578,7 @@ pub struct BundleProfile {
     pub degraded_profile: Option<DegradedProfile>,
     pub support_level: Option<SupportLevel>,
     pub speech: Option<SpeechContract>,
+    pub lineage: Option<VariantLineage>,
 }
 
 impl BundleProfile {
@@ -487,8 +591,12 @@ impl BundleProfile {
     pub fn from_manifest_text(raw: &str) -> Result<Self, BundleProfileError> {
         let mut profile = Self::default();
         let mut capabilities_declared = false;
+        let mut base = None;
+        let mut identity = None;
         for (key, value) in object_members(raw, "manifest")? {
             match key.as_str() {
+                "base_model_ref" => base = Some(base_model_ref(value)?),
+                "variant_identity" => identity = Some(variant_identity(value)?),
                 "capability_requirements" => capabilities_declared = true,
                 "runner_profile" => {
                     profile.runner_profile = Some(identifier(&key, value, true)?);
@@ -546,6 +654,24 @@ impl BundleProfile {
         if profile.support_level == Some(SupportLevel::Production) {
             required("capability_requirements", capabilities_declared)?;
         }
+        profile.lineage = match (base, identity) {
+            (Some(base), Some(identity)) => Some(VariantLineage { base, identity }),
+            (None, None) => None,
+            (Some(_), None) => {
+                return Err(rule(
+                    BundleRuleCode::BaseReference,
+                    "variant_identity",
+                    "is required beside `base_model_ref`",
+                ))
+            }
+            (None, Some(_)) => {
+                return Err(rule(
+                    BundleRuleCode::BaseReference,
+                    "base_model_ref",
+                    "is required beside `variant_identity`",
+                ))
+            }
+        };
         if let (Some(by_domain), Some(declared)) = (
             profile.memory_budget_by_domain.as_ref(),
             profile.memory_budget_breakdown_bytes.as_ref(),
@@ -579,6 +705,76 @@ impl BundleProfile {
                     ));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Judge a variant declaration against the bases the caller knows: its
+    /// base is one of them, its identity collides with no other variant of
+    /// that base, and it asks for no more support than the base holds. A
+    /// profile without a declaration passes. Passing does not make the
+    /// variant deployable. `bases` lists each base once; the first match is
+    /// the one judged.
+    ///
+    /// # Errors
+    ///
+    /// [`BundleProfileError::Rule`] naming the clause that failed.
+    pub fn check_lineage(&self, bases: &[KnownBase]) -> Result<(), BundleProfileError> {
+        let Some(lineage) = &self.lineage else {
+            return Ok(());
+        };
+        let declared = &lineage.base;
+        let Some(base) = bases.iter().find(|b| {
+            b.name == declared.name
+                && b.version == declared.version
+                && digests_equal(&b.manifest_digest, &declared.manifest_digest)
+        }) else {
+            return Err(rule(
+                BundleRuleCode::BaseReference,
+                "base_model_ref",
+                format!(
+                    "no known base bundle is `{}` version `{}` with that manifest digest",
+                    declared.name, declared.version
+                ),
+            ));
+        };
+        let identity = &lineage.identity;
+        for other in base.variants.iter().filter(|v| v.id == identity.id) {
+            if other.kind != identity.kind {
+                return Err(rule(
+                    BundleRuleCode::VariantIdentity,
+                    "variant_identity.variant_kind",
+                    format!(
+                        "`{}` is already a `{}` variant of this base",
+                        identity.id,
+                        other.kind.as_str()
+                    ),
+                ));
+            }
+            if other.revision == identity.revision {
+                return Err(rule(
+                    BundleRuleCode::VariantIdentity,
+                    "variant_identity.revision",
+                    format!(
+                        "`{}` revision `{}` is already declared on this base",
+                        identity.id, identity.revision
+                    ),
+                ));
+            }
+        }
+        let Some(requested) = self.support_level else {
+            return Err(rule(
+                BundleRuleCode::VariantSupportLevel,
+                "support_level",
+                "a variant must declare the support level it asks for",
+            ));
+        };
+        if requested.rank() > base.support_level.rank() {
+            return Err(rule(
+                BundleRuleCode::VariantSupportLevel,
+                "support_level",
+                "a variant cannot ask for more support than its base holds",
+            ));
         }
         Ok(())
     }
@@ -797,6 +993,79 @@ fn support_level(raw: &str) -> Result<SupportLevel, BundleProfileError> {
             format!("`{other}` is not a bundle support level"),
         )),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BaseModelRefWire {
+    name: String,
+    version: String,
+    manifest_digest: String,
+}
+
+fn base_model_ref(raw: &str) -> Result<BaseModelRef, BundleProfileError> {
+    const FIELD: &str = "base_model_ref";
+    let wire: BaseModelRefWire = decode_object(FIELD, raw)?;
+    for (key, value) in [("name", &wire.name), ("version", &wire.version)] {
+        if value.is_empty() {
+            return Err(invalid(&format!("{FIELD}.{key}"), "must not be empty"));
+        }
+    }
+    if !is_sha256_digest(&wire.manifest_digest) {
+        return Err(invalid(
+            "base_model_ref.manifest_digest",
+            "must be `sha256:` and 64 lowercase hex digits",
+        ));
+    }
+    Ok(BaseModelRef {
+        name: wire.name,
+        version: wire.version,
+        manifest_digest: wire.manifest_digest,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VariantIdentityWire {
+    id: String,
+    revision: String,
+    variant_kind: String,
+}
+
+fn is_variant_revision(revision: &str) -> bool {
+    revision.len() <= MAX_VARIANT_REVISION_BYTES
+        && revision.split(['.', '_', '-']).all(|segment| {
+            !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+}
+
+fn variant_identity(raw: &str) -> Result<VariantIdentity, BundleProfileError> {
+    const FIELD: &str = "variant_identity";
+    let wire: VariantIdentityWire = decode_object(FIELD, raw)?;
+    check_identifier("variant_identity.id", &wire.id, true)?;
+    if !is_variant_revision(&wire.revision) {
+        return Err(invalid(
+            "variant_identity.revision",
+            format!(
+                "`{}` is not alphanumeric segments joined by `.`, `_` or `-`, at most {MAX_VARIANT_REVISION_BYTES} bytes",
+                wire.revision
+            ),
+        ));
+    }
+    let Some(kind) = VariantKind::ALL
+        .into_iter()
+        .find(|k| k.as_str() == wire.variant_kind)
+    else {
+        return Err(invalid(
+            "variant_identity.variant_kind",
+            format!("`{}` is not a variant kind", wire.variant_kind),
+        ));
+    };
+    Ok(VariantIdentity {
+        id: wire.id,
+        revision: wire.revision,
+        kind,
+    })
 }
 
 fn degraded_profile(raw: &str) -> Result<DegradedProfile, BundleProfileError> {
@@ -1461,6 +1730,10 @@ mod tests {
             formats(&defs["tts_output_audio_format"]),
             TTS_OUTPUT_AUDIO_FORMATS
         );
+        assert_eq!(
+            strings(&defs["variant_identity"]["properties"]["variant_kind"]["enum"]),
+            super::VariantKind::ALL.map(super::VariantKind::as_str)
+        );
         let blocks: Vec<&String> = schema["properties"]["model_blocks"]["properties"]
             .as_object()
             .expect("model_blocks properties")
@@ -1495,7 +1768,7 @@ mod tests {
         let stt = &defs["stt_chunking"]["properties"];
         let tts = &defs["tts_chunking"]["properties"];
         let n = |v: &Value, key: &str| v[key].as_u64().expect(key);
-        let pairs: [(u64, u64, &str); 25] = [
+        let pairs: [(u64, u64, &str); 26] = [
             (
                 n(&defs["snake_identifier"], "maxLength"),
                 super::MAX_IDENTIFIER_BYTES as u64,
@@ -1616,6 +1889,14 @@ mod tests {
                 n(&tts["max_segment_text_bytes"], "minimum"),
                 1,
                 "segment text floor",
+            ),
+            (
+                n(
+                    &defs["variant_identity"]["properties"]["revision"],
+                    "maxLength",
+                ),
+                super::MAX_VARIANT_REVISION_BYTES as u64,
+                "variant revision length",
             ),
         ];
         for (schema_value, rust_value, what) in pairs {
