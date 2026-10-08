@@ -47,6 +47,10 @@ producer always wins, the oldest pending event is evicted. The
 `drop_incoming` mode preserves the existing tail; choose it when an
 operator wants the early-failure record over the latest spam.
 
+Both modes choose by position in the queue. Neither reads an event's
+`priority` ([log-schema.md](log-schema.md#delivery-class)), so a full
+queue can drop a `fatal` event and keep a `diagnostic` one.
+
 ## Rotation
 
 When a flush would push the file size past `rotate_bytes`, the

@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::correlation_id::validate_correlation_id;
+use crate::serde_shape::deserialize_some;
+use crate::telemetry_priority::TelemetryPriority;
 use crate::{DecodeError, ValidatePayload, SCHEMA_VERSION};
 
 /// Maximum bytes for a single metric label key or value.
@@ -31,7 +33,55 @@ pub const ALLOWED_METRIC_LABEL_KEYS: &[&str] = &[
     "backend",
     "component",
     "status",
+    "row",
+    "mode",
+    "outcome",
+    "stage",
 ];
+
+/// Registered `row` label values: the speech model rows the release is
+/// validated against.
+pub const METRIC_ROW_VALUES: [&str; 2] = [
+    "speech-stt-whisper-turbo-stream-l4",
+    "speech-tts-kokoro-stream-l4",
+];
+
+/// Registered `mode` label values: the stream serving modes a bundle's
+/// speech block resolves to.
+pub const METRIC_MODE_VALUES: [&str; 2] = ["stt_streaming", "tts_streaming"];
+
+/// Registered `outcome` label values. `rejected` is a refusal before
+/// admission; an expiry or a timeout is `failed`.
+pub const METRIC_OUTCOME_VALUES: [&str; 4] = ["succeeded", "failed", "cancelled", "rejected"];
+
+/// Registered `stage` label values, in pipeline order: the runtime pipeline
+/// stages, with the scheduler queue after `ingress`.
+pub const METRIC_STAGE_VALUES: [&str; 7] = [
+    "ingress",
+    "queue",
+    "vad",
+    "preprocessing",
+    "backend",
+    "postprocessing",
+    "egress",
+];
+
+/// The values `key` may take when it is a label held to a registered list;
+/// `None` for a key bounded by length alone or not allowed at all.
+#[must_use]
+pub fn registered_metric_label_values(key: &str) -> Option<&'static [&'static str]> {
+    match key {
+        "row" => Some(&METRIC_ROW_VALUES),
+        "mode" => Some(&METRIC_MODE_VALUES),
+        "outcome" => Some(&METRIC_OUTCOME_VALUES),
+        "stage" => Some(&METRIC_STAGE_VALUES),
+        _ => None,
+    }
+}
+
+fn label_value_is_registered(key: &str, value: &str) -> bool {
+    registered_metric_label_values(key).map_or(true, |values| values.contains(&value))
+}
 
 /// Aggregation kind.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -85,7 +135,8 @@ impl MetricLabels {
     }
 
     /// Insert a label, returning `false` when the key is rejected by
-    /// the allowed-keys list or the value exceeds the bounded length.
+    /// the allowed-keys list, the value exceeds the bounded length, or
+    /// the key takes registered values and this is not one of them.
     /// The caller can use this signal to surface a typed registry
     /// error.
     pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) -> bool {
@@ -94,7 +145,7 @@ impl MetricLabels {
         if !ALLOWED_METRIC_LABEL_KEYS.iter().any(|k| *k == key) {
             return false;
         }
-        if value.len() > MAX_METRIC_LABEL_BYTES {
+        if value.len() > MAX_METRIC_LABEL_BYTES || !label_value_is_registered(&key, &value) {
             return false;
         }
         self.0.insert(key, value);
@@ -166,6 +217,12 @@ pub struct MetricEvent {
     pub kind: MetricKind,
     pub unit: MetricUnit,
     pub monotonic_timestamp_ns: u64,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_some",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub priority: Option<TelemetryPriority>,
     #[serde(default, skip_serializing_if = "MetricLabels::is_empty")]
     pub labels: MetricLabels,
     pub sample: MetricSample,
@@ -189,10 +246,18 @@ impl MetricEvent {
             kind,
             unit,
             monotonic_timestamp_ns,
+            priority: None,
             labels: MetricLabels::new(),
             sample,
             correlation_id: None,
         }
+    }
+
+    /// Set the delivery class.
+    #[must_use]
+    pub fn with_priority(mut self, priority: TelemetryPriority) -> Self {
+        self.priority = Some(priority);
+        self
     }
 }
 
@@ -240,6 +305,11 @@ fn validate_labels(labels: &MetricLabels) -> Result<(), DecodeError> {
         if value.len() > MAX_METRIC_LABEL_BYTES {
             return Err(DecodeError::InvalidPayload(format!(
                 "MetricEvent.labels value for `{key}` exceeds {MAX_METRIC_LABEL_BYTES} bytes"
+            )));
+        }
+        if !label_value_is_registered(key, value) {
+            return Err(DecodeError::InvalidPayload(format!(
+                "MetricEvent.labels value for `{key}` is not a registered value"
             )));
         }
     }
@@ -371,6 +441,7 @@ mod tests {
             kind: MetricKind::Counter,
             unit: MetricUnit::Count,
             monotonic_timestamp_ns: 1,
+            priority: None,
             labels,
             sample: MetricSample::scalar(7.0),
             correlation_id: None,
@@ -399,6 +470,16 @@ mod tests {
         let mut labels = MetricLabels::new();
         assert!(!labels.insert("custom_label", "v"));
         assert!(labels.is_empty());
+    }
+
+    #[test]
+    fn label_insertion_holds_a_registered_key_to_its_values() {
+        let mut labels = MetricLabels::new();
+        assert!(!labels.insert("stage", "session-7"));
+        assert!(!labels.insert("mode", "stt_batch"));
+        assert!(labels.is_empty());
+        assert!(labels.insert("stage", "backend"));
+        assert!(labels.insert("outcome", "rejected"));
     }
 
     #[test]

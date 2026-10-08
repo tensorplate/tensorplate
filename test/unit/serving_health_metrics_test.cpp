@@ -4,11 +4,15 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
+#include <iterator>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -104,6 +108,91 @@ TEST(ServingMetrics, LatencyHistogramAndPrometheusRender) {
   EXPECT_NE(txt.find("tensorplate_serving_total_latency_ms_bucket"), std::string::npos);
   EXPECT_NE(txt.find("endpoint=\"e\""), std::string::npos);
   EXPECT_NE(txt.find("backend=\"mock\""), std::string::npos);
+}
+
+std::string read_source_file(const std::string& relative) {
+  std::ifstream in(std::string{TP_SOURCE_DIR} + "/" + relative);
+  EXPECT_TRUE(in.is_open()) << relative;
+  return {std::istreambuf_iterator<char>{in}, std::istreambuf_iterator<char>{}};
+}
+
+std::string documented_boundaries() {
+  std::ostringstream out;
+  for (const double edge : kLatencyBucketsMs) {
+    out << edge << ", ";
+  }
+  out << "+Inf";
+  return out.str();
+}
+
+TEST(LatencyBuckets, ExistingBoundariesAreKeptAndEverySpeechGateValueIsOne) {
+  const std::array<double, 15> expected{0.5,   1.0,   2.0,   5.0,   10.0,   25.0,   50.0,  100.0,
+                                        250.0, 300.0, 500.0, 600.0, 1000.0, 1500.0, 5000.0};
+  EXPECT_EQ(kLatencyBucketsMs, expected);
+  for (std::size_t i = 1; i < kLatencyBucketsMs.size(); ++i) {
+    EXPECT_LT(kLatencyBucketsMs.at(i - 1), kLatencyBucketsMs.at(i));
+  }
+}
+
+TEST(LatencyBuckets, AnObservationAtAGateValueCountsInThatBucket) {
+  for (const double gate : {100.0, 250.0, 300.0, 500.0, 600.0, 1000.0, 1500.0}) {
+    LatencyHistogram at_gate;
+    at_gate.observe_ms(gate);
+    LatencyHistogram past_gate;
+    past_gate.observe_ms(gate + 0.001);
+    std::size_t edge = kLatencyBucketsMs.size();
+    for (std::size_t i = 0; i < kLatencyBucketsMs.size(); ++i) {
+      if (kLatencyBucketsMs.at(i) == gate) {
+        edge = i;
+      }
+    }
+    ASSERT_LT(edge, kLatencyBucketsMs.size()) << gate << " ms is not a boundary";
+    EXPECT_EQ(at_gate.snapshot().bucket_counts.at(edge), 1U) << gate;
+    EXPECT_EQ(past_gate.snapshot().bucket_counts.at(edge), 0U) << gate;
+    EXPECT_EQ(past_gate.snapshot().bucket_counts.at(edge + 1), 1U) << gate;
+  }
+}
+
+TEST(LatencyBuckets, BothExpositionsListEveryBoundaryInOrder) {
+  ServingMetrics m;
+  m.observe_total_ms(300.0);
+  const auto snapshot = m.snapshot();
+
+  const auto buckets = nlohmann::json::parse(render_metrics_json(snapshot))
+                           .at("latency_ms")
+                           .at("total")
+                           .at("buckets");
+  ASSERT_EQ(buckets.size(), kLatencyBucketsMs.size() + 1);
+  for (std::size_t i = 0; i < kLatencyBucketsMs.size(); ++i) {
+    EXPECT_EQ(buckets.at(i).at("le_ms"), kLatencyBucketsMs.at(i));
+    EXPECT_EQ(buckets.at(i).at("count"), kLatencyBucketsMs.at(i) == 300.0 ? 1 : 0);
+  }
+  EXPECT_EQ(buckets.back().at("le_ms"), "+Inf");
+
+  std::istringstream text(render_prometheus_text(snapshot));
+  std::vector<std::string> total;
+  for (std::string line; std::getline(text, line);) {
+    if (line.starts_with("tensorplate_serving_total_latency_ms_bucket{")) {
+      total.push_back(line.substr(line.find(",le=")));
+    }
+  }
+  ASSERT_EQ(total.size(), kLatencyBucketsMs.size() + 1);
+  EXPECT_EQ(total.at(8), ",le=\"250.000\"} 0");
+  EXPECT_EQ(total.at(9), ",le=\"300.000\"} 1");
+  EXPECT_EQ(total.at(13), ",le=\"1500.000\"} 1");
+  EXPECT_EQ(total.back(), ",le=\"+Inf\"} 1");
+}
+
+TEST(LatencyBuckets, SchemaAndArchitectureDocNameTheSameBoundaries) {
+  const auto listed = documented_boundaries();
+  const auto schema =
+      nlohmann::json::parse(read_source_file("protocol/schemas/serving_metrics.json"));
+  EXPECT_NE(schema.at("description").get<std::string>().find("): " + listed + "."),
+            std::string::npos)
+      << listed;
+  EXPECT_NE(read_source_file("docs/architecture/serving-worker.md").find("`" + listed + "` ms."),
+            std::string::npos)
+      << listed;
 }
 
 SchedulerMetrics distinct_scheduler_snapshot() {

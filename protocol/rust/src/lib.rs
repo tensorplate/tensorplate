@@ -61,6 +61,7 @@ pub mod python_pytorch_ipc;
 pub mod resident_set;
 pub mod serde_shape;
 pub mod supervision_event;
+pub mod telemetry_priority;
 pub mod tensor_view;
 pub mod worker_control;
 pub mod worker_status;
@@ -165,6 +166,7 @@ pub use supervision_event::{
     SupervisionAgentState, SupervisionEvent, SupervisionEventKind, SupervisionServingState,
     MAX_SUPERVISION_MESSAGE_BYTES,
 };
+pub use telemetry_priority::TelemetryPriority;
 pub use tensor_view::{DType, Layout, TensorView, TensorViewError};
 pub use worker_control::{
     encode_frame, CandidateRef, LedgerStatus, MemberRef, PressureDirective, PressureLevel,

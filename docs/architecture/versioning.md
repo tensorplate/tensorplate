@@ -97,7 +97,9 @@ failure-category enums under `0.1`. A third lets an optional output-only
 property be added to `scheduler_metrics.json`, and a value be appended to the
 scheduler policy enum, under `0.1`. A fourth lets the Python/PyTorch sidecar
 IPC gain kinds and optional fields that only negotiated peers exchange, under
-`0.1`.
+`0.1`. A fifth lets the log and metric events gain an optional property, the
+metric labels gain a key held to a registered value list, and the serving
+worker's latency histograms gain a boundary, under `0.1`.
 
 ### Schema version
 
@@ -187,3 +189,10 @@ stream session envelope's `ErrorCode` and `FailureReason` enums with
 schema copies of the scheduler policy enum to each other and to the policy
 registry, `SchedulerMetrics` to `scheduler_metrics.json`, and the serving
 exporter's in-flight gauges to the names `serving_metrics.json` gives them.
+`protocol/rust/tests/telemetry_event_fixtures.rs` holds the delivery-class
+enum of `log_event.json` and `metric_event.json`, and the registered metric
+label values in `metric_event.json` and `serving_metrics.json`, to the Rust
+constants, and holds the `mode` and `stage` lists to the bundle profile and
+the stream schema they repeat. `test/unit/serving_health_metrics_test.cpp`
+holds the worker's latency bucket boundaries to the list in
+`serving_metrics.json` and in `serving-worker.md`.

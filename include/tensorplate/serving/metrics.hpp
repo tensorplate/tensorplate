@@ -16,9 +16,10 @@
 //     side scrapers that prefer machine-friendly bodies.
 //
 // Latency histograms use a small fixed set of bucket boundaries
-// matched to robotics-class latency budgets (1 ms ... 5 s). The
-// boundaries are part of the wire contract; downstream observability
-// (V01-E12) re-uses them.
+// matched to robotics-class latency budgets (1 ms ... 5 s), with a
+// boundary at each streaming speech latency threshold (100 ms ... 1.5 s)
+// so a threshold reads off one bucket. The boundaries are part of the
+// wire contract.
 
 #pragma once
 
@@ -40,8 +41,9 @@ struct SchedulerMetrics;
 
 /// Latency bucket boundaries (milliseconds). The trailing +Inf bucket
 /// is implicit.
-inline constexpr std::array<double, 11> kLatencyBucketsMs{0.5,  1.0,   2.0,   5.0,    10.0,  25.0,
-                                                          50.0, 100.0, 250.0, 1000.0, 5000.0};
+inline constexpr std::array<double, 15> kLatencyBucketsMs{0.5,   1.0,   2.0,    5.0,    10.0,
+                                                          25.0,  50.0,  100.0,  250.0,  300.0,
+                                                          500.0, 600.0, 1000.0, 1500.0, 5000.0};
 
 /// Snapshot of a single latency histogram.
 struct LatencyHistogramSnapshot {
@@ -50,7 +52,7 @@ struct LatencyHistogramSnapshot {
   double sum_ms = 0.0;
 };
 
-/// Thread-safe latency histogram with the v0.1.0 bucket layout.
+/// Thread-safe latency histogram over `kLatencyBucketsMs`.
 class LatencyHistogram {
  public:
   void observe_ms(double ms);
