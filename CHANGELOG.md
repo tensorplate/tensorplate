@@ -60,6 +60,38 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   observations at or below 600 and 1500 ms. Additive change inside
   protocol 0.1; version constants unchanged. (V030-E05-F04-T01)
 
+### Changed
+
+- The agent starts every serving worker as a member generation. A
+  `process`-mode agent now runs its workers through one member registry:
+  each start takes a new generation from a durable counter, renders it as
+  `deployment.generation`, hands the worker its control socket and polls
+  its ledger from the moment it starts; a candidate is warm only when
+  `/health` is ready and its ledger has arrived. A candidate that answers
+  no ledger poll for 10 seconds is killed and its deploy fails, whatever
+  the warm timeout, and one that exits after it was warmed is not
+  promoted. Each worker being stopped is sent SIGTERM and is killed only
+  if it has not exited 10 seconds later, where it was killed at once; its
+  serving config sets its own drain to 5 seconds. That applies to the
+  replaced worker at promotion and to a candidate a failed deploy left
+  behind when the next deploy displaces it. Deploying the id that is
+  already active no longer stops the worker just promoted. A
+  configuration that enables `supervision` beside `worker.mode: process`
+  is refused at start. The first worker start,
+  including the restore of the recorded deployment after an upgrade,
+  moves `state.json` to state version 0.2, which an agent through 0.2.x
+  refuses; set the state directory aside before starting an older
+  release, as the rollback procedure describes. A recorded deployment
+  whose id is not 1 to 128 of ASCII letters, digits, `-`, `_` or `.`
+  (possible only for one first deployed before 0.2.1) is not restored at
+  start: the agent comes up without a worker and reports why in
+  `last_error`, and the deployment must be deployed again under such an
+  id. Serving config files are named
+  `serving-<deployment>-<generation>.json`. A `/health` read that times
+  out now counts as not ready instead of failing the deploy as
+  `internal`. A crashed worker is still not restarted, and the two
+  configured serving ports are unchanged. (V030-E03-F01-T03)
+
 ## [0.3.1] - 2026-10-01
 
 ### Added
