@@ -410,7 +410,12 @@ impl Coordinator {
             let s = self.store.snapshot()?;
             s.previous_active.as_ref().map(|d| d.deployment_id.clone())
         };
-        if let Some(prev) = previous_active.as_deref() {
+        // A deployment replaced under its own id was retired at promotion;
+        // unloading that id now would stop the worker just promoted.
+        if let Some(prev) = previous_active
+            .as_deref()
+            .filter(|prev| *prev != deployment_id)
+        {
             self.worker.unload(prev);
             self.emit(&WorkerEvent::Unload {
                 deployment_id: prev.to_string(),

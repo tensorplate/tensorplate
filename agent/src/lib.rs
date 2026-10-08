@@ -44,6 +44,8 @@ pub mod memory_admission;
 pub mod platform_admission;
 pub mod quarantine;
 pub mod recovery;
+#[cfg(unix)]
+pub mod registry;
 pub mod rollback;
 pub mod server;
 pub mod state;

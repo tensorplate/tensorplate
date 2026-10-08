@@ -668,6 +668,7 @@ dependencies = [
  "anyhow",
  "hex",
  "jsonschema",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

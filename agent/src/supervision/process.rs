@@ -275,12 +275,7 @@ impl WorkerProcess for SystemWorkerProcess {
         if let Some(child) = state.child.as_ref() {
             #[cfg(unix)]
             {
-                // Best-effort SIGTERM via libc; we cannot depend on a new
-                // crate just for this so we use a raw syscall via the
-                // `kill` system call exposed through std::process when
-                // available. v0.1.0 ships unix-only.
-                let pid = child.id();
-                send_sigterm(pid)?;
+                send_sigterm(child.id())?;
             }
             #[cfg(not(unix))]
             {
@@ -316,33 +311,14 @@ impl WorkerProcess for SystemWorkerProcess {
 
 #[cfg(unix)]
 fn send_sigterm(pid: u32) -> AgentResult<()> {
-    // Safe: kill(2) with SIGTERM (15) is signal-safe and reentrant.
-    // We deliberately avoid pulling in `libc` or `nix` for one syscall.
-    // SAFETY: directly invoke kill(2) through std's libc wrapper via
-    // the `signal` crate replacement — fall back to writing the signal
-    // through `/proc/<pid>/term` is unsafe; instead we shell out only
-    // when libc-style syscall fails. v0.1.0 keeps the dependency
-    // surface small, so we use the established `Command::new("kill")`
-    // pattern.
-    let status = std::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|err| AgentError::WorkerControl(format!("invoke kill -TERM {pid}: {err}")))?;
-    if !status.success() {
-        // `kill -TERM` against an already-exited PID returns non-zero;
-        // we treat that as a no-op (the process is already gone).
-        let code = status.code().unwrap_or(0);
-        if code != 1 {
-            return Err(AgentError::WorkerControl(format!(
-                "kill -TERM {pid} exited with {code}"
-            )));
-        }
+    match crate::worker::send_sigterm(pid) {
+        Ok(()) => Ok(()),
+        // The process is already gone.
+        Err(err) if err.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => Ok(()),
+        Err(err) => Err(AgentError::WorkerControl(format!(
+            "send SIGTERM to {pid}: {err}"
+        ))),
     }
-    Ok(())
 }
 
 /// Behavior knobs for [`MockWorkerProcess`].
@@ -623,6 +599,32 @@ mod tests {
     use crate::supervision::config::{EventSinkConfig, RestartPolicy, WorkerStdioMode};
     use std::collections::BTreeSet;
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_stop_signal_is_sigterm_and_a_pid_that_names_no_process_is_not_an_error() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn");
+        super::send_sigterm(child.id()).expect("signal");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("wait") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().expect("kill");
+                panic!("the child was not signalled");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(status.signal(), Some(15));
+
+        // Above every pid a kernel hands out.
+        super::send_sigterm(i32::MAX.unsigned_abs()).expect("no such process");
+    }
 
     /// A config that only has to be well-formed: these cases inspect the
     /// prepared command and never spawn, so no path needs to exist.

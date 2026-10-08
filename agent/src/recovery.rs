@@ -22,7 +22,9 @@
 
 use std::path::Path;
 
-use tensorplate_protocol::agent_control::{RecoveryAction, RecoverySummary};
+use tensorplate_protocol::agent_control::{
+    is_valid_deployment_id, RecoveryAction, RecoverySummary,
+};
 use tensorplate_protocol::agent_state::{DeploymentRecord, ErrorRecord, TransactionKind};
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::worker_control::CandidateRef;
@@ -261,6 +263,15 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
         .snapshot()?
         .active
         .ok_or_else(|| AgentError::Unavailable("no active deployment to restore".into()))?;
+    // An id recorded before deployment ids were restricted cannot be started
+    // as a member. The agent stays up, so the operator can redeploy it.
+    if !is_valid_deployment_id(&active.deployment_id) {
+        let err = AgentError::Config(format!(
+            "recorded active deployment `{}` was not restored: its id cannot name a member (1 to 128 of ASCII letters, digits, `-`, `_` or `.`); deploy it again under such an id",
+            active.deployment_id
+        ));
+        return coordinator.state().set_last_error(Some(err.to_record()));
+    }
     let candidate = match candidate_from_record(&active) {
         Ok(candidate) => candidate,
         Err(err) => {

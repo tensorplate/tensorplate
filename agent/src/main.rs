@@ -831,7 +831,7 @@ fn main() -> ExitCode {
             return ExitCode::from(3);
         }
     };
-    let worker = match worker::from_config(&cfg) {
+    let worker = match worker::from_config(&cfg, &store) {
         Ok(w) => w,
         Err(err) => {
             eprintln!("worker control error: {err}");

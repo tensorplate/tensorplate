@@ -31,8 +31,9 @@ use tensorplate_agent::config::{
 };
 use tensorplate_agent::control::dispatch;
 use tensorplate_agent::coordinator::Coordinator;
+use tensorplate_agent::registry::{durable_generations, MemberRegistry};
 use tensorplate_agent::state::StateStore;
-use tensorplate_agent::worker::{ProcessWorkerControl, WorkerStderrSink};
+use tensorplate_agent::worker::{agent_stderr_sink, WorkerStderrSink};
 use tensorplate_protocol::agent_control::{
     ControlRequest, ControlResponse, DeployRequest, ResponseStatus, RollbackRequest,
 };
@@ -125,6 +126,24 @@ impl ProcessHarness {
         warm_timeout: Duration,
         stderr_sink: Option<WorkerStderrSink>,
     ) -> Self {
+        assert!(
+            std::process::Command::new("python3")
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success()),
+            "the stand-in worker answers its control socket with python3, which is not on PATH"
+        );
+        let stub = fixture_dir().join("stub-worker.sh");
+        Self::build_with(stub, active_port, candidate_port, warm_timeout, stderr_sink)
+    }
+
+    fn build_with(
+        serving_binary: PathBuf,
+        active_port: u16,
+        candidate_port: u16,
+        warm_timeout: Duration,
+        stderr_sink: Option<WorkerStderrSink>,
+    ) -> Self {
         let td = TempDir::new().expect("td");
         let state_dir = td.path().join("state");
         let mut config = AgentConfig {
@@ -146,7 +165,8 @@ impl ProcessHarness {
             runtime_version: Some("0.1.0".into()),
         };
         config.worker.mode = WorkerControlMode::Process;
-        config.worker.serving_binary_path = Some(fixture_dir().join("stub-worker.sh"));
+        config.worker.serving_binary_path = Some(serving_binary);
+        config.worker.serving_use_mock_session = true;
         config.worker.serving_config_dir = Some(td.path().join("worker-configs"));
         config.worker.serving_bind_port = active_port;
         config.worker.serving_candidate_bind_port = candidate_port;
@@ -154,11 +174,14 @@ impl ProcessHarness {
         config.worker.status_poll_interval_ms = 10;
         let config = config.validate().expect("valid config");
         let store = Arc::new(StateStore::open(&state_dir).expect("open store"));
-        let mut worker = ProcessWorkerControl::new(&config).expect("worker");
-        if let Some(sink) = stderr_sink {
-            worker = worker.with_stderr_sink(sink);
-        }
-        let worker = Arc::new(worker);
+        let worker = Arc::new(
+            MemberRegistry::from_config(
+                &config,
+                durable_generations(store.clone()),
+                stderr_sink.unwrap_or_else(agent_stderr_sink),
+            )
+            .expect("registry"),
+        );
         let coord = Arc::new(Coordinator::new(config, store.clone(), worker));
         Self { td, store, coord }
     }
@@ -412,6 +435,119 @@ fn a_candidate_that_stays_alive_still_waits_out_the_warm_timeout() {
     assert_eq!(error.code, ErrorCode::NotReady, "{}", error.message);
 }
 
+/// What the state file at `path` says of its version and counter.
+fn version_and_counter(path: &Path) -> (String, Option<u64>) {
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).expect("read state")).expect("state json");
+    (
+        state["schema_version"]
+            .as_str()
+            .expect("version")
+            .to_string(),
+        state["next_generation"].as_u64(),
+    )
+}
+
+/// The stand-in worker refuses a poll that names another member than its
+/// config, so a deploy that succeeds was polled as the generation rendered.
+#[test]
+fn each_worker_is_started_as_a_new_durable_generation_and_stopped_by_request() {
+    let first = HealthPort::listen();
+    let second = HealthPort::listen();
+    let h = ProcessHarness::new(first.port, second.port);
+    let state_dir = h.td.path().join("state");
+    let configs = h.td.path().join("worker-configs");
+
+    first.serve("good-a");
+    assert_eq!(h.deploy("good-a").status, ResponseStatus::Ok);
+    for file in ["state.json", "state.json.bak"] {
+        assert_eq!(
+            version_and_counter(&state_dir.join(file)),
+            ("0.2".to_string(), Some(2)),
+            "{file}"
+        );
+    }
+    assert!(configs.join("serving-good-a-1.json").is_file());
+
+    second.serve("good-b");
+    assert_eq!(h.deploy("good-b").status, ResponseStatus::Ok);
+    assert_eq!(
+        h.store.snapshot().expect("snapshot").next_generation,
+        Some(3)
+    );
+    // Written by the replaced worker on SIGTERM; a kill would leave none.
+    assert!(configs.join("good-a.terminated").is_file());
+    assert!(!configs.join("serving-good-a-1.json").exists());
+    assert!(configs.join("serving-good-b-2.json").is_file());
+
+    // A failed start spends its generation too.
+    assert!(h.deploy("exit-66").error.is_some());
+    assert_eq!(
+        h.store.snapshot().expect("snapshot").next_generation,
+        Some(4)
+    );
+}
+
+#[test]
+fn a_worker_that_never_answers_its_control_socket_is_not_promoted() {
+    let health = HealthPort::listen();
+    health.serve("mute-worker");
+    let warm_timeout = Duration::from_millis(1500);
+    let h = ProcessHarness::build(health.port, unused_port(), warm_timeout, None);
+
+    let started = Instant::now();
+    let error = h.deploy("mute-worker").error.expect("typed error");
+    assert!(started.elapsed() >= warm_timeout);
+    assert_eq!(error.code, ErrorCode::NotReady, "{}", error.message);
+    assert!(h.store.snapshot().expect("snapshot").active.is_none());
+}
+
+/// The agent's control client against the worker's own control thread. Run
+/// with `TP_TEST_SERVING_BINARY` naming a built `tensorplate-serving`.
+#[test]
+#[ignore = "needs a built tensorplate-serving"]
+fn a_real_worker_is_polled_from_its_start_and_promoted_as_a_member() {
+    let serving = std::env::var_os("TP_TEST_SERVING_BINARY").expect("TP_TEST_SERVING_BINARY");
+    let h = ProcessHarness::build_with(
+        PathBuf::from(serving),
+        unused_port(),
+        unused_port(),
+        Duration::from_secs(30),
+        None,
+    );
+
+    assert_eq!(h.deploy("member-a").status, ResponseStatus::Ok);
+    assert_eq!(h.deploy("member-b").status, ResponseStatus::Ok);
+    assert_eq!(h.rollback().status, ResponseStatus::Ok);
+    let snap = h.store.snapshot().expect("snapshot");
+    assert_eq!(snap.active.expect("active").deployment_id, "member-a");
+    assert_eq!(snap.next_generation, Some(4));
+}
+
+/// The unload of the previous active id that follows a promotion must not
+/// reach the worker just promoted when the two ids are the same.
+#[test]
+fn deploying_the_active_id_again_leaves_it_served() {
+    let first = HealthPort::listen();
+    let second = HealthPort::listen();
+    let h = ProcessHarness::new(first.port, second.port);
+    first.serve("same-id");
+    second.serve("same-id");
+
+    assert_eq!(h.deploy("same-id").status, ResponseStatus::Ok);
+    assert_eq!(h.deploy("same-id").status, ResponseStatus::Ok);
+
+    let active = h.coord.status().expect("status").active.expect("active");
+    assert_eq!(active.deployment_id, "same-id");
+    assert_eq!(
+        active.serving_url,
+        Some(format!("http://127.0.0.1:{}/infer", second.port))
+    );
+    let configs = h.td.path().join("worker-configs");
+    assert!(configs.join("serving-same-id-2.json").is_file());
+    assert!(!configs.join("serving-same-id-1.json").exists());
+}
+
 fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).expect("mkdir");
     for entry in std::fs::read_dir(from).expect("read_dir") {
@@ -509,7 +645,14 @@ fn real_worker_and_sidecar_report_an_undeclared_voice_as_unsupported() {
     let config = config.validate().expect("valid config");
     let warm_timeout = Duration::from_millis(config.worker.warm_timeout_ms);
     let store = Arc::new(StateStore::open(&state_dir).expect("open store"));
-    let worker = Arc::new(ProcessWorkerControl::new(&config).expect("worker"));
+    let worker = Arc::new(
+        MemberRegistry::from_config(
+            &config,
+            durable_generations(store.clone()),
+            agent_stderr_sink(),
+        )
+        .expect("registry"),
+    );
     let coord = Arc::new(Coordinator::new(config, store, worker));
     let bundle = kokoro_bundle_with_undeclared_voice(td.path());
 

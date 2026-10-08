@@ -63,11 +63,10 @@ Layer rules:
 
 - The agent never links against the C++ runtime or the serving worker.
 - The serving worker is supervised through the typed
-  `WorkerControl` trait. v0.1.0 ships both the deterministic
-  `MockWorkerControl` used by host CI and a process-backed
-  `ProcessWorkerControl` that renders a V01-E07 serving config, starts
-  `tensorplate-serving`, polls `/health`, and promotes only warmed
-  candidates.
+  `WorkerControl` trait. Its implementations are the deterministic
+  `MockWorkerControl` used by host CI and the process-backed
+  [member registry](#member-registry), which owns every
+  `tensorplate-serving` process a `process`-mode agent starts.
 - The CLI never speaks to the serving worker directly; every mutating
   operation flows through the agent.
 
@@ -466,6 +465,60 @@ The reusable `ControlChannel` owns a socket, bounded command queue and dedicated
 ledger-polling thread for one member generation. Its typed contact transitions
 are available through a bounded snapshot; process recovery is a registry
 responsibility. `spawn_with_control` supplies the corresponding safe stdin socket
-handoff. These APIs have no production caller yet and do not change the existing
-process managers. See [runtime control client](worker-supervision.md#runtime-control-client)
+handoff. The [member registry](#member-registry) is their production caller. See
+[runtime control client](worker-supervision.md#runtime-control-client)
 for framing, deadlines, ownership and loss-of-contact behavior.
+
+## Member registry
+
+`agent/src/registry.rs` is the one owner of the serving worker processes a
+`process`-mode agent starts. Each worker is a member generation:
+
+- **Generation.** Before a worker starts, the registry takes the next
+  generation from the durable state's counter in a committed write, so a
+  generation is never used twice, including across agent restarts and by a
+  start that then fails. The first allocation moves the state file to state
+  version `0.2` (see [durable state](#durable-state-store-v01-e08-f02)); startup
+  recovery relaunches the recorded active deployment through the same path,
+  so it happens on the first start that has a deployment to restore.
+- **Start.** The registry renders the serving config with
+  `deployment.generation` and `deployment.endpoint` set to the deployment id,
+  hands the worker its control socket on fd 0 in the same launch, and starts
+  the 1 Hz ledger poll at once, before it waits for the model to load. The
+  config file is named for the deployment and generation and is removed with
+  the worker; files an earlier agent process left are removed at start.
+- **Readiness.** A candidate is warm when `/health` reports it ready for the
+  deployment and its control channel has delivered a ledger. A candidate
+  that exits while loading answers with its startup failure record; one
+  that answers no ledger poll for 10 seconds has a failed control channel
+  and is killed and refused, whatever the warm timeout.
+- **Stop.** A member being replaced, displaced or unloaded is sent SIGTERM
+  and is killed if it has not exited 10 seconds later; members stopped
+  together share that deadline. Its serving config tells it to drain its
+  sessions for 5 seconds (`shutdown.drain_deadline_ms`), so its own drain
+  ends before the registry would kill it. The signal goes to the worker's
+  process id only: a worker that has to be killed leaves its sidecar to
+  exit when it sees its peer closed.
+- **Promotion.** A candidate that exited after it was warmed is not
+  promoted: the deploy fails with the worker's failure and the serving
+  member stays.
+
+A member's name is its deployment id, and the serving worker accepts only 1
+to 128 of ASCII letters, digits, `-`, `_` and `.`. Deploys have been held to
+that since 0.2.1; a recorded active deployment from an earlier release whose
+id breaks it is not restored at start. The agent comes up without a worker
+and with the reason in `last_error`.
+
+The registry keeps the two configured ports (`serving_bind_port`,
+`serving_candidate_bind_port`): a candidate binds the one the serving member
+is not on. It does not restart a member that exits or loses contact after
+promotion, and it writes no resident set. `WorkerSupervisor` is a separate
+process manager that no packaged configuration enables; a configuration that
+enables `supervision` beside `worker.mode: process` is refused at start,
+since each would start its own worker.
+
+The agent installs no termination handler, so when the agent itself is
+stopped the registry's stop does not run. What ends the workers then is the
+service manager: under the packaged systemd unit every process in the
+unit's control group, workers and sidecars included, is sent SIGTERM and
+whatever remains after the unit's stop timeout is killed.
