@@ -365,12 +365,20 @@ for a separate memory quota. An optional bounded initialization step
 runs after slot reservation and before `emit_ready`; failure emits one
 terminal error and holds the slot for physical cleanup. Its sink applies
 each machine's effects in order; the manager serializes event
-application and sink calls across client and timer threads. A slot
-remains held after cancel, failure or drain until `release_acknowledged`
-produces `release_slot`. `stop_admission_and_drain` closes admission,
-starts each live session's drain, and waits for `drain_completed`
-followed by physical release before closure. The manager does not reload
-a backend or schedule a physical job.
+application and sink calls across client and timer threads. Each
+transition names the event that caused it. Besides every transition with
+effects, the sink receives each return of input credit (a transition
+with no event and no effects, carrying the status after it) and each
+`finalize_completed` that made a session `active` again, inside the same
+serialized section, so the status a sink last saw is never older than
+one it saw before. That does not hold for the status a call returns,
+which reaches its caller after the section ends: a stream takes the
+credit it reports from the sink only. A slot remains held after cancel,
+failure or drain until `release_acknowledged` produces `release_slot`.
+`stop_admission_and_drain` closes admission, starts each live session's
+drain, and waits for `drain_completed` followed by physical release
+before closure. The manager does not reload a backend or schedule a
+physical job.
 
 Each session is opened with `SessionBudgets`
 (`runtime/src/serving/session/credits.hpp`), derived from the byte rate
@@ -399,30 +407,37 @@ defect in the caller and fails the session.
 
 **Output queue.** Every server message of a stream passes through its
 `BoundedOutputQueue`, which the manager creates at open and hands to the
-sink with each transition. A producer of task output offers an item;
-when its budget has no room the offer answers `full`, the producer keeps
-the item and pauses until output drains, so task output is never dropped
-while the session lives. Task output may fill the metadata budget only
-up to its last 1 KiB, which is kept for lifecycle messages so that a
-backlog of transcripts cannot keep a reply or `CancelAccepted` out. A
-lifecycle reply is answered `full` only when the peer has left the whole
-metadata budget unread; the sink, which cannot wait, does not queue that
-reply. For a live or draining session the no-progress limit below is
-already running; a cancelled session ends with its terminal outcome. The
-stream assigns a message its sequence only when the transport takes it,
-so an unsent partial hypothesis can still be replaced in place by its
-newer revision, and a final supersedes the unsent partial of its
-utterance; a final is never replaced. A lifecycle reply whose newest
-instance says everything can carry a key and is replaced the same way,
-which keeps such replies from accumulating. An item stays charged from
-the offer until the transport confirms its delivery, so what the
-transport holds counts against the same budget. On `suppress_output` the
-manager discards the unsent task output before the sink runs and the
-queue refuses task output from then on, while lifecycle messages still
-pass. The terminal outcome is accepted once, even when the budget is
-full, and nothing is accepted after it. The queue outlives the session's
-slot, because lifecycle messages and the terminal outcome are still
-delivered after release.
+sink with each transition. The queue has several producers and one
+consumer, the stream's writer, which registers a callback once
+(`set_consumer`; a second registration is refused). The callback runs
+outside the queue's lock on the offering thread after an offer was
+queued, may stand for several items, and must not block or call the
+session manager, whose sink may be the one offering; if something is
+already unsent it also runs inside the registration, on the caller's
+thread. A producer of task output offers an item; when its budget has no
+room the offer answers `full`, the producer keeps the item and pauses
+until output drains, so task output is never dropped while the session
+lives. Task output may fill the metadata budget only up to its last 1
+KiB, which is kept for lifecycle messages so that a backlog of
+transcripts cannot keep a reply or `CancelAccepted` out. A lifecycle
+reply is answered `full` only when the peer has left the whole metadata
+budget unread; the sink, which cannot wait, does not queue that reply.
+For a live or draining session the no-progress limit below is already
+running; a cancelled session ends with its terminal outcome. The stream
+assigns a message its sequence only when the transport takes it, so an
+unsent partial hypothesis can still be replaced in place by its newer
+revision, and a final supersedes the unsent partial of its utterance; a
+final is never replaced. A lifecycle reply whose newest instance says
+everything can carry a key and is replaced the same way, which keeps
+such replies from accumulating. An item stays charged from the offer
+until the transport confirms its delivery, so what the transport holds
+counts against the same budget. On `suppress_output` the manager
+discards the unsent task output before the sink runs and the queue
+refuses task output from then on, while lifecycle messages still pass.
+The terminal outcome is accepted once, even when the budget is full, and
+nothing is accepted after it. The queue outlives the session's slot,
+because lifecycle messages and the terminal outcome are still delivered
+after release.
 
 **No-progress limit.** The queue keeps a stall clock: it starts when
 output first awaits delivery, moves only when a delivery is confirmed,
@@ -484,7 +499,8 @@ worker's existing request evictor. Unit tests advance
 `FakeSchedulerClock` without sleeping. The current HTTP composition
 root does not instantiate `SessionManager`; the streaming transport
 binding will supply its effect sink, choose each session's budgets and
-drive its output queue.
+drive its output queue, with a [session dispatch](#session-dispatch)
+beside it for the task work.
 
 States: `opening`, `active`, `finalizing`, `draining`,
 `cancel_requested`, and the terminal `closed` and `failed`. Events come
@@ -599,6 +615,155 @@ exists. The owner keeps the end cause: the error carried by the most
 recent accepted event that moved the session into `draining`,
 `cancel_requested` or `failed`, which can only move from a drain to a
 cancel to a failure.
+
+## Session dispatch
+
+`SessionDispatch` (`runtime/src/serving/session/dispatch.hpp`, internal)
+is the seam between a streaming transport binding and the work a
+deployment does for its sessions. It sits beside the `SessionManager`,
+not around it: the binding stays the manager's sink and the only writer
+of lifecycle messages, and the dispatch is the only producer of task
+output. The header names no wire schema type and no backend job type, so
+the binding owns the whole wire mapping and the dispatch owns the whole
+mapping from session input to backend work. One dispatch serves one
+worker process and therefore one deployment generation, fixed when it is
+built; the manager refuses any other generation at open, so a dispatch
+never sees one.
+
+The effects of the table above divide between the two:
+
+| Effect | Carried out by |
+|---|---|
+| `emit_ready`, `emit_reply`, `emit_cancel_accepted`, `emit_terminal` | the binding, as lifecycle messages in the session's output queue |
+| `accept_input` | the binding, which hands the accepted frame or segment to the dispatch (`audio`, `text_segment`) |
+| `start_finalize` | for a client Finalize, the binding, which calls `finalize` with that message's client sequence; for an automatic endpoint, the dispatch that raised it |
+| `start_drain`, `request_cleanup` | the dispatch, from the transitions the binding forwards (`on_transition`) |
+| `suppress_output`, `release_slot` | the manager: it suppresses the queue before the sink runs and returns the slot itself |
+
+**Opening.** Before admission the binding asks `negotiate` what the
+deployment would grant a request: the audio format and the limits the
+stream reports when the session is ready, or a typed refusal that
+reserves nothing (`unsupported`, with `unsupported_input_kind`,
+`unsupported_audio_format`, `unsupported_language` or
+`unsupported_voice`). `budgets_for` derives the session's budgets from
+the granted terms. The binding opens the session and calls
+`open_session` from the manager's initialize hook, so the dispatch knows
+a session before any transition names it. `open_session` runs under the
+manager's lock: it records, and refuses only what it can tell without
+waiting; anything the backend decides fails the session later.
+
+**What the binding checks.** Wire validation is the binding's, before
+`accept_input`: a frame's size, sample count and offset against the
+granted frame bounds, a segment's text against the text limits
+(including the limit over the segments between two Finalizes), and that
+a segment id is above every earlier one of the session; the dispatch
+carries the id unchanged and does not check it. A frame shorter than the
+smallest the terms grant is valid only as the last before a Finalize or
+a half-close, which the binding cannot know when it arrives: it accepts
+the frame and fails the session if more audio follows first. A frame
+found invalid after it was accepted fails the session: the binding
+applies `fail` with the cause its own validation would have given before
+acceptance. That requests the session's cleanup, after which nothing is
+owed, so the frame is not handed over. The limits on produced audio are
+the dispatch's to keep, since only it sees the audio.
+
+**Calls and their order.** Every method a binding calls is thread-safe
+and returns without waiting on a job, on the output queue or on the
+manager. One session's hand-overs (`audio`, `text_segment`, `finalize`)
+are made one at a time, in the order the manager accepted them, each
+after exactly one `accept_input` charged the item's size or one accepted
+Finalize; two hand-overs for one session at once have no defined order
+and are not allowed. Calls for different sessions may run concurrently,
+and so may `on_transition` or `output_delivered` for the same session.
+`on_transition` arrives on whatever thread made the manager act: a
+transport thread, the manager's timer thread, the thread that drains the
+worker, or a dispatch thread inside its own report; it and
+`open_session` therefore only record. Hand-overs return nothing. A
+dispatch that cannot use one fails the session through the manager, and
+a call for a session that was never opened, whose cleanup was requested,
+or after `stop()`, is ignored: that is the whole error contract.
+
+**Reports.** A dispatch reports to the manager and offers output from
+threads of its own. For one session it makes one report or offer at a
+time, in order; nothing is promised across sessions, and a dispatch may
+use one thread for all of them or several. It applies
+`finalize_completed` (before it offers the output that answers a
+Finalize), `drain_completed`, `release_acknowledged`,
+`automatic_endpoint`, `backend_reset`, `fail` and the credit releases,
+and no other event: client events, admission, `drain` and `abort` belong
+to the binding, the worker and the manager's timers. Because the
+manager's sink shows credit returns and completed finalizations in
+order, a binding takes every credit it reports from the sink, the
+unsolicited update included, and never from the status a call returned.
+
+**Hand-overs and drains.** Input and a client Finalize are handed over
+after the manager's call returns, outside its serialized section, so a
+drain can reach the dispatch first. A drain is not complete while the
+manager still counts accepted input that was not handed over or worked
+through, while an accepted client Finalize is still to be handed over,
+or while output of accepted work is undelivered. A binding therefore
+hands over everything the manager accepted while the session lives,
+whatever happened in between; a hand-over that never arrives leaves the
+drain to the session's finalize deadline. For audio input, a client's
+half-close finalizes the open utterance, if it holds audio, with an
+endpoint of its own reason, and a drain the worker starts completes only
+finalizations already asked: audio that was accepted and not finalized
+is not transcribed. For text input every accepted segment is synthesized
+and delivered in either drain.
+
+**Input.** Input belongs to the dispatch from the call that hands it
+over; `audio` copies the frame before it returns. Audio credit returns
+when a frame joins the utterance being collected, not when the utterance
+is decoded. The dispatch keeps that utterance within the longest the
+terms grant by ending it itself: an `automatic_endpoint`, with the
+duration-limit reason on its endpoint. What it collected stays readable
+for as long as a backend job may read it, which is until the backend
+reports that job released, and is dropped then. A text segment's waiting
+credit returns when its work starts and its active slot when the last
+item of its output was delivered.
+
+**Output.** The dispatch queues `TaskOutputBody` items only, as plain
+values the binding encodes: an utterance's endpoint and then its one
+final transcript; a segment's audio chunks and then its completion; and
+the answer to a text Finalize, once every segment accepted before it was
+delivered. A chunk carries 20 ms of the session's audio format, the last
+of a segment possibly less. A result is charged its text plus a fixed
+number of budget units per message and per transcript segment. An offer
+answered `full` leaves the item with the dispatch, which produces nothing
+further for that session until the binding reports a delivery
+(`output_delivered`, after every confirmed delivery of any kind of
+item) and then offers it again; no timer covers a report the binding
+misses. Nothing is offered after `suppress_output`.
+
+**Cleanup.** A `request_cleanup` is answered by one
+`release_acknowledged`, once the backend has released what the session
+held, also for a session whose `open_session` was refused or never
+called. A backend that never confirms a release leaves the
+acknowledgement unsent and the slot held, and whatever shuts the worker
+down has to tolerate that.
+
+**Shutdown.** The order is: stop accepting streams;
+`stop_admission_and_drain`, after which sessions drain and those that
+overrun their finalize deadline are aborted and cleaned up; wait for the
+held slots to reach zero or for the shutdown deadline; `stop()` on the
+dispatch; destroy the manager; destroy the dispatch last, because the
+manager's timer thread calls the sink, and through it the dispatch,
+until the manager is gone. `stop()` waits for the report in progress and
+none follows; it is safe to repeat and to call while binding calls run.
+It must not be called from the manager's sink or initialize hook or from
+a queue's consumer callback: they hold the manager's serialized section,
+which the report `stop()` waits for needs, or run on the reporting
+thread itself. Slots still held at `stop()` are released by nobody: they
+end with the manager.
+
+`SyntheticSessionDispatch` is a dispatch with no backend, for exercising
+a binding: each utterance yields its endpoint and a fixed transcript,
+each text segment a fixed PCM pattern, under the same credit,
+backpressure, drain and cleanup rules. It serves both input kinds on one
+thread, confirms cleanup at once, accepts any language and voice, and
+keeps no audio, so it never ends an utterance itself. The dispatch that
+runs backend jobs is not built yet, and the serving worker constructs
+neither.
 
 ## Test surface
 

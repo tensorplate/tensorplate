@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -93,7 +94,21 @@ enum class OutputOffer : std::uint8_t {
 /// comes from the clock the session manager was created with.
 class BoundedOutputQueue {
  public:
+  /// Tells the consumer that take() has something to return.
+  using Consumer = std::function<void()>;
+
   explicit BoundedOutputQueue(const SessionBudgets& budgets) noexcept;
+
+  /// Registers the queue's one consumer. It is called outside the queue's
+  /// lock, on the offering thread, after an offer was queued; one call may
+  /// stand for several items. If something is already unsent it is also
+  /// called here, on the caller's thread, before this returns: do not
+  /// register while holding a lock the consumer takes. It must not block or
+  /// call the session manager, whose sink may be the one offering, and it
+  /// must stay callable for as long as any producer holds the queue.
+  /// @return false, changing nothing, if `on_takeable` is empty or a
+  ///   consumer was already registered.
+  [[nodiscard]] bool set_consumer(Consumer on_takeable);
 
   /// Queues `item` if it is valid and there is room. Only Queued and Replaced
   /// move from `item`; any other outcome leaves it and the queue unchanged.
@@ -130,6 +145,9 @@ class BoundedOutputQueue {
   };
 
   [[nodiscard]] bool pending_locked() const noexcept;
+  /// offer() once the item is known to be well formed. Caller holds mu_.
+  [[nodiscard]] OutputOffer queue_locked(OutputItem& item, SchedulerClock::TimePoint now,
+                                         OutputItem& replaced);
   /// The unsent item of `kind` carrying the nonzero `key`, or the end.
   [[nodiscard]] std::deque<OutputItem>::iterator find_unsent_locked(OutputKind kind,
                                                                     std::uint64_t key);
@@ -146,6 +164,7 @@ class BoundedOutputQueue {
   std::uint64_t metadata_used_ = 0;
   std::uint64_t last_sequence_ = 0;
   std::optional<SchedulerClock::TimePoint> stalled_since_;
+  std::shared_ptr<const Consumer> consumer_;
   bool suppressed_ = false;
   bool closed_ = false;
 };

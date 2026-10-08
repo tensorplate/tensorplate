@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -883,6 +885,93 @@ TEST(SessionManager, TimerThreadEndsASessionWhoseOutputStalls) {
   (*manager)->notify_clock_advanced();
   ASSERT_EQ(cause.wait_for(1s), std::future_status::ready);
   EXPECT_EQ(cause.get().context, "slow_consumer");
+}
+
+TEST(SessionManager, SinkSeesCreditReturnsAndReactivationInTheOrderApplied) {
+  testing::FakeSchedulerClock clock;
+  std::vector<ManagedSessionTransition> observed;
+  auto manager = SessionManager::create(
+      SessionLimits::defaults(), 5, clock,
+      [&](const auto& transition) { observed.push_back(transition); }, {}, false);
+  ASSERT_TRUE(manager);
+  const auto opened = (*manager)->open(5, kBudgets);
+  ASSERT_TRUE(opened);
+  const auto key = opened->session_key;
+  ASSERT_TRUE((*manager)->accept_input(key, 640));
+  ASSERT_TRUE((*manager)->release_audio_input(key, 1, 640));
+  ASSERT_TRUE((*manager)->apply(key, LogicalSessionEvent::Finalize));
+  ASSERT_TRUE((*manager)->apply(key, LogicalSessionEvent::FinalizeCompleted));
+
+  ASSERT_EQ(observed.size(), 5U);
+  EXPECT_EQ(observed[0].event, LogicalSessionEvent::Admitted);
+  EXPECT_EQ(observed[1].event, LogicalSessionEvent::Data);
+  EXPECT_EQ(observed[1].status.input_credit_bytes.used(), 640U);
+  // A return of credit: no event, no effects, the status after it.
+  EXPECT_FALSE(observed[2].event.has_value());
+  EXPECT_TRUE(observed[2].effects.empty());
+  EXPECT_EQ(observed[2].status.input_credit_bytes.used(), 0U);
+  EXPECT_EQ(observed[3].event, LogicalSessionEvent::Finalize);
+  EXPECT_EQ(observed[4].event, LogicalSessionEvent::FinalizeCompleted);
+  EXPECT_TRUE(observed[4].effects.empty());
+  EXPECT_EQ(observed[4].state, LogicalSessionState::Active);
+
+  // A report that changes nothing is still not shown.
+  ASSERT_TRUE((*manager)->apply(key, LogicalSessionEvent::Cancel));
+  ASSERT_TRUE((*manager)->apply(key, LogicalSessionEvent::FinalizeCompleted));
+  ASSERT_EQ(observed.size(), 6U);
+  EXPECT_EQ(observed[5].event, LogicalSessionEvent::Cancel);
+}
+
+TEST(SessionManager, RefusedCreditReleaseShowsOnlyTheFailure) {
+  testing::FakeSchedulerClock clock;
+  std::vector<ManagedSessionTransition> observed;
+  auto manager = SessionManager::create(
+      SessionLimits::defaults(), 5, clock,
+      [&](const auto& transition) { observed.push_back(transition); }, {}, false);
+  ASSERT_TRUE(manager);
+  const auto opened = (*manager)->open(5, kBudgets);
+  ASSERT_TRUE(opened);
+  ASSERT_FALSE((*manager)->release_audio_input(opened->session_key, 1, 640));
+  ASSERT_EQ(observed.size(), 2U);
+  EXPECT_EQ(observed[1].event, LogicalSessionEvent::Fail);
+  EXPECT_EQ(observed[1].state, LogicalSessionState::Failed);
+}
+
+// While the sink is busy with a credit return no other transition may reach
+// it, or a status could arrive after a newer one.
+TEST(SessionManager, CreditReturnIsShownInsideTheSerializedSection) {
+  testing::FakeSchedulerClock clock;
+  std::mutex mu;
+  std::vector<std::optional<LogicalSessionEvent>> finished;
+  std::promise<void> showing_credit;
+  auto manager = SessionManager::create(
+      SessionLimits::defaults(), 5, clock,
+      [&](const ManagedSessionTransition& transition) {
+        if (!transition.event) {
+          showing_credit.set_value();
+          std::this_thread::sleep_for(100ms);
+        }
+        const std::lock_guard guard(mu);
+        finished.push_back(transition.event);
+      },
+      {}, false);
+  ASSERT_TRUE(manager);
+  const auto opened = (*manager)->open(5, kBudgets);
+  ASSERT_TRUE(opened);
+  const auto key = opened->session_key;
+  ASSERT_TRUE((*manager)->accept_input(key, 640));
+  std::thread client([&] {
+    if (showing_credit.get_future().wait_for(5s) == std::future_status::ready) {
+      (void)(*manager)->apply(key, LogicalSessionEvent::Ping);
+    }
+  });
+  ASSERT_TRUE((*manager)->release_audio_input(key, 1, 640));
+  client.join();
+
+  const std::lock_guard guard(mu);
+  ASSERT_EQ(finished.size(), 4U);
+  EXPECT_FALSE(finished[2].has_value());
+  EXPECT_EQ(finished[3], LogicalSessionEvent::Ping);
 }
 }  // namespace
 }  // namespace tensorplate::serving

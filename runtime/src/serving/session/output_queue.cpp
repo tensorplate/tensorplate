@@ -54,9 +54,45 @@ Result<OutputOffer> BoundedOutputQueue::offer(OutputItem& item, SchedulerClock::
     return unexpected(
         invalid_item("output item exceeds all its kind may use", "output_item_too_large"));
   }
-  // Declared before the lock so a replaced body is destroyed outside it.
+  // Declared before the lock so that a replaced body is destroyed outside it.
   OutputItem replaced;
-  std::lock_guard guard(mu_);
+  std::shared_ptr<const Consumer> consumer;
+  OutputOffer outcome = OutputOffer::Full;
+  {
+    std::lock_guard guard(mu_);
+    outcome = queue_locked(item, now, replaced);
+    if (outcome == OutputOffer::Queued) {
+      consumer = consumer_;
+    }
+  }
+  if (consumer) {
+    (*consumer)();
+  }
+  return outcome;
+}
+
+bool BoundedOutputQueue::set_consumer(Consumer on_takeable) {
+  if (!on_takeable) {
+    return false;
+  }
+  auto consumer = std::make_shared<const Consumer>(std::move(on_takeable));
+  {
+    std::lock_guard guard(mu_);
+    if (consumer_) {
+      return false;
+    }
+    consumer_ = consumer;
+    if (unsent_.empty()) {
+      return true;
+    }
+  }
+  (*consumer)();
+  return true;
+}
+
+OutputOffer BoundedOutputQueue::queue_locked(OutputItem& item, SchedulerClock::TimePoint now,
+                                             OutputItem& replaced) {
+  const std::uint64_t limit = limit_for(item.kind);
   if (closed_) {
     return OutputOffer::Closed;
   }
