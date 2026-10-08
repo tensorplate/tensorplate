@@ -49,7 +49,7 @@ compatibility promise until it is frozen. The JSON contracts under
   emitted in lowercase hex, and the message in protobuf text format. Two
   files are whole sessions in the order their events are sent, one
   speech-to-text and one text-to-speech. One holds the remaining bodies,
-  five ends with a cause, an `Open` with a selector and three refusals. One
+  five ends with a cause, an `Open` with a selector and seven refusals. One
   holds frames of `extension.proto`, a fixture-only schema with fields, a
   body, a mode and a capability stream/v1 does not have. Every value in
   them is synthetic. After a schema change, record the
@@ -71,8 +71,10 @@ compatibility promise until it is frozen. The JSON contracts under
   every body and every non-zero value of the enums defined only here; lists
   every field with its type, number and label, which the bytes of a frame do
   not all show; holds every sequence, generation and 64-bit id to its bound,
-  every end cause to a set reason with the taxonomy's code, and every
-  refusal to a reason the schema lists as preceding admission; holds the
+  every end cause to a set reason with the code
+  `docs/observability/failure-reasons.md` gives it, every session's end to
+  an admitted one, and every refusal to a reason the schema lists as
+  preceding admission; holds the
   two sessions to the ordering, credit, limit, total and unit rules the
   schema states; pins the service, the envelope numbering, the reserved
   body numbers and the reserved names; and reads the `extension.proto`
