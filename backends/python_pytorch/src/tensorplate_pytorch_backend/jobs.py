@@ -89,6 +89,8 @@ class JobTable:
         self._classes: tuple[str, ...] = ()
         self._closing: set[int] = set()
         self._stopped = False
+        #: Whether a load ever enabled job messages on this connection.
+        self.ever_opened = False
 
     def open(self, backend: JobBackend, classes: tuple[str, ...]) -> None:
         """Enable job messages for a loaded backend that runs ``classes``.
@@ -96,6 +98,7 @@ class JobTable:
         Not when a request that unloads or replaces it already waits.
         """
         with self._lock:
+            self.ever_opened = True
             if not self._closing:
                 self._backend, self._classes = backend, classes
 

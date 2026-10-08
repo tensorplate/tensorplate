@@ -20,10 +20,12 @@ Threads
     requests wait; one more is refused with ``resource_exhausted``.
 
 Writes
-    A frame is written whole, under one lock. A write that makes no progress
-    for ``WRITE_STALL_TIMEOUT_S`` ends the connection, as EOF or a frame
-    error does: the socket is shut down, waiting work is dropped unanswered,
-    and ``serve_forever`` returns when the backend call in progress has.
+    A frame is written whole, under one lock. A write that fails, or makes no
+    progress for ``WRITE_STALL_TIMEOUT_S``, ends the connection, as a frame
+    error does, and EOF once a load has enabled jobs: the socket is shut down,
+    waiting work is dropped unanswered, and ``serve_forever`` returns when the
+    backend call in progress has. At EOF on a connection that never enabled
+    jobs, what was already read is run and answered first, in order.
 
 Lifecycle
     The runner owns at most one active backend at a time (one
@@ -226,6 +228,7 @@ class SidecarRunner:
         self._write_lock = threading.Lock()
         self._originated = 0
         self._ended = False
+        self._at_limit = False
         self._table = jobs.JobTable(
             self._write_frame, lambda message: setattr(self._state, "last_error", message)
         )
@@ -261,17 +264,22 @@ class SidecarRunner:
         except Exception as exc:
             logger.error("sidecar runner exiting on unexpected error: %s", sanitize.describe(exc))
             self._end_connection()
+        # A caller that set a frame limit keeps the connection it stopped reading at.
+        if not self._at_limit:
+            self._end_connection()
         reader.join(timeout=2 * WRITE_STALL_TIMEOUT_S)
 
     def _read_frames(self, limit: int | None) -> None:
         """The reader thread: route frames until EOF, an error or ``limit`` frames."""
         count = 0
+        half_closed = False
         try:
             # A write that ended the connection leaves the frames already read unrouted.
             while not self._ended and (limit is None or count < limit):
                 frame = self._read_one_frame()
                 if frame is None:
-                    break  # peer closed, or the connection ended while the reader waited
+                    half_closed = True  # or the connection ended while the reader waited
+                    break
                 count += 1
                 self._route(frame)
         except (ConnectionError, OSError) as exc:
@@ -279,10 +287,11 @@ class SidecarRunner:
         except Exception as exc:
             logger.error("sidecar runner exiting on unexpected error: %s", sanitize.describe(exc))
         finally:
-            # At the frame limit the backend thread still answers what was read.
-            # Otherwise the connection is over: no more writes, then waiting work
-            # is dropped, and only then does the peer see the socket shut down.
-            drain = count == limit
+            # At the frame limit, and at EOF when no load ever enabled jobs, the serving
+            # thread still answers what was read. Otherwise no more writes, then waiting
+            # work is dropped, and only then does the peer see the socket shut down.
+            self._at_limit = count == limit
+            drain = self._at_limit or (half_closed and not self._table.ever_opened)
             self._ended = self._ended or not drain
             self._table.stop(drain=drain)
             if not drain:

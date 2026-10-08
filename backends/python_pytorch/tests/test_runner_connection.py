@@ -19,7 +19,7 @@ from tensorplate_pytorch_backend import runner as runner_module
 from tensorplate_pytorch_backend.backends import Backend, FixtureBackend, NamedTensor
 from test_speech_jobs_golden_replay import WAIT_S, Peer
 from test_speech_jobs_golden_replay import connect as connect  # the fixture
-from test_speech_jobs_runner import ACCEPTED, message, read_after, submit
+from test_speech_jobs_runner import ACCEPTED, message, read, read_after, submit
 
 
 @contextlib.contextmanager
@@ -204,3 +204,17 @@ def test_an_unload_queued_after_a_waiting_jobs_failure_ended_the_connection_is_n
     _fail_the_write_made_in("offer", peer, message(protocol.KIND_UNLOAD), monkeypatch)
     assert [type(work) for work in taken] == [codec.SidecarFrame]
     assert peer.runner.state.backend is backend
+
+
+def test_a_connection_that_never_enabled_jobs_is_answered_in_full_after_a_half_close(
+    connect: Callable[..., Peer],
+) -> None:
+    peer = connect()
+    load = message(protocol.KIND_LOAD_MODEL, model_spec={})
+    requests = [load, message(protocol.KIND_PRIME), message(protocol.KIND_UNLOAD)]
+    _send(peer.client, *requests)
+    peer.client.shutdown(socket.SHUT_WR)
+    answered = [(f"{request['kind']}_response", request["message_id"]) for request in requests]
+    assert read(peer, 3) == answered  # each ok: an error would add its code
+    assert peer.client.recv(1) == b""  # and only then is the connection ended
+    assert peer.runner.state.backend is None

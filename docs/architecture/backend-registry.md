@@ -282,10 +282,13 @@ submit for it fails with `job_class_unsupported`, and no job sends
   `job_failed` (`cancelled`), `job_released` and `session_released` come
   before the `unload_response`; once it is released they are refused too.
 - **Writes.** A frame is written whole under one lock, and a job's messages
-  in the order of its state changes. A write that makes no progress for 5 s
-  ends the connection, as EOF or a frame error does: the socket is shut down,
-  waiting work is dropped unanswered, and the loop returns once the backend
-  call in progress has.
+  in the order of its state changes. A write that fails, or makes no progress
+  for 5 s, ends the connection, as a frame error does, and EOF once a load
+  has enabled jobs: the socket is shut down, waiting work is dropped
+  unanswered, and the loop returns once the backend call in progress has.
+  When the peer half-closes a connection that never enabled jobs, the
+  requests already read are run and answered in order, and then the socket
+  is shut down.
 - **Message ids.** A message the sidecar originates, the `ready_event`
   included, carries `s<n>` from one counter per connection.
 
