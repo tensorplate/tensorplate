@@ -138,11 +138,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   deterministic implementation that needs no backend
   (`SyntheticSessionDispatch`). The binding forwards session transitions
   and accepted input; the dispatch returns input credit, reports
-  completions and queues typed output (a final transcript, audio chunks,
-  a segment completion) under the output queue's backpressure. The
-  serving worker does not construct either yet.
-  `docs/architecture/serving-worker.md` describes the division, threads
-  and ownership. (V030-E04-F03-T02)
+  completions and queues typed output (an utterance's endpoint and final
+  transcript, audio chunks, a segment completion, the answer to a text
+  Finalize) under the output queue's backpressure. For it, the session
+  layer gains two things: an output queue tells its one consumer when
+  something was queued (`BoundedOutputQueue::set_consumer`), and the
+  session manager's sink also receives every return of input credit and
+  every completed finalization, in order with the other transitions,
+  each transition naming the event that caused it. The serving worker
+  does not construct a dispatch yet. `docs/architecture/serving-worker.md`
+  states the contract. (V030-E04-F03-T02)
 - `tensorplate-serving --version` prints a fourth line, `streaming-grpc on`
   or `streaming-grpc off`, so an installed worker says whether streaming
   support was compiled in; the first three lines keep their shape. Both
