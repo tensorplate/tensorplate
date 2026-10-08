@@ -10,10 +10,10 @@
 // is ready sends SessionClosed alone: failed, or closed with reason
 // `client_cancelled` after a Cancel. SessionClosed is always its last event.
 //
-// Every sequence and every 64-bit id is at most 9,007,199,254,740,991
-// (2^53 - 1). A client value that earlier events already determine, such as an
-// Audio's `sample_offset`, must agree with them; one that does not fails the
-// session with reason `invalid_event`.
+// Every sequence, every generation and every 64-bit id is at most
+// 9,007,199,254,740,991 (2^53 - 1). A client value that earlier events
+// already determine, such as an Audio's `sample_offset`, must agree with
+// them; one that does not fails the session with reason `invalid_event`.
 //
 // Input that was accepted but not answered when a session ended was not
 // processed: audio after the last FinalTranscript's `end_sample_offset` was
@@ -24,7 +24,7 @@
 // ignores a field it does not know and reads an enum value it does not know
 // as that enum's unspecified value. A client ignores a server event whose body
 // it does not know. A server refuses a client event whose body, or an Open
-// whose mode, it does not know.
+// whose mode, it does not know, with reason `backend_unsupported_capability`.
 
 syntax = "proto3";
 
@@ -230,7 +230,8 @@ message SessionLimits {
 message EndCause {
   // Never unspecified.
   FailureReason reason = 1;
-  // The code protocol/schemas/failure_reason.json pairs with `reason`.
+  // The code the failure reason taxonomy pairs with `reason`
+  // (docs/observability/failure-reasons.md).
   ErrorCode code = 2;
   // Optional and not stable, for logs only: at most 64 ASCII characters that
   // name the check that failed, for example `wrong_input_kind`.
@@ -452,8 +453,8 @@ message SessionClosed {
   // Absent when the session ended without an error, which is when the client
   // closed its sending half and the session drained.
   EndCause cause = 2;
-  // ADMISSION_ADMITTED unless the session ended before a slot was reserved
-  // for it.
+  // Always ADMISSION_ADMITTED: a call that was never admitted has no session
+  // and ends with an OpenRefused.
   Admission admission = 3;
   // Sequence of the last Audio or TextSegment the server accepted; zero when
   // it accepted none.
