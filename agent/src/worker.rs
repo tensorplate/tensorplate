@@ -46,6 +46,20 @@ pub fn spawn_with_control(
     Ok((child, agent))
 }
 
+/// Send SIGTERM to a child this process started and has not reaped, so the
+/// pid still names it.
+#[cfg(unix)]
+pub(crate) fn send_sigterm(pid: u32) -> std::io::Result<()> {
+    let pid = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or(std::io::ErrorKind::InvalidInput)?;
+    Ok(rustix::process::kill_process(
+        pid,
+        rustix::process::Signal::Term,
+    )?)
+}
+
 /// Event surface for observability. `Coordinator` emits events at every
 /// state transition; the agent's main loop subscribes a logging sink and
 /// (in V01-E10) the observability service.

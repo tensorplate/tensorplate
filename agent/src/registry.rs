@@ -24,12 +24,18 @@ use crate::control_channel::{ContactState, ControlChannel};
 use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
 use crate::worker::{
-    forward_stderr, get_health_json, spawn_with_control, startup_error, WorkerControl,
-    WorkerReadiness, WorkerStderr, WorkerStderrSink,
+    forward_stderr, get_health_json, send_sigterm, spawn_with_control, startup_error,
+    WorkerControl, WorkerReadiness, WorkerStderr, WorkerStderrSink,
 };
 
-/// How long a member asked to stop is given to drain before it is killed.
-pub const STOP_DRAIN: Duration = Duration::from_secs(5);
+/// The drain a worker is told to give its sessions once it is asked to stop.
+pub const WORKER_DRAIN: Duration = Duration::from_secs(5);
+
+/// How long a member asked to stop is given before it is killed: its own
+/// drain, then a margin in which it stops its sidecar and exits.
+pub const STOP_DEADLINE: Duration = Duration::from_secs(10);
+
+const _: () = assert!(WORKER_DRAIN.as_millis() < STOP_DEADLINE.as_millis());
 
 const DRAIN_POLL: Duration = Duration::from_millis(10);
 
@@ -107,7 +113,8 @@ pub struct RegistrySettings {
     pub config_dir: PathBuf,
     pub use_mock_session: bool,
     pub status_poll_interval: Duration,
-    pub stop_drain: Duration,
+    pub worker_drain: Duration,
+    pub stop_deadline: Duration,
 }
 
 struct Member {
@@ -198,7 +205,8 @@ impl MemberRegistry {
                 .unwrap_or_else(|| agent.state_dir.join("worker-configs")),
             use_mock_session: agent.worker.serving_use_mock_session,
             status_poll_interval: Duration::from_millis(agent.worker.status_poll_interval_ms),
-            stop_drain: STOP_DRAIN,
+            worker_drain: WORKER_DRAIN,
+            stop_deadline: STOP_DEADLINE,
         };
         remove_stale_configs(&settings.config_dir);
         let probe = Arc::new(HttpHealth {
@@ -258,6 +266,10 @@ impl MemberRegistry {
             "health_mode": "local_json",
             "metrics_mode": "prometheus_text",
             "enable_stderr_logs": true,
+            "shutdown": {
+                "drain_deadline_ms": u64::try_from(self.settings.worker_drain.as_millis())
+                    .unwrap_or(u64::MAX)
+            },
             "deployment": {
                 "use_mock_session": self.settings.use_mock_session,
                 "endpoint": candidate.deployment_id,
@@ -282,12 +294,12 @@ impl MemberRegistry {
     }
 
     /// Stop `members`: ask each to drain, then kill whatever is still
-    /// running when the one drain deadline they share passes.
+    /// running when the one stop deadline they share passes.
     fn retire(&self, mut members: Vec<Member>) {
         for member in &mut members {
             member.process.terminate();
         }
-        let deadline = Instant::now() + self.settings.stop_drain;
+        let deadline = Instant::now() + self.settings.stop_deadline;
         for member in &mut members {
             while !matches!(member.process.exited(), Ok(true)) {
                 let remaining = deadline.saturating_duration_since(Instant::now());
@@ -391,17 +403,22 @@ impl WorkerControl for MemberRegistry {
                 return Err(err);
             }
         };
-        let mut members = self.members()?;
-        members.by_generation.insert(
-            generation,
-            Member {
-                deployment_id: spec.member.deployment_id,
-                port,
-                config_path: spec.config_path,
-                process,
-            },
-        );
-        members.candidate = Some(generation);
+        let member = Member {
+            deployment_id: spec.member.deployment_id,
+            port,
+            config_path: spec.config_path,
+            process,
+        };
+        // The lock was released since the slot was emptied; whatever took it
+        // in between is displaced as well, not forgotten.
+        let displaced = {
+            let mut members = self.members()?;
+            let displaced = members.take_candidate();
+            members.by_generation.insert(generation, member);
+            members.candidate = Some(generation);
+            displaced
+        };
+        self.retire(displaced.map(|(_, member)| member).into_iter().collect());
         Ok(())
     }
 
@@ -448,26 +465,37 @@ impl WorkerControl for MemberRegistry {
     }
 
     fn promote(&self, _transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
-        let (retired, outcome) = {
+        let retired = {
             let mut members = self.members()?;
-            let Some((generation, prepared)) = members.take_candidate() else {
+            let Some((generation, mut prepared)) = members.take_candidate() else {
                 return Err(AgentError::WorkerNotReady);
             };
-            if prepared.deployment_id == candidate.deployment_id {
-                let old = members.take_serving();
-                members.by_generation.insert(generation, prepared);
-                members.serving = Some(generation);
-                (old, Ok(()))
-            } else {
+            if prepared.deployment_id != candidate.deployment_id {
+                drop(members);
                 let err = AgentError::WorkerControl(format!(
                     "prepared candidate `{}` does not match promote request `{}`",
                     prepared.deployment_id, candidate.deployment_id
                 ));
-                (Some(prepared), Err(err))
+                self.retire(vec![prepared]);
+                return Err(err);
             }
+            // A candidate that exited after it was warmed replaces nothing:
+            // the serving member stays.
+            let exited = prepared.process.exited();
+            if !matches!(exited, Ok(false)) {
+                drop(members);
+                let _ = fs::remove_file(&prepared.config_path);
+                return Err(exited
+                    .err()
+                    .unwrap_or_else(|| prepared.process.startup_failure()));
+            }
+            let old = members.take_serving();
+            members.by_generation.insert(generation, prepared);
+            members.serving = Some(generation);
+            old
         };
         self.retire(retired.into_iter().collect());
-        outcome
+        Ok(())
     }
 
     fn unload(&self, deployment_id: &str) {
@@ -619,7 +647,7 @@ impl MemberProcess for SystemProcess {
     fn startup_failure(&mut self) -> AgentError {
         match self.status {
             Some(status) => startup_error(status, &self.stderr),
-            None => AgentError::WorkerNotReady,
+            None => AgentError::WorkerExited("exit status unknown".into()),
         }
     }
 
@@ -639,7 +667,12 @@ impl MemberProcess for SystemProcess {
     fn terminate(&mut self) {
         // Not reaped yet, so the pid still names this child.
         if self.status.is_none() {
-            request_stop(self.child.id());
+            if let Err(err) = send_sigterm(self.child.id()) {
+                eprintln!(
+                    "serving worker pid {} could not be asked to stop: {err}",
+                    self.child.id()
+                );
+            }
         }
     }
 
@@ -648,22 +681,6 @@ impl MemberProcess for SystemProcess {
         if let Ok(status) = self.child.wait() {
             self.status = Some(status);
         }
-    }
-}
-
-/// Send SIGTERM with the shell's builtin: the standard library sends only
-/// SIGKILL, the workspace denies `unsafe`, and a `kill` binary is not part
-/// of every base system. A request that cannot be sent is reported; the
-/// drain deadline still ends in a kill.
-fn request_stop(pid: u32) {
-    let sent = Command::new("/bin/sh")
-        .args(["-c", "kill -TERM \"$0\"", &pid.to_string()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    if !matches!(&sent, Ok(status) if status.success()) {
-        eprintln!("serving worker pid {pid} could not be asked to stop: {sent:?}");
     }
 }
 

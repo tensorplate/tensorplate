@@ -316,33 +316,14 @@ impl WorkerProcess for SystemWorkerProcess {
 
 #[cfg(unix)]
 fn send_sigterm(pid: u32) -> AgentResult<()> {
-    // Safe: kill(2) with SIGTERM (15) is signal-safe and reentrant.
-    // We deliberately avoid pulling in `libc` or `nix` for one syscall.
-    // SAFETY: directly invoke kill(2) through std's libc wrapper via
-    // the `signal` crate replacement — fall back to writing the signal
-    // through `/proc/<pid>/term` is unsafe; instead we shell out only
-    // when libc-style syscall fails. v0.1.0 keeps the dependency
-    // surface small, so we use the established `Command::new("kill")`
-    // pattern.
-    let status = std::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|err| AgentError::WorkerControl(format!("invoke kill -TERM {pid}: {err}")))?;
-    if !status.success() {
-        // `kill -TERM` against an already-exited PID returns non-zero;
-        // we treat that as a no-op (the process is already gone).
-        let code = status.code().unwrap_or(0);
-        if code != 1 {
-            return Err(AgentError::WorkerControl(format!(
-                "kill -TERM {pid} exited with {code}"
-            )));
-        }
+    match crate::worker::send_sigterm(pid) {
+        Ok(()) => Ok(()),
+        // The process is already gone.
+        Err(err) if err.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => Ok(()),
+        Err(err) => Err(AgentError::WorkerControl(format!(
+            "send SIGTERM to {pid}: {err}"
+        ))),
     }
-    Ok(())
 }
 
 /// Behavior knobs for [`MockWorkerProcess`].

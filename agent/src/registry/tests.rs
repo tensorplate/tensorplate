@@ -4,6 +4,7 @@
 
 use super::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::time::Instant;
 use tempfile::TempDir;
 
@@ -59,6 +60,8 @@ impl MemberProcess for FakeProcess {
 struct FakeLauncher {
     launched: Mutex<Vec<Arc<Handle>>>,
     refuse: AtomicBool,
+    /// The first launch says it has started, then waits to be let finish.
+    hold_first: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
 }
 
 impl FakeLauncher {
@@ -81,6 +84,11 @@ impl ProcessLauncher for FakeLauncher {
         if self.refuse.load(Ordering::SeqCst) {
             return Err(AgentError::WorkerControl("spawn refused".into()));
         }
+        let held = self.hold_first.lock().unwrap().take();
+        if let Some((started, release)) = held {
+            started.send(()).unwrap();
+            release.recv().unwrap();
+        }
         let config = serde_json::from_slice(&std::fs::read(&spec.config_path).unwrap()).unwrap();
         let handle = Arc::new(Handle {
             spec: spec.clone(),
@@ -100,10 +108,15 @@ impl ProcessLauncher for FakeLauncher {
 struct FakeProbe {
     silent: AtomicBool,
     models: Mutex<BTreeMap<u16, String>>,
+    /// Runs inside each probe, before it answers.
+    during: Mutex<Option<Box<dyn Fn() + Send>>>,
 }
 
 impl HealthProbe for FakeProbe {
     fn ready_model(&self, port: u16, _timeout: Duration) -> AgentResult<Option<String>> {
+        if let Some(during) = self.during.lock().unwrap().as_ref() {
+            during();
+        }
         if self.silent.load(Ordering::SeqCst) {
             return Ok(None);
         }
@@ -127,7 +140,8 @@ fn settings(dir: &std::path::Path) -> RegistrySettings {
         config_dir: dir.join("worker-configs"),
         use_mock_session: true,
         status_poll_interval: Duration::from_millis(1),
-        stop_drain: DRAIN,
+        worker_drain: DRAIN / 2,
+        stop_deadline: DRAIN,
     }
 }
 
@@ -226,6 +240,7 @@ fn each_launch_takes_a_new_generation_and_renders_it_with_the_member_name() {
         );
         assert_eq!(handle.config["bind"]["port"], ACTIVE_PORT);
         assert_eq!(handle.config["bind"]["host"], "127.0.0.1");
+        assert_eq!(handle.config["shutdown"]["drain_deadline_ms"], 30);
         assert_eq!(deployment["use_mock_session"], true);
     }
     assert_eq!(f.launcher.count(), 2);
@@ -268,7 +283,9 @@ fn a_launch_that_fails_spends_its_generation_and_leaves_no_config() {
 
     f.launcher.refuse.store(false, Ordering::SeqCst);
     f.prepare("stt").unwrap();
-    assert_eq!(f.launcher.handle(2).spec.member.generation, 2);
+    let launched = f.launcher.launched.lock().unwrap();
+    let generations: Vec<u64> = launched.iter().map(|h| h.spec.member.generation).collect();
+    assert_eq!(generations, [2]);
 }
 
 #[test]
@@ -551,8 +568,14 @@ fn health_listener(body: &'static str) -> u16 {
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let mut head = [0_u8; 512];
-        let _ = stream.read(&mut head);
+        let mut head = Vec::new();
+        let mut chunk = [0_u8; 512];
+        while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+            match stream.read(&mut chunk) {
+                Ok(n) if n > 0 => head.extend_from_slice(&chunk[..n]),
+                _ => break,
+            }
+        }
         let _ = write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -613,5 +636,75 @@ fn building_the_agents_registry_clears_the_configs_an_earlier_process_left() {
     )
     .unwrap();
     assert_eq!(std::fs::read_dir(&configs).unwrap().count(), 0);
-    drop(registry);
+
+    // The worker is told a drain that ends before the registry would kill it.
+    assert_eq!(registry.settings.worker_drain, WORKER_DRAIN);
+    assert_eq!(registry.settings.stop_deadline, STOP_DEADLINE);
+    let rendered = registry.render_config(&candidate("stt"), 1, 18080).unwrap();
+    let rendered: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(rendered).unwrap()).unwrap();
+    let drain_ms = rendered["shutdown"]["drain_deadline_ms"].as_u64().unwrap();
+    assert_eq!(u128::from(drain_ms), WORKER_DRAIN.as_millis());
+    assert!(u128::from(drain_ms) < registry.settings.stop_deadline.as_millis());
+}
+
+#[test]
+fn a_candidate_that_exits_after_it_was_warmed_is_not_promoted_and_the_serving_member_stays() {
+    let f = fixture();
+    let serving = f.serve("stt");
+    f.prepare("tts").unwrap();
+    f.health(CANDIDATE_PORT, "tts");
+    assert!(f.warm("tts").unwrap().ready);
+    f.launcher.handle(2).exited.store(true, Ordering::SeqCst);
+
+    let err = f.registry.promote("tx", &candidate("tts")).unwrap_err();
+    assert!(
+        matches!(err, AgentError::WorkerExited(ref s) if s == "generation 2"),
+        "{err}"
+    );
+    assert!(serving.calls().is_empty());
+    assert_eq!(
+        f.registry.active_deployment_id().unwrap().as_deref(),
+        Some("stt")
+    );
+    assert!(matches!(
+        f.registry.promote("tx", &candidate("tts")),
+        Err(AgentError::WorkerNotReady)
+    ));
+    assert_eq!(f.configs(), 1);
+}
+
+#[test]
+fn an_exit_during_the_last_probe_outranks_the_warm_deadline() {
+    let f = fixture();
+    f.prepare("stt").unwrap();
+    let handle = f.launcher.handle(1);
+    *f.probe.during.lock().unwrap() = Some(Box::new(move || {
+        handle.exited.store(true, Ordering::SeqCst);
+        std::thread::sleep(WARM * 2);
+    }));
+
+    let err = f.warm("stt").unwrap_err();
+    assert!(matches!(err, AgentError::WorkerExited(_)), "{err}");
+}
+
+#[test]
+fn a_candidate_that_took_the_slot_during_a_launch_is_retired_not_forgotten() {
+    let f = fixture();
+    let (started, has_started) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *f.launcher.hold_first.lock().unwrap() = Some((started, released));
+
+    std::thread::scope(|scope| {
+        let held = scope.spawn(|| f.prepare("stt"));
+        // The held launch has generation 1; this one takes 2 and the slot.
+        has_started.recv().unwrap();
+        f.prepare("stt").unwrap();
+        release.send(()).unwrap();
+        held.join().unwrap().unwrap();
+    });
+
+    assert_eq!(f.launcher.handle(2).calls(), ["terminate"]);
+    assert!(f.launcher.handle(1).calls().is_empty());
+    assert_eq!(f.configs(), 1);
 }

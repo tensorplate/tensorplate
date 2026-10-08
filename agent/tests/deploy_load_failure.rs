@@ -126,6 +126,13 @@ impl ProcessHarness {
         warm_timeout: Duration,
         stderr_sink: Option<WorkerStderrSink>,
     ) -> Self {
+        assert!(
+            std::process::Command::new("python3")
+                .arg("--version")
+                .output()
+                .is_ok_and(|output| output.status.success()),
+            "the stand-in worker answers its control socket with python3, which is not on PATH"
+        );
         let stub = fixture_dir().join("stub-worker.sh");
         Self::build_with(stub, active_port, candidate_port, warm_timeout, stderr_sink)
     }
@@ -515,6 +522,30 @@ fn a_real_worker_is_polled_from_its_start_and_promoted_as_a_member() {
     let snap = h.store.snapshot().expect("snapshot");
     assert_eq!(snap.active.expect("active").deployment_id, "member-a");
     assert_eq!(snap.next_generation, Some(4));
+}
+
+/// The coordinator unloads the previous active id after a promotion; under
+/// one id that is the worker just promoted.
+#[test]
+fn deploying_the_active_id_again_leaves_it_served() {
+    let first = HealthPort::listen();
+    let second = HealthPort::listen();
+    let h = ProcessHarness::new(first.port, second.port);
+    first.serve("same-id");
+    second.serve("same-id");
+
+    assert_eq!(h.deploy("same-id").status, ResponseStatus::Ok);
+    assert_eq!(h.deploy("same-id").status, ResponseStatus::Ok);
+
+    let active = h.coord.status().expect("status").active.expect("active");
+    assert_eq!(active.deployment_id, "same-id");
+    assert_eq!(
+        active.serving_url,
+        Some(format!("http://127.0.0.1:{}/infer", second.port))
+    );
+    let configs = h.td.path().join("worker-configs");
+    assert!(configs.join("serving-same-id-2.json").is_file());
+    assert!(!configs.join("serving-same-id-1.json").exists());
 }
 
 fn copy_dir(from: &Path, to: &Path) {
