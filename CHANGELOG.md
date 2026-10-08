@@ -133,6 +133,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- An internal interface, `SessionDispatch`, between a streaming transport
+  binding and the work a deployment does for its sessions, with a
+  deterministic implementation that needs no backend
+  (`SyntheticSessionDispatch`). The binding forwards session transitions
+  and accepted input; the dispatch returns input credit, reports
+  completions and queues typed output (a final transcript, audio chunks,
+  a segment completion) under the output queue's backpressure. The
+  serving worker does not construct either yet.
+  `docs/architecture/serving-worker.md` describes the division, threads
+  and ownership. (V030-E04-F03-T02)
 - `tensorplate-serving --version` prints a fourth line, `streaming-grpc on`
   or `streaming-grpc off`, so an installed worker says whether streaming
   support was compiled in; the first three lines keep their shape. Both

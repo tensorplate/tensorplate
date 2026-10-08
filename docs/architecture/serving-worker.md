@@ -484,7 +484,8 @@ worker's existing request evictor. Unit tests advance
 `FakeSchedulerClock` without sleeping. The current HTTP composition
 root does not instantiate `SessionManager`; the streaming transport
 binding will supply its effect sink, choose each session's budgets and
-drive its output queue.
+drive its output queue, with a [session dispatch](#session-dispatch)
+beside it for the task work.
 
 States: `opening`, `active`, `finalizing`, `draining`,
 `cancel_requested`, and the terminal `closed` and `failed`. Events come
@@ -599,6 +600,93 @@ exists. The owner keeps the end cause: the error carried by the most
 recent accepted event that moved the session into `draining`,
 `cancel_requested` or `failed`, which can only move from a drain to a
 cancel to a failure.
+
+## Session dispatch
+
+`SessionDispatch` (`runtime/src/serving/session/dispatch.hpp`, internal)
+is the seam between a streaming transport binding and the work a
+deployment does for its sessions. It sits beside the `SessionManager`,
+not around it: the binding stays the manager's sink and the only writer
+of lifecycle messages, and the dispatch is the only producer of task
+output. The header names no wire schema type and no backend job type, so
+the binding owns the whole wire mapping and the dispatch owns the whole
+mapping from session input to backend work.
+
+The effects of the table above divide between the two:
+
+| Effect | Carried out by |
+|---|---|
+| `emit_ready`, `emit_reply`, `emit_cancel_accepted`, `emit_terminal` | the binding, as lifecycle messages in the session's output queue |
+| `accept_input` | the binding, which hands the accepted frame or segment to the dispatch (`audio`, `text_segment`) |
+| `start_finalize` | the binding, which for a client Finalize calls `finalize` with that message's client sequence |
+| `start_drain`, `request_cleanup` | the dispatch, from the transitions the binding forwards (`on_transition`) |
+| `suppress_output`, `release_slot` | the manager: it suppresses the queue before the sink runs and returns the slot itself |
+
+Before admission the binding asks `negotiate` what the deployment would
+grant a request: the audio format and the limits the stream reports when
+the session is ready, or a typed refusal that reserves nothing. It
+derives the session's budgets from the granted format, opens the session
+and calls `open_session` from the manager's initialize hook, so the
+dispatch knows a session before any transition names it.
+
+**Threads.** Every method a binding calls is thread-safe and returns
+without waiting on a job, on the output queue or on the manager, so a
+transport thread may call it. `open_session` and `on_transition` run
+inside the manager's serialized section and only record what they are
+told. The dispatch reports back from a thread of its own:
+`finalize_completed` before it offers the output that answers a
+Finalize, `drain_completed` once the output of all accepted work was
+delivered, the credit releases, and `fail` for a defect it finds.
+
+**What the sink does not show.** The manager calls its sink only for a
+transition with effects, so a returned input credit and a completed
+finalization never reach the binding that way. The dispatch announces
+both through the status sink it is given at `attach`, on its own thread,
+with the status the manager returned; a binding sends its unsolicited
+credit update from there.
+
+**Hand-overs.** Input and a client Finalize are handed over after the
+manager's call returns, outside its serialized section, so a drain the
+worker starts can reach the dispatch first. The forwarded transition
+already told the dispatch that a hand-over is owed (`accept_input`, or
+the `start_finalize` of a client Finalize), and a drain does not
+complete while one is: the accepted frame, segment or Finalize is
+processed as part of the drain. A binding therefore hands over every
+input and Finalize the manager accepted, whatever happened in between.
+What is handed over after the session's cleanup was requested is
+discarded.
+
+**Input.** Input belongs to the dispatch from the call that hands it
+over. Audio credit returns when a frame joins the utterance being
+collected, not when the utterance is decoded; the dispatch keeps that
+utterance within the longest the terms grant. A text segment's waiting
+credit returns when its work starts and its active slot when the last
+item of its output was delivered. Collected input is dropped when its
+result is queued or when the session's cleanup is requested, whichever
+comes first.
+
+**Output.** The dispatch queues `TaskOutputBody` items only: a final
+transcript, an audio chunk or a segment completion, as plain values the
+binding encodes. An offer answered `full` leaves the item with the
+dispatch, which produces nothing further for that session until the
+binding reports a delivery (`output_delivered`, after each confirmed
+delivery of any kind of item) and then offers it again. Nothing is
+offered after `suppress_output`.
+
+**Endings.** Every `request_cleanup` is answered by exactly one
+`release_acknowledged`, including for a session whose `open_session` was
+refused or never called, and the dispatch forgets the session with what
+it held. `stop()` ends the dispatch's reports and waits for the one in
+progress, so its owner calls it before destroying the manager and never
+from the manager's sink or initialize hook; a session still open then is
+not released.
+
+`SyntheticSessionDispatch` is a dispatch with no backend, for exercising
+a binding: each utterance yields a fixed transcript and each text segment
+a fixed PCM pattern in 20 ms chunks, under the same credit, backpressure,
+drain and cleanup rules. It keeps no audio, so it does not bound an
+utterance. The dispatch that runs backend jobs is not built yet, and the
+serving worker constructs neither.
 
 ## Test surface
 
