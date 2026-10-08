@@ -36,6 +36,7 @@ if(TP_ENABLE_STREAMING_GRPC)
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stream/v1/record.sh --check
             $<TARGET_FILE:protobuf::protoc>)
   set_tests_properties(contract.stream_frames_recorded PROPERTIES LABELS "T3")
+  tp_uninstrumented_protobuf_test_properties(_tp_contract_test_properties)
 endif()
 
 tp_apply_warnings(tp_test_contract)
@@ -44,5 +45,6 @@ tp_apply_sanitizers(tp_test_contract)
 gtest_discover_tests(tp_test_contract
   PROPERTIES
     LABELS "T3"
+    ${_tp_contract_test_properties}
   DISCOVERY_MODE PRE_TEST
 )

@@ -512,13 +512,31 @@ constexpr End kEnds[] = {
     {v1::FAILURE_REASON_INTERNAL, v1::SESSION_STATE_FAILED},
 };
 
-// The reasons the schema's comment on OpenRefused lists as preceding admission.
-constexpr v1::FailureReason kRefusals[] = {
-    v1::FAILURE_REASON_INVALID_EVENT,       v1::FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY,
-    v1::FAILURE_REASON_TARGET_UNRESOLVED,   v1::FAILURE_REASON_TARGET_MISMATCH,
-    v1::FAILURE_REASON_STALE_GENERATION,    v1::FAILURE_REASON_ADMISSION_CLOSED,
-    v1::FAILURE_REASON_SESSION_COUNT_LIMIT,
-};
+// The reasons the schema lists as preceding admission: the backticked names in the sentence
+// of its comment on OpenRefused that starts "Reasons that precede admission:".
+std::set<v1::FailureReason> refusal_reasons() {
+  const std::string proto =
+      read_file(std::string{TP_SOURCE_DIR} + "/protocol/proto/tensorplate/stream/v1/session.proto");
+  const std::size_t begin = proto.find("Reasons that precede admission:");
+  const std::size_t message = proto.find("message OpenRefused", std::min(begin, proto.size()));
+  std::set<v1::FailureReason> reasons;
+  if (message == std::string::npos) {
+    ADD_FAILURE() << "session.proto has no list of reasons before message OpenRefused";
+    return reasons;
+  }
+  // The sentence ends at the first full stop; what follows it names a field, not a reason.
+  std::istringstream list(proto.substr(begin, std::min(proto.find('.', begin), message) - begin));
+  std::string piece;
+  for (bool name = false; std::getline(list, piece, '`'); name = !name) {
+    v1::FailureReason reason = v1::FAILURE_REASON_UNSPECIFIED;
+    if (name && v1::FailureReason_Parse("FAILURE_REASON_" + upper(piece), &reason)) {
+      reasons.insert(reason);
+    } else if (name) {
+      ADD_FAILURE() << "session.proto lists " << piece << ", which is not a FailureReason";
+    }
+  }
+  return reasons;
+}
 
 // The code the taxonomy pairs with each reason, both as the mirrors name them: the first
 // and last cells of the "## Reasons" table of docs/observability/failure-reasons.md, which
@@ -667,11 +685,12 @@ TEST(StreamEnvelope, EveryFieldAndEnumValueHasAGoldenFrame) {
 
 TEST(StreamEnvelope, GoldenFramesKeepTheStatedValueRules) {
   const auto codes = taxonomy_codes();
+  const auto refusals = refusal_reasons();
   std::set<v1::FailureReason> ended;    // reasons of the SessionCloseds
   std::set<v1::FailureReason> refused;  // and of the OpenRefuseds
   for (const auto& [frame, message] : golden_messages()) {
     SCOPED_TRACE(frame.file + ": " + frame.name);
-    for_each_message(*message, [&codes, &ended, &refused](const pb::Message& part) {
+    for_each_message(*message, [&codes, &refusals, &ended, &refused](const pb::Message& part) {
       std::vector<const pb::FieldDescriptor*> fields;
       part.GetReflection()->ListFields(part, &fields);
       for (const auto* field : fields) {
@@ -702,9 +721,8 @@ TEST(StreamEnvelope, GoldenFramesKeepTheStatedValueRules) {
       }
       if (const auto* refusal = dynamic_cast<const v1::OpenRefused*>(&part)) {
         EXPECT_EQ(refusal->admission(), v1::ADMISSION_NOT_ADMITTED);
-        EXPECT_NE(std::find(std::begin(kRefusals), std::end(kRefusals), refusal->cause().reason()),
-                  std::end(kRefusals))
-            << "not a reason that precedes admission";
+        EXPECT_TRUE(refusals.contains(refusal->cause().reason()))
+            << "not a reason the schema lists as preceding admission";
         refused.insert(refusal->cause().reason());
       }
       if (const auto* cause = dynamic_cast<const v1::EndCause*>(&part)) {
@@ -724,7 +742,7 @@ TEST(StreamEnvelope, GoldenFramesKeepTheStatedValueRules) {
     EXPECT_TRUE(ended.contains(end.reason))
         << "no frame ends with " << v1::FailureReason_Name(end.reason);
   }
-  for (const v1::FailureReason reason : kRefusals) {
+  for (const v1::FailureReason reason : refusals) {
     EXPECT_TRUE(refused.contains(reason))
         << "no frame refuses an Open with " << v1::FailureReason_Name(reason);
   }
@@ -756,10 +774,11 @@ TEST(StreamEnvelope, SessionScriptsAreSequencedAndAddressed) {
 
     std::uint64_t client_sequence = 0;
     std::uint64_t server_sequence = 0;
-    std::set<std::uint64_t> inputs;  // sequences of the Audio and TextSegments sent
-    v1::Accepted accepted;           // the latest one
-    bool segment_credit_returned = false;
-    std::uint64_t audio_samples = 0;  // what the events add up to
+    std::set<std::uint64_t> inputs;        // sequences of the Audio and TextSegments sent
+    v1::Accepted accepted;                 // the latest one
+    bool credit_returned = false;          // an Accepted repeats the sequence of the one before
+    bool segment_credit_returned = false;  // and shows fewer segments waiting
+    std::uint64_t audio_samples = 0;       // what the events add up to
     std::uint64_t text_bytes = 0;
     std::uint64_t output_bytes = 0;
     std::uint32_t finals = 0;
@@ -800,6 +819,7 @@ TEST(StreamEnvelope, SessionScriptsAreSequencedAndAddressed) {
             EXPECT_LE(credit.bytes().used(), before.input_credit().bytes().used());
             EXPECT_LE(waiting, waiting_before);
             EXPECT_FALSE(same(credit, before.input_credit())) << "no credit returned";
+            credit_returned = true;
             segment_credit_returned = segment_credit_returned || waiting < waiting_before;
           }
           // A property of the recordings: a session keeps the budgets its Ready reported.
@@ -809,7 +829,9 @@ TEST(StreamEnvelope, SessionScriptsAreSequencedAndAddressed) {
         }
       }
     }
-    // A property of the recordings: the text-to-speech one shows a waiting segment's credit return.
+    // Properties of the recordings: each shows credit returning in an Accepted of its own,
+    // and the text-to-speech one a waiting segment's.
+    EXPECT_TRUE(credit_returned);
     EXPECT_TRUE(speech || segment_credit_returned);
 
     ASSERT_TRUE(script.back().server && script.back().server->has_session_closed());

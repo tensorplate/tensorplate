@@ -47,3 +47,19 @@ function(tp_apply_sanitizers target)
       "does not have a supported configuration. Skipping for ${target}.")
   endif()
 endfunction()
+
+# tp_uninstrumented_protobuf_test_properties(<variable>)
+#
+# Sets <variable> to the properties to give gtest_discover_tests(... PROPERTIES)
+# for a test binary that links the generated protobuf bindings; empty unless
+# TP_ENABLE_SANITIZERS is ON. The dependency tree's protobuf is not built with
+# the sanitizer, so it fills a repeated field without the container bounds the
+# instrumented accessors check. Appended, so the ASAN_OPTIONS exported around
+# ctest stay in force.
+function(tp_uninstrumented_protobuf_test_properties variable)
+  set(${variable} "" PARENT_SCOPE)
+  if(TP_ENABLE_SANITIZERS)
+    set(${variable} ENVIRONMENT_MODIFICATION
+      "ASAN_OPTIONS=string_append::detect_container_overflow=0" PARENT_SCOPE)
+  endif()
+endfunction()

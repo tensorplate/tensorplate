@@ -25,6 +25,8 @@ refused_target_mismatch	tensorplate.stream.v1.OpenRefused	0a04082610031001	cause
 refused_stale_generation	tensorplate.stream.v1.OpenRefused	0a04081f10031001	cause { reason: FAILURE_REASON_STALE_GENERATION code: ERROR_CODE_NOT_READY } admission: ADMISSION_NOT_ADMITTED
 refused_admission_closed	tensorplate.stream.v1.OpenRefused	0a04082310031001	cause { reason: FAILURE_REASON_ADMISSION_CLOSED code: ERROR_CODE_NOT_READY } admission: ADMISSION_NOT_ADMITTED
 refused_session_count_limit	tensorplate.stream.v1.OpenRefused	0a040822100c1001	cause { reason: FAILURE_REASON_SESSION_COUNT_LIMIT code: ERROR_CODE_RESOURCE_EXHAUSTED } admission: ADMISSION_NOT_ADMITTED
+refused_config_invalid	tensorplate.stream.v1.OpenRefused	0a04080110011001	cause { reason: FAILURE_REASON_CONFIG_INVALID code: ERROR_CODE_CONFIG_INVALID } admission: ADMISSION_NOT_ADMITTED
+refused_internal	tensorplate.stream.v1.OpenRefused	0a1b081410091a1573657373696f6e5f6b65795f6578686175737465641001	cause { reason: FAILURE_REASON_INTERNAL code: ERROR_CODE_INTERNAL detail: "session_key_exhausted" } admission: ADMISSION_NOT_ADMITTED
 client_last_sequence	tensorplate.stream.v1.ClientEvent	08ffffffffffffff0f121373796e7468657469632d73657373696f6e2d316a00	sequence: 9007199254740991 session_id: "synthetic-session-1" ping {}
 server_last_sequence	tensorplate.stream.v1.ServerEvent	08ffffffffffffff0f6a00	sequence: 9007199254740991 pong {}
 endpoint_duration_limit	tensorplate.stream.v1.ServerEvent	0809aa010808041080d30e1803	sequence: 9 endpoint_detected { utterance_id: 4 end_sample_offset: 240000 reason: ENDPOINT_REASON_DURATION_LIMIT }
