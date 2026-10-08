@@ -318,6 +318,26 @@ def test_a_frame_read_before_a_write_stalled_is_not_routed(
     assert _Asked.permits == 0
 
 
+def test_a_job_that_waits_when_the_serving_threads_write_stalls_is_not_run(
+    connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runner_module, "WRITE_STALL_TIMEOUT_S", 0.2)
+    peer = connect()
+    backend = peer.enable_jobs()
+    gate = peer.hold(backend)
+    large = copy.deepcopy(golden("tts_synthesis")[0])
+    text = b"a" * protocol.LIMIT_TEXT_SEGMENT_MAX_BYTES
+    large.update(job_id=1, input={**large["input"], "payload_length": len(text)})
+    assert read_after(peer, large, text) == (ACCEPTED, 1)
+    assert backend.job_started.wait(WAIT_S)
+    backend.job_started.clear()
+    assert read_after(peer, submit(2)) == (ACCEPTED, 2)
+    gate.set()  # the result is larger than the socket buffer, and the peer reads no more
+    peer.thread.join(timeout=WAIT_S)
+    assert not peer.thread.is_alive()
+    assert not backend.job_started.is_set()
+
+
 class _NoClasses(FixtureBackend):
     unloaded: ClassVar[int] = 0
 

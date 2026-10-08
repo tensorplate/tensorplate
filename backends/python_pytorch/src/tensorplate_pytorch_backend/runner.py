@@ -247,7 +247,7 @@ class SidecarRunner:
         )
         reader.start()
         try:
-            while (work := self._table.take()) is not None:
+            while not self._ended and (work := self._table.take()) is not None:
                 if isinstance(work, jobs.Job):
                     self._table.run(work)
                 elif (response := self._dispatch(work)) is not None:
