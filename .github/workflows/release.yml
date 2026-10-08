@@ -300,6 +300,11 @@ jobs:
     timeout-minutes: ${{ needs.meta.outputs.publish == 'true' && 60 || 180 }}
     permissions:
       contents: read
+      actions: read
+    outputs:
+      native_recorded: ${{ steps.native.outputs.recorded }}
+    env:
+      NATIVE_CACHE_MODE: ${{ needs.meta.outputs.publish == 'true' && 'restore' || (github.ref_type == 'branch' && github.event.repository.default_branch != '' && github.ref_name != github.event.repository.default_branch) && 'build-and-save' || 'build' }}
 
     steps:
       - name: Checkout release source
@@ -372,10 +377,42 @@ jobs:
 
       # Before anything is compiled: a publishing run with a cold cache fails
       # here. Only a branch other than the default one may save what it builds.
+      - name: Mark the native cache restore start
+        continue-on-error: ${{ env.NATIVE_CACHE_MODE != 'restore' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -Eeuo pipefail
+          cache_annotation=warning
+          if [[ "$NATIVE_CACHE_MODE" == restore ]]; then
+            cache_annotation=error
+          fi
+          trap 'echo "::${cache_annotation}::native cache discovery failed; see docs/release/runbook.md#provision-the-vcpkg-checkout-and-binary-cache and warm the exact cache with release-dependencies.yml before retrying"' ERR
+          date -u +'%Y-%m-%dT%H:%M:%S.%NZ' > "${RUNNER_TEMP}/native-cache-restore-started.txt"
+          key="$(python3 tools/release/native-cache-provenance.py key \
+            --manifest vcpkg.json --profile tools/release/amd64-build-profile.sh \
+            --action .github/actions/release-vcpkg/action.yml)"
+          python3 tools/release/native-cache-provenance.py cache \
+            --cache-key "$key" --repository "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF" --default-branch "$DEFAULT_BRANCH" \
+            --restore-started "$(cat "${RUNNER_TEMP}/native-cache-restore-started.txt")" \
+            --output "${RUNNER_TEMP}/native-cache-before-source.json"
+
       - name: Pinned vcpkg checkout and binary cache
         uses: ./.github/actions/release-vcpkg
         with:
-          mode: ${{ needs.meta.outputs.publish == 'true' && 'restore' || (github.ref_type == 'branch' && github.event.repository.default_branch != '' && github.ref_name != github.event.repository.default_branch) && 'build-and-save' || 'build' }}
+          mode: ${{ env.NATIVE_CACHE_MODE }}
+
+      - name: Snapshot the restored native archives before a build
+        if: ${{ env.NATIVE_CACHE_MODE != 'restore' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          python3 tools/release/native-cache-provenance.py snapshot \
+            --archives "${RUNNER_TEMP}/vcpkg-archives" \
+            --output "${RUNNER_TEMP}/native-cache-before.json"
 
       - name: Build amd64 Rust binaries
         shell: bash
@@ -528,6 +565,26 @@ jobs:
             printf '%s\n' "$payload"
             exit 1
           fi
+
+      - name: Record the amd64 native closure
+        id: native
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python3 tools/release/native-release-record.py record \
+            --directory dist/native-sbom --tag "$TAG" --architecture amd64 \
+            --mode "$NATIVE_CACHE_MODE"
+
+      - name: Upload the amd64 native records
+        if: ${{ steps.native.outputs.recorded == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tensorplate-amd64-native-sbom
+          path: dist/native-sbom/*.json
+          if-no-files-found: error
 
       - name: Upload amd64 runtime packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -939,6 +996,51 @@ jobs:
             --binary build/release/tensorplate-serving \
             --cmake-cache build/release/CMakeCache.txt
 
+      - name: Record the arm64 native closure
+        shell: bash
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
+          RELEASE_DIR: ${{ needs.meta.outputs.release_dir }}
+        run: |
+          python3 tools/release/native-release-record.py record \
+            --directory "$RELEASE_DIR" --tag "$TAG" --architecture arm64 --mode restore
+
+      - name: Stage the amd64 native records
+        if: ${{ needs.build_packages_amd64.outputs.native_recorded == 'true' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tensorplate-amd64-native-sbom
+          path: ${{ needs.meta.outputs.release_dir }}
+
+      - name: Include native records in the signed artifact inventory
+        shell: bash
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          DEB_VERSION: ${{ needs.meta.outputs.deb_version }}
+          PYTHON_VERSION: ${{ needs.meta.outputs.python_version }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          RELEASE_DIR: ${{ needs.meta.outputs.release_dir }}
+          MANIFEST: ${{ needs.meta.outputs.manifest }}
+          CHECKSUMS: ${{ needs.meta.outputs.checksums }}
+          SOURCE_LABEL: ${{ needs.meta.outputs.source_label }}
+          SPEECH_RUNTIME: ${{ needs.meta.outputs.speech_runtime }}
+          PUBLISH: ${{ needs.meta.outputs.publish }}
+        run: |
+          set -Eeuo pipefail
+          args=(--version "$VERSION"
+                --deb-version "$DEB_VERSION" --python-version "$PYTHON_VERSION" --tag "$TAG"
+                --release-branch "$SOURCE_LABEL" --artifacts-dir "$RELEASE_DIR" --arch arm64
+                --target-os "Ubuntu 22.04 / JetPack 6.x (L4T 36.x)"
+                --manifest "$MANIFEST" --checksums "$CHECKSUMS")
+          if [[ "$SPEECH_RUNTIME" == stub ]]; then
+            args+=(--with-speech-runtime)
+          fi
+          tools/release/tensorplate-release.sh manifest "${args[@]}"
+          if [[ "$PUBLISH" != true ]]; then
+            args+=(--skip-tag-verify)
+          fi
+          tools/release/tensorplate-release.sh verify "${args[@]}"
+
       - name: Assert the release package count
         shell: bash
         env:
@@ -1040,6 +1142,16 @@ jobs:
           }
           (cd "$RELEASE_DIR" && sha256sum -c SHA256SUMS)
 
+      - name: Require native records for a final release
+        if: ${{ needs.build_packages.outputs.prerelease != 'true' }}
+        shell: bash
+        env:
+          TAG: ${{ needs.build_packages.outputs.tag }}
+          RELEASE_DIR: ${{ needs.build_packages.outputs.release_dir }}
+        run: |
+          python3 tools/release/native-release-record.py check --directory "$RELEASE_DIR" --tag "$TAG" \
+            --commit "$(git rev-parse HEAD)"
+
       - name: Install cosign
         shell: bash
         env:
@@ -1101,6 +1213,8 @@ jobs:
             ${{ needs.build_packages.outputs.release_dir }}/install.sh
             ${{ needs.build_packages.outputs.release_dir }}/tensorplate_python-*.whl
             ${{ needs.build_packages.outputs.release_dir }}/tensorplate_python-*.tar.gz
+            ${{ needs.build_packages.outputs.release_dir }}/tensorplate-${{ needs.build_packages.outputs.tag }}-native-closure-*.spdx.json
+            ${{ needs.build_packages.outputs.release_dir }}/tensorplate-${{ needs.build_packages.outputs.tag }}-vcpkg-cache-provenance-*.json
             ${{ needs.build_packages.outputs.manifest }}
             ${{ needs.build_packages.outputs.checksums }}
 
@@ -1113,6 +1227,8 @@ jobs:
             ${{ needs.build_packages.outputs.release_dir }}/install.sh
             ${{ needs.build_packages.outputs.release_dir }}/tensorplate_python-*.whl
             ${{ needs.build_packages.outputs.release_dir }}/tensorplate_python-*.tar.gz
+            ${{ needs.build_packages.outputs.release_dir }}/tensorplate-${{ needs.build_packages.outputs.tag }}-native-closure-*.spdx.json
+            ${{ needs.build_packages.outputs.release_dir }}/tensorplate-${{ needs.build_packages.outputs.tag }}-vcpkg-cache-provenance-*.json
             ${{ needs.build_packages.outputs.manifest }}
             ${{ needs.build_packages.outputs.checksums }}
             ${{ needs.build_packages.outputs.bundle }}
@@ -1158,7 +1274,9 @@ jobs:
             echo "::error::expected tensorplate-python wheel and sdist release assets"
             exit 1
           }
-          assets=("${deb_assets[@]}" "$installer" "${sdk_assets[@]}" "$MANIFEST" "$CHECKSUMS" "$BUNDLE")
+          native_assets=("${RELEASE_DIR}"/tensorplate-"${TAG}"-native-closure-*.spdx.json
+                         "${RELEASE_DIR}"/tensorplate-"${TAG}"-vcpkg-cache-provenance-*.json)
+          assets=("${deb_assets[@]}" "$installer" "${sdk_assets[@]}" ${native_assets[@]+"${native_assets[@]}"} "$MANIFEST" "$CHECKSUMS" "$BUNDLE")
 
           args=(release create "$TAG" "${assets[@]}" --verify-tag --title "TensorPlate ${TAG}" --notes-file "$NOTES")
           if [[ "$PRERELEASE" == "true" ]]; then

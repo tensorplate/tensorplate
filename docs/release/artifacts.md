@@ -369,10 +369,10 @@ status file, a supplied CMake cache without streaming enabled, a supplied
 archive directory missing a port's archive, or a port with no identifier
 decision. `check` validates the document against the manifest, feature and
 triplet. It checks declared facts, not the authenticity of a build.
-Dependency traversal currently drops dependency triplet qualifiers: the
-native amd64 job has identical host and target triplets. A cross build
-must preserve host/target identities separately before using this collector;
-the ARM64 release-record follow-up must address that limitation.
+The release builds are native: each closure uses one triplet. Dependency
+qualifiers are retained until traversal and an explicit foreign triplet is
+refused, including host helper and self-dependencies. Cross compilation
+requires a separate inventory of each host and target identity.
 
 The document and its checker distinguish three coverage states:
 
@@ -412,9 +412,50 @@ with no fixed release listed by that database. The OpenSSL matches list
 the executable absence check, with review due by 2026-11-18. The report and the
 identifier controls are uploaded even when the scan fails.
 
-Still required before a final release: records for both release jobs'
-workers, binary-cache provenance, and a final-tag gate that refuses their
-absence. This CI inventory does not supply that gate.
+Both release jobs use `native-release-record.py` to produce a worker SBOM
+and a cache-provenance JSON record. The record binds the source commit,
+full release version, SBOM digest and each archive's content digest. The
+worker digest comes from the packaged executable extracted from the serving
+Debian package, including any packaging-time stripping. The
+amd64 record identifies the exact Actions cache entry selected before
+restoration and computes archive content digests locally after restoration.
+The selected entry must match that earlier cache identity and predate the
+restore-start timestamp; concurrent cache creation or eviction cannot silently
+replace the source attribution. A successful job's matching save-log line
+adds `saved_by` attribution when it uniquely identifies the writer.
+`log_evidence.status` is `available` in that case; expired, inaccessible,
+unmatched or ambiguous logs instead produce `unavailable` with a reason and
+no writer claim. Log lookup errors retain GitHub CLI diagnostics in the job
+output and do not prevent recording the restored archives. The record does
+not infer a writer from workflow completion times. The cache-key action is
+unchanged.
+
+ARM64 records the provisioning stamp and archive content digests. The
+stamp's `archives_sha256` is checked against the archive **names**, not
+contents; the record keeps that distinction and cannot supply a workflow
+run id for operator provisioning. Compiler and vcpkg version text from the
+stamp are represented by digests to avoid publishing operator-controlled
+host details.
+
+Recording is required in binary-only `restore` mode, including ARM64
+build-only runs. In amd64 `build` and `build-and-save` modes it is optional:
+a cold cache or invalid cache binding produces no pair of records and a warning.
+These optional modes also compare archive snapshots before and after the
+build; changed archives cannot be attributed to the earlier cache entry.
+Successful pairs are uploaded as workflow artifacts, staged, and included in
+the release manifest, `SHA256SUMS`, GitHub Release assets, signed workflow
+bundle and attestation subjects. Partial or stale outputs from a failed
+attempt are removed. The build job verifies its regenerated manifest before
+uploading it.
+
+The final cut checks the filed records for both architectures. Final
+publication checks its build's pair again with `check --commit`, comparing
+the record's source commit to the checkout used for publication. Pre-cut
+records come from a build before the evidence commit, so their continued
+source relevance requires owner review. A candidate is lenient only at cut
+time: every tag push, including a candidate, uses restore mode and requires
+the record step. See the
+[release procedure](runbook.md#native-dependency-records-before-a-final-cut).
 
 **License policy.** `deny.toml` allows `Apache-2.0`, `MIT` and
 `Unicode-3.0`, which every Rust dependency satisfies today. A dependency

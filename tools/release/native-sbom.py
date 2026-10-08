@@ -158,9 +158,19 @@ def manifest_facts(manifest: pathlib.Path, feature: str) -> tuple[str, list[str]
     return baseline, deps
 
 
-def dependency_name(spec: str) -> str:
-    """`grpc[core]:x64-linux (>=1)` -> `grpc`."""
-    return re.split(r"[\[:(\s]", spec.strip(), maxsplit=1)[0]
+def dependency_name(spec: str, triplet: str) -> str:
+    """Return the port only after checking its explicit triplet, if any."""
+    match = re.fullmatch(
+        r"([a-z0-9][a-z0-9-]*)(?:\[[^\[\]]+\])?"
+        r"(?::([a-z0-9][a-z0-9-]*))?(?:\s+\([^()]+\))?", spec.strip()
+    )
+    if match is None:
+        raise Refused([f"invalid installed dependency specification {spec!r}"])
+    name, qualified_triplet = match.groups()
+    if qualified_triplet is not None and qualified_triplet != triplet:
+        raise Refused([f"dependency {spec!r} names triplet {qualified_triplet}, not {triplet}; "
+                       "native inventories require the same host and target triplet"])
+    return name
 
 
 def parse_status(path: pathlib.Path) -> list[dict[str, str]]:
@@ -194,7 +204,7 @@ def parse_status(path: pathlib.Path) -> list[dict[str, str]]:
 
 
 def installed_ports(status: list[dict[str, str]], triplet: str) -> dict[str, dict]:
-    """Each installed port of the triplet: version, port version, abi and the names it depends on."""
+    """Each installed port, retaining dependency specifications until closure validation."""
     ports: dict[str, dict] = {}
     for paragraph in status:
         if paragraph.get("Architecture") != triplet or paragraph.get("Status") != INSTALLED:
@@ -205,8 +215,10 @@ def installed_ports(status: list[dict[str, str]], triplet: str) -> dict[str, dic
         port = ports.setdefault(
             name, {"version": None, "port_version": "0", "abi": None, "depends": set()}
         )
-        depends = {dependency_name(d) for d in paragraph.get("Depends", "").split(",") if d.strip()}
-        port["depends"] |= depends - {name}
+        # Feature lists contain commas too. Keep triplets and self-dependencies:
+        # dropping either here could substitute a target port for a host port.
+        depends = re.split(r",(?![^\[]*\])", paragraph.get("Depends", ""))
+        port["depends"].update(d.strip() for d in depends if d.strip())
         if "Feature" in paragraph:
             continue
         port["version"] = paragraph.get("Version")
@@ -215,7 +227,7 @@ def installed_ports(status: list[dict[str, str]], triplet: str) -> dict[str, dic
     return {name: port for name, port in ports.items() if port["version"] is not None}
 
 
-def closure_of(roots: list[str], ports: dict[str, dict]) -> list[str]:
+def closure_of(roots: list[str], ports: dict[str, dict], triplet: str) -> list[str]:
     """`roots` and everything they depend on, by name, sorted; tool ports excluded."""
     seen: set[str] = set()
     todo = list(roots)
@@ -226,7 +238,7 @@ def closure_of(roots: list[str], ports: dict[str, dict]) -> list[str]:
         if name not in ports:
             raise Refused([f"the closure reaches {name}, which the status file does not record as installed"])
         seen.add(name)
-        todo.extend(sorted(ports[name]["depends"]))
+        todo.extend(dependency_name(spec, triplet) for spec in sorted(ports[name]["depends"]))
     return sorted(seen)
 
 
@@ -317,7 +329,7 @@ def collect(args: argparse.Namespace) -> dict:
             [f"{args.install_root}: feature {args.feature!r} dependency {name!r} is not installed "
              f"for {args.triplet}" for name in missing]
         )
-    closure = closure_of(roots, ports)
+    closure = closure_of(roots, ports, args.triplet)
     left_out = sorted(name for name in NOT_LINKED if name in ports)
     documents: dict[str, dict] = {}
     for name in closure:

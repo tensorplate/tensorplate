@@ -12,9 +12,12 @@ stand-in that answers as GitHub would for that set.
 
 from __future__ import annotations
 
+from dataclasses import replace
+import glob
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -34,9 +37,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_artifact_identity import (  # noqa: E402
     REPO_ROOT,
+    RELEASE_DRIVER,
     github_served_name,
+    identity_args,
     init_fixture_repo,
     make_release_set,
+    run_command,
 )
 
 CHECKER = REPO_ROOT / "tools/release/check-release-asset-names.py"
@@ -53,6 +59,14 @@ import json, os, sys
 from pathlib import Path
 
 args = sys.argv[1:]
+if args[:2] == ["release", "create"]:
+    assert args[2] == os.environ["FAKE_TAG"]
+    paths = args[3:args.index("--verify-tag")]
+    assert all(Path(path).is_file() for path in paths)
+    Path(os.environ["FAKE_UPLOADED"]).write_text("\n".join(paths) + "\n")
+    sys.exit(0)
+if args == ["release", "view", os.environ["FAKE_TAG"]]:
+    sys.exit(1)
 if args[:2] != ["release", "view"] or args[3:] != ["--repo", "tensorplate/tensorplate", "--json", "assets"]:
     sys.exit(f"gh stand-in: unexpected {args!r}")
 if args[2] != os.environ["FAKE_TAG"]:
@@ -143,6 +157,7 @@ class WorkflowStepTests(unittest.TestCase):
         steps = workflow["jobs"]["publish-release"]["steps"]
         names = [step.get("name") for step in steps]
         cls.names = names
+        cls.steps = {step.get("name"): step for step in steps}
         cls.step = next((step for step in steps if step.get("name") == CHECK_STEP), None)
 
     def test_the_check_runs_right_after_the_release_is_created(self) -> None:
@@ -150,6 +165,77 @@ class WorkflowStepTests(unittest.TestCase):
         self.assertEqual(self.names.index(CHECK_STEP), self.names.index(CREATE_STEP) + 1)
         self.assertNotIn("if", self.step)
         self.assertNotIn("continue-on-error", self.step)
+
+    def test_created_signed_and_attested_assets_include_both_native_record_pairs(self) -> None:
+        for kind in ("final", "rc"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix="tp-publish-records-") as temporary:
+                root = Path(temporary)
+                repo = root / "repo"
+                init_fixture_repo(repo)
+                fixture = make_release_set(root / "set", kind, repo, release_layout=True)
+                native = set()
+                for arch in ("amd64", "arm64"):
+                    for suffix in (f"native-closure-{arch}.spdx.json", f"vcpkg-cache-provenance-{arch}.json"):
+                        record = fixture.artifacts / f"tensorplate-{fixture.tag}-{suffix}"
+                        record.write_text("artifact hashing stand-in; not native build evidence\n")
+                        native.add(record)
+                result = run_command(["bash", str(RELEASE_DRIVER), "manifest", *identity_args(fixture)], cwd=repo)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                bundle = fixture.artifacts / "SHA256SUMS.cosign.bundle"
+                bundle.write_text("signature stand-in\n")
+                (fixture.artifacts / "unrelated.json").write_text("not a release asset\n")
+                bin_dir = root / "bin"
+                bin_dir.mkdir()
+                (bin_dir / "gh").write_text(FAKE_GH.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1))
+                (bin_dir / "gh").chmod(0o755)
+                uploaded = root / "uploaded"
+                values = {"tag": fixture.tag, "release_dir": str(fixture.artifacts), "notes": str(root / "notes"),
+                          "manifest": str(fixture.manifest), "checksums": str(fixture.checksums), "bundle": str(bundle),
+                          "prerelease": str(kind == "rc").lower(), "draft": str(kind == "final").lower()}
+                context = {f"needs.build_packages.outputs.{name}": value for name, value in values.items()}
+                context["github.token"] = "fixture-token"
+
+                def expand(value):
+                    return re.sub(r"\$\{\{\s*(.*?)\s*\}\}", lambda match: context[match[1]], value)
+
+                def execute(step):
+                    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(root),
+                           "GITHUB_REPOSITORY": "tensorplate/tensorplate", "FAKE_TAG": fixture.tag,
+                           "FAKE_UPLOADED": str(uploaded), "FAKE_SERVE_AS": "github",
+                           **{name: expand(str(value)) for name, value in step["env"].items()}}
+                    return subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+                                          cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=False, timeout=30)
+
+                created = execute(self.steps[CREATE_STEP])
+                self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+                assets = {Path(line) for line in uploaded.read_text().splitlines()}
+                listed = {fixture.artifacts / line.split("  ", 1)[1] for line in fixture.checksums.read_text().splitlines()}
+                self.assertTrue(native <= assets)
+                self.assertEqual(assets, listed | {fixture.checksums, bundle})
+                checked = execute(self.step)
+                self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+                signed = set()
+                for name, field, expected in (("Upload signed release build artifact bundle", "path", assets),
+                                              ("Attest build provenance", "subject-path", assets - {bundle})):
+                    matched = {Path(path) for pattern in expand(self.steps[name]["with"][field]).splitlines()
+                               for path in glob.glob(pattern)}
+                    self.assertEqual(matched, expected, name)
+                    if field == "path":
+                        signed = matched
+                downloaded = root / "downloaded"
+                downloaded.mkdir()
+                for path in signed:
+                    shutil.copyfile(path, downloaded / path.name)
+                received = replace(fixture, artifacts=downloaded, manifest=downloaded / fixture.manifest.name,
+                                   checksums=downloaded / fixture.checksums.name)
+                verified = run_command(["bash", str(RELEASE_DRIVER), "verify", *identity_args(received)], cwd=repo)
+                self.assertEqual(verified.returncode, 0, verified.stdout + verified.stderr)
+                uploaded.write_text("\n".join(str(path) for path in assets - native) + "\n")
+                refused = execute(self.step)
+                self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+                self.assertIn("listed but not served:", refused.stderr)
+                for path in native:
+                    self.assertIn(path.name, refused.stderr)
 
     def _run_step(self, kind: str, serve_as: str, *, rename_to_tilde: bool = False):
         root = Path(tempfile.mkdtemp(prefix="tp-asset-step-"))

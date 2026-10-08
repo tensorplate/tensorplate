@@ -8,6 +8,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Record each release worker's native dependency inventory and cache
+  provenance, include them in signed release artifacts, and refuse final
+  cuts without accepted records for both architectures. Build modes may
+  omit unavailable records; binary-only restore requires them.
+  (V030-E01-F03-T01)
 - Format 0.2 bundle manifests can declare variant lineage: `base_model_ref`
   (`name`, `version`, `manifest_digest` of the base bundle) and
   `variant_identity` (`id`, `revision` and a `variant_kind` of

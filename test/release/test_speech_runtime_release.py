@@ -337,7 +337,7 @@ class ChangelogStagingTests(Scratch):
     def test_both_package_jobs_stage_one_version(self) -> None:
         amd64 = self.tree("amd64")
         result = run_step("build_packages_amd64", "Build amd64 runtime packages",
-                          {"DEB_VERSION": "0.2.1~rc.1"}, cwd=amd64,
+                          {"DEB_VERSION": "0.2.1~rc.1", "NATIVE_CACHE_MODE": "build"}, cwd=amd64,
                           until="packaging/scripts/build-deb.sh")
         self.assertEqual(result.returncode, 0, result.stdout)
         speech, values, result = self.build_step()

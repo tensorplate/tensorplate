@@ -139,10 +139,40 @@ class Collect(Fixture):
             self.assertEqual(ports[name]["checksums"][0]["algorithm"], "SHA512", name)
 
     def test_a_dependency_written_with_a_feature_or_triplet_is_followed(self) -> None:
-        self.assertEqual(tool.dependency_name(" protobuf[core,libprotoc]:x64-linux (>= 6)"), "protobuf")
-        status = self.status_text().replace("Depends: abseil, c-ares,", "Depends: abseil[core]:x64-linux, c-ares,")
+        self.assertEqual(tool.dependency_name(" protobuf[core,libprotoc]:x64-linux (>= 6)", TRIPLET), "protobuf")
+        status = self.status_text().replace("Depends: protobuf", "Depends: protobuf[core,libprotoc]:x64-linux")
         self.assertNotEqual(status, self.status_text())
         (self.tree / "vcpkg/status").write_text(status)
+        self.assertEqual(sorted(p["name"] for p in self.document()["packages"][1:]), CLOSURE)
+
+    def test_a_foreign_triplet_cannot_be_replaced_by_an_installed_target_port(self) -> None:
+        status = self.status_text().replace("Depends: abseil, c-ares,",
+                                          "Depends: abseil[core]:arm64-linux, c-ares,")
+        self.assertNotEqual(status, self.status_text())
+        (self.tree / "vcpkg/status").write_text(status)
+        self.assert_refused(self.collect(), "names triplet arm64-linux, not x64-linux")
+
+    def test_a_foreign_host_tool_dependency_is_refused_before_tools_are_excluded(self) -> None:
+        status = self.status_text().replace("Depends: vcpkg-cmake,",
+                                          "Depends: vcpkg-cmake:arm64-linux,")
+        self.assertNotEqual(status, self.status_text())
+        (self.tree / "vcpkg/status").write_text(status)
+        self.assert_refused(self.collect(), "dependency 'vcpkg-cmake:arm64-linux' names triplet arm64-linux")
+
+    def test_a_feature_cannot_hide_a_self_dependency_on_another_triplet(self) -> None:
+        paragraphs = self.status_text().split("\n\n")
+        feature = next(i for i, p in enumerate(paragraphs)
+                       if p.startswith("Package: grpc\n") and "Feature:" in p)
+        paragraphs[feature] += "\nDepends: grpc:arm64-linux"
+        (self.tree / "vcpkg/status").write_text("\n\n".join(paragraphs))
+        self.assert_refused(self.collect(), "dependency 'grpc:arm64-linux' names triplet arm64-linux")
+
+    def test_an_excluded_test_port_does_not_extend_the_workers_closure(self) -> None:
+        paragraphs = self.status_text().split("\n\n")
+        gtest = next(i for i, p in enumerate(paragraphs) if p.startswith("Package: gtest\n"))
+        paragraphs[gtest] = paragraphs[gtest].replace("Depends: vcpkg-cmake,",
+                                                    "Depends: vcpkg-cmake:arm64-linux,")
+        (self.tree / "vcpkg/status").write_text("\n\n".join(paragraphs))
         self.assertEqual(sorted(p["name"] for p in self.document()["packages"][1:]), CLOSURE)
 
     def test_a_dependency_only_a_feature_paragraph_names_is_followed(self) -> None:
