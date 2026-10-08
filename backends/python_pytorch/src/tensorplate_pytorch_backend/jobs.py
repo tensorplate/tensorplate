@@ -56,6 +56,14 @@ def _edge(exc: BaseException) -> sanitize.EdgeError:
     return sanitize.edge_error(exc)
 
 
+def _permits(backend: JobBackend, request: job_objects.JobRequest) -> bool | sanitize.EdgeError:
+    """Whether the backend permits the job, or the failure its check raised."""
+    try:
+        return backend.permits_job(request)
+    except Exception as exc:
+        return _edge(exc)
+
+
 class JobTable:
     """Unreleased jobs, sessions being released, and the FIFO of work for the backend thread.
 
@@ -204,7 +212,10 @@ class JobTable:
             self._end(job, protocol.ERR_CONFIG_INVALID, refusal)
         elif request.job_class not in self._classes:
             self._end(job, protocol.ERR_UNSUPPORTED, "job_class_unsupported")
-        elif not backend.permits_job(request):
+        elif isinstance(permitted := _permits(backend, request), sanitize.EdgeError):
+            self._note_error(permitted.message)
+            self._end(job, permitted.code, None, permitted.message)
+        elif not permitted:
             self._end(job, protocol.ERR_UNSUPPORTED, "job_not_permitted")
         elif job.session in self._releasing:
             self._end(job, protocol.ERR_NOT_READY, "session_releasing")

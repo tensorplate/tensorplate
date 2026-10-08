@@ -365,6 +365,25 @@ def test_an_authored_backend_error_reaches_the_job_and_health(connect: Callable[
     assert health["last_error"] == "the window is too long"
 
 
+class _Unpermitting(FixtureBackend):
+    def permits_job(self, request: job_objects.JobRequest) -> bool:
+        raise RuntimeError(CANARY)
+
+
+def test_a_permits_job_that_raises_fails_the_job_and_the_connection_stays_up(
+    connect: Callable[..., Peer], caplog: pytest.LogCaptureFixture
+) -> None:
+    peer = connect({"fixture": _Unpermitting})
+    peer.enable_jobs()
+    with caplog.at_level(logging.DEBUG):
+        failed, released = exchange(peer, submit(1)), peer.read().header
+        health = exchange(peer, message(protocol.KIND_HEALTH_CHECK))
+    assert [digest(failed), digest(released)] == ended(1, FAILED, "internal")
+    assert failed["error"]["message"] == health["health"]["last_error"] == _INTERNAL
+    assert "sidecar job failed: RuntimeError at " in caplog.text
+    assert "canary" not in (json.dumps([failed, released, health]) + caplog.text).lower()
+
+
 def test_max_iterations_answers_what_was_read_and_returns() -> None:
     client, server = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
