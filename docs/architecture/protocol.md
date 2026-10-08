@@ -195,8 +195,9 @@ may be added, and a value appended to such a list; and a boundary may be added
 to the worker's latency histograms. The `priority` property, the label keys
 `row`, `mode`, `outcome` and `stage`, and the 300, 500, 600 and 1500 ms
 boundaries are the first. An added property or key is never required and is
-absent rather than `null`. Existing properties, keys, values and boundaries
-are never renamed, removed, retyped or given a new meaning. Every schema copy
+absent rather than `null`. Existing properties, keys and values are never
+renamed, removed, retyped or given a new meaning, and the upper bound of an
+existing boundary never moves. Every schema copy
 of a list moves with its Rust constant, and the boundary list with
 `kLatencyBucketsMs`; `protocol/rust/tests/telemetry_event_fixtures.rs` and
 `test/unit/serving_health_metrics_test.cpp` fail if they do not. What a reader
@@ -207,6 +208,9 @@ that predates an addition does depends on the addition:
 - The Rust mirror of the metric event, and the Rust metrics registry, reject
   an event whose labels carry a key they do not know. An event with one of
   the four new keys is therefore refused by a reader built before them.
+- The same two readers, and the schema enums, hold a registered key to the
+  values listed when they were built. An event that carries a value appended
+  to a list later is refused by a reader built before the value.
 - The schema files are closed objects, so a validator pinned to the previous
   files rejects an added property.
 - A scraper that stored the worker's boundaries sees more `le` values. In the
@@ -217,8 +221,8 @@ that predates an addition does depends on the addition:
 The boundaries take effect with the change that adds them. No component sets
 `priority` or any of the four label keys yet, and nothing in this repository
 reads another component's metric events. The change that first emits one of
-those keys must keep it away from readers that may predate it. Retire this
-exception with the first.
+those keys, or a value appended to a registered list, must keep it away from
+readers that may predate it. Retire this exception with the first.
 
 The agent's durable state file (`agent_state.json`) is the one document
 with its own version track, because it is read by nothing but the agent

@@ -10,7 +10,7 @@
     "OutcomeLabel": {
       "type": "string",
       "enum": ["succeeded", "failed", "cancelled", "rejected"],
-      "description": "How the counted session or request ended. `rejected` is a refusal before admission; an expiry or a timeout is `failed`."
+      "description": "How the counted session or request ended. For this label `rejected` is a refusal before admission, and an expiry or a timeout is `failed`."
     },
     "StageLabel": {
       "type": "string",
@@ -85,7 +85,11 @@
               "required": ["le_ms", "count"],
               "properties": {
                 "le_ms": {"oneOf": [{"type": "number"}, {"type": "string", "const": "+Inf"}]},
-                "count": {"type": "integer", "minimum": 0}
+                "count": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Observations in this bucket alone: above the previous boundary and at or below `le_ms`. Not cumulative."
+                }
               }
             }
           }

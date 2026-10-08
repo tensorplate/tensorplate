@@ -55,7 +55,7 @@
     },
     "labels": {
       "type": "object",
-      "description": "Bounded label set. v0.1 allows the keys `endpoint`, `model_class`, `model_name`, `backend`, `component`, `status`, `row`, `mode`, `outcome`, `stage`. Values are bounded to 64 bytes, and the last four take only the values registered here. Unknown keys are rejected by the registry to keep cardinality finite. A session, turn, request or voice identifier is never a label.",
+      "description": "Bounded label set. v0.1 allows the keys `endpoint`, `model_class`, `model_name`, `backend`, `component`, `status`, `row`, `mode`, `outcome`, `stage`. Values are bounded to 64 bytes, and the last four take only the values registered here. This schema holds only those four to their values and accepts any other key: the key set is enforced by the Rust mirror and by the registry, which reject an unknown key to keep cardinality finite. A session, turn, request or voice identifier is never a label.",
       "properties": {
         "row": {
           "type": "string",
@@ -70,7 +70,7 @@
         "outcome": {
           "type": "string",
           "enum": ["succeeded", "failed", "cancelled", "rejected"],
-          "description": "How the counted session or request ended. `rejected` is a refusal before admission; an expiry or a timeout is `failed`."
+          "description": "How the counted session or request ended. For this label `rejected` is a refusal before admission, and an expiry or a timeout is `failed`."
         },
         "stage": {
           "type": "string",

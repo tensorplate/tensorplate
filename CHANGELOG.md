@@ -18,7 +18,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   held to a registered value list by `metric_event.json`, the Rust mirror
   and the Rust metrics registry; `serving_metrics.json` takes `row` and
   `mode` as optional labels and defines the `outcome` and `stage` lists. A
-  reader built before these keys rejects a metric event that carries one;
+  reader built before these keys rejects a metric event that carries one,
+  and a reader rejects a value appended to a list after it was built;
   nothing emits them yet. The serving worker's latency histograms gain the
   boundaries 300, 500, 600 and 1500 ms beside the existing ones, so a
   streaming speech latency threshold at any of 100 to 1500 ms falls on a

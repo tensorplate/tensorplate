@@ -50,7 +50,7 @@ the same way.
 | --------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | `row`     | `speech-stt-whisper-turbo-stream-l4`, `speech-tts-kokoro-stream-l4`               | Defined here: the two speech model rows the release is validated against. Not a platform support row id. |
 | `mode`    | `stt_streaming`, `tts_streaming`                                                  | The serving mode a bundle's speech block resolves to, and the stream schema's session modes. |
-| `outcome` | `succeeded`, `failed`, `cancelled`, `rejected`                                    | The words the serving worker's request counters use. `rejected` is a refusal before admission; an expiry or a timeout is `failed`. |
+| `outcome` | `succeeded`, `failed`, `cancelled`, `rejected`                                    | The words the serving worker's request counters use. For this label `rejected` is a refusal before admission, and an expiry or a timeout is `failed`. |
 | `stage`   | `ingress`, `queue`, `vad`, `preprocessing`, `backend`, `postprocessing`, `egress` | The runtime pipeline stages of a bundle profile, with the scheduler queue after `ingress`. |
 
 A deployment that is not one of the registered rows carries no `row`
@@ -59,10 +59,20 @@ its encode and decode separately reports the one stage and nothing finer.
 A session, turn, request, utterance or voice identifier is never a label
 key or a label value.
 
+`outcome` does not replace `status`: the baseline metrics below keep
+`status` and its four values, and `outcome` labels the speech series. The
+rule for an expiry is the label's own; the worker's request counters are
+unchanged and still count an expiry and a deadline rejection where they
+did. The `queue` and `backend` stages name what the worker's `queue_wait`
+and `execution` histograms already measure for unary requests; those two
+histograms keep their names.
+
 A reader built before a label key was added rejects a metric event that
 carries it: the Rust mirror and this registry refuse a key they do not
-know. No component sets the four speech keys yet. The change that first
-emits one must not send it to a reader that may predate the key.
+know. They hold a registered key to the values listed when they were
+built, so they also reject a value appended to a list later. No component
+sets the four speech keys yet. The change that first emits one of them,
+or an appended value, must not send it to a reader that may predate it.
 
 ## Delivery class
 

@@ -50,8 +50,8 @@ pub const METRIC_ROW_VALUES: [&str; 2] = [
 /// speech block resolves to.
 pub const METRIC_MODE_VALUES: [&str; 2] = ["stt_streaming", "tts_streaming"];
 
-/// Registered `outcome` label values. `rejected` is a refusal before
-/// admission; an expiry or a timeout is `failed`.
+/// Registered `outcome` label values. For this label `rejected` is a
+/// refusal before admission, and an expiry or a timeout is `failed`.
 pub const METRIC_OUTCOME_VALUES: [&str; 4] = ["succeeded", "failed", "cancelled", "rejected"];
 
 /// Registered `stage` label values, in pipeline order: the runtime pipeline

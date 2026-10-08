@@ -219,6 +219,13 @@ fn registered_label_values_match_both_schemas() {
     assert_eq!(lists.map(|(key, _)| key), REGISTERED_KEYS);
     let event = schema("metric_event.json");
     let worker = schema("serving_metrics.json");
+    let constrained: BTreeSet<&str> = event["properties"]["labels"]["properties"]
+        .as_object()
+        .expect("label properties")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(constrained, BTreeSet::from(REGISTERED_KEYS));
     for (key, values) in lists {
         assert_eq!(registered_metric_label_values(key), Some(values), "{key}");
         let pointer = match key {
