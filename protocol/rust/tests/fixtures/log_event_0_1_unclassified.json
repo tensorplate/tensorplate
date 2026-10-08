@@ -1,0 +1,14 @@
+{
+  "schema_version": "0.1",
+  "component": "serving_worker",
+  "event": "request.accepted",
+  "level": "info",
+  "monotonic_timestamp_ns": 1200,
+  "deployment_id": "synthetic-deployment",
+  "model_class": "speech",
+  "backend": "python_pytorch",
+  "duration_ms": 4.5,
+  "context": {
+    "queue_depth": 2
+  }
+}

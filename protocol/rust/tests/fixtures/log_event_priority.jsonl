@@ -1,0 +1,4 @@
+{"schema_version":"0.1","component":"serving_worker","event":"worker.exit","level":"error","priority":"fatal","monotonic_timestamp_ns":1000,"deployment_id":"synthetic-deployment"}
+{"schema_version":"0.1","component":"serving_worker","event":"heartbeat.missed","level":"warn","priority":"safety","monotonic_timestamp_ns":1001,"deployment_id":"synthetic-deployment"}
+{"schema_version":"0.1","component":"serving_worker","event":"deploy.activated","level":"info","priority":"state","monotonic_timestamp_ns":1002,"deployment_id":"synthetic-deployment"}
+{"schema_version":"0.1","component":"serving_worker","event":"infer.profile_sample","level":"debug","priority":"diagnostic","monotonic_timestamp_ns":1003,"deployment_id":"synthetic-deployment"}

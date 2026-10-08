@@ -43,6 +43,11 @@
       "enum": ["trace", "debug", "info", "warn", "error"],
       "description": "Severity level. Bounded to the v0.1 set; `trace` is filtered out of bounded sinks by default."
     },
+    "priority": {
+      "type": "string",
+      "enum": ["fatal", "safety", "state", "diagnostic"],
+      "description": "Optional delivery class, highest first: `fatal`, `safety`, `state`, `diagnostic`. It is independent of `level`. A producer that sheds telemetry by class drops only `diagnostic` and does not treat an event without the field as `diagnostic`. A bounded queue that evicts by age does not read the field. A reader must not derive a class for an event that has none."
+    },
     "monotonic_timestamp_ns": {
       "type": "integer",
       "minimum": 0,
