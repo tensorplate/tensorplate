@@ -327,13 +327,16 @@ def test_a_frame_read_before_a_write_stalled_is_not_routed(
     _Asked.permits = 0
     peer = connect({"fixture": _Asked})
     peer.enable_jobs()
+    # A send buffer this test sets, not the platform's, is what the answers overflow.
+    peer.runner._sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
     health = codec.encode(codec.SidecarFrame(message(protocol.KIND_HEALTH_CHECK)))
     job = submit(1)
-    behind = codec.encode(codec.SidecarFrame(job, bytes(job["input"]["payload_length"])))
-    # Half a send buffer of health checks goes out whole and its answers overflow the
-    # runner's, so the reader stalls with the submit, which would ask the backend, behind it.
-    checks = peer.client.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF) // (2 * len(health))
-    peer.client.sendall(health * checks + behind)
+    job["input"]["payload_length"] = 2
+    behind = codec.encode(codec.SidecarFrame(job, bytes(2)))
+    # The burst is small enough to be read at once, so when the answers stall the submit,
+    # which would ask the backend, is already behind them in the reader's hands.
+    with contextlib.suppress(OSError):  # a platform that takes less of it ends the send
+        peer.client.sendall(health * 300 + behind)
     peer.thread.join(timeout=WAIT_S)
     assert not peer.thread.is_alive()
     assert _Asked.permits == 0
