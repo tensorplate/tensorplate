@@ -8,6 +8,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Format 0.2 bundle manifests can declare variant lineage: `base_model_ref`
+  (`name`, `version`, `manifest_digest` of the base bundle) and
+  `variant_identity` (`id`, `revision` and a `variant_kind` of
+  `speaker_embedding`, `adapter` or `full_checkpoint`), declared together.
+  Every kind is reserved: the schema accepts the declaration, the parser
+  validates it and then refuses the bundle with `bundle_r8_reserved_variant`
+  before staging, so no variant bundle deploys. `BundleProfile::check_lineage`
+  judges a declaration against base facts its caller supplies (known base,
+  identity not already declared on it, support no greater than the base's)
+  with typed codes; nothing in the agent calls it yet. Additive change inside
+  bundle format 0.2 and protocol 0.1; version constants unchanged, and format
+  0.1 manifests keep treating both keys as extras.
+  (V030-E02-F02-T01)
 - Log and metric events take an optional `priority` of `fatal`, `safety`,
   `state` or `diagnostic`: the class a producer consults when it sheds
   telemetry by class, dropping only `diagnostic`. Nothing sets or reads it
@@ -29,20 +42,6 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 ## [0.3.1] - 2026-10-01
 
 ### Added
-
-- Format 0.2 bundle manifests can declare variant lineage: `base_model_ref`
-  (`name`, `version`, `manifest_digest` of the base bundle) and
-  `variant_identity` (`id`, `revision` and a `variant_kind` of
-  `speaker_embedding`, `adapter` or `full_checkpoint`), declared together.
-  Every kind is reserved: the schema accepts the declaration, the parser
-  validates it and then refuses the bundle with `bundle_r8_reserved_variant`
-  before staging, so no variant bundle deploys. `BundleProfile::check_lineage`
-  judges a declaration against base facts its caller supplies (known base,
-  identity not already declared on it, support no greater than the base's)
-  with typed codes; nothing in the agent calls it yet. Additive change inside
-  bundle format 0.2 and protocol 0.1; version constants unchanged, and format
-  0.1 manifests keep treating both keys as extras.
-  (V030-E02-F02-T01)
 
 - `tensorplate-serving --version` prints a fourth line, `streaming-grpc on`
   or `streaming-grpc off`, so an installed worker says whether streaming
