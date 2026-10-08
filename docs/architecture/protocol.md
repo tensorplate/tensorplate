@@ -192,9 +192,18 @@ golden frames and to the typed job seam's vectors
 (`protocol/fixtures/job_seam.json`). The sidecar replays both as well:
 `backends/python_pytorch/tests/test_job_seam_replay.py` runs every vector
 whose scope is `all` through the sidecar's job objects, and
-`tests/test_speech_jobs_golden_replay.py` beside it sends the adapter's side
-of each golden file to a live runner and compares the frames it answers
-with. Retire this exception with the first.
+`tests/test_speech_jobs_golden_replay.py` beside it replays the golden files
+against a live runner. Four are replayed whole, every frame the sidecar
+answers compared with the file's, frame for frame: `stt_decode`,
+`tts_synthesis`, `cancel` and `refused`. `session_release` is too, with the
+`stt_decode` submit of the same identity in place of its `vad_frames`
+submit. Of `negotiation`, the response's `job_classes` are compared with the
+loaded runner's, because the file lists `vad_frames`, which no lane runs; of
+`negotiation_refused`, the response with only the code of its error. Of
+`vad_frames` and `interleaved_progress` only the submits are sent and none
+of the file's answers is compared: the tests assert the refusal a class
+without a lane gets, and that neither job sends `job_progress`. Retire this
+exception with the first.
 
 A fifth narrow pre-1.0 exception covers the telemetry events and the serving
 worker's metrics. Under `0.1`, `log_event.json` and `metric_event.json` may

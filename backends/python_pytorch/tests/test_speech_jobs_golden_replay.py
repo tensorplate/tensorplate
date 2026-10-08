@@ -1,10 +1,12 @@
 """The golden speech-job frames, replayed against a live runner over a socketpair.
 
-Each file under ``protocol/rust/tests/fixtures`` is one connection: the
+Each file under ``protocol/rust/tests/fixtures`` is one connection, and
+``_REPLAYS`` maps each to how it is replayed. Four are replayed whole: the
 adapter's frames are sent in file order and every frame the sidecar answers
 with is compared with the file's, field for field. Two fields are the
 sidecar's own: the ``message_id`` of a message it originates, checked as the
-running ``s<n>``, and the wording of an error's ``message``.
+running ``s<n>``, and the wording of an error's ``message``. Of each other
+file its replay says what is compared instead.
 """
 
 from __future__ import annotations
@@ -26,17 +28,6 @@ from tensorplate_pytorch_backend.runner import SidecarRunner
 
 _FIXTURES = Path(__file__).resolve().parents[3] / "protocol" / "rust" / "tests" / "fixtures"
 _PREFIX = "python_pytorch_ipc_speech_jobs_"
-_REPLAYED = (
-    "cancel",
-    "interleaved_progress",
-    "negotiation",
-    "negotiation_refused",
-    "refused",
-    "session_release",
-    "stt_decode",
-    "tts_synthesis",
-    "vad_frames",
-)
 _ADAPTER_KINDS = {
     protocol.KIND_LOAD_MODEL,
     protocol.KIND_JOB_SUBMIT,
@@ -45,10 +36,12 @@ _ADAPTER_KINDS = {
 }
 #: Bound of every wait on the runner: a socket read, an event, a thread join.
 WAIT_S = 5.0
+#: How one golden file is replayed, given the ``connect`` fixture.
+_Replay = Callable[[Callable[..., "Peer"]], None]
 
 
 def golden(name: str) -> list[dict[str, Any]]:
-    assert name in _REPLAYED
+    assert name in _REPLAYS
     text = (_FIXTURES / f"{_PREFIX}{name}.jsonl").read_text(encoding="utf-8")
     return [json.loads(line) for line in text.splitlines()]
 
@@ -171,10 +164,22 @@ def replay(
 
 def test_every_golden_file_on_disk_is_replayed() -> None:
     on_disk = [path.name[len(_PREFIX) : -len(".jsonl")] for path in _FIXTURES.glob(f"{_PREFIX}*")]
-    assert sorted(on_disk) == sorted(_REPLAYED)
+    assert sorted(on_disk) == sorted(_REPLAYS)
 
 
-def test_negotiation(connect: Callable[..., Peer]) -> None:
+def _whole(name: str, held: bool = False, languages: frozenset[str] | None = None) -> _Replay:
+    """The replay of a whole file by a fixture that permits ``languages`` (None: any)."""
+
+    def replay_whole(connect: Callable[..., Peer]) -> None:
+        peer = connect()
+        backend = peer.enable_jobs()
+        backend.job_languages = languages
+        replay(peer, golden(name), backend, held=held)
+
+    return replay_whole
+
+
+def _negotiation(connect: Callable[..., Peer]) -> None:
     ready, load, response = golden("negotiation")
     peer = connect()
     peer.runner.announce_ready()
@@ -190,7 +195,7 @@ def test_negotiation(connect: Callable[..., Peer]) -> None:
     assert got == response
 
 
-def test_negotiation_refused(connect: Callable[..., Peer]) -> None:
+def _negotiation_refused(connect: Callable[..., Peer]) -> None:
     _ready, load, response = golden("negotiation_refused")
     # A backend without the job interface, refused before it is asked to load.
     assert not hasattr(SmolVLABackend, "run_job")
@@ -202,25 +207,7 @@ def test_negotiation_refused(connect: Callable[..., Peer]) -> None:
     assert peer.runner.state.backend is None
 
 
-@pytest.mark.parametrize("name", ["stt_decode", "tts_synthesis"])
-def test_a_job_runs_to_its_result(connect: Callable[..., Peer], name: str) -> None:
-    peer = connect()
-    replay(peer, golden(name), peer.enable_jobs())
-
-
-def test_cancel(connect: Callable[..., Peer]) -> None:
-    peer = connect()
-    replay(peer, golden("cancel"), peer.enable_jobs(), held=True)
-
-
-def test_refused(connect: Callable[..., Peer]) -> None:
-    peer = connect()
-    backend = peer.enable_jobs()
-    backend.job_languages = frozenset({"ar"})
-    replay(peer, golden("refused"), backend)
-
-
-def test_session_release(connect: Callable[..., Peer]) -> None:
+def _session_release(connect: Callable[..., Peer]) -> None:
     frames = golden("session_release")
     # No lane runs vad_frames yet, so the session's job is the stt_decode
     # golden submit, which has the same identity; every other frame is the file's.
@@ -232,7 +219,7 @@ def test_session_release(connect: Callable[..., Peer]) -> None:
     replay(peer, [submit, *frames[1:]], peer.enable_jobs(), held=True)
 
 
-def test_vad_frames_is_refused_until_it_has_a_lane(connect: Callable[..., Peer]) -> None:
+def _vad_frames_is_refused_until_it_has_a_lane(connect: Callable[..., Peer]) -> None:
     submit = golden("vad_frames")[0]
     peer = connect()
     peer.enable_jobs()
@@ -254,7 +241,7 @@ def test_vad_frames_is_refused_until_it_has_a_lane(connect: Callable[..., Peer])
     }
 
 
-def test_interleaved_progress_submits_yield_no_progress(connect: Callable[..., Peer]) -> None:
+def _interleaved_progress_submits_yield_no_progress(connect: Callable[..., Peer]) -> None:
     submits = [
         frame
         for frame in golden("interleaved_progress")
@@ -276,3 +263,22 @@ def test_interleaved_progress_submits_yield_no_progress(connect: Callable[..., P
         protocol.KIND_JOB_RELEASED,
     ]
     assert kinds == {1: whole_result, 2: whole_result}
+
+
+#: Every golden file and its replay; the tests below are derived from it.
+_REPLAYS: dict[str, _Replay] = {
+    "cancel": _whole("cancel", held=True),
+    "interleaved_progress": _interleaved_progress_submits_yield_no_progress,
+    "negotiation": _negotiation,
+    "negotiation_refused": _negotiation_refused,
+    "refused": _whole("refused", languages=frozenset({"ar"})),
+    "session_release": _session_release,
+    "stt_decode": _whole("stt_decode"),
+    "tts_synthesis": _whole("tts_synthesis"),
+    "vad_frames": _vad_frames_is_refused_until_it_has_a_lane,
+}
+
+
+@pytest.mark.parametrize("name", sorted(_REPLAYS))
+def test_golden_file(connect: Callable[..., Peer], name: str) -> None:
+    _REPLAYS[name](connect)
