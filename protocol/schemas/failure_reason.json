@@ -38,7 +38,20 @@
         "slow_consumer",
         "backend_reset",
         "deployment_retired",
-        "worker_shutdown"
+        "worker_shutdown",
+        "client_cancelled",
+        "idle_timeout",
+        "heartbeat_timeout",
+        "max_duration",
+        "finalize_timeout",
+        "stale_generation",
+        "illegal_transition",
+        "empty_input",
+        "session_count_limit",
+        "admission_closed",
+        "invalid_event",
+        "target_unresolved",
+        "target_mismatch"
       ],
       "description": "Stable failure reason code. The set is union-stable; post-v0.1.0 additions append."
     },

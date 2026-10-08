@@ -723,8 +723,8 @@ mod tests {
                 (ErrorCode::InferenceFailed, reason) => {
                     assert_eq!(reason, Some(FailureReason::Internal));
                 }
-                // Each of these covers several reasons (or, for a cancel,
-                // none), so the code alone implies no reason.
+                // Each of these covers several reasons, or for a cancel one
+                // that is not a failure, so the code alone implies no reason.
                 (
                     ErrorCode::Cancelled | ErrorCode::Unavailable | ErrorCode::ResourceExhausted,
                     r,

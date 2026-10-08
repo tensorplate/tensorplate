@@ -5,23 +5,39 @@
 //
 // One Session call carries one logical session. Each direction numbers its
 // events from 1 without gaps. The client's first event is Open. A refused Open
-// creates no session: the call ends with its status and no event. A session
-// sends Ready first. A session that ends before it is ready sends SessionClosed
-// alone: failed, or closed with reason `client_cancelled` after a Cancel.
-// SessionClosed is always its last event.
+// creates no session: the call ends with no event and a status whose detail is
+// one OpenRefused. A session sends Ready first. A session that ends before it
+// is ready sends SessionClosed alone, whatever ended it: a failure, a Cancel,
+// a timer, or the worker retiring or shutting down. SessionClosed is always
+// its last event.
 //
-// A field number is never reused: a deleted field stays reserved. A receiver
-// ignores a field it does not know and refuses an event whose body, or an Open
-// whose mode, it does not know.
+// Every sequence, every generation and every 64-bit id is at most
+// 9,007,199,254,740,991 (2^53 - 1). A client value that earlier events
+// already determine, such as an Audio's `sample_offset`, must agree with
+// them; one that does not fails the session with reason `invalid_event`.
+//
+// Input that was accepted but not answered when a session ended was not
+// processed: audio after the last FinalTranscript's `end_sample_offset` was
+// not transcribed, and a segment without a SegmentCompleted was not delivered
+// whole. Nothing replays it; sending it to a new session is a new request.
+//
+// Once the schema is frozen, a field number is never reused: a deleted field
+// stays reserved. A receiver ignores a field it does not know and reads an
+// enum value it does not know as that enum's unspecified value. A client
+// ignores a server event whose body it does not know. A server refuses a
+// client event whose body it does not know with reason `invalid_event`, and an
+// Open whose mode it does not know with reason
+// `backend_unsupported_capability`.
 
 syntax = "proto3";
 
 package tensorplate.stream.v1;
 
 service SessionService {
-  // Ordered in both directions. Closing the sending half drains accepted work
-  // and then closes the session; cancelling the call abandons it. A session is
-  // never resumed or replayed on another call.
+  // Ordered in both directions. Closing the sending half finalizes the open
+  // utterance, completes every accepted segment and then closes the session;
+  // cancelling the call abandons it. A session is never resumed or replayed on
+  // another call.
   rpc Session(stream ClientEvent) returns (stream ServerEvent);
 }
 
@@ -72,6 +88,19 @@ enum FailureReason {
   FAILURE_REASON_BACKEND_RESET = 23;
   FAILURE_REASON_DEPLOYMENT_RETIRED = 24;
   FAILURE_REASON_WORKER_SHUTDOWN = 25;
+  FAILURE_REASON_CLIENT_CANCELLED = 26;
+  FAILURE_REASON_IDLE_TIMEOUT = 27;
+  FAILURE_REASON_HEARTBEAT_TIMEOUT = 28;
+  FAILURE_REASON_MAX_DURATION = 29;
+  FAILURE_REASON_FINALIZE_TIMEOUT = 30;
+  FAILURE_REASON_STALE_GENERATION = 31;
+  FAILURE_REASON_ILLEGAL_TRANSITION = 32;
+  FAILURE_REASON_EMPTY_INPUT = 33;
+  FAILURE_REASON_SESSION_COUNT_LIMIT = 34;
+  FAILURE_REASON_ADMISSION_CLOSED = 35;
+  FAILURE_REASON_INVALID_EVENT = 36;
+  FAILURE_REASON_TARGET_UNRESOLVED = 37;
+  FAILURE_REASON_TARGET_MISMATCH = 38;
 }
 
 // The lifecycle states of tensorplate::serving::LogicalSessionState: the same
@@ -109,6 +138,30 @@ enum EndpointReason {
   ENDPOINT_REASON_CLIENT_FINALIZE = 2;
   // The utterance reached its maximum length and was split.
   ENDPOINT_REASON_DURATION_LIMIT = 3;
+  // The client closed its sending half with the utterance open.
+  ENDPOINT_REASON_HALF_CLOSE = 4;
+}
+
+// Whether the server ever reserved a session slot for the call. Always set on
+// a terminal outcome; an outcome without it proves nothing.
+enum Admission {
+  ADMISSION_UNSPECIFIED = 0;
+  // No slot was reserved and no work was started.
+  ADMISSION_NOT_ADMITTED = 1;
+  // A slot was reserved, whether or not the session became ready.
+  ADMISSION_ADMITTED = 2;
+}
+
+// An optional part of the protocol. A server sends an event that belongs to a
+// capability only when the Open declared it, and a client sends one only when
+// Ready lists it. None is defined yet: every event in this file is one that
+// every client and server of stream/v1 handles.
+enum Capability {
+  CAPABILITY_UNSPECIFIED = 0;
+
+  // A cancel scoped to text segments, not defined yet.
+  reserved 1;
+  reserved "CAPABILITY_SEGMENT_CANCEL";
 }
 
 // Raw audio with no container header.
@@ -134,7 +187,29 @@ message InputCredit {
   Usage waiting_segments = 2;
 }
 
-// Limits in force for the session, in whole milliseconds.
+// What the deployment admits in a speech-to-text session.
+message SpeechToTextLimits {
+  // Bounds on the audio one Audio body carries, in whole milliseconds.
+  uint32 min_frame_ms = 1;
+  uint32 max_frame_ms = 2;
+  // Longest utterance; a longer one is split, with
+  // ENDPOINT_REASON_DURATION_LIMIT.
+  uint32 max_utterance_ms = 3;
+}
+
+// What the deployment admits in a text-to-speech session.
+message TextToSpeechLimits {
+  // Bounds on one TextSegment and on the audio it may become.
+  uint32 max_segment_text_bytes = 1;
+  uint32 max_segment_audio_ms = 2;
+  // Bounds on the segments between one Finalize and the next, together.
+  uint32 max_synthesis_text_bytes = 3;
+  uint32 max_synthesis_audio_ms = 4;
+}
+
+// Limits in force for the session: its timers in whole milliseconds, and the
+// deployment's bounds for the session's mode. None of them is zero: every
+// timer runs and every bound of the session's mode is declared.
 message SessionLimits {
   // Longest gap between client events before the session is ended.
   uint32 idle_timeout_ms = 1;
@@ -149,16 +224,39 @@ message SessionLimits {
   uint32 finalize_deadline_ms = 5;
   // Longest time output may wait with none of it delivered.
   uint32 output_stall_timeout_ms = 6;
+  // Set in a speech-to-text session only.
+  SpeechToTextLimits speech_to_text = 7;
+  // Set in a text-to-speech session only.
+  TextToSpeechLimits text_to_speech = 8;
 }
 
-// Why a session ended. `code` and `reason` are the code and the stable
-// snake_case reason of the error that ended it.
+// Why a session ended or an Open was refused.
 message EndCause {
-  ErrorCode code = 1;
-  // Never empty; at most 64 ASCII characters, for example `idle_timeout`.
-  string reason = 2;
-  // Set when `reason` is one of the FailureReason names.
-  FailureReason failure_reason = 3;
+  // Never unspecified.
+  FailureReason reason = 1;
+  // The code the failure reason taxonomy pairs with `reason`
+  // (docs/observability/failure-reasons.md).
+  ErrorCode code = 2;
+  // Optional and not stable, for logs only: at most 64 ASCII characters that
+  // name the check that failed, for example `wrong_input_kind`.
+  string detail = 3;
+}
+
+// The detail of the status that ends a call whose Open was refused; how the
+// status carries it is not fixed yet. Reasons that precede admission:
+// `invalid_event` (a malformed Open), `backend_unsupported_capability` (a
+// mode, language, format or voice the deployment does not declare),
+// `target_unresolved`, `target_mismatch`, `stale_generation`,
+// `admission_closed`, `session_count_limit`, `config_invalid` (the worker
+// serves no generation) and `internal` (a fault before a slot was reserved,
+// such as an exhausted session key space). A reason added later says here
+// whether it precedes admission. The proof that a call was not admitted is
+// `admission`, not membership of this list.
+message OpenRefused {
+  EndCause cause = 1;
+  // Always ADMISSION_NOT_ADMITTED: the same Open may be sent to another
+  // server.
+  Admission admission = 2;
 }
 
 // The server refuses an event of a live session by failing the session:
@@ -170,9 +268,6 @@ message ClientEvent {
   // The id Ready returned. Empty on Open and on a Cancel sent before the
   // client has read Ready, the only other event it may send by then.
   string session_id = 2;
-  // The deployment generation the client addresses, on every event. Never
-  // zero.
-  uint64 generation = 3;
 
   oneof body {
     Open open = 10;
@@ -184,36 +279,72 @@ message ClientEvent {
     TextSegment text_segment = 21;
   }
 
+  // A cancel scoped to text segments, not defined yet.
+  reserved 15;
+  reserved "cancel_segments";
   // Bodies of session modes not defined yet.
   reserved 40 to 99;
+}
+
+// A deployment as the client, or a proxy in front of the server, resolved it.
+message ResolvedTarget {
+  // 1 to 128 characters of [A-Za-z0-9._-], not `.` or `..`.
+  string deployment_id = 1;
+  // The deployment generation addressed. Never zero. The session keeps it:
+  // no later client event names a generation.
+  uint64 generation = 2;
+  // Identity of the descriptor addressed, never empty: `sha256:` and 64
+  // lowercase hexadecimal digits. An Open whose deployment id or digest is
+  // not the served one is refused with reason `target_mismatch`.
+  string descriptor_digest = 3;
+}
+
+// A model by name, for a proxy that resolves it to a ResolvedTarget before the
+// Open reaches a server. A client that sends one also sends it as request
+// metadata, `tensorplate-model` and `tensorplate-model-version`. The proxy
+// that resolves it compares the two and refuses a call in which they differ.
+// The server never reads that metadata: it serves an Open with a resolved
+// target whatever metadata comes with it, and refuses an Open that still
+// carries a selector, with reason `target_unresolved`.
+message Selector {
+  // 1 to 128 ASCII characters.
+  string model = 1;
+  // Optional, at most 128 ASCII characters.
+  string version = 2;
 }
 
 message Open {
   // Operator-only deployment settings; a client never selects them.
   reserved "admission_mode", "test_count", "evidence_ref";
 
-  // 1 to 128 characters of [A-Za-z0-9._-], not `.` or `..`.
-  string deployment_id = 1;
-  // The descriptor identity the client resolved: `sha256:` and 64 lowercase
-  // hexadecimal digits.
-  string descriptor_digest = 2;
+  oneof target {
+    ResolvedTarget resolved = 1;
+    Selector selector = 2;
+  }
   SessionMode mode = 3;
-  // A language the deployment declares, for example `en`.
+  // A language the deployment declares, for example `en`: 1 to 64 ASCII
+  // characters.
   string language = 4;
   // Format of every Audio body, one the deployment declares. Speech-to-text
   // only.
   AudioFormat input_format = 5;
-  // A voice the deployment declares. Text-to-speech only.
+  // A voice the deployment declares: 1 to 64 ASCII characters.
+  // Text-to-speech only.
   string voice = 6;
   // Optional, at most 64 ASCII characters each.
   string trace_id = 7;
   string turn_id = 8;
+  // The capabilities the client has, at most 32. A value the server does not
+  // know is ignored.
+  repeated Capability capabilities = 9;
 }
 
 message Audio {
   bytes data = 1;
   // Samples in `data`: a frame length the deployment admits, never outside 20
-  // to 320 milliseconds of audio.
+  // to 320 milliseconds of audio. Only the last body before a Finalize, or
+  // before the client closes its sending half, may be shorter; it is sent as
+  // it is.
   uint32 sample_count = 2;
   // Samples sent before this body, at the input format's rate. Starts at zero
   // and never resets, across utterances included.
@@ -232,9 +363,15 @@ message TextSegment {
 }
 
 // Completes the current utterance or the submitted synthesis and is answered
-// by a FinalTranscript or by SynthesisCompleted; input sent before that answer
-// is refused. A Finalize repeated before the answer, or received while the
-// session drains, starts nothing and has no answer of its own.
+// by a FinalTranscript or by SynthesisCompleted that names this event's
+// sequence; input sent before that answer is refused. A Finalize repeated
+// before the answer, or received while the session drains, starts nothing and
+// has no answer of its own.
+//
+// In a speech-to-text session it ends the utterance that is open when the
+// server reads it, even one that holds no audio yet, and that utterance's
+// FinalTranscript is the answer. A FinalTranscript still owed to an earlier
+// automatic endpoint comes first and names no Finalize.
 message Finalize {}
 
 // Ends the whole session.
@@ -243,7 +380,7 @@ message Cancel {}
 // Answered by Pong.
 message Ping {}
 
-// Answered by Status.
+// Answered by SessionStatus.
 message StatusRequest {}
 
 message ServerEvent {
@@ -253,7 +390,7 @@ message ServerEvent {
   oneof body {
     Ready ready = 10;
     Accepted accepted = 11;
-    Status status = 12;
+    SessionStatus status = 12;
     Pong pong = 13;
     CancelAccepted cancel_accepted = 14;
     SessionClosed session_closed = 15;
@@ -265,6 +402,9 @@ message ServerEvent {
     SynthesisCompleted synthesis_completed = 25;
   }
 
+  // The answer to a cancel scoped to text segments, not defined yet.
+  reserved 16;
+  reserved "segments_cancelled";
   // Bodies of session modes not defined yet.
   reserved 40 to 99;
 }
@@ -273,7 +413,7 @@ message ServerEvent {
 message Ready {
   // Server-allocated; 1 to 64 ASCII characters.
   string session_id = 1;
-  // The generation the session serves, equal to the Open's.
+  // The generation the session serves, the one its Open named.
   uint64 generation = 2;
   // Identity of the descriptor the session serves.
   string descriptor_digest = 3;
@@ -284,23 +424,37 @@ message Ready {
   AudioFormat input_format = 6;
   // Format of every AudioChunk. Text-to-speech only.
   AudioFormat output_format = 7;
-  Status status = 8;
+  SessionStatus status = 8;
+  // The Open's capabilities that the server has too.
+  repeated Capability capabilities = 9;
 }
 
-// Every client event up to `accepted_sequence` was accepted, the Open and
-// control events included; one Accepted may cover several. Acceptance is not
-// completion.
+// Every Audio and TextSegment up to `accepted_sequence` was accepted; one
+// Accepted may cover several. Other client events are not counted; where one
+// has a reply, that reply answers it. Acceptance is not completion.
+//
+// The server announces returned credit. The next Accepted carries it, and
+// when none is due the server sends one for it, with the `accepted_sequence`
+// of the one before. A client takes its credit from Ready's status and then
+// from each Accepted, and never infers it from time or from task events.
 message Accepted {
+  // Sequence of the last Audio or TextSegment accepted.
   uint64 accepted_sequence = 1;
+  // The budgets as they stood once that event was accepted. Input the client
+  // sent after it is not counted here yet: what the client may still send is
+  // what this leaves, less what it has sent since.
   InputCredit input_credit = 2;
 }
 
 // Numbers only: carries no text, identifier or caller data.
-message Status {
+message SessionStatus {
   SessionState state = 1;
   // Accepted audio bodies or text segments the server still holds, the one
   // being processed included.
   uint32 input_queue_depth = 2;
+  // A reading when this was written, tied to no client sequence. In Ready it
+  // is the session's initial credit; later a client keeps its accounts from
+  // Accepted, not from a status.
   InputCredit input_credit = 3;
   // Undelivered output audio, in bytes.
   Usage output_pcm_bytes = 4;
@@ -310,7 +464,8 @@ message Status {
 
 // Answers Ping. A reply still unsent may stand for several requests, and none
 // is queued while the client leaves its output unread, so the client does not
-// count replies. The same holds for the Status that answers a StatusRequest.
+// count replies. The same holds for the SessionStatus that answers a
+// StatusRequest.
 message Pong {}
 
 // Output stops at once and SessionClosed follows. Not sent for a Cancel that
@@ -324,11 +479,27 @@ message SessionClosed {
   // Absent when the session ended without an error, which is when the client
   // closed its sending half and the session drained.
   EndCause cause = 2;
-  // Highest client sequence the server accepted; at least 1, the Open.
-  uint64 last_accepted_sequence = 3;
-  // Sequence of the last server event before this one; zero when there was
-  // none.
-  uint64 last_produced_sequence = 4;
+  // Always ADMISSION_ADMITTED: a call that was never admitted has no session
+  // and ends with an OpenRefused.
+  Admission admission = 3;
+  // Sequence of the last Audio or TextSegment the server accepted; zero when
+  // it accepted none.
+  uint64 last_accepted_sequence = 4;
+  SessionTotals totals = 5;
+}
+
+// What the session did, as the server counted it. Numbers only.
+message SessionTotals {
+  // Accepted input: audio samples at the input format's rate, or the bytes of
+  // text segments.
+  uint64 input_audio_samples = 1;
+  uint64 input_text_bytes = 2;
+  // Samples in the AudioChunks sent, at the output format's rate.
+  uint64 output_audio_samples = 3;
+  // FinalTranscripts sent.
+  uint32 utterances_completed = 4;
+  // SegmentCompleteds sent.
+  uint32 segments_completed = 5;
 }
 
 // The whole current hypothesis of one utterance. A later revision replaces it;
@@ -342,6 +513,8 @@ message PartialTranscript {
   string text = 3;
 }
 
+// Exactly one per utterance, before the utterance's FinalTranscript. No
+// PartialTranscript of the utterance follows it.
 message EndpointDetected {
   uint64 utterance_id = 1;
   // Input samples up to, not including, this offset belong to the utterance.
@@ -359,13 +532,18 @@ message TranscriptSegment {
   string text = 3;
 }
 
-// Exactly one per utterance, never revised. Empty for silence.
+// Exactly one per utterance, never revised. The utterance's text is its
+// segments' `text` in order with nothing added between them; silence has no
+// segment.
 message FinalTranscript {
   uint64 utterance_id = 1;
-  string text = 2;
-  repeated TranscriptSegment segments = 3;
-  // Same meaning as EndpointDetected.end_sample_offset.
-  uint64 end_sample_offset = 4;
+  repeated TranscriptSegment segments = 2;
+  // Same meaning as EndpointDetected.end_sample_offset: input before it needs
+  // no resending.
+  uint64 end_sample_offset = 3;
+  // Sequence of the Finalize this answers; zero when the utterance ended
+  // without one.
+  uint64 finalize_sequence = 4;
 }
 
 // Chunks of one segment are never interleaved with another segment's. Each
@@ -376,7 +554,7 @@ message AudioChunk {
   // From zero, one more for each chunk of the segment.
   uint32 chunk_index = 2;
   // Samples of the segment sent before this chunk, at `format`'s rate.
-  uint64 sample_offset = 3;
+  uint64 segment_sample_offset = 3;
   // Always Ready.output_format.
   AudioFormat format = 4;
   bytes data = 5;
@@ -395,10 +573,13 @@ message SegmentCompleted {
 }
 
 // Exactly one per finalized synthesis, after the SegmentCompleted of every
-// accepted segment. It answers the Finalize that asked for it.
+// accepted segment. None is sent when the client closes its sending half
+// without a Finalize.
 message SynthesisCompleted {
   // Segments completed since the previous SynthesisCompleted, and their
   // samples together.
   uint32 segment_count = 1;
   uint64 total_samples = 2;
+  // Sequence of the Finalize this answers.
+  uint64 finalize_sequence = 3;
 }

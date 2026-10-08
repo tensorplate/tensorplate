@@ -38,13 +38,30 @@ Rust mirror: [`protocol::failure_reason`](../../protocol/rust/src/failure_reason
 | `backend_reset`                 | sidecar     | error     | yes       | `unavailable`     |
 | `deployment_retired`            | supervision | warning   | yes       | `unavailable`     |
 | `worker_shutdown`               | supervision | warning   | yes       | `unavailable`     |
+| `client_cancelled`              | session     | warning   | no        | `cancelled`       |
+| `idle_timeout`                  | session     | warning   | no        | `timeout`         |
+| `heartbeat_timeout`             | session     | warning   | no        | `timeout`         |
+| `max_duration`                  | session     | warning   | no        | `timeout`         |
+| `finalize_timeout`              | session     | error     | yes       | `timeout`         |
+| `stale_generation`              | session     | warning   | yes       | `not_ready`       |
+| `illegal_transition`            | session     | error     | no        | `not_ready`       |
+| `empty_input`                   | session     | error     | no        | `config_invalid`  |
+| `session_count_limit`           | session     | warning   | yes       | `resource_exhausted` |
+| `admission_closed`              | session     | warning   | yes       | `not_ready`       |
+| `invalid_event`                 | session     | error     | no        | `config_invalid`  |
+| `target_unresolved`             | session     | error     | no        | `unsupported`     |
+| `target_mismatch`               | session     | warning   | yes       | `not_ready`       |
 
-The last five reasons describe how a streaming session ends: the client
-sent input beyond its credit, left output undelivered past the no-progress
-limit, or lost the backend process, deployment generation or worker that
-served it. They are defined ahead of the streaming serving mode that emits
-them. No reason maps to `cancelled`: a requested cancellation is not a
-failure.
+The reasons from `input_credit_exceeded` on describe how a streaming
+session ends or why its opening is refused, and are defined ahead of the
+streaming serving mode that emits them. The stream session envelope
+carries one as the cause of every such end, so the list also names ends
+that are not failures: `client_cancelled` is the only reason that maps to
+`cancelled`, and it records a cancellation the client asked for.
+`invalid_event`, `target_unresolved` and `target_mismatch` have no
+producer in the session layer; the stream listener is what refuses a
+malformed event, an unresolved model selector, and a deployment or
+descriptor digest the worker does not serve.
 
 ## Categories
 
@@ -59,7 +76,7 @@ failure.
 | `heartbeat`   | observability heartbeats                                        |
 | `permission`  | operating system permission                                     |
 | `internal`    | an unexpected internal error                                    |
-| `session`     | one streaming session's own traffic (input credit, output progress) |
+| `session`     | one streaming session's own traffic, timers or target           |
 
 The taxonomy is union-stable: post-v0.1.0 additions append rather than
 rename. Each reason carries an optional bounded `detail` string

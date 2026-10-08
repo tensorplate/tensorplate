@@ -24,6 +24,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Thirteen failure reasons, all in category `session`, name how a
+  streaming session ends or why its opening is refused: `client_cancelled`
+  (code `cancelled`); `idle_timeout`, `heartbeat_timeout`, `max_duration`
+  and `finalize_timeout` (`timeout`); `stale_generation`,
+  `illegal_transition`, `admission_closed` and `target_mismatch`
+  (`not_ready`); `empty_input` and `invalid_event` (`config_invalid`);
+  `session_count_limit` (`resource_exhausted`); and `target_unresolved`
+  (`unsupported`). Ten are the reasons the session layer already ends a
+  session or refuses an open with; `invalid_event`, `target_unresolved`
+  and `target_mismatch` are for the stream listener. They are appended to
+  `protocol/schemas/failure_reason.json`, the Rust taxonomy and the stream
+  envelope's mirror, and `schema_version` stays `0.1`. Nothing puts them
+  on a wire yet, and a Rust reader that predates them rejects a record
+  that carries one. (V030-E04-F02-T02)
 - Record each release worker's native dependency inventory and cache
   provenance, include them in signed release artifacts, and refuse final
   cuts without accepted records for both architectures. Build modes may
@@ -62,6 +76,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The draft stream session envelope
+  (`protocol/proto/tensorplate/stream/v1/session.proto`) changes before any
+  listener serves it. `Accepted` counts input only, and the server sends
+  one whenever input credit returns. An utterance's `EndpointDetected`
+  precedes its `FinalTranscript`; `FinalTranscript` and
+  `SynthesisCompleted` name the `Finalize` they answer; a transcript's text
+  is its segments' text; closing the sending half finalizes the open
+  utterance with the endpoint reason `half_close`. `Ready` reports the
+  deployment's frame, utterance, text and audio bounds and the capabilities
+  in force, and `Open` declares the client's capabilities. `Open` names a
+  resolved target (deployment id, generation, descriptor digest) or a model
+  selector, and is the only client event that names a generation. A refused
+  `Open` ends the call with a typed `OpenRefused` detail, and every
+  terminal outcome states whether a session slot was reserved. An end cause
+  is always a failure reason with its code, and its string is detail only.
+  `SessionClosed` carries the session's totals and no longer the last
+  produced sequence. `Status` is renamed `SessionStatus` and
+  `AudioChunk.sample_offset` is renamed `segment_sample_offset`. Sequences,
+  generations and 64-bit ids are at most 2^53 - 1. A cancel scoped to text segments is
+  reserved without behaviour. The golden frames are recorded again and the
+  conformance test holds the new rules. The envelope is still a draft:
+  `protocol/README.md` says what it now fixes and what may still change.
+  (V030-E04-F02-T02)
 - The agent starts every serving worker as a member generation. A
   `process`-mode agent now runs its workers through one member registry:
   each start takes a new generation from a durable counter, renders it as
