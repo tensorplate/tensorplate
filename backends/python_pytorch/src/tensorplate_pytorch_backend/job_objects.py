@@ -159,11 +159,13 @@ def _utf8(text: str) -> tuple[int, bool]:
 
 def _check_identity(identity: JobIdentity) -> JobIdentity:
     for name in _IDENTITY:
-        _require(getattr(identity, name), f"{name}_zero")
+        _require(_wire_int(getattr(identity, name)), f"{name}_zero")
     return identity
 
 
 def _check_pcm(audio_format: AudioFormat, required: AudioFormat, size: int) -> None:
+    for number in (audio_format.sample_rate_hz, audio_format.channels):
+        _wire_int(number)  # True equals 1, and would pass below for a channel count
     _require(audio_format == required, "audio_format_unsupported")
     _require(size, "pcm_window_empty")
     _require(size % 2 == 0, "pcm_misaligned")
@@ -221,8 +223,9 @@ def read_submit(header: Mapping[str, Any], payload: bytes) -> JobRequest:
     _require(progress_limit <= protocol.LIMIT_PROGRESS_EVENTS_MAX, "progress_limit_too_large")
     takes_language = job_class != protocol.JOB_CLASS_VAD_FRAMES
     takes_voice = job_class == protocol.JOB_CLASS_TTS_SYNTHESIS
-    _require(takes_language or not language, "option_not_applicable")
-    _require(takes_voice or not (voice or speed_milli), "option_not_applicable")
+    # Present is set, whatever the value: an empty or zero option is not an absent one.
+    _require(takes_language or "language" not in options, "option_not_applicable")
+    _require(takes_voice or not {"voice", "speed_milli"} & set(options), "option_not_applicable")
     if takes_language:
         _require(_LANGUAGE.fullmatch(language), "language_invalid")
         _require(len(language) <= protocol.LIMIT_LANGUAGE_TAG_MAX_BYTES, "language_invalid")

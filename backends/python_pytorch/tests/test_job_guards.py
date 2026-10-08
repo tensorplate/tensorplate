@@ -14,14 +14,17 @@ from typing import Any, ClassVar
 
 import pytest
 
-from tensorplate_pytorch_backend import job_objects, jobs, protocol
+from tensorplate_pytorch_backend import codec, job_objects, jobs, protocol
 from tensorplate_pytorch_backend.backends import BackendError, FixtureBackend, NamedTensor
 from test_speech_jobs_golden_replay import WAIT_S, Peer, golden
 from test_speech_jobs_golden_replay import connect as connect  # the fixture
 from test_speech_jobs_runner import (
+    ACCEPTED,
+    ACKNOWLEDGED,
     ERROR_EVENT,
     FAILED,
     assert_quiet,
+    digest,
     ended,
     exchange,
     hold_job,
@@ -64,6 +67,30 @@ def test_a_result_json_could_not_carry_is_malformed(result: object) -> None:
         job_objects.render_result(result)
 
 
+def test_a_boolean_is_not_a_wire_integer_where_one_is_rendered() -> None:
+    flagged = job_objects.AudioFormat(protocol.AUDIO_ENCODING_PCM_S16LE, 24000, True)
+    with pytest.raises(job_objects.MalformedJob):
+        job_objects.render_result(job_objects.AudioChunkResult(bytes(4), 0, flagged))
+    with pytest.raises(job_objects.MalformedJob):
+        job_objects.job_event(protocol.KIND_JOB_ACCEPTED, job_objects.JobIdentity(True, 1, 1))
+
+
+@pytest.mark.parametrize(
+    ("name", "option"),
+    [("stt_decode", "voice"), ("stt_decode", "speed_milli"), ("vad_frames", "language")],
+)
+def test_an_option_its_class_does_not_take_is_refused_though_empty_or_zero(
+    name: str, option: str
+) -> None:
+    header = copy.deepcopy(golden(name)[0])
+    payload = bytes(header["input"]["payload_length"])
+    assert job_objects.read_submit(header, payload).job_class == name
+    header["options"][option] = 0 if option == "speed_milli" else ""
+    with pytest.raises(job_objects.JobRefused) as refused:
+        job_objects.read_submit(header, payload)
+    assert refused.value.reason == "option_not_applicable"
+
+
 def test_a_failed_message_needs_its_error() -> None:
     identity = job_objects.JobIdentity(1, 1, 1)
     with pytest.raises(job_objects.MalformedJob):
@@ -85,6 +112,13 @@ def test_capabilities_that_are_not_a_list_are_refused(connect: Callable[..., Pee
     capabilities = {protocol.CAPABILITY_SPEECH_JOBS_V1: True}
     load = {**golden("negotiation")[1], "capabilities": capabilities}
     assert read_after(peer, load) == ("load_model_response", "a1", "unsupported")
+
+
+def test_an_empty_capability_list_is_refused(connect: Callable[..., Peer]) -> None:
+    peer = connect()
+    load = {**golden("negotiation")[1], "capabilities": []}
+    assert read_after(peer, load) == ("load_model_response", "a1", "config_invalid")
+    assert peer.runner.state.backend is None
 
 
 class _DeclaresVad(FixtureBackend):
@@ -182,6 +216,23 @@ def test_a_job_that_ends_after_the_peer_left_is_not_written(
     assert not peer.thread.is_alive()
     # A write to the socket that was shut down would fail, and the failure be logged.
     assert not caplog.records
+
+
+def test_a_job_cancelled_between_its_take_and_its_backend_call_is_not_run() -> None:
+    written: list[tuple[Any, ...]] = []
+    table = jobs.JobTable(
+        lambda frame, _originated: written.append(digest(frame.header)), lambda _message: None
+    )
+    backend = FixtureBackend()
+    table.open(backend, jobs.LANE_JOB_CLASSES)
+    header = submit(1)
+    assert table.handle(codec.SidecarFrame(header, bytes(header["input"]["payload_length"])))
+    job = table.take()
+    assert isinstance(job, jobs.Job)
+    assert table.handle(codec.SidecarFrame(message(protocol.KIND_JOB_CANCEL, 1)))
+    table.run(job)
+    assert not backend.job_started.is_set()
+    assert written == [(ACCEPTED, 1), (ACKNOWLEDGED, 1), *ended(1, FAILED, "cancelled")]
 
 
 def test_the_fixture_records_a_call_made_while_another_runs() -> None:

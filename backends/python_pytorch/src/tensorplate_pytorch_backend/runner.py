@@ -467,6 +467,8 @@ class SidecarRunner:
         if not isinstance(model_spec, dict):
             raise BackendError(protocol.ERR_CONFIG_INVALID, "load_model requires model_spec")
         enabled = frame.header.get("capabilities", [])
+        if enabled == [] and "capabilities" in frame.header:
+            raise BackendError(protocol.ERR_CONFIG_INVALID, "load_model lists no capability")
         if not isinstance(enabled, list) or any(item not in CAPABILITIES for item in enabled):
             raise BackendError(
                 protocol.ERR_UNSUPPORTED, "load_model enables a capability the sidecar did not list"

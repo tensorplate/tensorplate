@@ -246,7 +246,9 @@ declares its class only when the model's sample rate is the job seam's, so a
 load that enables the capability for a model at another rate is answered
 `unsupported`. Both mappings are provisional. No lane runs `vad_frames`, so a
 submit for it fails with `job_class_unsupported`, and no job sends
-`job_progress`.
+`job_progress`. An integer `job_delay_ms` (0 to 60000) in a fixture
+profile's entry file holds each of its jobs open that long: a test hook,
+and one that any entry file of those profiles can set.
 
 - **Threads.** A reader thread reads frames, answers `health_check`, and
   admits, cancels and releases jobs in the job table (`jobs.py`). The thread

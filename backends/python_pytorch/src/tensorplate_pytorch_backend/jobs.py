@@ -178,7 +178,8 @@ class JobTable:
         try:
             if request is None or backend is None:
                 raise BackendError(protocol.ERR_INTERNAL, "the job was released before it ran")
-            result = backend.run_job(request)
+            if not job.cancelled:  # a cancel can arrive between the take and this call
+                result = backend.run_job(request)
         except Exception as exc:
             failure = _edge(exc)
         with self._lock:

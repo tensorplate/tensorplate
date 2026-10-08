@@ -19,7 +19,8 @@ Jobs
     ``job_started`` is set when a job starts, and a job waits for
     ``job_gate``, when a test assigned one, before it returns. An integer
     ``job_delay_ms`` in the entry JSON holds every job open that long, for a
-    test that drives the sidecar from another process.
+    test that drives the sidecar from another process: a test hook, and one
+    that any entry file of the fixture profiles can set.
 """
 
 from __future__ import annotations
