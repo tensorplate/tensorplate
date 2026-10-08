@@ -6,6 +6,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
+### Fixed
+
+- The C++ workflow's dependency cache is keyed on what vcpkg builds the
+  packages with: the runner image's vcpkg checkout, the compiler binaries
+  and the image's cmake version (which vcpkg runs once it is new enough),
+  as well as the triplet, the manifest features and `vcpkg.json`. The key
+  named only `vcpkg.json`, so when a new runner image brought a vcpkg
+  checkout with changed helper scripts, vcpkg rebuilt gRPC, protobuf and
+  OpenSSL on every build leg that drew that image (41 to 95 minutes each),
+  and the exact key match kept the rebuilt tree from ever being saved. The
+  three build legs now share one tree, saved as soon as the dependencies
+  are installed rather than at the end of a passing job. The workflow also
+  drops vcpkg's removed GitHub Actions cache backend and the cache steps
+  of the clang-tidy and adapter-shell jobs, which named a path vcpkg never
+  wrote and so never saved anything.
+
 ### Added
 
 - Record each release worker's native dependency inventory and cache
