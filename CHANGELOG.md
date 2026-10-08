@@ -25,6 +25,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The Python sidecar acts on the `speech_jobs_v1` job and session messages.
+  Its `ready_event` lists the capability, and a `load_model` that enables it
+  is answered with the `job_classes` the loaded runner runs, or with
+  `unsupported` when it runs none. A reader thread answers `health_check`
+  and admits, cancels and releases jobs while a job runs; one job runs, at
+  most 8 wait, and unary requests share the queue and the thread, so backend
+  calls never overlap. `session_release` cancels a session's unfinished jobs
+  and the sidecar then forgets the session; `unload` fails the jobs still
+  waiting. A write that makes no progress for 5 s ends the connection. The
+  sidecar's job objects replay the typed job seam's vectors, and the golden
+  frames replay against a live runner. The fixture runner profiles run
+  `stt_decode` and `tts_synthesis`. `faster_whisper` runs `stt_decode` and
+  `kokoro` runs `tts_synthesis`, one batch decode or synthesis per job: a
+  Whisper transcript carries text and tokens and no word units, and a Kokoro
+  job returns the segment as one `audio_chunk` and permits only the entry's
+  language and voice at speed 1000. Both mappings are provisional. No lane
+  runs `vad_frames`, and no job sends `job_progress`. (V030-E04-F03-T01)
 - An internal interface, `SessionDispatch`, between a streaming transport
   binding and the work a deployment does for its sessions, with a
   deterministic implementation that needs no backend
