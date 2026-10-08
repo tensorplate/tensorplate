@@ -1,10 +1,10 @@
 # Recorded by record.sh from the text column. Every value is synthetic.
 # Tab-separated: name, message type, the bytes protoc emitted in hex, the message in text format.
 # Single frames, not one session: the control bodies, five ends with a cause (three closed, two
-# failed; one with a detail), an Open with a selector and three refusals of an Open, each the
-# detail of a status and not an event, the largest sequence, the remaining endpoint reason and
-# a transcript interval whose bounds fall between two microseconds (samples 1 up to 3 at
-# 16,000 Hz).
+# failed; one with a detail), an Open with a selector, a refusal of an Open for each reason
+# that precedes admission, each the detail of a status and not an event, the largest sequence,
+# the remaining endpoint reason and a transcript interval whose bounds fall between two
+# microseconds (samples 1 up to 3 at 16,000 Hz).
 
 ping	tensorplate.stream.v1.ClientEvent	0805121373796e7468657469632d73657373696f6e2d316a00	sequence: 5 session_id: "synthetic-session-1" ping {}
 pong	tensorplate.stream.v1.ServerEvent	08066a00	sequence: 6 pong {}
@@ -18,8 +18,12 @@ closed_deployment_retired	tensorplate.stream.v1.ServerEvent	080c7a13080612040818
 closed_idle_timeout	tensorplate.stream.v1.ServerEvent	08037a1108061204081b1007180220022a0308a001	sequence: 3 session_closed { state: SESSION_STATE_CLOSED cause { reason: FAILURE_REASON_IDLE_TIMEOUT code: ERROR_CODE_TIMEOUT } admission: ADMISSION_ADMITTED last_accepted_sequence: 2 totals { input_audio_samples: 160 } }
 failed_internal	tensorplate.stream.v1.ServerEvent	08057a2208071216081410091a1077726f6e675f696e7075745f6b696e64180220032a02102c	sequence: 5 session_closed { state: SESSION_STATE_FAILED cause { reason: FAILURE_REASON_INTERNAL code: ERROR_CODE_INTERNAL detail: "wrong_input_kind" } admission: ADMISSION_ADMITTED last_accepted_sequence: 3 totals { input_text_bytes: 44 } }
 open_selector	tensorplate.stream.v1.ClientEvent	0801523f12260a0f73796e7468657469632d6d6f64656c121373796e7468657469632d76657273696f6e2d3118022202656e320f73796e7468657469635f766f696365	sequence: 1 open { selector { model: "synthetic-model" version: "synthetic-version-1" } mode: SESSION_MODE_TTS_STREAMING language: "en" voice: "synthetic_voice" }
+refused_invalid_event	tensorplate.stream.v1.OpenRefused	0a04082410011001	cause { reason: FAILURE_REASON_INVALID_EVENT code: ERROR_CODE_CONFIG_INVALID } admission: ADMISSION_NOT_ADMITTED
+refused_backend_unsupported_capability	tensorplate.stream.v1.OpenRefused	0a04080710051001	cause { reason: FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY code: ERROR_CODE_UNSUPPORTED } admission: ADMISSION_NOT_ADMITTED
 refused_target_unresolved	tensorplate.stream.v1.OpenRefused	0a04082510051001	cause { reason: FAILURE_REASON_TARGET_UNRESOLVED code: ERROR_CODE_UNSUPPORTED } admission: ADMISSION_NOT_ADMITTED
 refused_target_mismatch	tensorplate.stream.v1.OpenRefused	0a04082610031001	cause { reason: FAILURE_REASON_TARGET_MISMATCH code: ERROR_CODE_NOT_READY } admission: ADMISSION_NOT_ADMITTED
+refused_stale_generation	tensorplate.stream.v1.OpenRefused	0a04081f10031001	cause { reason: FAILURE_REASON_STALE_GENERATION code: ERROR_CODE_NOT_READY } admission: ADMISSION_NOT_ADMITTED
+refused_admission_closed	tensorplate.stream.v1.OpenRefused	0a04082310031001	cause { reason: FAILURE_REASON_ADMISSION_CLOSED code: ERROR_CODE_NOT_READY } admission: ADMISSION_NOT_ADMITTED
 refused_session_count_limit	tensorplate.stream.v1.OpenRefused	0a040822100c1001	cause { reason: FAILURE_REASON_SESSION_COUNT_LIMIT code: ERROR_CODE_RESOURCE_EXHAUSTED } admission: ADMISSION_NOT_ADMITTED
 client_last_sequence	tensorplate.stream.v1.ClientEvent	08ffffffffffffff0f121373796e7468657469632d73657373696f6e2d316a00	sequence: 9007199254740991 session_id: "synthetic-session-1" ping {}
 server_last_sequence	tensorplate.stream.v1.ServerEvent	08ffffffffffffff0f6a00	sequence: 9007199254740991 pong {}

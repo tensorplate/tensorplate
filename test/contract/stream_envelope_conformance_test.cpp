@@ -20,6 +20,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -494,41 +495,54 @@ uint64 SynthesisCompleted.total_samples = 2
 uint64 SynthesisCompleted.finalize_sequence = 3
 )";
 
-// The ends with a cause that the frames show. The code is the one
-// docs/observability/failure-reasons.md pairs with the reason. The outcome is
-// a property of the recordings, the one the session layer gives that end: an
+// The ends with a cause that the frames show, each with its outcome: a
+// property of the recordings, the one the session layer gives that end. An
 // expired timer of an admitted session takes the abort path and so closes it
 // (runtime/src/serving/session/session_manager.cpp); the others are in
 // docs/architecture/serving-worker.md ("How sessions end").
 struct End {
   v1::FailureReason reason;
-  v1::ErrorCode code;
   v1::SessionState state;
 };
 constexpr End kEnds[] = {
-    {v1::FAILURE_REASON_CLIENT_CANCELLED, v1::ERROR_CODE_CANCELLED, v1::SESSION_STATE_CLOSED},
-    {v1::FAILURE_REASON_INPUT_CREDIT_EXCEEDED, v1::ERROR_CODE_RESOURCE_EXHAUSTED,
-     v1::SESSION_STATE_FAILED},
-    {v1::FAILURE_REASON_DEPLOYMENT_RETIRED, v1::ERROR_CODE_UNAVAILABLE, v1::SESSION_STATE_CLOSED},
-    {v1::FAILURE_REASON_IDLE_TIMEOUT, v1::ERROR_CODE_TIMEOUT, v1::SESSION_STATE_CLOSED},
-    {v1::FAILURE_REASON_INTERNAL, v1::ERROR_CODE_INTERNAL, v1::SESSION_STATE_FAILED},
+    {v1::FAILURE_REASON_CLIENT_CANCELLED, v1::SESSION_STATE_CLOSED},
+    {v1::FAILURE_REASON_INPUT_CREDIT_EXCEEDED, v1::SESSION_STATE_FAILED},
+    {v1::FAILURE_REASON_DEPLOYMENT_RETIRED, v1::SESSION_STATE_CLOSED},
+    {v1::FAILURE_REASON_IDLE_TIMEOUT, v1::SESSION_STATE_CLOSED},
+    {v1::FAILURE_REASON_INTERNAL, v1::SESSION_STATE_FAILED},
 };
 
-// The reasons the schema's comment on OpenRefused lists as preceding admission,
-// each with the code failure-reasons.md pairs with it.
-struct Refusal {
-  v1::FailureReason reason;
-  v1::ErrorCode code;
+// The reasons the schema's comment on OpenRefused lists as preceding admission.
+constexpr v1::FailureReason kRefusals[] = {
+    v1::FAILURE_REASON_INVALID_EVENT,       v1::FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY,
+    v1::FAILURE_REASON_TARGET_UNRESOLVED,   v1::FAILURE_REASON_TARGET_MISMATCH,
+    v1::FAILURE_REASON_STALE_GENERATION,    v1::FAILURE_REASON_ADMISSION_CLOSED,
+    v1::FAILURE_REASON_SESSION_COUNT_LIMIT,
 };
-constexpr Refusal kRefusals[] = {
-    {v1::FAILURE_REASON_INVALID_EVENT, v1::ERROR_CODE_CONFIG_INVALID},
-    {v1::FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY, v1::ERROR_CODE_UNSUPPORTED},
-    {v1::FAILURE_REASON_TARGET_UNRESOLVED, v1::ERROR_CODE_UNSUPPORTED},
-    {v1::FAILURE_REASON_TARGET_MISMATCH, v1::ERROR_CODE_NOT_READY},
-    {v1::FAILURE_REASON_STALE_GENERATION, v1::ERROR_CODE_NOT_READY},
-    {v1::FAILURE_REASON_ADMISSION_CLOSED, v1::ERROR_CODE_NOT_READY},
-    {v1::FAILURE_REASON_SESSION_COUNT_LIMIT, v1::ERROR_CODE_RESOURCE_EXHAUSTED},
-};
+
+// The code the taxonomy pairs with each reason, both as the mirrors name them: the first
+// and last cells of the "## Reasons" table of docs/observability/failure-reasons.md, which
+// protocol/rust/tests/schema_enum_drift.rs holds to the taxonomy.
+std::map<std::string, std::string> taxonomy_codes() {
+  std::string doc =
+      read_file(std::string{TP_SOURCE_DIR} + "/docs/observability/failure-reasons.md");
+  doc.erase(0, std::min(doc.find("## Reasons"), doc.size()));
+  doc.erase(std::min(doc.find("\n## ", 1), doc.size()));
+  std::map<std::string, std::string> codes;
+  std::istringstream lines(doc);
+  for (std::string line; std::getline(lines, line);) {
+    // "| `reason` | category | severity | retryable | `code` |", cut at each backtick.
+    std::vector<std::string> parts;
+    std::istringstream cells(line);
+    for (std::string part; std::getline(cells, part, '`');) {
+      parts.push_back(part);
+    }
+    if (line.starts_with("| `") && parts.size() == 5) {
+      codes["FAILURE_REASON_" + upper(parts[1])] = "ERROR_CODE_" + upper(parts[3]);
+    }
+  }
+  return codes;
+}
 
 // No default, and -Wswitch is an error here whatever the build's flags: a
 // state added to the header stops this file compiling until it is listed.
@@ -596,16 +610,16 @@ TEST(StreamEnvelope, GoldenFramesDecodeAndReencodeByteExact) {
 }
 
 TEST(StreamEnvelope, EveryFieldAndEnumValueHasAGoldenFrame) {
-  std::set<std::string> used;
+  std::set<std::string> used;      // by a frame of stream/v1's own type, which names its values
+  std::set<std::string> borrowed;  // fields stream/v1 reads from a frame of extension.proto
   for (const auto& [frame, message] : golden_messages()) {
-    // Only a frame of stream/v1's own type is written with the names of its values.
-    const bool names_values = schema_type(frame) != nullptr;
-    for_each_message(*message, [&used, names_values](const pb::Message& part) {
+    const bool own = schema_type(frame) != nullptr;
+    for_each_message(*message, [&used, &borrowed, own](const pb::Message& part) {
       std::vector<const pb::FieldDescriptor*> fields;
       part.GetReflection()->ListFields(part, &fields);
       for (const auto* field : fields) {
-        used.emplace(field->full_name());
-        if (names_values && field->cpp_type() == pb::FieldDescriptor::CPPTYPE_ENUM &&
+        (own ? used : borrowed).emplace(field->full_name());
+        if (own && field->cpp_type() == pb::FieldDescriptor::CPPTYPE_ENUM &&
             !field->is_repeated()) {
           used.emplace(part.GetReflection()->GetEnum(part, field)->full_name());
         }
@@ -623,9 +637,17 @@ TEST(StreamEnvelope, EveryFieldAndEnumValueHasAGoldenFrame) {
     }
     for (int field = 0; field < message->field_count(); ++field) {
       const std::string name{message->field(field)->full_name()};
-      EXPECT_TRUE(used.contains(name)) << "no golden frame sets " << name;
+      EXPECT_TRUE(used.contains(name) || borrowed.contains(name))
+          << "no golden frame sets " << name;
+      if (used.contains(name)) {
+        borrowed.erase(name);
+      }
     }
   }
+  // Capability names no value, so only a frame of extension.proto can list one. No other
+  // field is left to such a frame.
+  const std::string package{schema()->package()};
+  EXPECT_EQ(borrowed, (std::set{package + ".Open.capabilities", package + ".Ready.capabilities"}));
 
   // A frame is what ties a value's name to its number. The three mirrors are
   // tied to their sources instead, and zero is never on the wire.
@@ -644,9 +666,12 @@ TEST(StreamEnvelope, EveryFieldAndEnumValueHasAGoldenFrame) {
 }
 
 TEST(StreamEnvelope, GoldenFramesKeepTheStatedValueRules) {
+  const auto codes = taxonomy_codes();
+  std::set<v1::FailureReason> ended;    // reasons of the SessionCloseds
+  std::set<v1::FailureReason> refused;  // and of the OpenRefuseds
   for (const auto& [frame, message] : golden_messages()) {
     SCOPED_TRACE(frame.file + ": " + frame.name);
-    for_each_message(*message, [](const pb::Message& part) {
+    for_each_message(*message, [&codes, &ended, &refused](const pb::Message& part) {
       std::vector<const pb::FieldDescriptor*> fields;
       part.GetReflection()->ListFields(part, &fields);
       for (const auto* field : fields) {
@@ -665,33 +690,43 @@ TEST(StreamEnvelope, GoldenFramesKeepTheStatedValueRules) {
                     closed->state() == v1::SESSION_STATE_FAILED);
         EXPECT_TRUE(closed->state() != v1::SESSION_STATE_FAILED || closed->has_cause())
             << "a failed session names its cause";
-        EXPECT_NE(closed->admission(), v1::ADMISSION_UNSPECIFIED) << "admission is always set";
+        EXPECT_EQ(closed->admission(), v1::ADMISSION_ADMITTED) << "a session is always admitted";
         if (closed->has_cause()) {
           const auto* end = std::find_if(
               std::begin(kEnds), std::end(kEnds),
               [closed](const End& known) { return known.reason == closed->cause().reason(); });
-          ASSERT_NE(end, std::end(kEnds)) << "list this end in kEnds with its code and outcome";
-          EXPECT_EQ(closed->cause().code(), end->code);
+          ASSERT_NE(end, std::end(kEnds)) << "list this end in kEnds with its outcome";
           EXPECT_EQ(closed->state(), end->state);
+          ended.insert(end->reason);
         }
       }
-      if (const auto* refused = dynamic_cast<const v1::OpenRefused*>(&part)) {
-        EXPECT_EQ(refused->admission(), v1::ADMISSION_NOT_ADMITTED);
-        const auto* refusal = std::find_if(
-            std::begin(kRefusals), std::end(kRefusals),
-            [refused](const Refusal& known) { return known.reason == refused->cause().reason(); });
-        ASSERT_NE(refusal, std::end(kRefusals)) << "not a reason that precedes admission";
-        EXPECT_EQ(refused->cause().code(), refusal->code);
+      if (const auto* refusal = dynamic_cast<const v1::OpenRefused*>(&part)) {
+        EXPECT_EQ(refusal->admission(), v1::ADMISSION_NOT_ADMITTED);
+        EXPECT_NE(std::find(std::begin(kRefusals), std::end(kRefusals), refusal->cause().reason()),
+                  std::end(kRefusals))
+            << "not a reason that precedes admission";
+        refused.insert(refusal->cause().reason());
       }
       if (const auto* cause = dynamic_cast<const v1::EndCause*>(&part)) {
         EXPECT_NE(cause->reason(), v1::FAILURE_REASON_UNSPECIFIED);
-        EXPECT_NE(cause->code(), v1::ERROR_CODE_UNSPECIFIED);
+        const auto paired = codes.find(v1::FailureReason_Name(cause->reason()));
+        ASSERT_NE(paired, codes.end()) << "failure-reasons.md has no row for the reason";
+        EXPECT_EQ(v1::ErrorCode_Name(cause->code()), paired->second);
         const std::string& detail = cause->detail();
         const auto printable = [](char c) { return c >= ' ' && c <= '~'; };
         EXPECT_TRUE(detail.size() <= 64 && std::all_of(detail.begin(), detail.end(), printable))
             << "not at most 64 ASCII characters: " << detail;
       }
     });
+  }
+  // A row no frame uses could be wrong and nothing would show it.
+  for (const End& end : kEnds) {
+    EXPECT_TRUE(ended.contains(end.reason))
+        << "no frame ends with " << v1::FailureReason_Name(end.reason);
+  }
+  for (const v1::FailureReason reason : kRefusals) {
+    EXPECT_TRUE(refused.contains(reason))
+        << "no frame refuses an Open with " << v1::FailureReason_Name(reason);
   }
 }
 
@@ -781,7 +816,6 @@ TEST(StreamEnvelope, SessionScriptsAreSequencedAndAddressed) {
     const v1::SessionClosed& closed = script.back().server->session_closed();
     EXPECT_EQ(closed.state(), v1::SESSION_STATE_CLOSED);
     EXPECT_FALSE(closed.has_cause());
-    EXPECT_EQ(closed.admission(), v1::ADMISSION_ADMITTED);
     EXPECT_EQ(closed.last_accepted_sequence(), accepted.accepted_sequence());
     // A property of the recordings: all the input sent was accepted, so the totals count all of it.
     ASSERT_FALSE(inputs.empty());
@@ -807,11 +841,13 @@ TEST(StreamEnvelope, SpeechToTextScriptKeepsSampleAndTimeUnits) {
   const std::uint64_t sample_bytes = bytes_per_sample(format);
   ASSERT_NE(rate, 0U);
   ASSERT_NE(sample_bytes, 0U);
-  // The frame lengths the deployment admits, which are never outside 20 to 320 ms.
+  // What the deployment admits: a frame is never outside 20 to 320 ms, and the bundle
+  // manifest schema lets no utterance be longer than 30,000 ms.
   const v1::SpeechToTextLimits& limits = script[1].server->ready().limits().speech_to_text();
   EXPECT_GE(limits.min_frame_ms(), 20U);
   EXPECT_LE(limits.min_frame_ms(), limits.max_frame_ms());
   EXPECT_LE(limits.max_frame_ms(), 320U);
+  EXPECT_LE(limits.max_utterance_ms(), 30'000U);
 
   // Events the client has still to send: after the last, it closes its sending half.
   auto client_events = std::count_if(script.begin(), script.end(),
@@ -868,6 +904,8 @@ TEST(StreamEnvelope, SpeechToTextScriptKeepsSampleAndTimeUnits) {
       ended = endpoint->utterance_id();
       EXPECT_GE(endpoint->end_sample_offset(), covered);
       EXPECT_LE(endpoint->end_sample_offset(), sent);
+      EXPECT_LE((endpoint->end_sample_offset() - covered) * 1000, limits.max_utterance_ms() * rate)
+          << "a longer utterance than the deployment admits";
       ended_by = endpoint->reason();
       EXPECT_TRUE(ended_by != v1::ENDPOINT_REASON_HALF_CLOSE || client_events == 0)
           << "a half-close before the client's last event";
