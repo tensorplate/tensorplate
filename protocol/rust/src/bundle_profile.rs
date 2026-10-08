@@ -13,6 +13,7 @@ use serde::de::{DeserializeOwned, Deserializer, IgnoredAny};
 use serde::{Deserialize, Serialize};
 
 use crate::backend_descriptor::ComputeType;
+use crate::bundle::digests_equal;
 use crate::bundle_manifest::BundleArtifact;
 use crate::json_numbers;
 use crate::member_quota::MAX_MEMBER_SESSIONS;
@@ -217,7 +218,8 @@ pub(crate) fn check_model_class(class: ModelClass) -> Result<(), BundleProfileEr
 }
 
 /// Ends manifest validation, so a declaration is refused as reserved only
-/// once the manifest's own rules pass. Artifact files are not read first.
+/// once the manifest's own rules pass. Artifact digests are not yet
+/// verified against the files.
 pub(crate) fn check_variant_kind(profile: &BundleProfile) -> Result<(), BundleProfileError> {
     match &profile.lineage {
         Some(lineage) => Err(rule(
@@ -363,7 +365,8 @@ pub struct KnownBase {
     pub version: String,
     pub manifest_digest: String,
     /// The level the base holds on the target's platform support row, not
-    /// the one its manifest asks for.
+    /// the one its manifest asks for. A base on a planned row, or on no
+    /// row, has no level here and must not be listed.
     pub support_level: SupportLevel,
     /// Identities other bundles already declared on this base. An entry
     /// carries no declarer, so the caller leaves out what the judged bundle
@@ -724,7 +727,7 @@ impl BundleProfile {
         let Some(base) = bases.iter().find(|b| {
             b.name == declared.name
                 && b.version == declared.version
-                && b.manifest_digest == declared.manifest_digest
+                && digests_equal(&b.manifest_digest, &declared.manifest_digest)
         }) else {
             return Err(rule(
                 BundleRuleCode::BaseReference,
@@ -753,7 +756,7 @@ impl BundleProfile {
                     BundleRuleCode::VariantIdentity,
                     "variant_identity.revision",
                     format!(
-                        "another bundle already declares `{}` revision `{}` on this base",
+                        "`{}` revision `{}` is already declared on this base",
                         identity.id, identity.revision
                     ),
                 ));

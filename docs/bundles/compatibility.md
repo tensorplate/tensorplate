@@ -161,8 +161,8 @@ posture. No new shared wire error enum is required.
 | `bundle_r12_explicit_precision` | Speech uses `auto`, including an omitted precision hint. |
 | `bundle_r8_base_reference` | `base_model_ref` and `variant_identity` are not declared together, or the base reference names the declaring bundle's own name and version. From the lineage check: no known base has that name, version and manifest digest. |
 | `bundle_r8_variant_identity` | From the lineage check only: another bundle already declares this variant id and revision on the base, or the id with another kind. |
-| `bundle_r8_variant_support_level` | From the lineage check only: the variant asks for more support than its base holds. |
-| `bundle_r8_reserved_variant` | The manifest declares a variant. Every variant kind is reserved. The refusal ends manifest validation: the manifest's other rules and its warmup artifact references are judged first, and artifact files, artifact digests and a declared `manifest_digest` are not checked for a variant. |
+| `bundle_r8_variant_support_level` | From the lineage check only: the variant asks for more support than its base holds, or declares no `support_level`. |
+| `bundle_r8_reserved_variant` | The manifest declares a variant. Every variant kind is reserved. The refusal ends manifest validation: the manifest's other rules and its warmup artifact references are judged first, and the form of its artifact digests is checked, but a variant's artifact digests are not verified against the files and a declared `manifest_digest` is not compared. |
 
 The parser has no facts about other bundles, so a variant declaration that
 reaches it and is otherwise valid always ends in `bundle_r8_reserved_variant`.

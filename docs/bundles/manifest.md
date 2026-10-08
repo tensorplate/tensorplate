@@ -258,7 +258,7 @@ only through the bundle parser; `decode_with_version_check` refuses them.
 | `memory_budget_breakdown_bytes` | The same line items summed across domains; when both are present it must equal the per-line sum. It is a reporting total, not an admission input. |
 | `max_concurrent_sessions` | Declared upper bound, 1–2048. |
 | `degraded_profile` | `null` for no quality-changing degradation, or a reserved profile id. |
-| `base_model_ref` | The base bundle a variant derives from: `{name, version, manifest_digest}`. `name` and `version` are the base manifest's own. `manifest_digest` is the canonical digest the parser computes for the base manifest and `tensorplate-bundle-tool` prints (`sha256:` and 64 lowercase hex digits), whether or not the base declares the optional top-level `manifest_digest`; the deployment descriptor calls the same value `bundle_digest`. Declared together with `variant_identity`. |
+| `base_model_ref` | The base bundle a variant derives from: `{name, version, manifest_digest}`. `name` and `version` are the base manifest's own. `manifest_digest` is the canonical digest the parser computes for the base manifest and `tensorplate-bundle-tool` prints (`sha256:` and 64 lowercase hex digits), whether or not the base declares the optional top-level `manifest_digest`; the deployment descriptor calls the same value `bundle_digest`, and it is what `tensorplate status` and `tensorplate deploy` report as the bundle's digest. Declared together with `variant_identity`. |
 | `variant_identity` | `{id, revision, variant_kind}`: a `lower_snake_case` id that stays the same across revisions of the variant, a revision of at most 64 bytes (alphanumeric segments joined by `.`, `_` or `-`), and one of the three kinds below. |
 
 Manifest-local [deployment rules](compatibility.md#format-02-manifest-rules)
@@ -281,8 +281,9 @@ Every kind is reserved. The schema accepts the declaration and the parser
 validates it, and then refuses the bundle with
 `bundle_r8_reserved_variant`: no variant bundle deploys in this release,
 whatever its kind. The refusal ends manifest validation, so the manifest's
-other rules are reported first and a variant's artifact files and digests are
-never read. A voice a TTS bundle ships as one of its own hashed
+other rules are reported first. The form of a variant's artifact digests is
+still checked, but they are not verified against the files and a declared
+`manifest_digest` is not compared. A voice a TTS bundle ships as one of its own hashed
 artifacts and lists under `voices` is part of that bundle, not a variant of
 it, and needs no lineage declaration.
 

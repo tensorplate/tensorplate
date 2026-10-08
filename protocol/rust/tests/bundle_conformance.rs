@@ -539,6 +539,15 @@ fn manifest_rule_fixture_pairs_retain_typed_reasons() {
                 counts[0] += 1;
             }
             Some(code) => {
+                // The schema accepts every committed variant declaration;
+                // the refusals are the reader's.
+                if code.starts_with("bundle_r8_") {
+                    assert!(
+                        validator.is_valid(&read(&path.join("manifest.json"))),
+                        "{}",
+                        path.display()
+                    );
+                }
                 match parse_bundle(&path).expect_err("reject fixture") {
                     ParseError::ManifestSemantics(e) => assert_eq!(
                         e.rule_code()
@@ -754,6 +763,49 @@ fn variant_lineage_clauses_hold_at_their_boundaries() {
     assert!(base.lineage.is_none());
     base.check_lineage(&[])
         .expect("no declaration, nothing to judge");
+}
+
+#[test]
+fn variant_lineage_resolves_a_base_by_digest_and_refuses_a_recorded_identity() {
+    use tensorplate_protocol::BundleRuleCode as Rule;
+    let bases = known_bases();
+    let judge = |edit: &dyn Fn(&mut serde_json::Value),
+                 bases: &[tensorplate_protocol::KnownBase]| {
+        let mut manifest = rule_manifest("invalid_r8_reserved_speaker_embedding");
+        edit(&mut manifest);
+        lineage_profile(&manifest)
+            .check_lineage(bases)
+            .map_err(|e| e.rule_code().expect("a rule refusal"))
+    };
+    let known = bases[0].variants[0].clone();
+    let recorded = |m: &mut serde_json::Value| {
+        m["variant_identity"] = serde_json::json!({
+            "id": known.id,
+            "revision": known.revision,
+            "variant_kind": known.kind.as_str(),
+        });
+    };
+    assert_eq!(
+        judge(&recorded, &bases),
+        Err(Rule::VariantIdentity),
+        "a recorded identity is refused again; the caller leaves out the judged bundle's own record"
+    );
+    let mut decoy_first = bases.clone();
+    decoy_first.insert(0, bases[0].clone());
+    decoy_first[0].manifest_digest = format!("sha256:{}", "0".repeat(64));
+    decoy_first[0].variants[0].id = "guest_voice".into();
+    assert_eq!(
+        judge(&|_| {}, &decoy_first),
+        Ok(()),
+        "a base of the same name and version with another digest is another base"
+    );
+    let mut uppercase = bases.clone();
+    uppercase[0].manifest_digest = uppercase[0].manifest_digest.to_uppercase();
+    assert_eq!(
+        judge(&|_| {}, &uppercase),
+        Ok(()),
+        "digests compare as the agent compares them"
+    );
 }
 
 #[test]

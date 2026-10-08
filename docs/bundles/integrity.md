@@ -34,6 +34,11 @@ so two manifest files whose only difference is whitespace and field
 ordering produce the same digest as long as the underlying JSON object is
 the same.
 
+Only the top-level `manifest_digest` key is removed. A nested key of the
+same name, such as `base_model_ref.manifest_digest`, is part of the value
+that is hashed, so a tool that strips by key name at every depth computes a
+different digest.
+
 Pseudocode:
 
 ```text
