@@ -14,7 +14,10 @@
   "features": {
     "streaming-grpc": {
       "description": "Static gRPC/protobuf transport and matching code generators for streams.",
-      "dependencies": ["grpc", "protobuf"]
+      "dependencies": [
+        "grpc",
+        "protobuf"
+      ]
     },
     "tensorrt-adapter": {
       "description": "Build the TensorRT backend adapter (system-provided TensorRT, not vendored).",
