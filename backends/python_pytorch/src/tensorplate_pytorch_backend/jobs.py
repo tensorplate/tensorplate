@@ -191,7 +191,7 @@ class JobTable:
             request = job_objects.read_submit(header, frame.payload)
         except job_objects.JobRefused as exc:
             refusal = exc.reason
-        identity = request.identity if request else job_objects.read_identity(header)
+        identity = job_objects.read_identity(header)
         if request is None:
             job = Job(identity, job_objects.JobEventSequence(identity))
         else:
@@ -228,8 +228,7 @@ class JobTable:
             self._end(job, protocol.ERR_CANCELLED)
 
     def _release_session(self, session: tuple[int, int]) -> None:
-        if session in self._releasing:
-            return
+        # A repeat while the release is pending finds every job cancelled already.
         self._releasing.add(session)
         for job in [job for job in self._jobs.values() if job.session == session]:
             self._cancel(job)

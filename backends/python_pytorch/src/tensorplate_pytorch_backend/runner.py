@@ -271,7 +271,10 @@ class SidecarRunner:
         except Exception as exc:
             logger.error("sidecar runner exiting on unexpected error: %s", sanitize.describe(exc))
         finally:
-            # After its last frame the backend thread still answers what was read.
+            # At the frame limit the backend thread still answers what was read;
+            # otherwise the connection is over and what waits is dropped unanswered.
+            if count != limit:
+                self._end_connection()
             self._table.stop(drain=count == limit)
 
     def _route(self, frame: codec.SidecarFrame) -> None:

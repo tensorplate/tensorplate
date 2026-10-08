@@ -166,13 +166,15 @@ def test_unload_fails_waiting_jobs_and_disables_job_messages(connect: Callable[.
     peer = connect()
     _backend, gate = hold_job(peer)
     assert read_after(peer, submit(2)) == (ACCEPTED, 2)
-    unload = message(protocol.KIND_UNLOAD)
+    prime, unload = message(protocol.KIND_PRIME), message(protocol.KIND_UNLOAD)
+    peer.send(prime)  # a unary request waiting in the lane is not a job to fail
     peer.send(unload)
     assert read(peer, 2) == ended(2, FAILED, "unavailable", "backend_unavailable")
     peer.send(submit(3))
     gate.set()
-    assert read(peer, 4) == [
+    assert read(peer, 5) == [
         *ended(1),
+        ("prime_response", prime["message_id"]),
         ("unload_response", unload["message_id"]),
         (ERROR_EVENT, "a3", "unsupported"),
     ]
@@ -341,6 +343,9 @@ def test_a_failed_job_says_nothing_of_the_request_or_the_exception(
     ]
     assert failed["error"]["message"] == sanitize.MESSAGES[failure[0]]
     assert health["health"]["last_error"] == last_error
+    # Only an exception that is not the backend's own typed error is logged, by class.
+    logged = last_error is not None and not isinstance(outcome, BackendError)
+    assert ("sidecar job failed: " in caplog.text) == logged
     said = json.dumps([failed, released, health]) + caplog.text
     assert "canary" not in said.lower()
 
