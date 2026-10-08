@@ -12,7 +12,9 @@ host CI). The TorchScript / SmolVLA backend lands in V01-E05-F05.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
+
+from tensorplate_pytorch_backend.job_objects import JobRequest, JobResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,4 +108,20 @@ class Backend(Protocol):
     def runtime_capability(self) -> RuntimeCapability | None: ...
 
 
-__all__ = ["Backend", "BackendError", "NamedTensor", "RuntimeCapability"]
+@runtime_checkable
+class JobBackend(Protocol):
+    """What a backend adds to run ``speech_jobs_v1`` jobs; optional.
+
+    ``job_classes`` is asked after ``load``. ``run_job`` shares the thread of
+    the lifecycle calls. ``permits_job`` runs on another thread, so it reads
+    only what ``load`` established.
+    """
+
+    def job_classes(self) -> tuple[str, ...]: ...
+
+    def permits_job(self, request: JobRequest) -> bool: ...
+
+    def run_job(self, request: JobRequest) -> JobResult: ...
+
+
+__all__ = ["Backend", "BackendError", "JobBackend", "NamedTensor", "RuntimeCapability"]

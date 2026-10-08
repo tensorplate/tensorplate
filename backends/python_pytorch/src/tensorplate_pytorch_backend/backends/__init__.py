@@ -3,6 +3,7 @@
 from tensorplate_pytorch_backend.backends.base import (
     Backend,
     BackendError,
+    JobBackend,
     NamedTensor,
     RuntimeCapability,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "CudaFixtureBackend",
     "FasterWhisperBackend",
     "FixtureBackend",
+    "JobBackend",
     "KokoroBackend",
     "MpsFixtureBackend",
     "NamedTensor",
