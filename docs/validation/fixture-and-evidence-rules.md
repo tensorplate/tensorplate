@@ -94,9 +94,10 @@ not style.
     authors, the branch checked out or named with `--branch`, and the pull
     request text it is given. It works in two tiers:
 
-    - **Evidence**: recorded evidence and fixtures of real machines,
-      under `docs/validation/evidence/` and `test/platform/` in any letter
-      case, go through `check-evidence-publication.sh` as rule 3
+    - **Evidence**: recorded evidence and fixtures from real machines or
+      dependency tools, under `docs/validation/evidence/`, `test/platform/`
+      and `test/release/fixtures/native-sbom/` in any letter case, go through
+      `check-evidence-publication.sh` as rule 3
       describes: patterns only in CI, and with the private literal file
       when `--literals FILE` is given. They go through the source policy
       as well, and a symlink standing in for one of these directories is
