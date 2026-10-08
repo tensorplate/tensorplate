@@ -240,5 +240,60 @@ TEST(BoundedOutputQueue, ProducerAndTransportThreadsKeepOrderAndBudget) {
   EXPECT_FALSE(queue.stalled_since());
   EXPECT_FALSE(queue.take());
 }
+
+OutputItem control_item(std::uint64_t bytes, std::uint64_t key = 0) {
+  return OutputItem{OutputKind::Control, bytes, key, std::make_unique<FakeBody>("control")};
+}
+
+TEST(BoundedOutputQueue, ConsumerIsCalledOutsideTheLockForEachQueuedOffer) {
+  const testing::FakeSchedulerClock clock;
+  const auto budgets = SessionBudgets::for_text_input(48'000).value();
+  BoundedOutputQueue queue(budgets);
+  int calls = 0;
+  std::uint64_t unsent_bytes = 0;
+  // Reading the queue from the callback would deadlock under its lock.
+  ASSERT_TRUE(queue.set_consumer([&] {
+    ++calls;
+    unsent_bytes = queue.metadata_usage().used();
+  }));
+  EXPECT_EQ(calls, 0);
+
+  auto first = control_item(16, 7);
+  ASSERT_EQ(queue.offer(first, clock.now()).value(), OutputOffer::Queued);
+  EXPECT_EQ(calls, 1);
+  EXPECT_EQ(unsent_bytes, 16U);
+
+  // Nothing new became takeable: the consumer already knows of the item.
+  auto newer = control_item(16, 7);
+  ASSERT_EQ(queue.offer(newer, clock.now()).value(), OutputOffer::Replaced);
+  auto too_much = control_item(budgets.output_metadata_bytes());
+  ASSERT_EQ(queue.offer(too_much, clock.now()).value(), OutputOffer::Full);
+  EXPECT_EQ(calls, 1);
+}
+
+TEST(BoundedOutputQueue, ConsumerRegisteredLateIsCalledAtOnceAndASecondIsRefused) {
+  const testing::FakeSchedulerClock clock;
+  BoundedOutputQueue queue(SessionBudgets::for_text_input(48'000).value());
+  auto waiting = control_item(16);
+  ASSERT_EQ(queue.offer(waiting, clock.now()).value(), OutputOffer::Queued);
+
+  EXPECT_FALSE(queue.set_consumer({}));
+  int calls = 0;
+  std::uint64_t unsent_bytes = 0;
+  // Called on this thread, and still outside the queue's lock.
+  ASSERT_TRUE(queue.set_consumer([&] {
+    ++calls;
+    unsent_bytes = queue.metadata_usage().used();
+  }));
+  EXPECT_EQ(calls, 1);
+  EXPECT_EQ(unsent_bytes, 16U);
+
+  int other_calls = 0;
+  EXPECT_FALSE(queue.set_consumer([&] { ++other_calls; }));
+  auto next = control_item(16);
+  ASSERT_EQ(queue.offer(next, clock.now()).value(), OutputOffer::Queued);
+  EXPECT_EQ(calls, 2);
+  EXPECT_EQ(other_calls, 0);
+}
 }  // namespace
 }  // namespace tensorplate::serving

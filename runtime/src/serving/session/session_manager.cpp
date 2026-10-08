@@ -219,7 +219,7 @@ std::optional<ManagedSessionTransition> SessionManager::apply_locked(std::uint64
     entry.output->suppress();
   }
   const auto status = status_of(entry);
-  return ManagedSessionTransition{key, after, *effects, entry.cause, status, entry.output};
+  return ManagedSessionTransition{key, event, after, *effects, entry.cause, status, entry.output};
 }
 
 Result<ManagedSessionTransition> SessionManager::apply(std::uint64_t session_key,
@@ -289,9 +289,11 @@ Result<ManagedSessionTransition> SessionManager::apply_event(std::uint64_t sessi
 
   ManagedSessionTransition transition;
   std::optional<Error> refusal;
+  bool reactivated = false;
   {
     std::lock_guard guard(mu_);
     const auto it = entries_.find(session_key);
+    const auto before = it->second.machine.state();
     std::optional<ManagedSessionTransition> result;
     if (bytes) {
       refusal = charge_accepted_input(it->second, *bytes);
@@ -310,6 +312,8 @@ Result<ManagedSessionTransition> SessionManager::apply_event(std::uint64_t sessi
                                     "failure_transition_refused"));
     }
     transition = *result;
+    reactivated =
+        !refusal && event == LogicalSessionEvent::FinalizeCompleted && before != transition.state;
     if (transition.effects.contains(LogicalSessionEffect::ReleaseSlot)) {
       tombstones_.record(session_key, it->second.machine.generation(), transition.state,
                          transition.cause, clock_.now());
@@ -317,7 +321,7 @@ Result<ManagedSessionTransition> SessionManager::apply_event(std::uint64_t sessi
     }
   }
   cv_.notify_one();
-  emit(transition);
+  emit(transition, reactivated);
   if (refusal) {
     return unexpected(*refusal);
   }
@@ -494,19 +498,21 @@ Result<LogicalSessionStatus> SessionManager::update_credit(std::uint64_t session
   std::lock_guard serial(serial_mu_);
   std::optional<Error> defect;
   std::optional<ManagedSessionTransition> failed;
-  LogicalSessionStatus status;
+  ManagedSessionTransition returned;
   {
     std::lock_guard guard(mu_);
     const auto it = entries_.find(session_key);
     if (it == entries_.end()) {
       return unexpected(missing_session_locked(session_key));
     }
-    const auto updated = update(it->second.credit);
+    Entry& entry = it->second;
+    const auto updated = update(entry.credit);
     if (!updated) {
       defect = updated.error();
-      failed = apply_locked(session_key, it->second, LogicalSessionEvent::Fail, defect);
+      failed = apply_locked(session_key, entry, LogicalSessionEvent::Fail, defect);
     }
-    status = status_of(it->second);
+    returned = ManagedSessionTransition{session_key, std::nullopt,     entry.machine.state(), {},
+                                        entry.cause, status_of(entry), entry.output};
   }
   if (failed) {
     cv_.notify_one();
@@ -515,7 +521,8 @@ Result<LogicalSessionStatus> SessionManager::update_credit(std::uint64_t session
   if (defect) {
     return unexpected(*defect);
   }
-  return status;
+  emit(returned, true);
+  return returned.status;
 }
 
 LogicalSessionStatus SessionManager::status_of(const Entry& entry) {
@@ -557,8 +564,8 @@ bool SessionManager::admission_open() const noexcept {
   return admission_open_;
 }
 
-void SessionManager::emit(const ManagedSessionTransition& transition) const {
-  if (!transition.effects.empty()) {
+void SessionManager::emit(const ManagedSessionTransition& transition, bool announced) const {
+  if (announced || !transition.effects.empty()) {
     sink_(transition);
   }
 }

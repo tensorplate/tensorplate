@@ -24,6 +24,9 @@ namespace tensorplate::serving {
 
 struct ManagedSessionTransition {
   std::uint64_t session_key = 0;
+  /// The event that was applied. None when input credit was returned, which
+  /// changes only `status`.
+  std::optional<LogicalSessionEvent> event;
   LogicalSessionState state = LogicalSessionState::Opening;
   LogicalSessionEffects effects;
   std::optional<Error> cause;
@@ -37,9 +40,16 @@ struct ManagedSessionTransition {
 /// Owns logical-session count slots and input credit, and applies lifecycle
 /// effects in order. The sink performs each transition's effects before
 /// another event is applied; the manager has already suppressed the output
-/// queue when a transition carries suppress_output. The sink and
-/// admission/initialization hooks must not reenter this manager or throw. A
-/// later stream binding supplies them.
+/// queue when a transition carries suppress_output.
+///
+/// Besides every transition with effects, the sink receives each return of
+/// input credit and each `finalize_completed` that made a session active
+/// again, in the order they were applied. The status a sink last saw is
+/// therefore never older than one it saw before, which does not hold for the
+/// status a call returns: a stream reports credit from the sink only.
+///
+/// The sink and admission/initialization hooks must not reenter this manager
+/// or throw. A later stream binding supplies them.
 class SessionManager {
  public:
   using TransitionSink = std::function<void(const ManagedSessionTransition&)>;
@@ -127,7 +137,9 @@ class SessionManager {
   [[nodiscard]] static Error expiry_cause(const Entry& entry, SessionExpiry expiry);
   [[nodiscard]] static LogicalSessionStatus status_of(const Entry& entry);
   [[nodiscard]] Error missing_session_locked(std::uint64_t session_key) const;
-  void emit(const ManagedSessionTransition& transition) const;
+  /// Calls the sink for a transition with effects, or for one that
+  /// `announced` a change of status the sink must still see.
+  void emit(const ManagedSessionTransition& transition, bool announced = false) const;
   void run_timer();
 
   SessionLimits limits_;
