@@ -146,6 +146,11 @@ cut_version="$(tr -d '[:space:]' < "$repo_root/packaging/VERSION")"
 printf '# TensorPlate v%s\n\nSandbox notes.\n' "$cut_version" \
   > "$cut_repo/docs/release/notes/v${cut_version}.md"
 
+# Isolate the native-record cut gate from the separately tested lifecycle gate.
+mkdir -p "$cut_repo/tools/release"
+printf '#!/bin/sh\nexit 0\n' > "$cut_repo/tools/release/check-evidence-bundles.sh"
+chmod +x "$cut_repo/tools/release/check-evidence-bundles.sh"
+
 git init -q --bare -b develop "$cut_origin"
 (
   cd "$cut_repo"
@@ -154,7 +159,7 @@ git init -q --bare -b develop "$cut_origin"
   git config user.name "release test"
   git remote add origin "$cut_origin"
   git add -- CMakeLists.txt Cargo.toml Cargo.lock vcpkg.json CHANGELOG.md \
-    packaging protocol config include docs
+    packaging protocol config include docs tools
   git commit -qm "sandbox base"
   # Finalize the surfaces in the sandbox so the metadata gate is satisfied
   # whatever state the real tree is in.
@@ -223,6 +228,14 @@ HOOK
   # authored a commit would tag a commit no branch contains, and fail here.
   git merge-base --is-ancestor "v${cut_version}-rc.1^{commit}" refs/remotes/origin/develop || {
     echo "FAIL: the tagged commit is not contained in origin/develop" >&2; exit 1; }
+
+  if out="$(cut_sandbox --final --execute --confirm "CUT-v${cut_version}" 2>&1)"; then
+    echo "FAIL: final cut accepted absent native closure records" >&2; exit 1
+  fi
+  printf '%s\n' "$out" | grep -q 'native closure records' || {
+    echo "FAIL: final cut stopped for the wrong reason: $out" >&2; exit 1; }
+  [[ -z "$(git tag --list "v${cut_version}")" ]] || {
+    echo "FAIL: rejected final cut created a tag" >&2; exit 1; }
 
   # 3. --push moves the tag and nothing else. The release commit is behind
   #    the trunk head here, so a cut that also pushed the branch would be
