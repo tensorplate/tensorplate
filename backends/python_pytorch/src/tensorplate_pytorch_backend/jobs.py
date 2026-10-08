@@ -277,3 +277,6 @@ class JobTable:
         error = job_objects.error_object(code, sanitize.MESSAGES[code], context)
         kind = protocol.KIND_ERROR_EVENT
         self._write(_message(kind, header["message_id"], status=status, error=error), False)
+
+
+__all__ = ["GPU_LANE_QUEUE_DEPTH", "LANE_JOB_CLASSES", "UNARY_QUEUE_DEPTH", "Job", "JobTable"]

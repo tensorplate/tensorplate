@@ -432,3 +432,29 @@ class JobEventSequence:
         self.cancel_acknowledged |= kind == protocol.KIND_JOB_CANCEL_ACKNOWLEDGED
         self.released = kind == protocol.KIND_JOB_RELEASED
         self.totals = totals
+
+
+__all__ = [
+    "INPUT_FORMAT",
+    "MAX_WIRE_INTEGER",
+    "OUTPUT_FORMAT",
+    "RESULT_KIND_OF",
+    "AudioChunkResult",
+    "AudioFormat",
+    "JobEventSequence",
+    "JobIdentity",
+    "JobRefused",
+    "JobRequest",
+    "JobResult",
+    "MalformedJob",
+    "TranscriptResult",
+    "VadResult",
+    "WordUnit",
+    "error_object",
+    "job_event",
+    "read_cancel",
+    "read_identity",
+    "read_session_release",
+    "read_submit",
+    "render_result",
+]

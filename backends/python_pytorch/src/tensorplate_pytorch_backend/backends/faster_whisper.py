@@ -33,6 +33,7 @@ from tensorplate_pytorch_backend.backends.base import (
     RuntimeCapability,
 )
 from tensorplate_pytorch_backend.configuration import ArtifactConfigError, read_artifact_config
+from tensorplate_pytorch_backend.job_objects import JobRequest, TranscriptResult
 from tensorplate_pytorch_backend.protocol import (
     ERR_CONFIG_INVALID,
     ERR_INFERENCE_FAILED,
@@ -41,6 +42,8 @@ from tensorplate_pytorch_backend.protocol import (
     ERR_OOM_ERROR,
     ERR_SHAPE_MISMATCH,
     ERR_UNSUPPORTED,
+    JOB_CLASS_STT_DECODE,
+    LIMIT_JOB_INPUT_SAMPLE_RATE_HZ,
 )
 from tensorplate_pytorch_backend.speech_payload import (
     TEXT_UTF8,
@@ -295,6 +298,23 @@ class _Loaded:
     load_timings_us: Mapping[str, int]
 
 
+def _decode(loaded: _Loaded, pcm: bytes, language: str) -> list[dict[str, Any]]:
+    """Transcribe one clip of PCM at the model's rate; return its segments."""
+    clip_us = -(-(len(pcm) // 2) * 1_000_000 // loaded.sample_rate_hz)
+    numpy = loaded.numpy
+    try:
+        samples = numpy.frombuffer(pcm, dtype="<i2").astype(numpy.float32) / _PCM_FULL_SCALE
+        segments, _info = loaded.model.transcribe(samples, language=language, **DECODE_OPTIONS)
+        # The generator decodes as it is consumed, so the job ends only here.
+        return [_segment(segment, clip_us) for segment in segments]
+    except BackendError:
+        raise
+    except Exception as exc:
+        raise BackendError(
+            _failure_code(exc, ERR_INFERENCE_FAILED), "the audio could not be transcribed"
+        ) from exc
+
+
 class FasterWhisperBackend(Backend):
     """Transcribes one mono PCM clip per request with a Whisper-family model."""
 
@@ -405,20 +425,8 @@ class FasterWhisperBackend(Backend):
             )
         pcm = _audio_payload(inputs, loaded.max_samples)
         sample_count = len(pcm) // 2
-        clip_us = -(-sample_count * 1_000_000 // loaded.sample_rate_hz)
-        numpy = loaded.numpy
         started = time.monotonic_ns()
-        try:
-            samples = numpy.frombuffer(pcm, dtype="<i2").astype(numpy.float32) / _PCM_FULL_SCALE
-            segments, _info = loaded.model.transcribe(samples, language=language, **DECODE_OPTIONS)
-            # The generator decodes as it is consumed, so the job ends only here.
-            decoded = [_segment(segment, clip_us) for segment in segments]
-        except BackendError:
-            raise
-        except Exception as exc:
-            raise BackendError(
-                _failure_code(exc, ERR_INFERENCE_FAILED), "the audio could not be transcribed"
-            ) from exc
+        decoded = _decode(loaded, pcm, language)
         decode_us = (time.monotonic_ns() - started) // 1000
         return [
             result_json_tensor(
@@ -447,6 +455,27 @@ class FasterWhisperBackend(Backend):
             _release(loaded.model)
             del loaded
             gc.collect()
+
+    def job_classes(self) -> tuple[str, ...]:
+        loaded = self._loaded
+        at_rate = loaded is not None and loaded.sample_rate_hz == LIMIT_JOB_INPUT_SAMPLE_RATE_HZ
+        return (JOB_CLASS_STT_DECODE,) if at_rate else ()
+
+    def permits_job(self, request: JobRequest) -> bool:
+        loaded = self._loaded  # read once: the reader thread calls this
+        return (
+            loaded is not None
+            and request.job_class == JOB_CLASS_STT_DECODE
+            and request.language in loaded.languages
+            and len(request.payload) <= 2 * loaded.max_samples
+        )
+
+    def run_job(self, request: JobRequest) -> TranscriptResult:
+        # Provisional mapping: one batch decode per job. Words are empty because the
+        # engine's word records carry no token intervals.
+        decoded = _decode(self._require_loaded(), request.payload, request.language)
+        text = "".join(segment["text"] for segment in decoded)
+        return TranscriptResult(text, [token for segment in decoded for token in segment["tokens"]])
 
     def _require_loaded(self) -> _Loaded:
         if self._loaded is None:
