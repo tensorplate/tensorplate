@@ -141,14 +141,19 @@ class JobTable:
             self._work.notify_all()
 
     def handle(self, frame: codec.SidecarFrame) -> bool:
-        """Act on a job or session message; False when no load enabled them."""
+        """Act on a job or session message; False when no load enabled them.
+
+        Behind a request that unloads or replaces the backend, a cancel or a
+        session release still reaches the job that is running.
+        """
         header, kind = frame.header, frame.header["kind"]
         with self._lock:
-            if self._backend is None:
+            backend = self._backend
+            if backend is None and (kind == protocol.KIND_JOB_SUBMIT or not self._jobs):
                 return False
             try:
-                if kind == protocol.KIND_JOB_SUBMIT:
-                    self._submit(frame, self._backend)
+                if backend is not None and kind == protocol.KIND_JOB_SUBMIT:
+                    self._submit(frame, backend)
                 elif kind == protocol.KIND_JOB_CANCEL:
                     identity = job_objects.read_cancel(header)
                     job = self._jobs.get(identity.job_id)

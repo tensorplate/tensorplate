@@ -276,8 +276,11 @@ submit for it fails with `job_class_unsupported`, and no job sends
   forgotten the session: the same key later is a new session to it.
 - **Unload.** When `unload` or another `load_model` arrives, waiting jobs fail
   with `unavailable` and `backend_unavailable`, the running job finishes
-  ahead of the unload, and job messages are refused as on a connection
-  without the capability until a load enables it again.
+  ahead of the unload, and a `job_submit` is refused as on a connection
+  without the capability until a load enables it again. A `job_cancel` or
+  `session_release` still acts while that job is unreleased, so its
+  `job_failed` (`cancelled`), `job_released` and `session_released` come
+  before the `unload_response`; once it is released they are refused too.
 - **Writes.** A frame is written whole under one lock, and a job's messages
   in the order of its state changes. A write that makes no progress for 5 s
   ends the connection, as EOF or a frame error does: the socket is shut down,

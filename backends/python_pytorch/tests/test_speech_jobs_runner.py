@@ -228,6 +228,27 @@ def test_a_second_load_fails_waiting_jobs_and_disables_job_messages_until_it_ena
     assert read(peer, 3) == [(ACCEPTED, 4), *ended(4)]
 
 
+@pytest.mark.parametrize("closing", [protocol.KIND_UNLOAD, protocol.KIND_LOAD_MODEL])
+@pytest.mark.parametrize("control", [protocol.KIND_JOB_CANCEL, protocol.KIND_SESSION_RELEASE])
+def test_a_running_job_is_cancelled_or_its_session_released_behind_a_queued_unload_or_load(
+    connect: Callable[..., Peer], closing: str, control: str
+) -> None:
+    peer = connect()
+    _backend, gate = hold_job(peer)
+    request = golden("negotiation")[1] if closing == protocol.KIND_LOAD_MODEL else message(closing)
+    peer.send(request)
+    assert_quiet(peer)  # the reader has queued it behind the running job
+    by_session = control == protocol.KIND_SESSION_RELEASE
+    assert read_after(peer, message(control, None if by_session else 1)) == (ACKNOWLEDGED, 1)
+    gate.set()
+    expected = [*ended(1, FAILED, "cancelled"), *[(SESSION_RELEASED, 1)] * by_session]
+    response = (f"{closing}_response", request["message_id"])
+    assert read(peer, len(expected) + 1) == [*expected, response]
+    if closing == protocol.KIND_UNLOAD:  # with no job left to reach, the table refuses again
+        late = message(control, None if by_session else 1)
+        assert read_after(peer, late) == (ERROR_EVENT, late["message_id"], "unsupported")
+
+
 def test_a_result_larger_than_the_socket_buffer_and_health_answers_are_written_whole(
     connect: Callable[..., Peer],
 ) -> None:
