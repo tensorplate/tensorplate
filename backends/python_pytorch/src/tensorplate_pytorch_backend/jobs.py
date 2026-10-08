@@ -60,11 +60,17 @@ class JobTable:
     """Unreleased jobs, sessions being released, and the FIFO of work for the backend thread.
 
     ``write(frame, originated)`` sends one frame; ``originated`` asks the
-    writer to number it as a message of the sidecar's own.
+    writer to number it as a message of the sidecar's own. ``note_error``
+    takes the message of an error a backend raised, for health.
     """
 
-    def __init__(self, write: Callable[[codec.SidecarFrame, bool], None]) -> None:
+    def __init__(
+        self,
+        write: Callable[[codec.SidecarFrame, bool], None],
+        note_error: Callable[[str], None],
+    ) -> None:
         self._write = write
+        self._note_error = note_error
         self._lock = threading.Lock()
         self._work = threading.Condition(self._lock)
         self._lane: deque[Job | codec.SidecarFrame] = deque()
@@ -148,11 +154,8 @@ class JobTable:
                 self._refuse(header, getattr(exc, "reason", None))
             return True
 
-    def run(self, job: Job) -> str | None:
-        """Run a job taken from the lane on the calling thread, then end and release it.
-
-        Returns the message of an error the backend raised, for health.
-        """
+    def run(self, job: Job) -> None:
+        """Run a job taken from the lane on the calling thread, then end and release it."""
         request, backend = job.request, job.backend
         result: object = None
         failure = None
@@ -166,7 +169,7 @@ class JobTable:
             self._running = None
             if job.cancelled:
                 self._end(job, protocol.ERR_CANCELLED)
-                return None
+                return
             if failure is None:
                 try:
                     self._emit(job, protocol.KIND_JOB_COMPLETED, result=result)
@@ -177,8 +180,9 @@ class JobTable:
                 else:
                     self._release(job)
             if failure is not None:
+                # Health has it before the job_failed that may prompt a look.
+                self._note_error(failure.message)
                 self._end(job, failure.code, None, failure.message)
-        return failure.message if failure is not None else None
 
     def _submit(self, frame: codec.SidecarFrame, backend: JobBackend) -> None:
         header = frame.header

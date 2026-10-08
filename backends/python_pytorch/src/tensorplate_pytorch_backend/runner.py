@@ -221,7 +221,9 @@ class SidecarRunner:
         self._write_lock = threading.Lock()
         self._originated = 0
         self._ended = False
-        self._table = jobs.JobTable(self._write_frame)
+        self._table = jobs.JobTable(
+            self._write_frame, lambda message: setattr(self._state, "last_error", message)
+        )
 
     @property
     def state(self) -> RunnerState:
@@ -246,7 +248,7 @@ class SidecarRunner:
         try:
             while (work := self._table.take()) is not None:
                 if isinstance(work, jobs.Job):
-                    self._state.last_error = self._table.run(work) or self._state.last_error
+                    self._table.run(work)
                 elif (response := self._dispatch(work)) is not None:
                     self._write_frame(response)
         except Exception as exc:
