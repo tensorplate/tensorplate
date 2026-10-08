@@ -6,8 +6,6 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
-## [0.3.1] - 2026-10-01
-
 ### Added
 
 - Log and metric events take an optional `priority` of `fatal`, `safety`,
@@ -27,6 +25,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   JSON `/metrics` body the 1000 and 5000 ms buckets no longer count
   observations at or below 600 and 1500 ms. Additive change inside
   protocol 0.1; version constants unchanged. (V030-E05-F04-T01)
+
+## [0.3.1] - 2026-10-01
+
+### Added
+
 - `tensorplate-serving --version` prints a fourth line, `streaming-grpc on`
   or `streaming-grpc off`, so an installed worker says whether streaming
   support was compiled in; the first three lines keep their shape. Both
