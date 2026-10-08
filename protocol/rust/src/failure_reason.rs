@@ -80,6 +80,39 @@ pub enum FailureReason {
     DeploymentRetired,
     /// The serving worker shut down with the session still open.
     WorkerShutdown,
+    /// The client cancelled its streaming session.
+    ClientCancelled,
+    /// A streaming session saw no client event within its idle limit.
+    IdleTimeout,
+    /// A streaming session saw no liveness ping within its limit.
+    HeartbeatTimeout,
+    /// A streaming session reached its maximum duration.
+    MaxDuration,
+    /// A finalization or a client's drain did not finish by the
+    /// session's finalize deadline.
+    FinalizeTimeout,
+    /// A streaming client addressed a generation the worker does not
+    /// serve.
+    StaleGeneration,
+    /// A streaming client sent an event its session's state does not
+    /// permit.
+    IllegalTransition,
+    /// A streaming client sent an input item that carries no bytes.
+    EmptyInput,
+    /// The worker already holds its maximum number of sessions.
+    SessionCountLimit,
+    /// The worker is not admitting sessions.
+    AdmissionClosed,
+    /// A streaming client sent a malformed event: a field outside its
+    /// bounds, a sequence that is not the next one, or a value that
+    /// disagrees with what earlier events determine.
+    InvalidEvent,
+    /// A streaming session was opened with a model selector, which
+    /// the serving worker does not resolve.
+    TargetUnresolved,
+    /// A streaming session was opened for a deployment or a
+    /// descriptor digest the worker does not serve.
+    TargetMismatch,
 }
 
 /// Coarse grouping used by CLI rendering and metric aggregation.
@@ -96,8 +129,8 @@ pub enum FailureCategory {
     Heartbeat,
     Permission,
     Internal,
-    /// A logical streaming session ended for a reason tied to that
-    /// session's own traffic (credit, output progress).
+    /// A logical streaming session ended, or was refused, for a
+    /// reason tied to that session's own traffic, timers or target.
     Session,
 }
 
@@ -131,7 +164,7 @@ pub enum FailureSeverity {
 impl FailureReason {
     /// Every reason in declaration order, which is the order of the
     /// `reason` enum in `protocol/schemas/failure_reason.json`.
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 38] = [
         Self::ConfigInvalid,
         Self::BundleSchemaInvalid,
         Self::BundleIntegrityFailed,
@@ -157,6 +190,19 @@ impl FailureReason {
         Self::BackendReset,
         Self::DeploymentRetired,
         Self::WorkerShutdown,
+        Self::ClientCancelled,
+        Self::IdleTimeout,
+        Self::HeartbeatTimeout,
+        Self::MaxDuration,
+        Self::FinalizeTimeout,
+        Self::StaleGeneration,
+        Self::IllegalTransition,
+        Self::EmptyInput,
+        Self::SessionCountLimit,
+        Self::AdmissionClosed,
+        Self::InvalidEvent,
+        Self::TargetUnresolved,
+        Self::TargetMismatch,
     ];
 
     /// Stable serialised name (`snake_case`).
@@ -188,6 +234,19 @@ impl FailureReason {
             Self::BackendReset => "backend_reset",
             Self::DeploymentRetired => "deployment_retired",
             Self::WorkerShutdown => "worker_shutdown",
+            Self::ClientCancelled => "client_cancelled",
+            Self::IdleTimeout => "idle_timeout",
+            Self::HeartbeatTimeout => "heartbeat_timeout",
+            Self::MaxDuration => "max_duration",
+            Self::FinalizeTimeout => "finalize_timeout",
+            Self::StaleGeneration => "stale_generation",
+            Self::IllegalTransition => "illegal_transition",
+            Self::EmptyInput => "empty_input",
+            Self::SessionCountLimit => "session_count_limit",
+            Self::AdmissionClosed => "admission_closed",
+            Self::InvalidEvent => "invalid_event",
+            Self::TargetUnresolved => "target_unresolved",
+            Self::TargetMismatch => "target_mismatch",
         }
     }
 
@@ -216,7 +275,21 @@ impl FailureReason {
             Self::NoHeartbeat => FailureCategory::Heartbeat,
             Self::PermissionDenied => FailureCategory::Permission,
             Self::Internal => FailureCategory::Internal,
-            Self::InputCreditExceeded | Self::SlowConsumer => FailureCategory::Session,
+            Self::InputCreditExceeded
+            | Self::SlowConsumer
+            | Self::ClientCancelled
+            | Self::IdleTimeout
+            | Self::HeartbeatTimeout
+            | Self::MaxDuration
+            | Self::FinalizeTimeout
+            | Self::StaleGeneration
+            | Self::IllegalTransition
+            | Self::EmptyInput
+            | Self::SessionCountLimit
+            | Self::AdmissionClosed
+            | Self::InvalidEvent
+            | Self::TargetUnresolved
+            | Self::TargetMismatch => FailureCategory::Session,
         }
     }
 
@@ -247,11 +320,24 @@ impl FailureReason {
             | Self::WorkerNotReady
             | Self::WorkerExit
             | Self::InputCreditExceeded
-            | Self::BackendReset => FailureSeverity::Error,
+            | Self::BackendReset
+            | Self::FinalizeTimeout
+            | Self::IllegalTransition
+            | Self::EmptyInput
+            | Self::InvalidEvent
+            | Self::TargetUnresolved => FailureSeverity::Error,
             Self::DeadlineMissed
             | Self::SlowConsumer
             | Self::DeploymentRetired
-            | Self::WorkerShutdown => FailureSeverity::Warning,
+            | Self::WorkerShutdown
+            | Self::ClientCancelled
+            | Self::IdleTimeout
+            | Self::HeartbeatTimeout
+            | Self::MaxDuration
+            | Self::StaleGeneration
+            | Self::SessionCountLimit
+            | Self::AdmissionClosed
+            | Self::TargetMismatch => FailureSeverity::Warning,
         }
     }
 
@@ -269,6 +355,9 @@ impl FailureReason {
                 | Self::BackendReset
                 | Self::DeploymentRetired
                 | Self::WorkerShutdown
+                | Self::FinalizeTimeout
+                | Self::SessionCountLimit
+                | Self::AdmissionClosed
         )
     }
 
@@ -279,25 +368,41 @@ impl FailureReason {
     #[must_use]
     pub fn error_code(self) -> ErrorCode {
         match self {
-            Self::ConfigInvalid | Self::BundleSchemaInvalid | Self::BundleIntegrityFailed => {
-                ErrorCode::ConfigInvalid
-            }
+            Self::ConfigInvalid
+            | Self::BundleSchemaInvalid
+            | Self::BundleIntegrityFailed
+            | Self::EmptyInput
+            | Self::InvalidEvent => ErrorCode::ConfigInvalid,
             Self::UnsupportedRuntime
             | Self::UnsupportedHardware
             | Self::BackendUnsupportedCapability
-            | Self::PermissionDenied => ErrorCode::Unsupported,
+            | Self::PermissionDenied
+            | Self::TargetUnresolved => ErrorCode::Unsupported,
             Self::BackendUnavailable | Self::SidecarStartupFailed | Self::SidecarProcessExit => {
                 ErrorCode::LoadFailed
             }
             Self::ShapeMismatch => ErrorCode::ShapeMismatch,
             Self::Oom => ErrorCode::OomError,
-            Self::Timeout | Self::DeadlineMissed => ErrorCode::Timeout,
+            Self::Timeout
+            | Self::DeadlineMissed
+            | Self::IdleTimeout
+            | Self::HeartbeatTimeout
+            | Self::MaxDuration
+            | Self::FinalizeTimeout => ErrorCode::Timeout,
             Self::SidecarMalformedResponse => ErrorCode::InferenceFailed,
-            Self::WorkerNotReady | Self::WorkerExit | Self::WorkerCrashLoop | Self::NoHeartbeat => {
-                ErrorCode::NotReady
-            }
+            Self::WorkerNotReady
+            | Self::WorkerExit
+            | Self::WorkerCrashLoop
+            | Self::NoHeartbeat
+            | Self::StaleGeneration
+            | Self::IllegalTransition
+            | Self::AdmissionClosed
+            | Self::TargetMismatch => ErrorCode::NotReady,
             Self::Internal => ErrorCode::Internal,
-            Self::InputCreditExceeded | Self::SlowConsumer => ErrorCode::ResourceExhausted,
+            Self::InputCreditExceeded | Self::SlowConsumer | Self::SessionCountLimit => {
+                ErrorCode::ResourceExhausted
+            }
+            Self::ClientCancelled => ErrorCode::Cancelled,
             Self::BackendReset | Self::DeploymentRetired | Self::WorkerShutdown => {
                 ErrorCode::Unavailable
             }
@@ -470,6 +575,22 @@ mod tests {
             (FailureReason::BackendReset, ErrorCode::Unavailable),
             (FailureReason::DeploymentRetired, ErrorCode::Unavailable),
             (FailureReason::WorkerShutdown, ErrorCode::Unavailable),
+            (FailureReason::ClientCancelled, ErrorCode::Cancelled),
+            (FailureReason::IdleTimeout, ErrorCode::Timeout),
+            (FailureReason::HeartbeatTimeout, ErrorCode::Timeout),
+            (FailureReason::MaxDuration, ErrorCode::Timeout),
+            (FailureReason::FinalizeTimeout, ErrorCode::Timeout),
+            (FailureReason::StaleGeneration, ErrorCode::NotReady),
+            (FailureReason::IllegalTransition, ErrorCode::NotReady),
+            (FailureReason::EmptyInput, ErrorCode::ConfigInvalid),
+            (
+                FailureReason::SessionCountLimit,
+                ErrorCode::ResourceExhausted,
+            ),
+            (FailureReason::AdmissionClosed, ErrorCode::NotReady),
+            (FailureReason::InvalidEvent, ErrorCode::ConfigInvalid),
+            (FailureReason::TargetUnresolved, ErrorCode::Unsupported),
+            (FailureReason::TargetMismatch, ErrorCode::NotReady),
         ];
         for (reason, expected) in cases {
             assert_eq!(
@@ -568,6 +689,46 @@ mod tests {
             assert_eq!(record.severity, severity, "{name}");
             assert_eq!(record.retryable, retryable, "{name}");
             assert_eq!(record.error_code, code, "{name}");
+            let json = serde_json::to_string(&record).expect("serialise");
+            let back =
+                decode_with_version_check::<FailureReasonRecord>(&json).expect("canonical decode");
+            assert_eq!(back, record);
+        }
+    }
+
+    #[test]
+    fn session_end_reasons_have_their_canonical_hints() {
+        use ErrorCode as Code;
+        use FailureReason as Reason;
+        use FailureSeverity::{Error, Warning};
+
+        // (reason, severity, retryable, error code); the category is `session`.
+        let cases = [
+            (Reason::ClientCancelled, Warning, false, Code::Cancelled),
+            (Reason::IdleTimeout, Warning, false, Code::Timeout),
+            (Reason::HeartbeatTimeout, Warning, false, Code::Timeout),
+            (Reason::MaxDuration, Warning, false, Code::Timeout),
+            (Reason::FinalizeTimeout, Error, true, Code::Timeout),
+            (Reason::StaleGeneration, Warning, false, Code::NotReady),
+            (Reason::IllegalTransition, Error, false, Code::NotReady),
+            (Reason::EmptyInput, Error, false, Code::ConfigInvalid),
+            (
+                Reason::SessionCountLimit,
+                Warning,
+                true,
+                Code::ResourceExhausted,
+            ),
+            (Reason::AdmissionClosed, Warning, true, Code::NotReady),
+            (Reason::InvalidEvent, Error, false, Code::ConfigInvalid),
+            (Reason::TargetUnresolved, Error, false, Code::Unsupported),
+            (Reason::TargetMismatch, Warning, false, Code::NotReady),
+        ];
+        for (reason, severity, retryable, code) in cases {
+            let record = FailureReasonRecord::new(reason);
+            assert_eq!(record.category, FailureCategory::Session, "{reason}");
+            assert_eq!(record.severity, severity, "{reason}");
+            assert_eq!(record.retryable, retryable, "{reason}");
+            assert_eq!(record.error_code, code, "{reason}");
             let json = serde_json::to_string(&record).expect("serialise");
             let back =
                 decode_with_version_check::<FailureReasonRecord>(&json).expect("canonical decode");
