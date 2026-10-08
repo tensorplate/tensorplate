@@ -227,6 +227,7 @@ def test_a_job_cancelled_between_its_take_and_its_backend_call_is_not_run() -> N
     table.open(backend, jobs.LANE_JOB_CLASSES)
     header = submit(1)
     assert table.handle(codec.SidecarFrame(header, bytes(header["input"]["payload_length"])))
+    table.stop(drain=True)  # a take of a stopped lane does not wait when nothing was queued
     job = table.take()
     assert isinstance(job, jobs.Job)
     assert table.handle(codec.SidecarFrame(message(protocol.KIND_JOB_CANCEL, 1)))
