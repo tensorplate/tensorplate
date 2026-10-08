@@ -275,12 +275,7 @@ impl WorkerProcess for SystemWorkerProcess {
         if let Some(child) = state.child.as_ref() {
             #[cfg(unix)]
             {
-                // Best-effort SIGTERM via libc; we cannot depend on a new
-                // crate just for this so we use a raw syscall via the
-                // `kill` system call exposed through std::process when
-                // available. v0.1.0 ships unix-only.
-                let pid = child.id();
-                send_sigterm(pid)?;
+                send_sigterm(child.id())?;
             }
             #[cfg(not(unix))]
             {
@@ -604,6 +599,21 @@ mod tests {
     use crate::supervision::config::{EventSinkConfig, RestartPolicy, WorkerStdioMode};
     use std::collections::BTreeSet;
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_stop_signal_is_sigterm_and_a_pid_that_names_no_process_is_not_an_error() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("600")
+            .spawn()
+            .expect("spawn");
+        super::send_sigterm(child.id()).expect("signal");
+        assert_eq!(child.wait().expect("wait").signal(), Some(15));
+
+        // Above every pid a kernel hands out.
+        super::send_sigterm(i32::MAX.unsigned_abs()).expect("no such process");
+    }
 
     /// A config that only has to be well-formed: these cases inspect the
     /// prepared command and never spawn, so no path needs to exist.

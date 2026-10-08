@@ -524,8 +524,8 @@ fn a_real_worker_is_polled_from_its_start_and_promoted_as_a_member() {
     assert_eq!(snap.next_generation, Some(4));
 }
 
-/// The coordinator unloads the previous active id after a promotion; under
-/// one id that is the worker just promoted.
+/// The unload of the previous active id that follows a promotion must not
+/// reach the worker just promoted when the two ids are the same.
 #[test]
 fn deploying_the_active_id_again_leaves_it_served() {
     let first = HealthPort::listen();

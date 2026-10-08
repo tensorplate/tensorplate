@@ -600,13 +600,9 @@ fn only_a_health_answer_in_the_ready_state_names_a_ready_model() {
     );
 }
 
-#[test]
-fn building_the_agents_registry_clears_the_configs_an_earlier_process_left() {
+/// The registry a `process`-mode agent builds, its configs under `configs`.
+fn agents_registry(td: &TempDir, configs: &std::path::Path) -> MemberRegistry {
     use crate::config::{AgentConfig, ControlTransport, WorkerControlMode};
-    let td = TempDir::new().unwrap();
-    let configs = td.path().join("worker-configs");
-    std::fs::create_dir_all(&configs).unwrap();
-    std::fs::write(configs.join("serving-stt-1.json"), "{}").unwrap();
     let mut agent = AgentConfig {
         schema_version: tensorplate_protocol::SCHEMA_VERSION.to_string(),
         transport: ControlTransport::UnixSocket,
@@ -627,17 +623,32 @@ fn building_the_agents_registry_clears_the_configs_an_earlier_process_left() {
     };
     agent.worker.mode = WorkerControlMode::Process;
     agent.worker.serving_binary_path = Some("/usr/local/bin/tensorplate-serving".into());
-    agent.worker.serving_config_dir = Some(configs.clone());
+    agent.worker.serving_config_dir = Some(configs.to_path_buf());
 
-    let registry = MemberRegistry::from_config(
+    MemberRegistry::from_config(
         &agent,
         Arc::new(|| Ok(1)),
         crate::worker::agent_stderr_sink(),
     )
-    .unwrap();
-    assert_eq!(std::fs::read_dir(&configs).unwrap().count(), 0);
+    .unwrap()
+}
 
-    // The worker is told a drain that ends before the registry would kill it.
+#[test]
+fn building_the_agents_registry_clears_the_configs_an_earlier_process_left() {
+    let td = TempDir::new().unwrap();
+    let configs = td.path().join("worker-configs");
+    std::fs::create_dir_all(&configs).unwrap();
+    std::fs::write(configs.join("serving-stt-1.json"), "{}").unwrap();
+
+    let registry = agents_registry(&td, &configs);
+    assert_eq!(std::fs::read_dir(&configs).unwrap().count(), 0);
+    drop(registry);
+}
+
+#[test]
+fn the_worker_is_told_a_drain_that_ends_before_the_registry_would_kill_it() {
+    let td = TempDir::new().unwrap();
+    let registry = agents_registry(&td, &td.path().join("worker-configs"));
     assert_eq!(registry.settings.worker_drain, WORKER_DRAIN);
     assert_eq!(registry.settings.stop_deadline, STOP_DEADLINE);
     let rendered = registry.render_config(&candidate("stt"), 1, 18080).unwrap();

@@ -538,7 +538,15 @@ mod tests {
         );
         let cfg = AgentConfig::parse_json(&raw).expect("parse");
         assert!(cfg.supervision.is_some());
+    }
 
+    #[test]
+    fn refuses_the_supervisor_beside_the_process_worker_mode() {
+        let raw = format!(
+            r#"{{"schema_version":"{}","socket_path":"/tmp/tensorplate-agent.sock","state_dir":"/var/lib/tensorplate","staging_dir":"/var/lib/tensorplate/staging","supervision":{{"binary_path":"/usr/local/bin/tensorplate-serving","working_dir":"/var/lib/tensorplate","serving_config_path":"/var/lib/tensorplate/serving.json","control_port":18090}}}}"#,
+            tensorplate_protocol::SCHEMA_VERSION
+        );
+        AgentConfig::parse_json(&raw).expect("the supervisor alone");
         let both = raw.replacen(
             r#""supervision":"#,
             r#""worker":{"mode":"process","serving_binary_path":"/usr/local/bin/tensorplate-serving"},"supervision":"#,

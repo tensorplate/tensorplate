@@ -364,6 +364,10 @@ const AGREEMENT_CASES: &[(&str, &str)] = &[
         r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","supervision":{"binary_path":"/b","working_dir":"/w","serving_config_path":"/c","control_port":18080,"restart_policy":{"kind":"bounded_backoff","backoff":{"initial_delay_ms":0}}}}"#,
     ),
     (
+        "supervisor beside the process worker mode",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b"},"supervision":{"binary_path":"/b","working_dir":"/w","serving_config_path":"/c","control_port":18090}}"#,
+    ),
+    (
         "default policy, zero backoff",
         r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","supervision":{"binary_path":"/b","working_dir":"/w","serving_config_path":"/c","control_port":18080,"restart_policy":{"backoff":{"initial_delay_ms":0}}}}"#,
     ),

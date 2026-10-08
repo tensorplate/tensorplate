@@ -24,6 +24,13 @@
       "$comment": "The loopback restriction applies to the host actually bound. Under a unix socket the value is unused and the runtime never reads it, so rejecting a leftover here would refuse a config that starts.",
       "if": {"properties": {"transport": {"const": "loopback_tcp"}}, "required": ["transport"]},
       "then": {"properties": {"tcp_bind_host": {"enum": ["127.0.0.1", "::1", "localhost"]}}}
+    },
+    {
+      "if": {
+        "properties": {"worker": {"properties": {"mode": {"const": "process"}}, "required": ["mode"]}},
+        "required": ["worker"]
+      },
+      "then": {"not": {"required": ["supervision"]}}
     }
   ],
   "properties": {
@@ -266,7 +273,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["binary_path", "working_dir", "serving_config_path", "control_port"],
-      "description": "V01-E09 worker supervisor config. `worker.*` controls the prepare/warm/promote IPC contract; `supervision.*` controls the supervisor's own worker process lifecycle (launch, stop, restart backoff, crash-loop policy). The agent refuses a config that sets this beside `worker.mode: process`: each would start its own serving worker.",
+      "description": "Worker supervisor config. `worker.*` controls the prepare/warm/promote IPC contract; `supervision.*` controls the supervisor's own worker process lifecycle (launch, stop, restart backoff, crash-loop policy). Not allowed beside `worker.mode: process`: each would start its own serving worker.",
       "properties": {
         "binary_path": {
           "type": "string",
