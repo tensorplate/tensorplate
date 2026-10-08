@@ -148,7 +148,7 @@ What the draft now fixes:
   digest that is not the served descriptor's. The request metadata names
   `tensorplate-model` and `tensorplate-model-version` are reserved for the
   selector; the server does not read them.
-- **Bounds.** Sequences and 64-bit ids stop at 2^53 - 1. A client value
+- **Bounds.** Sequences, generations and 64-bit ids stop at 2^53 - 1. A client value
   that disagrees with what earlier events determine fails the session.
 - **Totals and recovery.** `SessionClosed` carries the session's totals.
   Input that was accepted but not answered when a session ended was not

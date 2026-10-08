@@ -91,8 +91,8 @@ pub enum FailureReason {
     /// A finalization or a client's drain did not finish by the
     /// session's finalize deadline.
     FinalizeTimeout,
-    /// A streaming client addressed a generation the worker does not
-    /// serve.
+    /// A streaming client, or a backend report, named a generation
+    /// the worker does not serve.
     StaleGeneration,
     /// A streaming client sent an event its session's state does not
     /// permit.
@@ -356,8 +356,10 @@ impl FailureReason {
                 | Self::DeploymentRetired
                 | Self::WorkerShutdown
                 | Self::FinalizeTimeout
+                | Self::StaleGeneration
                 | Self::SessionCountLimit
                 | Self::AdmissionClosed
+                | Self::TargetMismatch
         )
     }
 
@@ -709,7 +711,7 @@ mod tests {
             (Reason::HeartbeatTimeout, Warning, false, Code::Timeout),
             (Reason::MaxDuration, Warning, false, Code::Timeout),
             (Reason::FinalizeTimeout, Error, true, Code::Timeout),
-            (Reason::StaleGeneration, Warning, false, Code::NotReady),
+            (Reason::StaleGeneration, Warning, true, Code::NotReady),
             (Reason::IllegalTransition, Error, false, Code::NotReady),
             (Reason::EmptyInput, Error, false, Code::ConfigInvalid),
             (
@@ -721,7 +723,7 @@ mod tests {
             (Reason::AdmissionClosed, Warning, true, Code::NotReady),
             (Reason::InvalidEvent, Error, false, Code::ConfigInvalid),
             (Reason::TargetUnresolved, Error, false, Code::Unsupported),
-            (Reason::TargetMismatch, Warning, false, Code::NotReady),
+            (Reason::TargetMismatch, Warning, true, Code::NotReady),
         ];
         for (reason, severity, retryable, code) in cases {
             let record = FailureReasonRecord::new(reason);

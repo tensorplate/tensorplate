@@ -43,14 +43,14 @@ Rust mirror: [`protocol::failure_reason`](../../protocol/rust/src/failure_reason
 | `heartbeat_timeout`             | session     | warning   | no        | `timeout`         |
 | `max_duration`                  | session     | warning   | no        | `timeout`         |
 | `finalize_timeout`              | session     | error     | yes       | `timeout`         |
-| `stale_generation`              | session     | warning   | no        | `not_ready`       |
+| `stale_generation`              | session     | warning   | yes       | `not_ready`       |
 | `illegal_transition`            | session     | error     | no        | `not_ready`       |
 | `empty_input`                   | session     | error     | no        | `config_invalid`  |
 | `session_count_limit`           | session     | warning   | yes       | `resource_exhausted` |
 | `admission_closed`              | session     | warning   | yes       | `not_ready`       |
 | `invalid_event`                 | session     | error     | no        | `config_invalid`  |
 | `target_unresolved`             | session     | error     | no        | `unsupported`     |
-| `target_mismatch`               | session     | warning   | no        | `not_ready`       |
+| `target_mismatch`               | session     | warning   | yes       | `not_ready`       |
 
 The reasons from `input_credit_exceeded` on describe how a streaming
 session ends or why its opening is refused, and are defined ahead of the

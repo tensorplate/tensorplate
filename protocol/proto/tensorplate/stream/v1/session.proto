@@ -20,11 +20,13 @@
 // not transcribed, and a segment without a SegmentCompleted was not delivered
 // whole. Nothing replays it; sending it to a new session is a new request.
 //
-// A field number is never reused: a deleted field stays reserved. A receiver
-// ignores a field it does not know and reads an enum value it does not know
-// as that enum's unspecified value. A client ignores a server event whose body
-// it does not know. A server refuses a client event whose body, or an Open
-// whose mode, it does not know, with reason `backend_unsupported_capability`.
+// Once the schema is frozen, a field number is never reused: a deleted field
+// stays reserved. A receiver ignores a field it does not know and reads an
+// enum value it does not know as that enum's unspecified value. A client
+// ignores a server event whose body it does not know. A server refuses a
+// client event whose body it does not know with reason `invalid_event`, and an
+// Open whose mode it does not know with reason
+// `backend_unsupported_capability`.
 
 syntax = "proto3";
 
@@ -238,12 +240,13 @@ message EndCause {
   string detail = 3;
 }
 
-// The detail of the status that ends a call whose Open was refused. Reasons
-// that precede admission: `invalid_event` (a malformed Open),
-// `backend_unsupported_capability` (a mode, language, format or voice the
-// deployment does not declare), `target_unresolved`, `target_mismatch`,
-// `stale_generation`, `admission_closed` and `session_count_limit`. A reason
-// added later says here whether it precedes admission.
+// The detail of the status that ends a call whose Open was refused; how the
+// status carries it is not fixed yet. Reasons that precede admission:
+// `invalid_event` (a malformed Open), `backend_unsupported_capability` (a
+// mode, language, format or voice the deployment does not declare),
+// `target_unresolved`, `target_mismatch`, `stale_generation`,
+// `admission_closed` and `session_count_limit`. A reason added later says
+// here whether it precedes admission.
 message OpenRefused {
   EndCause cause = 1;
   // ADMISSION_NOT_ADMITTED: the same Open may be sent to another server.
@@ -284,9 +287,9 @@ message ResolvedTarget {
   // The deployment generation addressed. Never zero. The session keeps it:
   // no later client event names a generation.
   uint64 generation = 2;
-  // Identity of the descriptor addressed: `sha256:` and 64 lowercase
-  // hexadecimal digits. An Open whose digest is not the served descriptor's
-  // is refused with reason `target_mismatch`.
+  // Identity of the descriptor addressed, never empty: `sha256:` and 64
+  // lowercase hexadecimal digits. An Open whose deployment id or digest is
+  // not the served one is refused with reason `target_mismatch`.
   string descriptor_digest = 3;
 }
 
@@ -414,9 +417,10 @@ message Ready {
 // Accepted may cover several. Other client events are not counted: each has
 // an answer of its own. Acceptance is not completion.
 //
-// The server also sends an Accepted, with the `accepted_sequence` of the one
-// before, whenever input credit returns. A client reads its credit from the
-// latest Accepted and never infers it from time or from other events.
+// The server announces returned credit. The next Accepted carries it, and
+// when none is due the server sends one for it, with the `accepted_sequence`
+// of the one before. A client takes its credit from Ready's status and then
+// from each Accepted, and never infers it from time or from task events.
 message Accepted {
   // Sequence of the last Audio or TextSegment accepted.
   uint64 accepted_sequence = 1;
@@ -547,7 +551,8 @@ message SegmentCompleted {
 }
 
 // Exactly one per finalized synthesis, after the SegmentCompleted of every
-// accepted segment.
+// accepted segment. None is sent when the client closes its sending half
+// without a Finalize.
 message SynthesisCompleted {
   // Segments completed since the previous SynthesisCompleted, and their
   // samples together.
