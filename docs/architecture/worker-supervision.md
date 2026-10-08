@@ -292,10 +292,13 @@ a config with a generation and no socket on fd 0 is a worker that refuses to
 start. Linux tests check that exactly the agent end remains in the
 parent and worker exit produces EOF.
 
-Neither `ProcessWorkerControl` nor `WorkerSupervisor` currently uses this client
-or spawn helper, and neither renders a generation, so the workers they start
-have no control channel. Production wiring belongs to registry/server
-integration. The serving worker's side is described in
+The agent's member registry (`docs/architecture/agent.md`, "Member registry")
+starts every `process`-mode worker through this helper and client and renders
+the generation in the same config. `WorkerSupervisor` does neither: a worker
+it starts has no control channel, and enabling `supervision` beside
+`worker.mode: process` starts a second worker the registry does not know.
+The serving worker's side is described in
 `docs/architecture/serving-worker.md` ("Control channel"); descriptor isolation
 between sibling workers remains an integration check. The synthetic peer tests exercise the published golden
-frames and a blocked backend without claiming production interoperability.
+frames and a blocked backend; `agent/tests/deploy_load_failure.rs` carries an
+opt-in test of the registry against a built `tensorplate-serving`.

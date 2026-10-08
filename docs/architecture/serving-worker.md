@@ -289,9 +289,10 @@ shutdown in the V01-E07-F08 integration tests.
 A serving config may name the deployment generation its worker serves
 (`deployment.generation`, an integer from 1 to 2^53 - 1). A worker
 with a generation is a member the agent controls, and the agent passes
-it one end of a socket pair as fd 0. A config without one, which is
-what the agent writes today, starts a worker with no control channel
-and fd 0 is not touched.
+it one end of a socket pair as fd 0. The agent's member registry writes
+one for every worker it starts. A config without one, which a worker
+started by hand or by the agent's separate `WorkerSupervisor` has, starts
+a worker with no control channel and fd 0 is not touched.
 
 **Taking the descriptor.** `ServingWorker::create` takes the socket
 before it builds anything, while the process has one thread and no
