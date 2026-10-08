@@ -385,7 +385,11 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -Eeuo pipefail
-          trap 'echo "::error::native cache discovery failed; see docs/release/runbook.md#provision-the-vcpkg-checkout-and-binary-cache and warm the exact cache with release-dependencies.yml before retrying"' ERR
+          cache_annotation=warning
+          if [[ "$NATIVE_CACHE_MODE" == restore ]]; then
+            cache_annotation=error
+          fi
+          trap 'echo "::${cache_annotation}::native cache discovery failed; see docs/release/runbook.md#provision-the-vcpkg-checkout-and-binary-cache and warm the exact cache with release-dependencies.yml before retrying"' ERR
           date -u +'%Y-%m-%dT%H:%M:%S.%NZ' > "${RUNNER_TEMP}/native-cache-restore-started.txt"
           key="$(python3 tools/release/native-cache-provenance.py key \
             --manifest vcpkg.json --profile tools/release/amd64-build-profile.sh \
@@ -1272,7 +1276,7 @@ jobs:
           }
           native_assets=("${RELEASE_DIR}"/tensorplate-"${TAG}"-native-closure-*.spdx.json
                          "${RELEASE_DIR}"/tensorplate-"${TAG}"-vcpkg-cache-provenance-*.json)
-          assets=("${deb_assets[@]}" "$installer" "${sdk_assets[@]}" "${native_assets[@]}" "$MANIFEST" "$CHECKSUMS" "$BUNDLE")
+          assets=("${deb_assets[@]}" "$installer" "${sdk_assets[@]}" ${native_assets[@]+"${native_assets[@]}"} "$MANIFEST" "$CHECKSUMS" "$BUNDLE")
 
           args=(release create "$TAG" "${assets[@]}" --verify-tag --title "TensorPlate ${TAG}" --notes-file "$NOTES")
           if [[ "$PRERELEASE" == "true" ]]; then

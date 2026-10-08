@@ -1972,7 +1972,7 @@ cmd_publish() {
   assets+=("${sdk_assets[@]}")
   local native_assets=("$ARTIFACTS_DIR"/tensorplate-*-native-closure-*.spdx.json
                        "$ARTIFACTS_DIR"/tensorplate-*-vcpkg-cache-provenance-*.json)
-  assets+=("${native_assets[@]}")
+  assets+=(${native_assets[@]+"${native_assets[@]}"})
   [[ -f "$ARTIFACTS_DIR/install.sh" ]] || die "missing installer asset: $ARTIFACTS_DIR/install.sh"
   local checksums_bundle="${CHECKSUMS}.cosign.bundle"
   [[ -f "$checksums_bundle" ]] ||

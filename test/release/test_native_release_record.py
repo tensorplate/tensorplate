@@ -287,8 +287,11 @@ class Workflow(unittest.TestCase):
             context = {"github.token": "stand-in-token", "github.event.repository.default_branch": "develop"}
             env = {"PATH": os.environ["PATH"], "RUNNER_TEMP": str(root), "GITHUB_REPOSITORY": "example/project",
                    "GITHUB_REF": "refs/tags/v0.3.1", **{key: str(evaluate(value, context)) for key, value in step["env"].items()}}
+            script = root / "mark-native-cache.sh"
+            script.write_text(step["run"])
+            env["NATIVE_CACHE_MODE"] = "restore"
             before = datetime.now(timezone.utc)
-            result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+            result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
                                     cwd=root, env=env,
                                     text=True, capture_output=True, check=False)
             after = datetime.now(timezone.utc)
@@ -307,12 +310,18 @@ class Workflow(unittest.TestCase):
             self.assertEqual(json.loads((root / "native-cache-before-source.json").read_text()), {"id": 11})
             helper.write_text("import sys\nif sys.argv[1] == 'key': print('exact-cache-key')\n"
                               "else: raise SystemExit('expected exactly one cache entry')\n")
-            result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
-                                    cwd=root, env=env, text=True, capture_output=True, check=False)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("expected exactly one cache entry", result.stderr)
-            self.assertIn("docs/release/runbook.md#provision-the-vcpkg-checkout-and-binary-cache", result.stdout)
-            self.assertIn("release-dependencies.yml before retrying", result.stdout)
+            for mode in ("build", "build-and-save", "restore"):
+                with self.subTest(mode=mode):
+                    env["NATIVE_CACHE_MODE"] = mode
+                    result = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
+                                            cwd=root, env=env, text=True, capture_output=True, check=False)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("expected exactly one cache entry", result.stderr)
+                    level = "error" if mode == "restore" else "warning"
+                    self.assertIn(f"::{level}::native cache discovery failed", result.stdout)
+                    self.assertNotIn("::warning::" if mode == "restore" else "::error::", result.stdout)
+                    self.assertIn("docs/release/runbook.md#provision-the-vcpkg-checkout-and-binary-cache", result.stdout)
+                    self.assertIn("release-dependencies.yml before retrying", result.stdout)
 
     def test_record_step_gets_the_same_mode_as_the_action_from_declared_environment(self):
         job = self.jobs["build_packages_amd64"]
