@@ -96,8 +96,11 @@ def test_the_socket_is_non_blocking_from_construction_and_stays_so() -> None:
 
 def test_a_recv_that_finds_nothing_waits_for_the_peer_again() -> None:
     with _socketpair() as (client, server):
-        _serve(_Quirky(server))
+        serving = _serve(_Quirky(server))
         assert _answered(client)
+        client.close()
+        serving.join(timeout=WAIT_S)
+        assert not serving.is_alive()
 
 
 def test_a_refused_shutdown_of_both_directions_falls_back_to_the_write_side() -> None:

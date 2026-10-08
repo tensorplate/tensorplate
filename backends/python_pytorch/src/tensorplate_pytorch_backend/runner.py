@@ -292,7 +292,8 @@ class SidecarRunner:
             # work is dropped, and only then does the peer see the socket shut down.
             self._at_limit = count == limit
             drain = self._at_limit or (half_closed and not self._table.ever_opened)
-            self._ended = self._ended or not drain
+            if not drain:
+                self._ended = True
             self._table.stop(drain=drain)
             if not drain:
                 self._end_connection()
