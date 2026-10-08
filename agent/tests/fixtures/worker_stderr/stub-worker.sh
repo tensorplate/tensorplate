@@ -6,7 +6,9 @@
 # worker's load-error status; `late-<name>` exits first and lets a child
 # replay it afterwards; `again-<name>` stays alive the first time it is
 # started and fails like `fail-<name>` after that; `exit-<n>` exits <n>
-# silently; any other id stays alive without listening.
+# silently; `mute-<name>` stays alive and never answers its control socket;
+# any other id stays alive answering it (control-responder.py) without
+# listening.
 id=$(sed -n 's/.*"model_id": "\([^"]*\)".*/\1/p' "$2")
 fixtures=$(dirname "$0")
 case "$id" in
@@ -29,5 +31,8 @@ case "$id" in
   exit-*)
     exit "${id#exit-}"
     ;;
+  mute-*)
+    exec sleep 600
+    ;;
 esac
-exec sleep 600
+exec python3 "$fixtures/control-responder.py" "$2"

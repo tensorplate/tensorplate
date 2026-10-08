@@ -159,3 +159,32 @@ fn restart_during_replayable_phase_recommends_resume() {
     let plan = recovery::plan_with_worker(&h.store, h.worker.as_ref()).expect("plan");
     assert_eq!(plan.action, RecoveryAction::ResumeStage);
 }
+
+/// A release before deployment ids were restricted could record this id.
+#[test]
+fn an_active_whose_id_cannot_name_a_member_is_not_restored_and_the_agent_starts() {
+    let h = Harness::new();
+    let bundle = vision_bundle(h.td.path(), "d-1");
+    h.coord
+        .deploy("d-1", &bundle, Default::default(), None, None)
+        .expect("deploy");
+    h.store
+        .update(|state| {
+            state.active.as_mut().expect("active").deployment_id = "smoke:v1".into();
+            Ok(())
+        })
+        .expect("rename");
+
+    let store = Arc::new(StateStore::open(h.td.path().join("state")).expect("reopen"));
+    let worker = Arc::new(MockWorkerControl::new());
+    let coord = Coordinator::new(h.coord.config().clone(), store.clone(), worker.clone());
+    let plan = recovery::apply_startup(&coord).expect("the agent starts");
+    assert_eq!(plan.action, RecoveryAction::RestoreActive);
+
+    assert!(worker.calls().expect("calls").is_empty());
+    let snap = store.snapshot().expect("snapshot");
+    assert_eq!(snap.active.expect("active kept").deployment_id, "smoke:v1");
+    let error = snap.last_error.expect("why it was not restored");
+    assert_eq!(error.code, tensorplate_protocol::ErrorCode::ConfigInvalid);
+    assert!(error.message.contains("smoke:v1"), "{}", error.message);
+}

@@ -14,17 +14,14 @@
 //   - [`MockWorkerControl`]: deterministic in-process implementation
 //     used by the agent integration tests and by the V01-E08 host CI
 //     matrix where `tensorplate-serving` is not available.
-//   - [`ProcessWorkerControl`]: process-backed implementation that
-//     renders a V01-E07 serving config, starts `tensorplate-serving`,
-//     polls `/health`, and promotes only warmed candidates. It forwards
-//     each worker's stderr and answers a candidate that exits while
-//     loading with the worker's own startup failure code.
+//   - [`crate::registry::MemberRegistry`]: the process-backed
+//     implementation. This module keeps what it shares with tests: the
+//     control-socket spawn, stderr forwarding with the startup failure
+//     record, and the `/health` read.
 //   - [`from_config`]: composition-root selector used by the binary.
 
-use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -155,16 +152,32 @@ pub trait WorkerControl: Send + Sync {
     }
 }
 
-/// Build the configured worker-control implementation.
+/// Build the configured worker-control implementation. Process mode is the
+/// member registry, drawing its generations from `store`.
 ///
 /// # Errors
 ///
 /// Returns [`AgentError::Config`] if process mode is selected without the
 /// required serving-worker process fields.
-pub fn from_config(config: &AgentConfig) -> AgentResult<std::sync::Arc<dyn WorkerControl>> {
+pub fn from_config(
+    config: &AgentConfig,
+    store: &Arc<crate::state::StateStore>,
+) -> AgentResult<Arc<dyn WorkerControl>> {
     match config.worker.mode {
-        WorkerControlMode::Mock => Ok(std::sync::Arc::new(MockWorkerControl::new())),
-        WorkerControlMode::Process => Ok(std::sync::Arc::new(ProcessWorkerControl::new(config)?)),
+        WorkerControlMode::Mock => Ok(Arc::new(MockWorkerControl::new())),
+        #[cfg(unix)]
+        WorkerControlMode::Process => Ok(Arc::new(crate::registry::MemberRegistry::from_config(
+            config,
+            crate::registry::durable_generations(store.clone()),
+            agent_stderr_sink(),
+        )?)),
+        #[cfg(not(unix))]
+        WorkerControlMode::Process => {
+            let _ = store;
+            Err(AgentError::Config(
+                "worker.mode `process` needs a Unix host".into(),
+            ))
+        }
     }
 }
 
@@ -189,7 +202,7 @@ struct StartupFailure {
 }
 
 #[derive(Default)]
-struct WorkerStderr {
+pub(crate) struct WorkerStderr {
     startup_failure: Option<StartupFailure>,
     closed: bool,
 }
@@ -210,7 +223,11 @@ fn parse_startup_failure(line: &[u8]) -> Option<StartupFailure> {
 
 /// Copy a worker's stderr to `sink` line by line until it closes, keeping
 /// the startup failure record if one arrives.
-fn forward_stderr(stderr: ChildStderr, sink: WorkerStderrSink, shared: Arc<Mutex<WorkerStderr>>) {
+pub(crate) fn forward_stderr(
+    stderr: ChildStderr,
+    sink: WorkerStderrSink,
+    shared: Arc<Mutex<WorkerStderr>>,
+) {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stderr);
         let mut line = Vec::new();
@@ -242,209 +259,17 @@ fn forward_stderr(stderr: ChildStderr, sink: WorkerStderrSink, shared: Arc<Mutex
     });
 }
 
-fn agent_stderr_sink() -> WorkerStderrSink {
+/// The sink that copies worker stderr to the agent's own.
+#[must_use]
+pub fn agent_stderr_sink() -> WorkerStderrSink {
     Arc::new(|line| {
         let _ = std::io::stderr().lock().write_all(line);
     })
 }
 
-#[derive(Clone, Debug)]
-struct ProcessWorkerConfig {
-    binary_path: PathBuf,
-    bind_host: String,
-    active_port: u16,
-    candidate_port: u16,
-    config_dir: PathBuf,
-    use_mock_session: bool,
-    status_poll_interval: Duration,
-}
-
-/// Process-backed worker controller for the V01-E07 `tensorplate-serving`
-/// binary. It renders a serving config for each prepared candidate, starts
-/// the worker on a loopback port, polls `/health` for warmup, and promotes
-/// by making the warmed candidate the active child.
-pub struct ProcessWorkerControl {
-    config: ProcessWorkerConfig,
-    inner: Mutex<ProcessWorkerState>,
-    stderr_sink: WorkerStderrSink,
-}
-
-#[derive(Default)]
-struct ProcessWorkerState {
-    active: Option<RunningWorker>,
-    candidate: Option<RunningWorker>,
-}
-
-struct RunningWorker {
-    deployment_id: String,
-    port: u16,
-    config_path: PathBuf,
-    child: Child,
-    stderr: Arc<Mutex<WorkerStderr>>,
-}
-
-impl ProcessWorkerControl {
-    /// Build a process-backed worker controller from validated agent config.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AgentError::Config`] when required process-mode fields are
-    /// missing.
-    pub fn new(agent: &AgentConfig) -> AgentResult<Self> {
-        let binary_path = agent
-            .worker
-            .serving_binary_path
-            .clone()
-            .ok_or_else(|| AgentError::Config("worker.serving_binary_path missing".into()))?;
-        let config_dir = agent
-            .worker
-            .serving_config_dir
-            .clone()
-            .unwrap_or_else(|| agent.state_dir.join("worker-configs"));
-        Ok(Self {
-            config: ProcessWorkerConfig {
-                binary_path,
-                bind_host: agent.worker.serving_bind_host.clone(),
-                active_port: agent.worker.serving_bind_port,
-                candidate_port: agent.worker.serving_candidate_bind_port,
-                config_dir,
-                use_mock_session: agent.worker.serving_use_mock_session,
-                status_poll_interval: Duration::from_millis(agent.worker.status_poll_interval_ms),
-            },
-            inner: Mutex::new(ProcessWorkerState::default()),
-            stderr_sink: agent_stderr_sink(),
-        })
-    }
-
-    /// Send the workers' stderr to `sink` instead of the agent's own stderr.
-    #[must_use]
-    pub fn with_stderr_sink(mut self, sink: WorkerStderrSink) -> Self {
-        self.stderr_sink = sink;
-        self
-    }
-
-    fn candidate_port_for(&self, state: &ProcessWorkerState) -> u16 {
-        match state.active.as_ref().map(|w| w.port) {
-            Some(port) if port == self.config.candidate_port => self.config.active_port,
-            _ => self.config.candidate_port,
-        }
-    }
-
-    fn render_config(
-        &self,
-        candidate: &CandidateRef,
-        port: u16,
-    ) -> AgentResult<(PathBuf, serde_json::Value)> {
-        fs::create_dir_all(&self.config.config_dir)?;
-        let safe_tx_name = candidate
-            .deployment_id
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
-        let path = self
-            .config
-            .config_dir
-            .join(format!("serving-{safe_tx_name}-{port}.json"));
-        let artifact_path = candidate.artifact_relative_path.as_ref().map_or_else(
-            || candidate.staged_path.clone(),
-            |rel| {
-                Path::new(&candidate.staged_path)
-                    .join(rel)
-                    .display()
-                    .to_string()
-            },
-        );
-        let mut config = serde_json::json!({
-            "schema_version": tensorplate_protocol::SCHEMA_VERSION,
-            "bind": {
-                "host": self.config.bind_host,
-                "port": port,
-                "allow_non_loopback": false
-            },
-            "health_mode": "local_json",
-            "metrics_mode": "prometheus_text",
-            "enable_stderr_logs": true,
-            "deployment": {
-                "use_mock_session": self.config.use_mock_session,
-                "endpoint": candidate.deployment_id,
-                "backend": candidate.backend_hint,
-                "model": {
-                    "model_id": candidate.deployment_id,
-                    "model_class": candidate.model_class,
-                    "artifact_path": artifact_path,
-                    "backend_hint": candidate.backend_hint,
-                    "precision_hint": "auto"
-                }
-            }
-        });
-        if let Some(profile) =
-            crate::bundle::staged_runner_profile(Path::new(&candidate.staged_path))?
-        {
-            config["deployment"]["model"]["runner_profile"] = profile.into();
-        }
-        fs::write(&path, serde_json::to_vec_pretty(&config)?)?;
-        Ok((path, config))
-    }
-
-    fn spawn_candidate(&self, candidate: &CandidateRef, port: u16) -> AgentResult<RunningWorker> {
-        let (config_path, _) = self.render_config(candidate, port)?;
-        let mut child = Command::new(&self.config.binary_path)
-            .arg("--config")
-            .arg(&config_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| {
-                AgentError::WorkerControl(format!(
-                    "spawn {}: {e}",
-                    self.config.binary_path.display()
-                ))
-            })?;
-        let stderr = Arc::new(Mutex::new(WorkerStderr::default()));
-        if let Some(pipe) = child.stderr.take() {
-            forward_stderr(pipe, self.stderr_sink.clone(), stderr.clone());
-        }
-        Ok(RunningWorker {
-            deployment_id: candidate.deployment_id.clone(),
-            port,
-            config_path,
-            child,
-            stderr,
-        })
-    }
-
-    /// The typed failure of a candidate that has exited, after reaping it;
-    /// `None` while it is still running.
-    fn candidate_exit(&self) -> AgentResult<Option<AgentError>> {
-        let (status, stderr) = {
-            let mut state = self
-                .inner
-                .lock()
-                .map_err(|e| AgentError::Internal(format!("process worker mutex poisoned: {e}")))?;
-            let Some(candidate) = state.candidate.as_mut() else {
-                return Ok(None);
-            };
-            let Some(status) = candidate.child.try_wait()? else {
-                return Ok(None);
-            };
-            let stderr = candidate.stderr.clone();
-            state.candidate = None;
-            (status, stderr)
-        };
-        Ok(Some(startup_error(status, &stderr)))
-    }
-}
-
 /// What an exited candidate reported, waiting briefly for its last stderr
 /// lines; without a record the exit status is all there is.
-fn startup_error(status: ExitStatus, stderr: &Mutex<WorkerStderr>) -> AgentError {
+pub(crate) fn startup_error(status: ExitStatus, stderr: &Mutex<WorkerStderr>) -> AgentError {
     let deadline = Instant::now() + STDERR_DRAIN_WAIT;
     loop {
         if let Ok(mut shared) = stderr.lock() {
@@ -466,186 +291,11 @@ fn startup_error(status: ExitStatus, stderr: &Mutex<WorkerStderr>) -> AgentError
     AgentError::WorkerExited(status.to_string())
 }
 
-impl WorkerControl for ProcessWorkerControl {
-    fn prepare(
-        &self,
-        _transaction_id: &str,
-        candidate: &CandidateRef,
-        _timeout: Duration,
-    ) -> AgentResult<()> {
-        let mut state = self
-            .inner
-            .lock()
-            .map_err(|e| AgentError::Internal(format!("process worker mutex poisoned: {e}")))?;
-        if let Some(mut old_candidate) = state.candidate.take() {
-            old_candidate.stop();
-        }
-        let port = if state.active.is_none() {
-            self.config.active_port
-        } else {
-            self.candidate_port_for(&state)
-        };
-        state.candidate = Some(self.spawn_candidate(candidate, port)?);
-        Ok(())
-    }
-
-    fn warm(
-        &self,
-        _transaction_id: &str,
-        candidate: &CandidateRef,
-        timeout: Duration,
-    ) -> AgentResult<WorkerReadiness> {
-        let port = {
-            let state = self
-                .inner
-                .lock()
-                .map_err(|e| AgentError::Internal(format!("process worker mutex poisoned: {e}")))?;
-            let Some(prepared) = state.candidate.as_ref() else {
-                return Err(AgentError::WorkerNotReady);
-            };
-            if prepared.deployment_id != candidate.deployment_id {
-                return Err(AgentError::WorkerControl(format!(
-                    "prepared candidate `{}` does not match warm request `{}`",
-                    prepared.deployment_id, candidate.deployment_id
-                )));
-            }
-            prepared.port
-        };
-        let started = Instant::now();
-        let deadline = started.checked_add(timeout).unwrap_or(started);
-        let mut last_error = None;
-        loop {
-            if let Some(exit) = self.candidate_exit()? {
-                return Err(exit);
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return last_error.map_or_else(
-                    || {
-                        Ok(WorkerReadiness {
-                            deployment_id: candidate.deployment_id.clone(),
-                            ready: false,
-                        })
-                    },
-                    Err,
-                );
-            }
-            match get_health_json(&self.config.bind_host, port, remaining) {
-                Ok(health) => {
-                    let state = health.get("state").and_then(serde_json::Value::as_str);
-                    let model = health
-                        .get("active_model_id")
-                        .and_then(serde_json::Value::as_str);
-                    if state == Some("ready") && model == Some(candidate.deployment_id.as_str()) {
-                        return Ok(WorkerReadiness {
-                            deployment_id: candidate.deployment_id.clone(),
-                            ready: true,
-                        });
-                    }
-                    last_error = None;
-                }
-                Err(err) => last_error = Some(err),
-            }
-            let sleep = self
-                .config
-                .status_poll_interval
-                .min(deadline.saturating_duration_since(Instant::now()));
-            if !sleep.is_zero() {
-                std::thread::sleep(sleep);
-            }
-        }
-    }
-
-    fn promote(&self, _transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
-        let mut state = self
-            .inner
-            .lock()
-            .map_err(|e| AgentError::Internal(format!("process worker mutex poisoned: {e}")))?;
-        let Some(mut prepared) = state.candidate.take() else {
-            return Err(AgentError::WorkerNotReady);
-        };
-        if prepared.deployment_id != candidate.deployment_id {
-            prepared.stop();
-            return Err(AgentError::WorkerControl(format!(
-                "prepared candidate `{}` does not match promote request `{}`",
-                prepared.deployment_id, candidate.deployment_id
-            )));
-        }
-        if let Some(mut active) = state.active.take() {
-            active.stop();
-        }
-        state.active = Some(prepared);
-        Ok(())
-    }
-
-    fn unload(&self, deployment_id: &str) {
-        if let Ok(mut state) = self.inner.lock() {
-            if state
-                .active
-                .as_ref()
-                .is_some_and(|active| active.deployment_id == deployment_id)
-            {
-                if let Some(mut active) = state.active.take() {
-                    active.stop();
-                }
-            }
-            if state
-                .candidate
-                .as_ref()
-                .is_some_and(|candidate| candidate.deployment_id == deployment_id)
-            {
-                if let Some(mut candidate) = state.candidate.take() {
-                    candidate.stop();
-                }
-            }
-        }
-    }
-
-    fn active_deployment_id(&self) -> AgentResult<Option<String>> {
-        let mut state = self
-            .inner
-            .lock()
-            .map_err(|e| AgentError::Internal(format!("process worker mutex poisoned: {e}")))?;
-        if let Some(active) = state.active.as_mut() {
-            if active.child.try_wait()?.is_some() {
-                state.active = None;
-            }
-        }
-        Ok(state.active.as_ref().map(|w| w.deployment_id.clone()))
-    }
-
-    fn active_serving_url(&self) -> AgentResult<Option<String>> {
-        let mut state = self
-            .inner
-            .lock()
-            .map_err(|e| AgentError::Internal(format!("process worker mutex poisoned: {e}")))?;
-        if let Some(active) = state.active.as_mut() {
-            if active.child.try_wait()?.is_some() {
-                state.active = None;
-            }
-        }
-        Ok(state
-            .active
-            .as_ref()
-            .map(|w| format!("http://{}:{}/infer", self.config.bind_host, w.port)))
-    }
-}
-
-impl RunningWorker {
-    fn stop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = fs::remove_file(&self.config_path);
-    }
-}
-
-impl Drop for RunningWorker {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-fn get_health_json(host: &str, port: u16, timeout: Duration) -> AgentResult<serde_json::Value> {
+pub(crate) fn get_health_json(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> AgentResult<serde_json::Value> {
     let mut stream = TcpStream::connect((host, port)).map_err(|e| {
         AgentError::WorkerControl(format!("connect serving worker {host}:{port}: {e}"))
     })?;
@@ -939,16 +589,8 @@ mod tests {
         clippy::unwrap_used,
         clippy::default_trait_access
     )]
-    use super::{
-        AgentErrorKind, CandidateRef, MockBehavior, MockWorkerControl, ProcessWorkerControl,
-        WorkerControl,
-    };
-    use crate::config::{AgentConfig, ControlTransport, WorkerControlMode};
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
+    use super::{AgentErrorKind, CandidateRef, MockBehavior, MockWorkerControl, WorkerControl};
     use std::time::Duration;
-    use tempfile::TempDir;
-    use tensorplate_protocol::bundle_manifest::DeviceFamily;
 
     fn candidate(id: &str) -> CandidateRef {
         CandidateRef {
@@ -961,31 +603,6 @@ mod tests {
             bundle_version: Some("1".into()),
             artifact_relative_path: Some("model.bin".into()),
         }
-    }
-
-    fn process_config(td: &std::path::Path) -> AgentConfig {
-        let mut cfg = AgentConfig {
-            schema_version: tensorplate_protocol::SCHEMA_VERSION.to_string(),
-            transport: ControlTransport::UnixSocket,
-            socket_path: Some(td.join("agent.sock")),
-            tcp_bind_host: "127.0.0.1".into(),
-            tcp_bind_port: 0,
-            state_dir: td.join("state"),
-            staging_dir: td.join("staging"),
-            available_backends: vec!["mock".into()],
-            backend_capabilities: BTreeMap::new(),
-            memory_admission: None,
-            device_memory_bytes: Some(8 * 1024 * 1024 * 1024),
-            device_family: DeviceFamily::Any,
-            admission_posture: None,
-            worker: Default::default(),
-            supervision: None,
-            runtime_version: Some("0.1.0".into()),
-        };
-        cfg.worker.mode = WorkerControlMode::Process;
-        cfg.worker.serving_binary_path = Some(PathBuf::from("/usr/local/bin/tensorplate-serving"));
-        cfg.worker.serving_config_dir = Some(td.join("worker-configs"));
-        cfg.validate().expect("valid")
     }
 
     #[test]
@@ -1081,97 +698,5 @@ mod tests {
         let forwarded = forwarded.lock().expect("lock");
         assert_eq!(forwarded.len(), padding + record.len() + 1);
         assert!(forwarded.ends_with(format!("{record}\n").as_bytes()));
-    }
-
-    /// A candidate staged at one of the repository's bundle fixtures.
-    fn staged(id: &str, bundle: &str) -> CandidateRef {
-        let staged_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../test/models/bundles")
-            .join(bundle);
-        CandidateRef {
-            staged_path: staged_path.display().to_string(),
-            ..candidate(id)
-        }
-    }
-
-    #[test]
-    fn process_worker_renders_serving_config_for_candidate() {
-        let td = TempDir::new().expect("td");
-        let cfg = process_config(td.path());
-        let worker = ProcessWorkerControl::new(&cfg).expect("worker");
-        let c = staged("deploy-1", "v0_1/x86_fixture_smoke");
-        let (path, rendered) = worker.render_config(&c, 18080).expect("render");
-        assert!(path.is_file());
-        assert_eq!(rendered["deployment"]["model"]["model_id"], "deploy-1");
-        assert_eq!(
-            rendered["deployment"]["model"]["artifact_path"],
-            format!("{}/model.bin", c.staged_path)
-        );
-        assert_eq!(rendered["bind"]["port"], 18080);
-    }
-
-    #[test]
-    fn process_worker_renders_the_runner_profile_the_staged_bundle_selects() {
-        let td = TempDir::new().expect("td");
-        let worker = ProcessWorkerControl::new(&process_config(td.path())).expect("worker");
-        for (bundle, expected) in [
-            ("v0_2/speech_stt_streaming", Some("faster_whisper")),
-            ("v0_2/speech_tts_streaming", Some("kokoro")),
-            ("v0_1/x86_fixture_smoke", None),
-            // Read without hashing: its artifact does not match its digest.
-            ("v0_1/invalid_corrupt_artifact", None),
-        ] {
-            let (path, rendered) = worker
-                .render_config(&staged("deploy-1", bundle), 18080)
-                .expect("render");
-            let model = rendered["deployment"]["model"].as_object().expect("model");
-            assert_eq!(
-                model.get("runner_profile").and_then(|v| v.as_str()),
-                expected,
-                "{bundle}"
-            );
-            assert_eq!(model.contains_key("runner_profile"), expected.is_some());
-            let written: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(path).expect("read")).expect("json");
-            assert_eq!(written, rendered, "{bundle}");
-        }
-    }
-
-    #[test]
-    fn process_worker_renders_nothing_for_a_staged_bundle_it_cannot_read() {
-        let td = TempDir::new().expect("td");
-        let worker = ProcessWorkerControl::new(&process_config(td.path())).expect("worker");
-        let staged_at = |name: &str, manifest: Option<&str>| {
-            let dir = td.path().join(name);
-            std::fs::create_dir(&dir).expect("staged directory");
-            if let Some(text) = manifest {
-                std::fs::write(dir.join("manifest.json"), text).expect("manifest");
-            }
-            CandidateRef {
-                staged_path: dir.display().to_string(),
-                ..candidate("deploy-1")
-            }
-        };
-
-        let gone = worker.render_config(&candidate("deploy-1"), 18080);
-        assert!(
-            matches!(gone, Err(super::AgentError::BundleMissing(_))),
-            "{gone:?}"
-        );
-        // Never read as a bundle that names no profile.
-        for (name, manifest) in [
-            ("no-manifest", None),
-            ("truncated", Some("{")),
-            ("not-a-manifest", Some("{}")),
-        ] {
-            let refused = worker.render_config(&staged_at(name, manifest), 18080);
-            assert!(
-                matches!(refused, Err(super::AgentError::BundleManifest(_))),
-                "{name}: {refused:?}"
-            );
-        }
-
-        let rendered = std::fs::read_dir(&worker.config.config_dir).expect("config directory");
-        assert_eq!(rendered.count(), 0);
     }
 }

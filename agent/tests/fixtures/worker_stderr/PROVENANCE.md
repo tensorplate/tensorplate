@@ -21,3 +21,9 @@ lines' code and message replaced by those the same profile raises when the
 model build runs out of memory (`oom_error`, "the Kokoro model could not be
 loaded"). An out-of-memory load needs an accelerator and is not recorded
 here.
+
+`control-responder.py` is not a recording. It is a stand-in, written by
+hand, for a worker's control thread: it answers ledger polls in the shape of
+`protocol/rust/tests/fixtures/worker_control_ledger_status.jsonl` with an
+empty ledger. `stub-worker.sh` runs it with `python3`, which these tests
+need on `PATH`.

@@ -152,10 +152,18 @@ fn fixture() -> Fixture {
     }
 }
 
+fn bundle_fixture(bundle: &str) -> String {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../test/models/bundles")
+        .join(bundle)
+        .display()
+        .to_string()
+}
+
 fn candidate(id: &str) -> CandidateRef {
     CandidateRef {
         deployment_id: id.into(),
-        staged_path: format!("/staging/{id}"),
+        staged_path: bundle_fixture("v0_1/x86_fixture_smoke"),
         bundle_digest: "sha256:cafe".into(),
         backend_hint: "mock".into(),
         model_class: "vision".into(),
@@ -179,7 +187,14 @@ impl Fixture {
     /// Launch `id` and take it through to serving.
     fn serve(&self, id: &str) -> Arc<Handle> {
         self.prepare(id).unwrap();
-        let handle = self.launcher.launched.lock().unwrap().last().cloned().unwrap();
+        let handle = self
+            .launcher
+            .launched
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap();
         let port = u16::try_from(handle.config["bind"]["port"].as_u64().unwrap()).unwrap();
         self.health(port, id);
         assert!(self.warm(id).unwrap().ready);
@@ -205,7 +220,12 @@ fn each_launch_takes_a_new_generation_and_renders_it_with_the_member_name() {
         assert_eq!(deployment["generation"], generation);
         assert_eq!(deployment["endpoint"], "stt");
         assert_eq!(deployment["model"]["model_id"], "stt");
-        assert_eq!(deployment["model"]["artifact_path"], "/staging/stt/model.bin");
+        assert_eq!(
+            deployment["model"]["artifact_path"],
+            format!("{}/model.bin", bundle_fixture("v0_1/x86_fixture_smoke"))
+        );
+        assert_eq!(handle.config["bind"]["port"], ACTIVE_PORT);
+        assert_eq!(handle.config["bind"]["host"], "127.0.0.1");
         assert_eq!(deployment["use_mock_session"], true);
     }
     assert_eq!(f.launcher.count(), 2);
@@ -215,7 +235,7 @@ fn each_launch_takes_a_new_generation_and_renders_it_with_the_member_name() {
 fn a_member_name_the_worker_would_refuse_never_takes_a_generation() {
     let f = fixture();
     let err = f.prepare("not a member name").unwrap_err();
-    assert!(matches!(err, AgentError::WorkerControl(_)), "{err}");
+    assert!(matches!(err, AgentError::Config(_)), "{err}");
     assert_eq!(f.launcher.count(), 0);
     assert_eq!(f.next_generation.load(Ordering::SeqCst), 1);
 }
@@ -228,7 +248,11 @@ fn no_worker_starts_when_a_generation_cannot_be_allocated() {
         settings(td.path()),
         launcher.clone(),
         Arc::new(FakeProbe::default()),
-        Arc::new(|| Err(AgentError::StateIndeterminate("write outcome unknown".into()))),
+        Arc::new(|| {
+            Err(AgentError::StateIndeterminate(
+                "write outcome unknown".into(),
+            ))
+        }),
     );
     let err = registry.prepare("tx", &candidate("stt"), WARM).unwrap_err();
     assert!(matches!(err, AgentError::StateIndeterminate(_)), "{err}");
@@ -276,7 +300,10 @@ fn a_candidate_that_exits_while_loading_answers_with_its_failure_and_is_forgotte
     f.launcher.handle(1).exited.store(true, Ordering::SeqCst);
 
     let err = f.warm("stt").unwrap_err();
-    assert!(matches!(err, AgentError::WorkerExited(ref s) if s == "generation 1"), "{err}");
+    assert!(
+        matches!(err, AgentError::WorkerExited(ref s) if s == "generation 1"),
+        "{err}"
+    );
     assert!(matches!(f.warm("stt"), Err(AgentError::WorkerNotReady)));
     assert_eq!(f.configs(), 0);
 }
@@ -313,7 +340,10 @@ fn promotion_retires_the_old_generation_by_asking_it_to_stop() {
 
     assert_eq!(old.calls(), ["terminate"]);
     assert!(new.calls().is_empty());
-    assert_eq!(f.registry.active_deployment_id().unwrap().as_deref(), Some("tts"));
+    assert_eq!(
+        f.registry.active_deployment_id().unwrap().as_deref(),
+        Some("tts")
+    );
     assert_eq!(
         f.registry.active_serving_url().unwrap().as_deref(),
         Some(format!("http://127.0.0.1:{CANDIDATE_PORT}/infer").as_str())
@@ -402,4 +432,186 @@ fn dropping_the_registry_stops_every_member_it_still_runs() {
     drop(f.registry);
     assert_eq!(serving.calls(), ["terminate"]);
     assert_eq!(candidate.calls(), ["terminate", "kill"]);
+}
+
+#[test]
+fn the_rendered_config_names_the_runner_profile_the_staged_bundle_selects() {
+    let f = fixture();
+    for (generation, (bundle, expected)) in [
+        ("v0_2/speech_stt_streaming", Some("faster_whisper")),
+        ("v0_2/speech_tts_streaming", Some("kokoro")),
+        ("v0_1/x86_fixture_smoke", None),
+        // Read without hashing: its artifact does not match its digest.
+        ("v0_1/invalid_corrupt_artifact", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let staged = CandidateRef {
+            staged_path: bundle_fixture(bundle),
+            ..candidate("deploy-1")
+        };
+        f.registry.prepare("tx", &staged, WARM).unwrap();
+        let handle = f.launcher.handle(generation as u64 + 1);
+        let model = handle.config["deployment"]["model"].as_object().unwrap();
+        assert_eq!(
+            model.get("runner_profile").and_then(|v| v.as_str()),
+            expected,
+            "{bundle}"
+        );
+        assert_eq!(model.contains_key("runner_profile"), expected.is_some());
+    }
+}
+
+#[test]
+fn nothing_is_rendered_or_started_for_a_staged_bundle_that_cannot_be_read() {
+    let f = fixture();
+    let staged_at = |name: &str, manifest: Option<&str>| {
+        let dir = f.td.path().join(name);
+        std::fs::create_dir(&dir).unwrap();
+        if let Some(text) = manifest {
+            std::fs::write(dir.join("manifest.json"), text).unwrap();
+        }
+        CandidateRef {
+            staged_path: dir.display().to_string(),
+            ..candidate("deploy-1")
+        }
+    };
+
+    let gone = CandidateRef {
+        staged_path: f.td.path().join("gone").display().to_string(),
+        ..candidate("deploy-1")
+    };
+    let refused = f.registry.prepare("tx", &gone, WARM);
+    assert!(
+        matches!(refused, Err(AgentError::BundleMissing(_))),
+        "{refused:?}"
+    );
+    // Never read as a bundle that names no profile.
+    for (name, manifest) in [
+        ("no-manifest", None),
+        ("truncated", Some("{")),
+        ("not-a-manifest", Some("{}")),
+    ] {
+        let refused = f.registry.prepare("tx", &staged_at(name, manifest), WARM);
+        assert!(
+            matches!(refused, Err(AgentError::BundleManifest(_))),
+            "{name}: {refused:?}"
+        );
+    }
+    assert_eq!(f.launcher.count(), 0);
+    assert_eq!(f.configs(), 0);
+}
+
+#[test]
+fn configs_left_by_an_earlier_agent_process_are_removed_and_nothing_else() {
+    let td = TempDir::new().unwrap();
+    for name in [
+        "serving-stt-3.json",
+        "serving-tts-18081.json",
+        "notes.txt",
+        "other.json",
+    ] {
+        std::fs::write(td.path().join(name), "{}").unwrap();
+    }
+    remove_stale_configs(td.path());
+    let mut left: Vec<_> = std::fs::read_dir(td.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["notes.txt", "other.json"]);
+    remove_stale_configs(&td.path().join("absent"));
+}
+
+#[test]
+fn a_health_read_that_times_out_is_not_ready_and_a_refused_one_is_an_error() {
+    let probe = HttpHealth {
+        host: "127.0.0.1".into(),
+    };
+    let listening = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listening.local_addr().unwrap().port();
+    assert_eq!(
+        probe.ready_model(port, Duration::from_millis(30)).unwrap(),
+        None
+    );
+
+    drop(listening);
+    let refused = probe.ready_model(port, Duration::from_millis(30));
+    assert!(
+        matches!(refused, Err(AgentError::WorkerControl(_))),
+        "{refused:?}"
+    );
+}
+
+/// Answers one `/health` request with `body`.
+fn health_listener(body: &'static str) -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut head = [0_u8; 512];
+        let _ = stream.read(&mut head);
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    });
+    port
+}
+
+#[test]
+fn only_a_health_answer_in_the_ready_state_names_a_ready_model() {
+    let probe = HttpHealth {
+        host: "127.0.0.1".into(),
+    };
+    let timeout = Duration::from_secs(2);
+    let loading = health_listener(r#"{"state":"loading","active_model_id":"stt"}"#);
+    assert_eq!(probe.ready_model(loading, timeout).unwrap(), None);
+    let ready = health_listener(r#"{"state":"ready","active_model_id":"stt"}"#);
+    assert_eq!(
+        probe.ready_model(ready, timeout).unwrap().as_deref(),
+        Some("stt")
+    );
+}
+
+#[test]
+fn building_the_agents_registry_clears_the_configs_an_earlier_process_left() {
+    use crate::config::{AgentConfig, ControlTransport, WorkerControlMode};
+    let td = TempDir::new().unwrap();
+    let configs = td.path().join("worker-configs");
+    std::fs::create_dir_all(&configs).unwrap();
+    std::fs::write(configs.join("serving-stt-1.json"), "{}").unwrap();
+    let mut agent = AgentConfig {
+        schema_version: tensorplate_protocol::SCHEMA_VERSION.to_string(),
+        transport: ControlTransport::UnixSocket,
+        socket_path: Some(td.path().join("agent.sock")),
+        tcp_bind_host: "127.0.0.1".into(),
+        tcp_bind_port: 0,
+        state_dir: td.path().join("state"),
+        staging_dir: td.path().join("staging"),
+        available_backends: vec!["mock".into()],
+        backend_capabilities: BTreeMap::new(),
+        memory_admission: None,
+        device_memory_bytes: None,
+        device_family: tensorplate_protocol::bundle_manifest::DeviceFamily::Any,
+        admission_posture: None,
+        worker: crate::config::WorkerConfig::default(),
+        supervision: None,
+        runtime_version: None,
+    };
+    agent.worker.mode = WorkerControlMode::Process;
+    agent.worker.serving_binary_path = Some("/usr/local/bin/tensorplate-serving".into());
+    agent.worker.serving_config_dir = Some(configs.clone());
+
+    let registry = MemberRegistry::from_config(
+        &agent,
+        Arc::new(|| Ok(1)),
+        crate::worker::agent_stderr_sink(),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read_dir(&configs).unwrap().count(), 0);
+    drop(registry);
 }
