@@ -6,52 +6,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ## [Unreleased]
 
-### Fixed
-
-- Apply the evidence publication policy to native dependency fixtures,
-  including earlier versions in a change's commit history. Recorded
-  fixtures cannot bypass the policy through a source allowlist.
-  (V030-E01-F03-T01)
-
-- The backend probe kills an interpreter query that outlasts its limit: five
-  seconds by default, and 120 for the PyTorch import, which reads far more
-  from disk. The limit was documented and never applied, so a
-  Python that hung held `tensorplate doctor`, and held the agent's startup
-  before its control socket existed. The probe's queries are also started
-  from `/`, so a module in the directory `tensorplate doctor` was run from
-  is no longer imported in place of an installed one. `tensorplate doctor`'s
-  own `dpkg-query` calls are killed after five seconds as well.
-  (V030-E01-F01-T03)
-- Run serving-worker SIGINT/SIGTERM shutdown on the main thread, retaining
-  signals during model load and avoiding signal-handler locks, allocation,
-  and repeated shutdown entry. (V030-E04-F03-T02)
-- The stub serving worker the CLI integration tests share reads a whole
-  request, the head through its blank line and then the `Content-Length`
-  body, before it answers. It did one 8 KiB read, so a request whose head
-  and body arrived as two segments could be answered and closed with the
-  body still unread; the kernel then reset the connection and a
-  `tensorplate infer` test failed now and then with "Connection reset by
-  peer". The health stub in the agent's deploy tests reads its request head
-  the same way. Test code only; nothing that ships changes.
-- The Evidence publication workflow checks every filed candidate
-  qualification record against its schema and the result its own steps
-  derive. That check ran only inside the qualify tool's test, behind a path
-  filter a pull request that changes nothing but records does not match.
-  `test/validation/candidate_qualify_test.py --filed-records` runs the check
-  alone. (V030-E06-F02-T01)
-- The systemd supervision contract test (`test/packaging/
-  verify_service_supervision.sh`) read `NRestarts` once, right after
-  killing the agent, and failed on a runner where systemd had not yet
-  processed the death; CI showed `NRestarts=0 after a crash` and passed
-  on rerun. The crash case now waits, bounded by the unit's `RestartSec`,
-  until the restart is counted and the unit is active with a new main
-  process, and a failure names the state it saw. A new core verifier,
-  `verify_supervision_restart_wait.sh`, replays that window and the
-  other ways the wait can be wrong against a fake `systemctl`.
-  (V030-E01-F01-T02)
-- The APT channel lifecycle rehearsal (`test/packaging/
-  apt-lifecycle-e2e.sh`) builds its baseline from `v0.2.1`, the published
-  predecessor, instead of `v0.1.1`. (V030-E01-F01-T02)
+## [0.3.1] - 2026-10-01
 
 ### Added
 
@@ -387,77 +342,6 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   gone, nothing restarted, and a line naming the units that are not
   installed. Exercised on the stubbed appliance only so far.
   (V030-E01-F01-T03)
-
-### Changed
-
-- The backend probe keeps one state per installed runner profile, and the
-  agent's deploy gate takes the state of the interpreter a bundle would run
-  in. Each profile's interpreter is probed in the environment the sidecar
-  launcher sets: it is an executable file that runs, meets the backend's
-  minimum Python and imports the sidecar module. A bundle that names a
-  runner profile no longer needs PyTorch in the descriptor's own
-  interpreter, so a host with only the speech runtime serves it; a bundle
-  that names none is decided as before. A bundle that names a profile no
-  installed package declares is refused before staging, as `unsupported`
-  with the reason `missing_backend_package` ("runner profile `<id>` is not
-  installed"); it was refused by the worker at load. The agent logs one
-  `backend probe:` line per profile at startup.
-  `tensorplate doctor`'s `python_pytorch_runtime` reports a PyTorch that does
-  not import in the descriptor's interpreter as `missing` where a runner
-  profile is installed and as `fail` where none is, and notes an interpreter
-  override it reads in `/etc/default/tensorplate-agent`. A refused runner
-  profile declaration's hint names the package to install or reinstall.
-  (V030-E01-F01-T03)
-- A deploy or rollback whose candidate worker exits while loading now fails
-  as soon as the worker exits instead of at the agent's warm timeout, and
-  with the worker's own code: a runner that refuses the model as
-  `unsupported` or `oom_error` reaches `tensorplate deploy` as that code
-  rather than `inference_failed`. A worker that exits without a startup
-  record fails the deploy as `load_failed` with its exit status. No
-  transaction is left in flight, so a rollback issued right after is
-  accepted. `tensorplate deploy` and `tensorplate rollback` now wait at
-  least 120,000 ms for the agent's answer unless `--timeout-ms` is given,
-  so the default no longer expires at the agent's 30,000 ms warm timeout.
-  (V030-E04-F03-T02)
-- The release workflow's package count checks are exact: the publish path
-  requires thirteen `.deb` assets, where it accepted thirteen or more.
-  (V030-E01-F01-T04)
-- `tools/validation/candidate-qualify.py` gives every deploy and rollback
-  a CLI agent timeout (`--agent-timeout-ms`, 120,000 by default) above the
-  agent's warm timeout, so a load failure is recorded as the agent answered it and
-  not as the CLI's own `timeout`, and its teardown retries a rollback the
-  agent refuses as `busy` for up to `--teardown-busy-wait-ms` (60,000 by
-  default). (V030-E01-F02-T03)
-- Both release jobs and the CPU-only smoke compile the serving worker with
-  `TP_ENABLE_STREAMING_GRPC=ON`, linking gRPC and protobuf statically from
-  the vcpkg manifest feature `streaming-grpc`. `build-release-artifacts.sh`
-  and `amd64-build-profile.sh` require `VCPKG_ROOT` to name a vcpkg checkout
-  at the `builtin-baseline` of `vcpkg.json`; `VCPKG_INSTALLATION_ROOT` is no
-  longer read, and `TP_CMAKE_TOOLCHAIN_FILE` is refused on amd64. Both take
-  `--without-streaming`, which builds a worker without the feature and
-  without vcpkg and is not the release configuration;
-  `build-install-from-source.sh` passes it when no `VCPKG_ROOT` is given, so
-  a source install needs no vcpkg and its worker refuses
-  `streaming.enabled=true` as `unsupported`. A build with the feature and no
-  binary cache compiles the dependencies first, about an hour or more. A
-  release that publishes restores them from a cache and fails on a miss: the
-  ARM64 job from the runner's, through `jetson-runner-control.sh vcpkg-env`,
-  which now also refuses a compiler other than the one the cache was built
-  with, and the amd64 job from an Actions cache that only the new
-  `release-dependencies.yml` workflow saves on `develop`. The new
-  `tools/release/assert-static-streaming-closure.sh` fails a build whose
-  worker was configured without the feature, or whose serving package or
-  worker asks for a distribution library of the gRPC closure. The worker now
-  compiles against the manifest's `nlohmann-json`
-  rather than the distribution's package, and vcpkg builds the ports without
-  the project's `-gdwarf-4`. `jetson-runner-control.sh` also lists the binary
-  cache from `/`: run through `sudo -u` from a directory the runner account
-  cannot enter, its vcpkg commands failed with "cannot list the binary
-  cache". (V030-E04-F02-T04)
-
-## [0.3.1] - 2026-10-01
-
-### Added
 
 - The speech runtime package family: `tensorplate-speech-runtime-base`,
   `-cublas`, `-cuda`, `-torch`, `-vad`, `-ct2`, `-kokoro` and the
@@ -1115,6 +999,71 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The backend probe keeps one state per installed runner profile, and the
+  agent's deploy gate takes the state of the interpreter a bundle would run
+  in. Each profile's interpreter is probed in the environment the sidecar
+  launcher sets: it is an executable file that runs, meets the backend's
+  minimum Python and imports the sidecar module. A bundle that names a
+  runner profile no longer needs PyTorch in the descriptor's own
+  interpreter, so a host with only the speech runtime serves it; a bundle
+  that names none is decided as before. A bundle that names a profile no
+  installed package declares is refused before staging, as `unsupported`
+  with the reason `missing_backend_package` ("runner profile `<id>` is not
+  installed"); it was refused by the worker at load. The agent logs one
+  `backend probe:` line per profile at startup.
+  `tensorplate doctor`'s `python_pytorch_runtime` reports a PyTorch that does
+  not import in the descriptor's interpreter as `missing` where a runner
+  profile is installed and as `fail` where none is, and notes an interpreter
+  override it reads in `/etc/default/tensorplate-agent`. A refused runner
+  profile declaration's hint names the package to install or reinstall.
+  (V030-E01-F01-T03)
+- A deploy or rollback whose candidate worker exits while loading now fails
+  as soon as the worker exits instead of at the agent's warm timeout, and
+  with the worker's own code: a runner that refuses the model as
+  `unsupported` or `oom_error` reaches `tensorplate deploy` as that code
+  rather than `inference_failed`. A worker that exits without a startup
+  record fails the deploy as `load_failed` with its exit status. No
+  transaction is left in flight, so a rollback issued right after is
+  accepted. `tensorplate deploy` and `tensorplate rollback` now wait at
+  least 120,000 ms for the agent's answer unless `--timeout-ms` is given,
+  so the default no longer expires at the agent's 30,000 ms warm timeout.
+  (V030-E04-F03-T02)
+- The release workflow's package count checks are exact: the publish path
+  requires thirteen `.deb` assets, where it accepted thirteen or more.
+  (V030-E01-F01-T04)
+- `tools/validation/candidate-qualify.py` gives every deploy and rollback
+  a CLI agent timeout (`--agent-timeout-ms`, 120,000 by default) above the
+  agent's warm timeout, so a load failure is recorded as the agent answered it and
+  not as the CLI's own `timeout`, and its teardown retries a rollback the
+  agent refuses as `busy` for up to `--teardown-busy-wait-ms` (60,000 by
+  default). (V030-E01-F02-T03)
+- Both release jobs and the CPU-only smoke compile the serving worker with
+  `TP_ENABLE_STREAMING_GRPC=ON`, linking gRPC and protobuf statically from
+  the vcpkg manifest feature `streaming-grpc`. `build-release-artifacts.sh`
+  and `amd64-build-profile.sh` require `VCPKG_ROOT` to name a vcpkg checkout
+  at the `builtin-baseline` of `vcpkg.json`; `VCPKG_INSTALLATION_ROOT` is no
+  longer read, and `TP_CMAKE_TOOLCHAIN_FILE` is refused on amd64. Both take
+  `--without-streaming`, which builds a worker without the feature and
+  without vcpkg and is not the release configuration;
+  `build-install-from-source.sh` passes it when no `VCPKG_ROOT` is given, so
+  a source install needs no vcpkg and its worker refuses
+  `streaming.enabled=true` as `unsupported`. A build with the feature and no
+  binary cache compiles the dependencies first, about an hour or more. A
+  release that publishes restores them from a cache and fails on a miss: the
+  ARM64 job from the runner's, through `jetson-runner-control.sh vcpkg-env`,
+  which now also refuses a compiler other than the one the cache was built
+  with, and the amd64 job from an Actions cache that only the new
+  `release-dependencies.yml` workflow saves on `develop`. The new
+  `tools/release/assert-static-streaming-closure.sh` fails a build whose
+  worker was configured without the feature, or whose serving package or
+  worker asks for a distribution library of the gRPC closure. The worker now
+  compiles against the manifest's `nlohmann-json`
+  rather than the distribution's package, and vcpkg builds the ports without
+  the project's `-gdwarf-4`. `jetson-runner-control.sh` also lists the binary
+  cache from `/`: run through `sudo -u` from a directory the runner account
+  cannot enter, its vcpkg commands failed with "cannot list the binary
+  cache". (V030-E04-F02-T04)
+
 - Validate format 0.2 class blocks, streaming state, canonical budget lines, caller-owned stages, required profile fields and explicit speech precision before staging; preserve typed rule codes in agent errors and validate applicable descriptor fields. Format 0.1 behavior is unchanged. (V030-E02-F01-T02)
 
 - The Rust mirror of the sidecar IPC header, `IpcMessage`, now refuses
@@ -1231,6 +1180,51 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   say to run it there. (V030-E06-F02-T01)
 
 ### Fixed
+
+- Apply the evidence publication policy to native dependency fixtures,
+  including earlier versions in a change's commit history. Recorded
+  fixtures cannot bypass the policy through a source allowlist.
+  (V030-E01-F03-T01)
+
+- The backend probe kills an interpreter query that outlasts its limit: five
+  seconds by default, and 120 for the PyTorch import, which reads far more
+  from disk. The limit was documented and never applied, so a
+  Python that hung held `tensorplate doctor`, and held the agent's startup
+  before its control socket existed. The probe's queries are also started
+  from `/`, so a module in the directory `tensorplate doctor` was run from
+  is no longer imported in place of an installed one. `tensorplate doctor`'s
+  own `dpkg-query` calls are killed after five seconds as well.
+  (V030-E01-F01-T03)
+- Run serving-worker SIGINT/SIGTERM shutdown on the main thread, retaining
+  signals during model load and avoiding signal-handler locks, allocation,
+  and repeated shutdown entry. (V030-E04-F03-T02)
+- The stub serving worker the CLI integration tests share reads a whole
+  request, the head through its blank line and then the `Content-Length`
+  body, before it answers. It did one 8 KiB read, so a request whose head
+  and body arrived as two segments could be answered and closed with the
+  body still unread; the kernel then reset the connection and a
+  `tensorplate infer` test failed now and then with "Connection reset by
+  peer". The health stub in the agent's deploy tests reads its request head
+  the same way. Test code only; nothing that ships changes.
+- The Evidence publication workflow checks every filed candidate
+  qualification record against its schema and the result its own steps
+  derive. That check ran only inside the qualify tool's test, behind a path
+  filter a pull request that changes nothing but records does not match.
+  `test/validation/candidate_qualify_test.py --filed-records` runs the check
+  alone. (V030-E06-F02-T01)
+- The systemd supervision contract test (`test/packaging/
+  verify_service_supervision.sh`) read `NRestarts` once, right after
+  killing the agent, and failed on a runner where systemd had not yet
+  processed the death; CI showed `NRestarts=0 after a crash` and passed
+  on rerun. The crash case now waits, bounded by the unit's `RestartSec`,
+  until the restart is counted and the unit is active with a new main
+  process, and a failure names the state it saw. A new core verifier,
+  `verify_supervision_restart_wait.sh`, replays that window and the
+  other ways the wait can be wrong against a fake `systemctl`.
+  (V030-E01-F01-T02)
+- The APT channel lifecycle rehearsal (`test/packaging/
+  apt-lifecycle-e2e.sh`) builds its baseline from `v0.2.1`, the published
+  predecessor, instead of `v0.1.1`. (V030-E01-F01-T02)
 
 - `HttpServer::stop()` closed the listening socket while the accept
   thread could still be polling it, a data race ThreadSanitizer reports
