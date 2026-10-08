@@ -266,7 +266,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["binary_path", "working_dir", "serving_config_path", "control_port"],
-      "description": "V01-E09 worker supervisor config. Independent of `worker.*`: `worker.*` controls the prepare/warm/promote IPC contract; `supervision.*` controls the agent-owned worker process lifecycle (launch, stop, restart backoff, crash-loop policy).",
+      "description": "V01-E09 worker supervisor config. `worker.*` controls the prepare/warm/promote IPC contract; `supervision.*` controls the supervisor's own worker process lifecycle (launch, stop, restart backoff, crash-loop policy). The agent refuses a config that sets this beside `worker.mode: process`: each would start its own serving worker.",
       "properties": {
         "binary_path": {
           "type": "string",

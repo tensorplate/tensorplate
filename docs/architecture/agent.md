@@ -493,8 +493,15 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   that answers no ledger poll for 10 seconds has a failed control channel
   and is killed and refused, whatever the warm timeout.
 - **Stop.** A member being replaced, displaced or unloaded is sent SIGTERM
-  and given 5 seconds to drain before SIGKILL; members stopped together
-  share one deadline.
+  and is killed if it has not exited 10 seconds later; members stopped
+  together share that deadline. Its serving config tells it to drain its
+  sessions for 5 seconds (`shutdown.drain_deadline_ms`), so its own drain
+  ends before the registry would kill it. The signal goes to the worker's
+  process id only: a worker that has to be killed leaves its sidecar to
+  exit when it sees its peer closed.
+- **Promotion.** A candidate that exited after it was warmed is not
+  promoted: the deploy fails with the worker's failure and the serving
+  member stays.
 
 A member's name is its deployment id, and the serving worker accepts only 1
 to 128 of ASCII letters, digits, `-`, `_` and `.`. Deploys have been held to
@@ -505,6 +512,13 @@ and with the reason in `last_error`.
 The registry keeps the two configured ports (`serving_bind_port`,
 `serving_candidate_bind_port`): a candidate binds the one the serving member
 is not on. It does not restart a member that exits or loses contact after
-promotion, and it writes no resident set; `WorkerSupervisor` is a separate
-process manager that no packaged configuration enables and that does not go
-through the registry.
+promotion, and it writes no resident set. `WorkerSupervisor` is a separate
+process manager that no packaged configuration enables; a configuration that
+enables `supervision` beside `worker.mode: process` is refused at start,
+since each would start its own worker.
+
+The agent installs no termination handler, so when the agent itself is
+stopped the registry's stop does not run. What ends the workers then is the
+service manager: under the packaged systemd unit every process in the
+unit's control group, workers and sidecars included, is sent SIGTERM and
+whatever remains after the unit's stop timeout is killed.

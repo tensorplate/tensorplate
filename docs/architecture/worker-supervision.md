@@ -295,8 +295,10 @@ parent and worker exit produces EOF.
 The agent's member registry (`docs/architecture/agent.md`, "Member registry")
 starts every `process`-mode worker through this helper and client and renders
 the generation in the same config. `WorkerSupervisor` does neither: a worker
-it starts has no control channel, and enabling `supervision` beside
-`worker.mode: process` starts a second worker the registry does not know.
+it starts has no control channel. A configuration that enables `supervision`
+beside `worker.mode: process` is refused at start, since each would start
+its own worker. Both send SIGTERM the same way, directly to the worker's
+process id.
 The serving worker's side is described in
 `docs/architecture/serving-worker.md` ("Control channel"); descriptor isolation
 between sibling workers remains an integration check. The synthetic peer tests exercise the published golden
