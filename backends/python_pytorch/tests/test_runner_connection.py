@@ -5,19 +5,21 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import itertools
 import os
 import socket
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 import pytest
 
-from tensorplate_pytorch_backend import codec, protocol
+from tensorplate_pytorch_backend import codec, jobs, protocol
 from tensorplate_pytorch_backend import runner as runner_module
 from tensorplate_pytorch_backend.backends import Backend, FixtureBackend, NamedTensor
-from test_speech_jobs_golden_replay import WAIT_S
-from test_speech_jobs_runner import message
+from test_speech_jobs_golden_replay import WAIT_S, Peer
+from test_speech_jobs_golden_replay import connect as connect  # the fixture
+from test_speech_jobs_runner import ACCEPTED, message, read_after, submit
 
 
 @contextlib.contextmanager
@@ -121,3 +123,84 @@ def test_the_reader_stops_without_a_shutdown_to_wake_it(monkeypatch: pytest.Monk
             pass
         serving.join(timeout=WAIT_S)
         assert not serving.is_alive()
+
+
+_Work = jobs.Job | codec.SidecarFrame | None
+
+
+def _hold_the_serving_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[threading.Event, list[_Work]]:
+    """Let the serving thread take the load, then hold it before its next take, past its look
+    at the ended flag, until the reader is about to stop the lane; hold the reader there until
+    that take has returned. Returns the event set once it is held and what it then took."""
+    held, release, returned = threading.Event(), threading.Event(), threading.Event()
+    take, stop, takes = jobs.JobTable.take, jobs.JobTable.stop, itertools.count()
+    taken: list[_Work] = []
+
+    def held_take(table: jobs.JobTable) -> _Work:
+        if next(takes) == 0:
+            return take(table)
+        held.set()
+        release.wait(WAIT_S)
+        try:
+            taken.append(take(table))
+        finally:
+            returned.set()
+        return taken[-1]
+
+    def held_stop(table: jobs.JobTable, *, drain: bool = False) -> None:
+        release.set()
+        returned.wait(WAIT_S)
+        stop(table, drain=drain)
+
+    monkeypatch.setattr(jobs.JobTable, "take", held_take)
+    monkeypatch.setattr(jobs.JobTable, "stop", held_stop)
+    return held, taken
+
+
+def _fail_the_write_made_in(
+    method: str, peer: Peer, header: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Send ``header`` and close the peer's end while the reader is held on its way into
+    the table's ``method``, so the write made there ends the connection."""
+    entered, closed = threading.Event(), threading.Event()
+    original = getattr(jobs.JobTable, method)
+
+    def held(*arguments: Any) -> Any:
+        entered.set()
+        closed.wait(WAIT_S)
+        return original(*arguments)
+
+    monkeypatch.setattr(jobs.JobTable, method, held)
+    peer.send(header)
+    assert entered.wait(WAIT_S)
+    peer.client.close()
+    closed.set()
+    peer.thread.join(timeout=WAIT_S)
+    assert not peer.thread.is_alive()
+
+
+def test_a_job_queued_after_its_job_accepted_write_ended_the_connection_is_not_run(
+    connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held, taken = _hold_the_serving_thread(monkeypatch)
+    peer = connect()
+    backend = peer.enable_jobs()
+    assert held.wait(WAIT_S)
+    _fail_the_write_made_in("handle", peer, submit(1), monkeypatch)
+    assert [type(work) for work in taken] == [jobs.Job]
+    assert not backend.job_started.is_set()
+
+
+def test_an_unload_queued_after_a_waiting_jobs_failure_ended_the_connection_is_not_run(
+    connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    held, taken = _hold_the_serving_thread(monkeypatch)
+    peer = connect()
+    backend = peer.enable_jobs()
+    assert held.wait(WAIT_S)
+    assert read_after(peer, submit(1)) == (ACCEPTED, 1)  # and it waits: the serving thread is held
+    _fail_the_write_made_in("offer", peer, message(protocol.KIND_UNLOAD), monkeypatch)
+    assert [type(work) for work in taken] == [codec.SidecarFrame]
+    assert peer.runner.state.backend is backend
