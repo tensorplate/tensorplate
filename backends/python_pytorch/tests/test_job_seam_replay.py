@@ -35,7 +35,7 @@ def _text_bytes(text: dict[str, Any]) -> bytes:
         return str(text["utf8"]).encode("utf-8")
     if "hex" in text:
         return bytes.fromhex(text["hex"])
-    return (text["repeat"] * text["times"] + text.get("then", "")).encode("utf-8")
+    return str(text["repeat"] * text["times"] + text.get("then", "")).encode("utf-8")
 
 
 def _text(text: dict[str, Any]) -> str:
@@ -144,11 +144,13 @@ def _render_event(
     return header, payload
 
 
-def _job_event(event: dict[str, Any], identity: dict[str, int]) -> job_objects.JobEvent:
-    """Build the event through the mirror, as the job table does."""
-    header, payload = _render_event("s1", event, identity)
+def _job_event(
+    message_id: str, event: dict[str, Any], identity: dict[str, int]
+) -> tuple[dict[str, Any], bytes]:
+    """Build the event through the mirror, as the job table does, and number it."""
+    header, payload = _render_event(message_id, event, identity)
     error = header.get("error")
-    return job_objects.job_event(
+    built, payload = job_objects.job_event(
         header["kind"],
         job_objects.JobIdentity(header["job_id"], header["session_key"], header["generation"]),
         progress_sequence=header.get("progress_sequence"),
@@ -157,6 +159,9 @@ def _job_event(event: dict[str, Any], identity: dict[str, int]) -> job_objects.J
         if error
         else None,
     )
+    assert built["message_id"] == ""
+    built["message_id"] = message_id
+    return built, payload
 
 
 def _refusal(vector: dict[str, Any]) -> str | None:
@@ -231,12 +236,10 @@ def test_every_event_vector_replays() -> None:
         reason = _refusal(vector)
         count += 1
         if reason is None:
-            built = _job_event(event, _IDENTITY)
-            header, payload = _render_event("s1", event, _IDENTITY)
-            assert (built.header("s1"), built.payload) == (header, payload), name
+            assert _job_event("s1", event, _IDENTITY) == _render_event("s1", event, _IDENTITY), name
             continue
         with pytest.raises(job_objects.JobRefused) as refused:
-            _job_event(event, _IDENTITY)
+            _job_event("s1", event, _IDENTITY)
         assert (refused.value.reason, refused.value.code) == (
             reason,
             protocol.ERR_CONFIG_INVALID,
@@ -261,15 +264,14 @@ def test_every_trace_vector_replays() -> None:
                 sequence.note_cancel_requested()
                 continue
             identity = trace["jobs"][step["job"]]["identity"]
-            event = _job_event(step, identity)
+            event = _job_event(f"s{index}", step, identity)
             if index != refused_at:
-                sequence.observe(event)
-                header, payload = _render_event(f"s{index}", step, identity)
-                assert (event.header(f"s{index}"), event.payload) == (header, payload), name
+                sequence.observe(*event)
+                assert event == _render_event(f"s{index}", step, identity), name
                 continue
             before = copy.deepcopy(sequence)
             with pytest.raises(job_objects.JobRefused) as refused:
-                sequence.observe(event)
+                sequence.observe(*event)
             assert (refused.value.reason, refused.value.code) == (
                 expect["reason"],
                 protocol.ERR_INFERENCE_FAILED,
