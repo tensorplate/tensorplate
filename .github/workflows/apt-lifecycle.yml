@@ -134,16 +134,14 @@ jobs:
         shell: bash
         run: test/packaging/run.sh compatibility
 
-      - name: Release driver checks
-        shell: bash
-        run: test/release/run.sh
-
-      # The evidence checker validates reports against the lifecycle
-      # schema, and the release driver's drift guard reads release.yml.
-      # Both were previously assumed to be present rather than declared.
+      # Python 3.10 needs the declared tomli fallback.
       - name: Install release tooling dependencies
         shell: bash
         run: python3 -m pip install --quiet -r tools/release/requirements.txt
+
+      - name: Release driver checks
+        shell: bash
+        run: test/release/run.sh
 
       # The lifecycle stage runner classifies each stage from its
       # command's captured status, because bash suspends errexit inside a

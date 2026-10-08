@@ -79,6 +79,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   listener, so a measurement now says nothing about the transport;
   `docs/validation/streaming-footprint.md` says what is measured, how the
   packages are built and where the summary goes. (V030-E04-F02-T01)
+- The serving worker's native build dependencies are inventoried from the
+  vcpkg install tree in SPDX and scanned with pinned Grype. Native package
+  identifiers avoid matches against same-name packages in other ecosystems;
+  CPE coverage distinguishes positive controls, forward lookups without
+  controls, and unscanned ports. A built-worker linker-map check enforces dispositions
+  based on absent archive code, and stale dispositions that match nothing
+  fail. The checked result is logged and its map is retained. Release tests
+  use explicit policy dates and skip unavailable local GNU linker controls;
+  hosted CI requires them. Release tooling supports Python 3.10. Records for both release jobs,
+  cache provenance and the final-tag gate remain separate follow-up work.
+  (V030-E01-F03-T01)
 - The Python SDK declares a `speech` extra, `grpcio>=1.81.1,<2` and
   `protobuf>=6.33.5,<7`, for the streaming speech transport, and
   `sdk/python/constraints/speech.txt` pins those floors and grpcio's one

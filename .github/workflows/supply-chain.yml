@@ -1,9 +1,11 @@
 name: Supply chain
 
 # License policy, dependency sources and known vulnerabilities for the Rust
-# workspace (cargo-deny), and a CycloneDX SBOM plus a vulnerability audit
+# workspace (cargo-deny), a CycloneDX SBOM plus a vulnerability audit
 # for each Python package and for the speech runtime lock (cyclonedx-py,
-# pip-audit). Accepted
+# pip-audit), and an SPDX SBOM plus a vulnerability scan of the serving
+# worker's static native closure, read from the release configuration's
+# vcpkg install tree (native-sbom.py, grype). Accepted
 # vulnerabilities live in tools/release/vulnerability-dispositions.json;
 # see docs/release/artifacts.md, "Supply-chain checks".
 #
@@ -37,6 +39,11 @@ env:
   CARGO_DENY_SHA256: '9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f'
   CYCLONEDX_BOM_VERSION: '7.4.0'
   PIP_AUDIT_VERSION: '2.10.1'
+  # A prebuilt binary; the SHA-256 is the digest GitHub publishes for the
+  # release asset grype_0.120.1_linux_amd64.tar.gz
+  # (GET /repos/anchore/grype/releases, assets[].digest).
+  GRYPE_VERSION: '0.120.1'
+  GRYPE_SHA256: '0a9ee97ef5ae2ee953b0a80098105052e846cdbe319a57d808b519c33cd1343d'
   PIP_DISABLE_PIP_VERSION_CHECK: '1'
   PIP_ROOT_USER_ACTION: ignore
   PYTHONDONTWRITEBYTECODE: '1'
@@ -58,6 +65,11 @@ jobs:
 
       - name: Disposition checker tests
         run: python test/release/test_vulnerability_dispositions.py
+
+      - name: Native closure SBOM tool tests
+        run: |
+          python test/release/test_native_sbom.py
+          python test/release/test_native_code_absence.py
 
       - name: Every disposition is current and agrees with deny.toml
         run: python tools/release/check-vulnerability-dispositions.py
@@ -301,3 +313,185 @@ jobs:
 
           sed -E 's/^([^=]+==[^ +]+)\+[^ ]+/\1/' "${RUNNER_TEMP}/speech-lock.txt" >"${RUNNER_TEMP}/speech-audit.txt"
           "${audit[@]}" -r "${RUNNER_TEMP}/speech-audit.txt" "${ignore[@]}"
+
+  native:
+    name: SBOM and audit (serving worker native closure)
+    runs-on: ubuntu-22.04
+    # The release configuration's dependencies are restored from the cache
+    # the dependency workflow keeps warm on develop; the bound is for a
+    # pull request whose manifest change leaves that cache cold.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # A stalled mirror holds a connection open without failing; a response
+      # timeout turns the stall into an error that a retry can recover.
+      - name: Make apt fail fast and retry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          printf '%s\n' \
+            'Acquire::Retries "3";' \
+            'Acquire::http::Timeout "30";' \
+            'Acquire::https::Timeout "30";' \
+            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
+          apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
+            echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
+
+      - name: Install the release profile's compilers
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends \
+            ca-certificates \
+            clang-15 \
+            llvm-15 \
+            ninja-build
+          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
+          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+
+      # Never saves: the dependency workflow is the one writer on develop.
+      - name: Pinned vcpkg checkout and binary cache
+        uses: ./.github/actions/release-vcpkg
+        with:
+          mode: build
+
+      - name: Configure the release profile
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # shellcheck source=tools/release/amd64-build-profile.sh disable=SC1091
+          . tools/release/amd64-build-profile.sh
+          CC="$TP_AMD64_CC" CXX="$TP_AMD64_CXX" cmake -S . -B "${RUNNER_TEMP}/native" \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DTP_BUILD_TESTS=OFF \
+            -DTP_BUILD_EXAMPLES=OFF \
+            -DTP_ENABLE_SANITIZERS=OFF \
+            "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-Map,${RUNNER_TEMP}/native/worker.map" \
+            "${TP_AMD64_CMAKE_ARGS[@]}"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Build the worker and check absent native code
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -f "${RUNNER_TEMP}/native/worker.map" "${RUNNER_TEMP}/native/serving_worker/tensorplate-serving"
+          cmake --build "${RUNNER_TEMP}/native" --target tp_serving_worker --parallel 2
+          python3 tools/release/check-native-code-absence.py \
+            --worker "${RUNNER_TEMP}/native/serving_worker/tensorplate-serving" \
+            --link-map "${RUNNER_TEMP}/native/worker.map" \
+            --install-root "${RUNNER_TEMP}/native/vcpkg_installed" --triplet x64-linux \
+            --port grpc --port openssl --port zlib \
+            --output "${RUNNER_TEMP}/native-code-absence.json"
+
+      - name: SPDX SBOM of the native closure, from the install tree
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p sbom
+          created="$(date -u -d "@$(git show -s --format=%ct HEAD)" +%Y-%m-%dT%H:%M:%SZ)"
+          python3 tools/release/native-sbom.py collect \
+            --install-root "${RUNNER_TEMP}/native/vcpkg_installed" \
+            --manifest vcpkg.json --feature streaming-grpc --triplet x64-linux \
+            --cmake-cache "${RUNNER_TEMP}/native/CMakeCache.txt" \
+            --archives "${RUNNER_TEMP}/vcpkg-archives" \
+            --worker "${RUNNER_TEMP}/native/serving_worker/tensorplate-serving" \
+            --version "$(cat packaging/VERSION)" \
+            --created "$created" \
+            --output sbom/tensorplate-serving-native-closure-x64-linux.spdx.json
+          python3 tools/release/native-sbom.py check \
+            --sbom sbom/tensorplate-serving-native-closure-x64-linux.spdx.json \
+            --manifest vcpkg.json --feature streaming-grpc --triplet x64-linux
+          python3 - sbom/tensorplate-serving-native-closure-x64-linux.spdx.json <<'PY'
+          import json, sys
+          doc = json.load(open(sys.argv[1]))
+          for p in doc["packages"][1:]:
+              cpes = [r["referenceLocator"] for r in p.get("externalRefs", []) if r["referenceType"] == "cpe23Type"]
+              print(p["name"], p["versionInfo"], p["licenseConcluded"], cpes, p.get("comment"))
+          PY
+
+      # Before the scan, so a run whose scan fails still keeps its SBOM.
+      - name: Upload the SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-tensorplate-serving-native-closure
+          path: sbom/tensorplate-serving-native-closure-x64-linux.spdx.json
+          if-no-files-found: error
+
+      - name: Install grype ${{ env.GRYPE_VERSION }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          name="grype_${GRYPE_VERSION}_linux_amd64"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${name}.tar.gz" \
+            "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/${name}.tar.gz"
+          printf '%s  %s\n' "${GRYPE_SHA256}" "${RUNNER_TEMP}/${name}.tar.gz" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf "${RUNNER_TEMP}/${name}.tar.gz" -C "${RUNNER_TEMP}/bin" grype
+          echo "${RUNNER_TEMP}/bin" >>"$GITHUB_PATH"
+          "${RUNNER_TEMP}/bin/grype" version
+
+      # A known vulnerable version for every controlled identifier must match by CPE.
+      - name: grype positive control
+        shell: bash
+        env:
+          GRYPE_CHECK_FOR_APP_UPDATE: 'false'
+        run: |
+          set -Eeuo pipefail
+          control="${RUNNER_TEMP}/positive-control.spdx.json"
+          python3 tools/release/native-sbom.py control --output "$control"
+          status=0
+          grype "sbom:${control}" --fail-on negligible -o json="${RUNNER_TEMP}/control.json" -q || status=$?
+          if [ "$status" -ne 2 ]; then
+            echo "positive control failed: expected threshold exit 2, got ${status}" >&2
+            exit 1
+          fi
+          python3 tools/release/native-sbom.py check-control --report "${RUNNER_TEMP}/control.json"
+
+      - name: Install release tooling requirements
+        run: python3 -m pip install --quiet -r tools/release/requirements.txt
+
+      # Judged on the report, not on a severity threshold: an advisory NVD
+      # has not scored yet is a match of unknown severity, below any
+      # threshold. Any match that no disposition ignores fails.
+      - name: grype, with the recorded dispositions
+        shell: bash
+        env:
+          GRYPE_CHECK_FOR_APP_UPDATE: 'false'
+        run: |
+          set -Eeuo pipefail
+          proof=(--worker "${RUNNER_TEMP}/native/serving_worker/tensorplate-serving"
+                 --link-map "${RUNNER_TEMP}/native/worker.map"
+                 --install-root "${RUNNER_TEMP}/native/vcpkg_installed" --triplet x64-linux)
+          python3 tools/release/check-vulnerability-dispositions.py \
+            --grype-ignore "${proof[@]}" >"${RUNNER_TEMP}/grype.yaml"
+          cat "${RUNNER_TEMP}/grype.yaml"
+          status=0
+          grype --config "${RUNNER_TEMP}/grype.yaml" \
+            "sbom:sbom/tensorplate-serving-native-closure-x64-linux.spdx.json" \
+            --by-cve --show-suppressed \
+            -o table -o json="${RUNNER_TEMP}/native-scan.json" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "grype did not complete the scan (exit ${status})" >&2
+            exit 1
+          fi
+          python3 tools/release/check-vulnerability-dispositions.py \
+            --grype-report "${RUNNER_TEMP}/native-scan.json" "${proof[@]}"
+
+      - name: Upload the scan report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: grype-tensorplate-serving-native-closure
+          path: |
+            ${{ runner.temp }}/native-scan.json
+            ${{ runner.temp }}/control.json
+            ${{ runner.temp }}/native-code-absence.json
+            ${{ runner.temp }}/native/worker.map
+          if-no-files-found: ignore

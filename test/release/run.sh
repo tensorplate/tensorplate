@@ -21,6 +21,7 @@ verify_release_asset_names="test/release/test_release_asset_names.py"
 verify_build_source_identity="test/release/test_build_source_identity.py"
 verify_build_configuration="test/release/test_build_configuration.py"
 verify_changelog_fold="test/release/test_changelog_fold.py"
+verify_native_sbom="test/release/test_native_sbom.py"
 verify_speech_runtime_release="test/release/test_speech_runtime_release.py"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -74,6 +75,9 @@ python3 "$verify_release_asset_names"
 python3 "$verify_build_source_identity"
 python3 "$verify_build_configuration"
 python3 "$verify_changelog_fold"
+python3 "$verify_native_sbom"
+python3 test/release/test_native_code_absence.py
+python3 test/release/test_vulnerability_dispositions.py
 python3 "$verify_speech_runtime_release"
 
 # Manifest generation reads each package's control Version with dpkg-deb,
