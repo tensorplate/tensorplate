@@ -8,6 +8,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+
 - The C++ workflow's dependency cache is keyed on what vcpkg builds the
   packages with: the runner image's vcpkg checkout, the compiler binaries
   and the image's cmake version (which vcpkg runs once it is new enough),
@@ -24,6 +25,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- An internal interface, `SessionDispatch`, between a streaming transport
+  binding and the work a deployment does for its sessions, with a
+  deterministic implementation that needs no backend
+  (`SyntheticSessionDispatch`). The binding forwards session transitions
+  and accepted input; the dispatch returns input credit, reports
+  completions and queues typed output (an utterance's endpoint and final
+  transcript, audio chunks, a segment completion, the answer to a text
+  Finalize) under the output queue's backpressure. For it, the session
+  layer gains two things: an output queue tells its one consumer when
+  something was queued (`BoundedOutputQueue::set_consumer`), and the
+  session manager's sink also receives every return of input credit and
+  every completed finalization, in order with the other transitions,
+  each transition naming the event that caused it. The serving worker
+  does not construct a dispatch yet. `docs/architecture/serving-worker.md`
+  states the contract. (V030-E04-F03-T02)
 - Thirteen failure reasons, all in category `session`, name how a
   streaming session ends or why its opening is refused: `client_cancelled`
   (code `cancelled`); `idle_timeout`, `heartbeat_timeout`, `max_duration`
@@ -75,6 +91,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   protocol 0.1; version constants unchanged. (V030-E05-F04-T01)
 
 ### Changed
+
 
 - The draft stream session envelope
   (`protocol/proto/tensorplate/stream/v1/session.proto`) changes before any
@@ -133,21 +150,6 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
-- An internal interface, `SessionDispatch`, between a streaming transport
-  binding and the work a deployment does for its sessions, with a
-  deterministic implementation that needs no backend
-  (`SyntheticSessionDispatch`). The binding forwards session transitions
-  and accepted input; the dispatch returns input credit, reports
-  completions and queues typed output (an utterance's endpoint and final
-  transcript, audio chunks, a segment completion, the answer to a text
-  Finalize) under the output queue's backpressure. For it, the session
-  layer gains two things: an output queue tells its one consumer when
-  something was queued (`BoundedOutputQueue::set_consumer`), and the
-  session manager's sink also receives every return of input credit and
-  every completed finalization, in order with the other transitions,
-  each transition naming the event that caused it. The serving worker
-  does not construct a dispatch yet. `docs/architecture/serving-worker.md`
-  states the contract. (V030-E04-F03-T02)
 - `tensorplate-serving --version` prints a fourth line, `streaming-grpc on`
   or `streaming-grpc off`, so an installed worker says whether streaming
   support was compiled in; the first three lines keep their shape. Both
