@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import copy
+import json
 import socket
 import threading
+import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
 
 from tensorplate_pytorch_backend import job_objects, protocol
-from tensorplate_pytorch_backend.backends import FixtureBackend
+from tensorplate_pytorch_backend.backends import BackendError, FixtureBackend
 from test_speech_jobs_golden_replay import WAIT_S, Peer, golden
 from test_speech_jobs_golden_replay import connect as connect  # the fixture
 from test_speech_jobs_runner import (
@@ -104,3 +107,23 @@ def test_work_waiting_when_the_peer_leaves_is_dropped_unanswered(
     peer.thread.join(timeout=WAIT_S)
     assert not peer.thread.is_alive()
     assert peer.runner.state.backend is backend  # the unload never ran
+
+
+@pytest.mark.parametrize("delay", [True, -1, 60_001, "5"])
+def test_the_fixture_refuses_a_job_delay_outside_its_range(tmp_path: Path, delay: object) -> None:
+    entry = tmp_path / "entry.json"
+    entry.write_text(json.dumps({"job_delay_ms": delay}), encoding="utf-8")
+    with pytest.raises(BackendError) as refused:
+        FixtureBackend().load({"artifact_path": str(entry)})
+    assert refused.value.code == protocol.ERR_CONFIG_INVALID
+
+
+def test_the_fixture_holds_a_job_open_for_its_entry_delay(tmp_path: Path) -> None:
+    entry = tmp_path / "entry.json"
+    entry.write_text('{"job_delay_ms": 80}', encoding="utf-8")
+    backend = FixtureBackend()
+    backend.load({"artifact_path": str(entry)})
+    request = job_objects.read_submit(golden("stt_decode")[0], bytes(32000))
+    started = time.monotonic()
+    assert isinstance(backend.run_job(request), job_objects.TranscriptResult)
+    assert time.monotonic() - started >= 0.08
