@@ -288,7 +288,12 @@ submit for it fails with `job_class_unsupported`, and no job sends
   unanswered, and the loop returns once the backend call in progress has.
   When the peer half-closes a connection that never enabled jobs, the
   requests already read are run and answered in order, and then the socket
-  is shut down.
+  is shut down. The rule requires the other side to read continuously, while
+  it writes too. Job messages are written under the job table's lock, so
+  while a large result drains, health and cancel answers wait behind it. A
+  peer that takes bytes slowly keeps a write alive; one that stops reading,
+  for instance to write a second large submit without reading, has its
+  connection ended after the 5 s.
 - **Message ids.** A message the sidecar originates, the `ready_event`
   included, carries `s<n>` from one counter per connection.
 
