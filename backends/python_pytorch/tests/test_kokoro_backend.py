@@ -854,7 +854,12 @@ def test_unselected_voice_still_requires_a_verified_artifact(
 
 
 _PCM = (-32768, -32768, -16384, 0, 16384, 32767, 32767)
-_OTHER: list[dict[str, Any]] = [{"language": "fr-FR"}, {"voice": "af_bella"}, {"speed_milli": 1001}]
+_OTHER: list[dict[str, Any]] = [
+    {"language": "fr-FR"},
+    {"voice": "af_bella"},
+    {"speed_milli": 999},
+    {"speed_milli": 1001},
+]
 
 
 def _submit(text: str = "Hello", job_id: int = 1, **options: Any) -> tuple[dict[str, Any], bytes]:
@@ -905,12 +910,12 @@ def test_run_job_returns_the_pcm_and_clipping_of_the_synthesis_infer_runs(
     engine: _Engine, tmp_path: Path
 ) -> None:
     backend = _loaded(tmp_path)
-    result = backend.run_job(_job("Hello"))
-    audio, _ = backend.infer([text_utf8_tensor("Hello")])
+    result = backend.run_job(_job("Héllo"))
+    audio, _ = backend.infer([text_utf8_tensor("Héllo")])
     assert result == job_objects.AudioChunkResult(audio.payload, 2)
     assert struct.unpack("<7h", result.pcm) == _PCM
     voice = str(tmp_path / CANARY / "model/voices/af_heart.pt")
-    assert _calls(engine, "g2p") == ["Hello"] * 2
+    assert _calls(engine, "g2p") == ["Héllo"] * 2
     assert _calls(engine, "synthesize") == [("hello", voice, 1.0)] * 2
     _error(lambda: KokoroBackend().run_job(_job()), "not_ready")
 

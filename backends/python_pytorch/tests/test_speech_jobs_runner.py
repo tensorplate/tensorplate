@@ -366,21 +366,36 @@ def test_an_authored_backend_error_reaches_the_job_and_health(connect: Callable[
 
 
 class _Unpermitting(FixtureBackend):
+    error: ClassVar[BaseException]
+
     def permits_job(self, request: job_objects.JobRequest) -> bool:
-        raise RuntimeError(CANARY)
+        raise self.error
 
 
+@pytest.mark.parametrize(
+    ("error", "code", "said"),
+    [
+        (RuntimeError(CANARY), "internal", _INTERNAL),
+        (BackendError(protocol.ERR_TIMEOUT, "the model is busy"), "timeout", "the model is busy"),
+    ],
+)
 def test_a_permits_job_that_raises_fails_the_job_and_the_connection_stays_up(
-    connect: Callable[..., Peer], caplog: pytest.LogCaptureFixture
+    connect: Callable[..., Peer],
+    caplog: pytest.LogCaptureFixture,
+    error: BaseException,
+    code: str,
+    said: str,
 ) -> None:
+    _Unpermitting.error = error
     peer = connect({"fixture": _Unpermitting})
     peer.enable_jobs()
     with caplog.at_level(logging.DEBUG):
         failed, released = exchange(peer, submit(1)), peer.read().header
         health = exchange(peer, message(protocol.KIND_HEALTH_CHECK))
-    assert [digest(failed), digest(released)] == ended(1, FAILED, "internal")
-    assert failed["error"]["message"] == health["health"]["last_error"] == _INTERNAL
-    assert "sidecar job failed: RuntimeError at " in caplog.text
+    assert [digest(failed), digest(released)] == ended(1, FAILED, code)
+    assert failed["error"]["message"] == health["health"]["last_error"] == said
+    # As for a job that fails while it runs, the backend's own typed error is not logged.
+    assert ("sidecar job failed: RuntimeError at " in caplog.text) == (code == "internal")
     assert "canary" not in (json.dumps([failed, released, health]) + caplog.text).lower()
 
 
