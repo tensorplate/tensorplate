@@ -100,9 +100,10 @@ pub use bundle_manifest::{
     MAX_ARTIFACT_DESCRIPTION_BYTES, MAX_IO_LABEL_BYTES, RECOGNIZED_BACKEND_HINTS,
 };
 pub use bundle_profile::{
-    AudioEncoding, AudioFormat, BundleProfile, BundleProfileError, BundleRuleCode, DegradedProfile,
-    MemoryBudgetByDomain, PipelineStage, ProfileReference, SpeechChunking, SpeechContract,
-    SpeechServingMode, SpeechTask, StageOwnership, SttChunking, SupportLevel, TtsChunking, Warmup,
+    AudioEncoding, AudioFormat, BaseModelRef, BundleProfile, BundleProfileError, BundleRuleCode,
+    DegradedProfile, KnownBase, MemoryBudgetByDomain, PipelineStage, ProfileReference,
+    SpeechChunking, SpeechContract, SpeechServingMode, SpeechTask, StageOwnership, SttChunking,
+    SupportLevel, TtsChunking, VariantIdentity, VariantKind, VariantLineage, Warmup,
     PROFILE_FORMAT_VERSION, RUNTIME_PIPELINE_STAGES, STT_INPUT_AUDIO_FORMATS,
     TTS_OUTPUT_AUDIO_FORMATS,
 };
