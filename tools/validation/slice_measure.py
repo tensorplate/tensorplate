@@ -913,7 +913,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "--provenance",
         choices=("recorded", "synthetic"),
-        help="default: recorded when --source-commit is given, synthetic otherwise",
+        help="default: recorded when --source-commit and the worker's release or build are "
+        "given, synthetic otherwise",
     )
     run.add_argument("--source-commit", default=None, help="the commit this tool was run from")
     run.add_argument("--worker-version", help="the serving worker's release, as the operator knows")
@@ -943,6 +944,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "sample-gpu":
         # Ending this process ends the query in flight: `subprocess.run` kills it on the way out.
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        # An interrupt reaches the whole process group; only the run that started this ends it.
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         return sample_gpu(args.program, args.interval_ms)
     try:
         if min(args.iterations, args.event_timeout_ms, args.gpu_interval_ms) < 1:
@@ -951,9 +954,12 @@ def main(argv: list[str] | None = None) -> int:
             raise MeasureError("a frame is 20 to 320 ms, the bounds of the stream schema")
         if args.source_commit and re.fullmatch("[0-9a-f]{40}", args.source_commit) is None:
             raise MeasureError("--source-commit is not a full commit id")
-        provenance = args.provenance or ("recorded" if args.source_commit else "synthetic")
-        if provenance == "recorded" and not args.source_commit:
-            raise MeasureError("--provenance recorded needs --source-commit")
+        sourced = bool(args.source_commit and (args.worker_version or args.worker_build))
+        provenance = args.provenance or ("recorded" if sourced else "synthetic")
+        if provenance == "recorded" and not sourced:
+            raise MeasureError(
+                "--provenance recorded needs --source-commit and --worker-version or --worker-build"
+            )
         for option, pattern in (
             ("worker_version", LABEL), ("worker_build", LABEL), ("stt_language", PROTOCOL_NAME),
             ("tts_language", PROTOCOL_NAME), ("voice", PROTOCOL_NAME),

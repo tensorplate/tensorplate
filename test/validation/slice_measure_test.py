@@ -540,6 +540,10 @@ STRUCTURE_CASES = (
     (put(f"{S0}.server.events_received", 0), "events_received is below the events the record"),
     (put(f"{T0}.server.events_received", 6), "events_received is below the events the record"),
     (put("provenance", "recorded"), "provenance: recorded needs the tool's source commit"),
+    (
+        puts(("provenance", "recorded"), ("tool.source_commit", "0" * 40)),
+        "provenance: recorded needs the worker's release or build",
+    ),
     (put("stt.target.loopback", False), "gpu: machine is 'serving' and the targets make it"),
     (put("gpu.machine", "client_only"), "gpu: machine is 'client_only' and the targets make"),
     (put("gpu.devices", []), "gpu: devices are not the devices the samples name"),
@@ -616,7 +620,12 @@ VERDICT_CASES = (
     (puts(("tts.target.loopback", False), ("gpu.machine", "client_only")), "complete", ""),
     (puts(("worker.source", "operator_stated"), ("worker.version", "0.3.1")), "complete", ""),
     (
-        puts(("provenance", "recorded"), ("tool.source_commit", "0" * 40)),
+        puts(
+            ("provenance", "recorded"),
+            ("tool.source_commit", "0" * 40),
+            ("worker.source", "operator_stated"),
+            ("worker.build", "b1"),
+        ),
         "complete",
         "",
     ),
@@ -807,6 +816,8 @@ class SliceServer:
         ready.descriptor_digest = opened.resolved.descriptor_digest
         if fault == "digest":
             ready.descriptor_digest = "sha256:" + "1" * 64
+        if fault == "ready_names_no_target":
+            ready.generation, ready.descriptor_digest = 0, ""
         if stt:
             ready.input_format.CopyFrom(opened.input_format)
             if fault == "format":
@@ -1258,6 +1269,9 @@ def check_sessions(harness: Harness) -> None:
         target = record[mode]["target"]
         assert (target["generation"], target["descriptor_digest"]) == (None, None), target
         assert record["record_kind"] == "slice_measurement"
+    # A Ready that names a generation the Open did not is as much a mismatch as the reverse.
+    session = harness.run("stt", "generation", identity=(None, None))[1]
+    assert (session["outcome"], session["stop_reason"]) == ("stopped", "ready_mismatch"), session
 
     # Three sessions one after another: every sample is kept and none overlaps.
     record, _, server = harness.run("tts", iterations=3)
@@ -1271,6 +1285,7 @@ STOP_CASES = (
     ("stt", "gap", "sequence_gap"),
     ("stt", "generation", "ready_mismatch"),
     ("tts", "digest", "ready_mismatch"),
+    ("stt", "ready_names_no_target", "ready_mismatch"),
     ("stt", "format", "ready_mismatch"),
     ("stt", "frame_limit", "input_outside_limits"),
     ("stt", "frame_max", "input_outside_limits"),
@@ -1665,17 +1680,48 @@ def check_stamps(harness: Harness) -> None:
             assert bounds[boundary] < script.sent(name)[which], (boundary, bounds, script.handed)
     assert bounds["text_segment_scheduled"] < bounds["text_segment_sent"]
 
-    # An event is stamped when it is read, however long it then waits to be handled.
-    clock, fed = HeldClock(), FedCall()
-    call = client_mod.Call(clock, harness.bindings, fed, "stt", 0, 400 * MS)
-    fed.asked.acquire()
-    clock.at = 100
-    fed.events.put(pb.ServerEvent(sequence=1, ready=recorded_ready(pb, "stt_ready")))
-    fed.asked.acquire()
-    clock.at = 500
-    call.wait(lambda: call.ready is not None)
-    call.close()
-    assert call.session["boundaries"]["ready"] == 100, call.session["boundaries"]
+    # An event is stamped when it is read, however long it then waits to be handled: each is
+    # read 100 ns after the one before, and all are handled at 900.
+    ready = recorded_ready(pb, "tts_ready")
+    chunk = pb.AudioChunk(segment_id=1, format=ready.output_format, data=bytes(960))
+    for mode, sent, answer, bodies in (
+        (
+            "stt",
+            "finalize_sent",
+            "final",
+            {
+                "ready": recorded_ready(pb, "stt_ready"),
+                "endpoint_detected": pb.EndpointDetected(utterance_id=1),
+                "final_transcript": pb.FinalTranscript(utterance_id=1),
+            },
+        ),
+        (
+            "tts",
+            "text_segment_sent",
+            "segment",
+            {
+                "ready": ready,
+                "audio_chunk": chunk,
+                "segment_completed": pb.SegmentCompleted(segment_id=1, total_samples=480),
+            },
+        ),
+    ):
+        clock, fed = HeldClock(), FedCall()
+        call = client_mod.Call(clock, harness.bindings, fed, mode, 0, 400 * MS)
+        # The state the answers need: their input went out at 150, after Ready.
+        call.session["boundaries"][sent] = 150
+        call.session["client"]["segment_id"] = 1
+        call.session["server"]["output_format"] = {"encoding": "pcm_s16le"}
+        for position, (name, body) in enumerate(bodies.items(), start=1):
+            fed.asked.acquire()
+            clock.at = position * 100
+            fed.events.put(pb.ServerEvent(sequence=position, **{name: body}))
+        fed.asked.acquire()
+        clock.at = 900
+        call.wait(lambda call=call, answer=answer: call.session["server"][answer] is not None)
+        call.close()
+        read = [at for at in call.session["boundaries"].values() if at not in (None, 0, 150)]
+        assert read == [100, 200, 300], call.session["boundaries"]
 
 
 def check_schedule(harness: Harness) -> None:
@@ -1746,6 +1792,8 @@ def check_schedule(harness: Harness) -> None:
     )
     assert session["outcome"] == "completed" and session["server"]["chunks"] == 10, session
     assert session["measurements"]["segment_to_completion"]["ns"] == 1100 * MS
+    # The first of the ten chunks ends the time to first audio, not a later one.
+    assert session["measurements"]["segment_to_first_audio"]["ns"] == 100 * MS
 
     # A Pong is not an event the session waits for: a server that answers Pings and not the
     # Finalize times out 400 ms after the Finalize, seven Pings later.
@@ -1761,9 +1809,10 @@ def check_schedule(harness: Harness) -> None:
     assert len([at for at in script.sent("ping") if at > finalized]) == 7, script.sent("ping")
 
     # A partial or a final of nothing but whitespace is no transcript: the first partial is
-    # the one read after the third frame, and a blank final is a miss.
-    record, session, script = scripted(harness, "stt", partials=("", " \n", "word"))
-    assert session["server"]["partials"] == 3, session["server"]
+    # the one read after the third frame, not the one after the fourth, and a blank final is
+    # a miss.
+    record, session, script = scripted(harness, "stt", partials=("", " \n", "word", "words"))
+    assert session["server"]["partials"] == 4, session["server"]
     assert session["boundaries"]["first_partial"] == script.sent("audio")[2]
     record, session, script = scripted(harness, "stt", final_text=" \n")
     first = session["measurements"]["call_start_to_first_transcript"]
@@ -1795,6 +1844,23 @@ def check_run_endings(harness: Harness) -> None:
         assert entry["run"]["ended_by"] is None
         status, detail = record_mod.check_record(entry)
         assert status == "failed" and "run: did not end" in detail, (status, detail)
+
+    # A record on disk is replaced whole: the new one is written beside it and renamed over
+    # it, so a reader sees the record before or the record after.
+    out, renames, rename = harness.work / "replaced.json", [], os.replace
+    out.write_text("{}", encoding="utf-8")
+
+    def renaming(source, target) -> None:
+        renames.append((Path(source).name, json.loads(Path(source).read_text()), out.read_text()))
+        rename(source, target)
+
+    os.replace = renaming
+    try:
+        client_mod.write_record(out, record)
+    finally:
+        os.replace = rename
+    assert renames == [("replaced.json.partial", record, "{}")], renames
+    assert json.loads(out.read_text(encoding="utf-8")) == record
 
     interrupt = {
         "ended_by": "interrupt",
@@ -1862,6 +1928,19 @@ def check_sampler(work: Path, silent: str) -> None:
     gpu = sampler.section(None, lines, False)
     assert (gpu["status"], gpu["failed_queries"], len(gpu["samples"])) == ("sampled", 2, 2), gpu
     assert gpu["devices"] == [{"index": 0, "name": "NVIDIA L4"}] and gpu["machine"] == "client_only"
+
+    # An interrupt meant for the run does not end the sampling process: it ignores SIGINT,
+    # which the query it starts inherits and reports here.
+    inherited, reporting = work / "sigint", work / "reporting-smi"
+    reporting.write_text(
+        f"#!{sys.executable}\nimport signal\n"
+        f"ignored = signal.getsignal(signal.SIGINT) == signal.SIG_IGN\n"
+        f"open({str(inherited)!r}, 'w').write(str(ignored))\n"
+        f"print(open({str(GPU_CAPTURE)!r}).read())\n"
+    )
+    reporting.chmod(0o755)
+    sampler = client_mod.GpuSampler(client_mod.Run(), True, 1000, str(reporting))
+    assert sampler.finish(True)["status"] == "sampled" and inherited.read_text() == "True"
 
     # A sampling process that died says nothing was sampled, whatever it read before.
     sampler = client_mod.GpuSampler(
@@ -2041,6 +2120,10 @@ def check_command(harness: Harness) -> None:
             (["--stt-target", "d:7"], "is not DEPLOYMENT or DEPLOYMENT:GENERATION:DIGEST"),
             (["--audio", str(text)], "unreadable WAV file"),
             (["--provenance", "recorded"], "--provenance recorded needs --source-commit"),
+            (
+                ["--provenance", "recorded", "--source-commit", "0" * 40],
+                "--provenance recorded needs --source-commit and --worker-version",
+            ),
             (["--worker-version", "synthetic/path"], "--worker-version does not match"),
             (["--worker-build", "a b"], "--worker-build does not match"),
             (["--voice", "\u00e9"], "--voice does not match"),
@@ -2077,6 +2160,20 @@ def check_command(harness: Harness) -> None:
             "loopback": True,
             "connect_ns": 0,
         }
+
+        # One target of two away from loopback, and no --gpu-sampling: nothing is sampled,
+        # though the fake nvidia-smi is there. Neither channel is given time to become ready.
+        mixed = [
+            "--event-timeout-ms", "1", "--stt-endpoint", "127.0.0.1:1",
+            "--tts-endpoint", "192.0.2.1:7",
+        ]  # fmt: skip
+        done = subprocess.run(
+            [*command, *mixed], capture_output=True, text=True, check=False, env=environment
+        )
+        assert done.returncode == 1 and "the channel never became ready" in done.stderr, done
+        record = json.loads(out.read_text(encoding="utf-8"))
+        assert [record[mode]["target"]["loopback"] for mode in ("stt", "tts")] == [True, False]
+        assert record["gpu"]["status"] == "not_requested", record["gpu"]
 
         # An interrupt in the second session: the record on disk holds the first and says so.
         # The server reads what was on disk before it sends the signal.
