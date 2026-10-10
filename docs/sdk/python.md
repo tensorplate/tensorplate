@@ -115,7 +115,9 @@ incompatibly.
 The modules are generated when the package is built, by `grpcio-tools`
 1.81.1, and are never committed: a source tree that was neither built nor
 installed has none, and an editable install writes them beside the package
-in `src/`, where git ignores them. The sdist carries the schema under
+in `src/`, where git ignores them. They are generated once, at install:
+after a change to the schema, reinstall an editable install, or the stale
+modules keep importing without any error. The sdist carries the schema under
 `proto/` and generates the same modules, so it builds the wheel with no
 repository around it.
 

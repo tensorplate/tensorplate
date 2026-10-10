@@ -36,6 +36,10 @@ _ADDITIONS = (
     "added_server_capability",
 )
 
+# The extension frames whose unknown fields re-encode after the known ones,
+# so their bytes change; the others of _ADDITIONS re-encode to the recorded bytes.
+_REORDERED = ("added_client_fields", "added_server_fields")
+
 
 class Frame(NamedTuple):
     name: str
@@ -116,6 +120,20 @@ def test_additions_the_schema_does_not_know_survive_a_decode_and_a_re_encode(
 ) -> None:
     added = {frame.name: frame for frame in frames if not frame.type.startswith(f"{_PACKAGE}.")}
     assert sorted(added) == sorted(_ADDITIONS)
+
+    classes = {
+        "added_client_fields": pb.ClientEvent,
+        "added_server_fields": pb.ServerEvent,
+        "added_client_body": pb.ClientEvent,
+        "added_server_body": pb.ServerEvent,
+        "added_mode": pb.ClientEvent,
+        "added_client_capability": pb.ClientEvent,
+        "added_server_capability": pb.ServerEvent,
+    }
+    assert sorted(classes) == sorted(_ADDITIONS)
+    for name in sorted(set(_ADDITIONS) - set(_REORDERED)):
+        wire = added[name].wire
+        assert classes[name].FromString(wire).SerializeToString() == wire, name
 
     for event in _twice(pb.ClientEvent, added["added_client_fields"]):
         assert event.sequence == 1
