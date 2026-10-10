@@ -407,10 +407,12 @@ nlohmann entry described an npm malware package and one zlib entry described
 the Ruby gem. The other zlib entry, CVE-2026-85091, concerns native `gzwrite`;
 its upstream fix is in
 [the zlib source](https://github.com/madler/zlib/commit/df84af25dc1942490e1d1c899a07619152a46148),
-with no fixed release listed by that database. The OpenSSL matches list
-3.6.5 as fixed. Dispositions for installed vulnerable dependencies rely on
-the executable absence check, with review due by 2026-11-18. The report and the
-identifier controls are uploaded even when the scan fails.
+with no fixed release listed by that database. The OpenSSL matches listed
+3.6.5 as fixed; the vcpkg baseline now resolves OpenSSL 3.6.5 and their
+thirteen dispositions are removed. The zlib disposition is the one native
+entry left: it relies on the executable absence check, with review due by
+2026-11-18. The report and the identifier controls are uploaded even when
+the scan fails.
 
 Both release jobs use `native-release-record.py` to produce a worker SBOM
 and a cache-provenance JSON record. The record binds the source commit,

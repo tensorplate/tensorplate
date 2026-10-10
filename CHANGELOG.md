@@ -109,6 +109,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The vcpkg baseline moves to the commit that updates the OpenSSL port to
+  3.6.5 (`e182cb4d`). That release fixes the thirteen OpenSSL advisories
+  the native closure scan matched against 3.6.4, so their dispositions are
+  removed; one zlib disposition remains. No other port of the streaming
+  closure moves (gRPC 1.81.1, protobuf 6.33.4, abseil 20260107.1, c-ares
+  1.34.8, re2 2025-11-05, utf8-range 6.33.4, zlib 1.3.2), so the Python
+  SDK's `speech` extra keeps its `grpcio` and `protobuf` floors. The
+  release dependency cache and the ARM64 release runner's cache are keyed
+  on the baseline: both must be rebuilt before the next release build.
+  Hosted C++ tests need a runner image whose vcpkg checkout contains the
+  baseline; `cmake/features/README.md` says which does. The recorded
+  native-closure fixture is recorded again at the new baseline.
+  (V030-E04-F02-T04)
 
 - The draft stream session envelope
   (`protocol/proto/tensorplate/stream/v1/session.proto`) changes before any
