@@ -98,15 +98,21 @@ in the clear are:
 - the target's generation and descriptor digest. A worker that reports
   neither is addressed by its deployment alone, and both are null. Such a
   record identifies no deployment by them; like every record of this tool
-  its `record_kind` is `slice_measurement` and the schema admits no other;
+  its `record_kind` is `slice_measurement` and the schema admits no other.
+  The `Open` of such a session carries a generation of zero and an empty
+  descriptor digest, which the draft stream schema's comments say do not
+  occur. That is the thin slice's case until the schema's next revision
+  settles it, and a `Ready` that names a generation the `Open` did not, or
+  omits one it did, stops the session as `ready_mismatch`;
 - the worker's release and build as the operator stated them with
   `--worker-version` and `--worker-build`, marked `operator_stated`. The
   stream session envelope carries neither, so the tool cannot read them;
 - the measuring machine's operating system, kernel release, architecture,
   CPU count and CPU model, and the model name of each GPU sampled;
 - `provenance`: `recorded` only with `--source-commit`, the commit the tool
-  was run from. Without one the record is `synthetic`, and the check
-  refuses a `recorded` record that names no commit.
+  was run from, and the worker's release or build. Without both the record
+  is `synthetic`, and the check refuses a `recorded` record that lacks
+  either.
 
 Each session records how it ended:
 
@@ -115,7 +121,7 @@ Each session records how it ended:
 | `completed` | every answer arrived, the session closed without a cause and the call ended `OK` |
 | `session_failed` | the server ended the session as failed or with a cause; its reason and code are recorded |
 | `call_failed` | the call ended without a `SessionClosed`, or with another status than `OK` after one |
-| `timeout` | the next event the client needed did not arrive within `--event-timeout-ms`, counted again from each such event; a `Pong` is not one |
+| `timeout` | the next event the client needed did not arrive within `--event-timeout-ms`, counted again from each such event; a `Pong` is not one. The timeout is per event: a phase of a session has no overall bound |
 | `stopped` | the client ended the call: a sequence gap, an event the session's state or mode does not allow, a `Ready` that names another generation, descriptor or input format, input credit without a byte limit, or input that fits neither the limits nor the whole input credit `Ready` reported |
 
 A refused `Open` is a `call_failed` with no server event, read by its gRPC
@@ -132,8 +138,8 @@ The record is written before the first session and again after each one,
 each time as a whole file that replaces the one before. A run that an
 error or an interrupt ends writes it once more, with `run.ended_by` set to
 `error` (and the error's type name) or `interrupt`; a run that was killed
-leaves the last one, whose `ended_by` is null. The check reports each of
-them as `failed`.
+leaves the last one, whose `ended_by` is null; SIGTERM is such a kill, the
+tool does not catch it. The check reports each of them as `failed`.
 
 ## GPU readings
 
@@ -145,6 +151,17 @@ the measuring machine is the one that serves; the record then marks them
 `client_only`: they say nothing of the device that serves. The check
 refuses a record whose mark does not agree with its targets.
 `--gpu-sampling off` measures without them.
+
+Loopback is decided from the endpoint as it is written: the name
+`localhost`, or an IP literal in a loopback range. The tool cannot see
+where the connection ends, so two cases need the option spelled out:
+
+- A port forwarded from another machine to `127.0.0.1` reads as loopback,
+  and its samples would be marked `serving` though they are this
+  machine's. Pass `--gpu-sampling off`.
+- A unix socket (`unix:<path>`) reads as not loopback, though the worker is
+  on this machine. Nothing is sampled by default; `--gpu-sampling on`
+  samples, and the record marks the samples `client_only`.
 
 Where sampling runs and the machine has `nvidia-smi`, the run records
 device-wide utilization and memory once per `--gpu-interval-ms` (1,000 by
