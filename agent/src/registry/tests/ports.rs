@@ -521,3 +521,99 @@ fn a_restart_a_deploy_took_hold_of_during_the_staged_read_is_left_owed_and_not_s
         "{events:?}"
     );
 }
+
+/// A stamp that says it has begun, then waits to be let finish.
+fn held_stamp() -> (
+    impl Fn(&Restamp<'_>) -> AgentResult<CandidateRef> + Send + Sync + 'static,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+) {
+    let (stamping, is_stamping) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let held = Mutex::new((stamping, released));
+    let stamp = move |restamp: &Restamp<'_>| {
+        let held = held.lock().unwrap();
+        held.0.send(()).unwrap();
+        let _ = held.1.recv();
+        Ok(stamped_for(restamp))
+    };
+    (stamp, is_stamping, release)
+}
+
+/// Waits, with a bound, until the registry's stop has begun.
+fn wait_for_stopping(f: &Fixture) {
+    let deadline = Instant::now() + GRACE;
+    while !f.registry.stopping() {
+        assert!(Instant::now() < deadline, "shutdown never began");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn held_outside(f: &Fixture) -> usize {
+    let members = f.registry.inner.lock().unwrap();
+    members.outside.load(Ordering::SeqCst)
+}
+
+#[test]
+fn a_stop_that_begins_while_a_restart_is_being_stamped_starts_nothing() {
+    let (stamp, is_stamping, release) = held_stamp();
+    let (f, stamps) = stamped_fixture(stamp);
+    exit(&f.serve("stt"));
+    f.registry.supervise();
+    f.clock.advance(Duration::from_secs(1));
+
+    std::thread::scope(|scope| {
+        let release = release;
+        let restarting = scope.spawn(|| f.registry.supervise());
+        is_stamping
+            .recv_timeout(GRACE)
+            .expect("the restart is stamped");
+        let stopping = scope.spawn(|| f.registry.shutdown());
+        wait_for_stopping(&f);
+        assert_eq!(held_outside(&f), 1, "the stop waits for the launch");
+        release.send(()).unwrap();
+        assert_eq!(restarting.join().unwrap(), []);
+        stopping.join().unwrap();
+    });
+
+    assert_eq!(stamps.lock().unwrap().len(), 1);
+    assert_eq!(f.launcher.count(), 1);
+    assert_eq!(held_outside(&f), 0);
+    let launched = f.launcher.launched.lock().unwrap();
+    assert!(launched.iter().all(|h| h.exited.load(Ordering::SeqCst)));
+    assert_eq!(f.configs(), 0);
+}
+
+#[test]
+fn a_launch_refused_for_a_stop_that_began_in_its_stamp_reports_what_the_stamp_wrote() {
+    let (stamp, is_stamping, release) = held_stamp();
+    let (f, _stamps) = stamped_fixture(stamp);
+    f.registry.inner.lock().unwrap().restart = Restart::InHand {
+        deployment_id: "stt".into(),
+    };
+    let ports = f.registry.ports.lease().unwrap();
+    let recipe = candidate("stt");
+
+    let failed = std::thread::scope(|scope| {
+        let release = release;
+        let launching = scope.spawn(|| f.registry.launch(&recipe, &ports, None, Some(7)));
+        is_stamping
+            .recv_timeout(GRACE)
+            .expect("the restart is stamped");
+        let stopping = scope.spawn(|| f.registry.shutdown());
+        wait_for_stopping(&f);
+        release.send(()).unwrap();
+        stopping.join().unwrap();
+        launching.join().unwrap().err().expect("nothing is started")
+    });
+
+    assert!(
+        matches!(failed.error, AgentError::Stopping),
+        "{}",
+        failed.error
+    );
+    let stamped = failed.stamped.expect("the stamp had returned");
+    assert_eq!(stamped.0, 1);
+    assert_eq!(stamped.1.backend_hint, "stamped-1");
+    assert_eq!(f.launcher.count(), 0);
+}

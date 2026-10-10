@@ -605,6 +605,18 @@ impl MemberRegistry {
             }
             _ => (recipe.clone(), None),
         };
+        // A stop that began while the stamp ran starts nothing.
+        let stopped = match self.members() {
+            Ok(members) => members.stopping.then_some(AgentError::Stopping),
+            Err(poisoned) => Some(poisoned),
+        };
+        if let Some(error) = stopped {
+            return Err(FailedLaunch {
+                error,
+                stamped,
+                held_by_a_deploy: false,
+            });
+        }
         let rendered = self.render_config(&recipe, generation, ports.ports.http, runner_profile);
         let launched = rendered.and_then(|config_path| {
             let spec = LaunchSpec {
