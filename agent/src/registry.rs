@@ -537,9 +537,6 @@ impl MemberRegistry {
             let Ok(mut members) = self.members() else {
                 return;
             };
-            if members.stopping {
-                return;
-            }
             let loading = match members.restart {
                 Restart::Idle => None,
                 Restart::Loading { deadline, probe_at } => Some((deadline, probe_at)),
@@ -609,7 +606,7 @@ impl MemberRegistry {
             let Ok(mut members) = self.members() else {
                 return;
             };
-            if members.stopping || members.serving != Some(generation) {
+            if members.serving != Some(generation) {
                 return;
             }
             let Some(member) = members.take_serving() else {
@@ -959,7 +956,6 @@ impl WorkerControl for MemberRegistry {
                 return;
             };
             members.stopping = true;
-            members.forget_restart();
             members.serving = None;
             members.candidate = None;
             std::mem::take(&mut members.by_generation)

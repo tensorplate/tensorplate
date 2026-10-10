@@ -115,6 +115,12 @@ fn a_restarted_generation_serves_only_once_it_is_ready() {
     assert_eq!(f.registry.active_serving_url().unwrap(), None);
 
     f.launcher.handle(2).set_contact(ControlContact::Reporting);
+    // Nor is a worker that reports another model than the member's.
+    let port = u16::try_from(port_of(&f.launcher.handle(2))).unwrap();
+    f.health(port, "tts");
+    assert_eq!(step(&f, secs(1)), []);
+
+    f.health(port, "stt");
     assert_eq!(
         step(&f, secs(1)),
         [MemberEvent::Serving {
@@ -449,11 +455,52 @@ fn unloading_a_deployment_drops_the_restart_owed_to_it() {
     exit(&f.serve("stt"));
     assert_eq!(owed(&f.registry.supervise()), Some(secs(1)));
 
-    f.registry.unload("tts");
     f.registry.unload("stt");
 
     assert_eq!(step(&f, secs(60)), []);
     assert_eq!(f.launcher.count(), 1);
+}
+
+#[test]
+fn unloading_another_deployment_leaves_the_restart_owed() {
+    let f = fixture();
+    exit(&f.serve("stt"));
+    f.registry.supervise();
+
+    f.registry.unload("tts");
+
+    assert_eq!(
+        step(&f, secs(1)),
+        [MemberEvent::Restarted {
+            member: member("stt", 2)
+        }]
+    );
+}
+
+#[test]
+fn a_successor_that_finishes_starting_after_shutdown_is_stopped() {
+    let f = fixture();
+    exit(&f.serve("stt"));
+    f.registry.supervise();
+    f.clock.advance(secs(1));
+    let (started, has_started) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *f.launcher.hold_first.lock().unwrap() = Some((started, released));
+
+    std::thread::scope(|scope| {
+        let release = release;
+        let restart = scope.spawn(|| f.registry.supervise());
+        has_started
+            .recv_timeout(HELD_LAUNCH)
+            .expect("the restart launches");
+        f.registry.shutdown();
+        release.send(()).unwrap();
+        assert_eq!(restart.join().unwrap(), []);
+    });
+
+    assert_eq!(f.launcher.handle(2).calls(), ["terminate"]);
+    assert_eq!(f.configs(), 0);
+    assert_eq!(f.registry.active_deployment_id().unwrap(), None);
 }
 
 #[test]
