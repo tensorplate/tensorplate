@@ -4,12 +4,12 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "documentNamespace": "https://spdx.org/spdxdocs/nlohmann-json-x64-linux-3.12.0#2-00000000-0000-4000-8000-000000000005",
-  "name": "nlohmann-json:x64-linux@3.12.0#2 9bc8fa0526d003a50511eeaf77fb077620b6bf4e5fb85f012a2f099eec90f6b1",
+  "name": "nlohmann-json:x64-linux@3.12.0#2 063f4bbecfc60c0660393020cf9c18a54cf36c31a542dbf438d31328dadb966a",
   "creationInfo": {
     "creators": [
-      "Tool: vcpkg-2026-07-27-98d7cb0cf1f4686a3e43aa5672b6230c1d56bce8"
+      "Tool: vcpkg-2026-09-26-51bf87ca6e9bf3e622d84ff323bd202ab1ca0c0b"
     ],
-    "created": "2026-10-07T16:17:00Z"
+    "created": "2026-10-10T12:38:57Z"
   },
   "relationships": [
     {
@@ -51,7 +51,7 @@
     {
       "name": "nlohmann-json:x64-linux",
       "SPDXID": "SPDXRef-binary",
-      "versionInfo": "9bc8fa0526d003a50511eeaf77fb077620b6bf4e5fb85f012a2f099eec90f6b1",
+      "versionInfo": "063f4bbecfc60c0660393020cf9c18a54cf36c31a542dbf438d31328dadb966a",
       "downloadLocation": "NONE",
       "licenseConcluded": "MIT",
       "licenseDeclared": "NOASSERTION",
