@@ -182,9 +182,14 @@ struct AsyncPolicyConfig {
 
 /// Optional streaming transport settings, mirroring the streaming JSON object.
 struct StreamingConfig {
-  /// Opt in to streaming support. False by default; true requires a build
-  /// with TP_ENABLE_STREAMING_GRPC. No stream listener is implemented yet.
+  /// Opt in to the gRPC stream listener. False by default; true requires a
+  /// build with TP_ENABLE_STREAMING_GRPC and a worker without
+  /// `deployment.generation`.
   bool enabled = false;
+
+  /// TCP port of the stream listener, on `bind.host` and under the same
+  /// loopback rule. 0 requests an ephemeral port, which the worker logs.
+  std::uint16_t port = 0;
 };
 
 /// Full serving worker runtime configuration. Validated by

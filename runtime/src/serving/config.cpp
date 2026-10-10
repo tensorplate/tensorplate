@@ -94,13 +94,37 @@ std::optional<MetricsMode> metrics_mode_from_string(std::string_view name) noexc
   return std::nullopt;
 }
 
-Result<void> ServingConfig::validate() const {
-#if !TP_ENABLE_STREAMING_GRPC
-  if (streaming.enabled) {
-    return unexpected(Error::Code::Unsupported,
-                      "serving config: streaming.enabled requires TP_ENABLE_STREAMING_GRPC");
+namespace {
+Result<void> validate_streaming(const StreamingConfig& streaming,
+                                const ActiveDeploymentConfig& deployment) {
+  if (!streaming.enabled) {
+    return {};
   }
+#if !TP_ENABLE_STREAMING_GRPC
+  (void)deployment;
+  return unexpected(Error::Code::Unsupported,
+                    "serving config: streaming.enabled requires TP_ENABLE_STREAMING_GRPC");
+#else
+  if (deployment.generation) {
+    // Ready names the descriptor a generation serves, which the worker is not given.
+    return unexpected(Error::Code::Unsupported,
+                      "serving config: streaming.enabled is not supported with "
+                      "deployment.generation");
+  }
+  if (!names_a_deployment(deployment.endpoint)) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "serving config: with streaming.enabled, deployment.endpoint must be 1 to "
+                      "128 of letters, digits, '.', '_' and '-'");
+  }
+  return {};
 #endif
+}
+}  // namespace
+
+Result<void> ServingConfig::validate() const {
+  if (auto checked = validate_streaming(streaming, deployment); !checked) {
+    return checked;
+  }
   if (schema_version != "0.1") {
     return unexpected(
         Error::Code::Unsupported,
@@ -222,13 +246,20 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
 
     if (root.contains("streaming")) {
       const auto& streaming = root.at("streaming");
+      const auto port_valid = [](const json& port) {
+        return port.is_number_unsigned() && port.get<std::uint64_t>() <= 65535U;
+      };
       if (!streaming.is_object() ||
           (streaming.contains("enabled") && !streaming.at("enabled").is_boolean()) ||
-          streaming.size() > static_cast<std::size_t>(streaming.contains("enabled"))) {
+          (streaming.contains("port") && !port_valid(streaming.at("port"))) ||
+          streaming.size() > static_cast<std::size_t>(streaming.contains("enabled")) +
+                                 static_cast<std::size_t>(streaming.contains("port"))) {
         return unexpected(Error::Code::ConfigInvalid,
-                          "serving config: streaming accepts only a boolean enabled field");
+                          "serving config: streaming accepts only a boolean enabled field and a "
+                          "port from 0 to 65535");
       }
       cfg.streaming.enabled = streaming.value("enabled", false);
+      cfg.streaming.port = static_cast<std::uint16_t>(streaming.value("port", 0U));
     }
 
     if (root.contains("bind") && root["bind"].is_object()) {
@@ -380,8 +411,8 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
 std::string ServingConfig::to_json() const {
   json root;
   root["schema_version"] = schema_version;
-  if (streaming.enabled) {
-    root["streaming"] = {{"enabled", true}};
+  if (streaming.enabled || streaming.port != 0) {
+    root["streaming"] = {{"enabled", streaming.enabled}, {"port", streaming.port}};
   }
   root["bind"] = {
       {"host", bind.host}, {"port", bind.port}, {"allow_non_loopback", bind.allow_non_loopback}};
