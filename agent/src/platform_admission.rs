@@ -443,6 +443,21 @@ impl PlatformAdmission {
         check_backend_packages(row, backend_path, installed_packages)
     }
 
+    /// The row this machine holds: it was admitted on the row and the
+    /// row's evidence covers it. `None` when it was refused, admitted on
+    /// technical prerequisites alone, or the row has left the registry.
+    #[must_use]
+    pub fn held_row<'r>(&self, registry: &'r PlatformRegistry) -> Option<&'r PlatformSupportRow> {
+        match self {
+            Self::Supported {
+                row_id,
+                validated: true,
+                ..
+            } => registry.row(row_id),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub fn row_id(&self) -> Option<&str> {
         match self {

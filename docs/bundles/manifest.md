@@ -249,9 +249,9 @@ only through the bundle parser; `decode_with_version_check` refuses them.
 | Field | Meaning |
 | --- | --- |
 | `runner_profile` | Installed runner profile id, `lower_snake_case` (e.g. `faster_whisper`, `kokoro`); names a `runner_profiles[].id` in the backend descriptor, never a module or path. |
-| `hardware_compatibility` | Platform support row ids the bundle declares, unique. |
+| `hardware_compatibility` | Platform support row ids the bundle declares, unique. At deploy each must be a row of the installed registry. |
 | `compute_type` | Compute type the profile loads the model with; one of the descriptor's `compute_types` spellings (`float16`, `float32`, ...). |
-| `support_level` | Requested claim: `production`, `preview` or `experimental`. Registry evidence grants support; the manifest cannot. |
+| `support_level` | Requested claim: `production`, `preview` or `experimental`. Registry evidence grants support; the manifest cannot. At deploy, `production` is refused when a named row is not Production. |
 | `warmup` | `fixtures` (1–16 `artifacts[].path` entries, so each is hashed), `repetitions` (1–100) and `timeout_ms` (1–600,000). |
 | `pipeline_stages` | 1–16 ordered stages, each `{stage, ownership, observable?, interface?}`. A `runtime_owned` stage is one of `ingress`, `vad`, `preprocessing`, `backend`, `postprocessing`, `egress`; a `caller_owned` stage names the caller's span and may carry an `interface` label. `observable: false` marks a stage fused into another, which reports `not_observable`. Stage names are unique. |
 | `memory_budget_by_domain` | Per-domain budgets under `shared_pool`, `guest_ram` and `device_vram`, each a line-item object of [`memory_budget_breakdown.json`](../../config/schemas/memory_budget_breakdown.json). A speech bundle declares `os_reserve_bytes: 0`; the row's admission configuration holds the OS reserve. |
@@ -292,8 +292,14 @@ cannot make them: that the base is a bundle the target knows, that no other
 bundle already declares the same variant id and revision (or the same id
 with another kind) on that base, and that the variant asks for no more
 support than the base holds on the target's platform support row. `BundleProfile::check_lineage` makes
-them against base facts its caller supplies. Nothing in the agent supplies
-them yet.
+them against base facts its caller supplies. The agent supplies them at
+deploy, before the parser's reserved refusal: a base is a bundle the agent
+is serving, known at the level of the platform row the machine holds, so a
+variant whose base is not deployed there, or which asks for more than that
+row gives, is refused with the lineage code instead. No variant can deploy,
+so the agent has no variant to record on a base and the identity check has
+nothing to compare at deploy. See
+[the rules judged against the target](compatibility.md#rules-judged-against-the-target).
 
 The schema validates the same fields in its `format_0_2` definition; its
 description lists the checks readers make beyond it. A validator must be

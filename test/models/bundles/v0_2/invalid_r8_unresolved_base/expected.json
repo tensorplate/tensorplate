@@ -1,4 +1,5 @@
 {
   "rule": "bundle_r8_reserved_variant",
-  "lineage_rule": "bundle_r8_base_reference"
+  "lineage_rule": "bundle_r8_base_reference",
+  "deploy_code": "bundle_r8_base_reference"
 }

@@ -33,6 +33,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The agent judges a format 0.2 bundle against what its target holds before
+  anything is staged, with a typed code for each refusal in the error
+  context. A refusal is `unsupported` where the installation lacks the
+  means to run the bundle (a package, a runner profile, a compute type),
+  and `config_invalid` where the manifest's declarations contradict each
+  other or what this target records (its platform rows, its deployed
+  bases). A variant's base must be a bundle the agent is serving on a
+  platform row the machine holds, and the variant may ask for no more
+  support than that row gives (`bundle_r8_base_reference`,
+  `bundle_r8_variant_support_level`); a variant that passes is still
+  refused as reserved by the parser. Every `hardware_compatibility` id must
+  be a row of the installed registry (`bundle_r9_hardware_row`), and a
+  manifest asking for `production` may name only Production rows
+  (`bundle_r9_support_claim`). A runner profile named under a backend that
+  declares none is refused (`bundle_r6_runner_selector`), as is a
+  `compute_type` the installed profile does not list
+  (`bundle_r6_compute_type`); a profile that is not installed keeps
+  `missing_backend_package`. Format 0.1 bundles are not judged by these
+  rules. Not judged yet: quotas shared between members, a warmup required
+  by a row's benchmark profile, and the resolution of a Production request
+  to evidence. (V030-E02-F01-T02)
 - The Python sidecar acts on the `speech_jobs_v1` job and session messages.
   Its `ready_event` lists the capability, and a `load_model` that enables it
   is answered with the `job_classes` the loaded runner runs, or with

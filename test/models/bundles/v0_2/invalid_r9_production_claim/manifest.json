@@ -1,0 +1,23 @@
+{
+  "schema_version": "0.1",
+  "name": "speech-stt-rows",
+  "version": "0.2.0",
+  "format_version": "0.2",
+  "model_class": "speech",
+  "backend_hint": "python_pytorch",
+  "precision_hint": "fp16",
+  "runner_profile": "faster_whisper",
+  "compute_type": "float16",
+  "support_level": "production",
+  "capability_requirements": {},
+  "hardware_compatibility": ["ubuntu2404-x86-l4-g2s8", "ubuntu2404-x86-l4-g2s24"],
+  "artifacts": [{"role": "model", "kind": "python_pytorch_entry", "path": "entry.json", "digest": "sha256:aa09fabd4f085f4c57fc96b61907837d0c1b0e9fede8617c2e539526470260f4", "byte_size": 82, "description": "Placeholder runner entry for the STT schema fixture."}],
+  "target_hardware": {"device_family": "x86_64"},
+  "runtime_compatibility": {"min_runtime_version": "0.3.0"},
+  "pipeline_stages": [{"stage": "ingress", "ownership": "runtime_owned"}, {"stage": "vad", "ownership": "runtime_owned"}, {"stage": "preprocessing", "ownership": "runtime_owned", "observable": false}, {"stage": "backend", "ownership": "runtime_owned"}, {"stage": "postprocessing", "ownership": "runtime_owned"}, {"stage": "egress", "ownership": "runtime_owned"}],
+  "memory_budget_by_domain": {"guest_ram": {"model_weights_bytes": 0, "runtime_overhead_bytes": 1073741824, "output_queue_bytes": 4194304, "io_buffer_bytes": 16777216, "per_session_state_bytes": 33554432, "sidecar_process_bytes": 536870912, "os_reserve_bytes": 0, "backend_reserve_bytes": 134217728}, "device_vram": {"model_weights_bytes": 1744830464, "runtime_overhead_bytes": 536870912, "session_scratch_bytes": 268435456, "cache_bytes": 134217728, "per_session_state_bytes": 67108864, "os_reserve_bytes": 0, "backend_reserve_bytes": 268435456}},
+  "memory_budget_breakdown_bytes": {"model_weights_bytes": 1744830464, "runtime_overhead_bytes": 1610612736, "session_scratch_bytes": 268435456, "cache_bytes": 134217728, "output_queue_bytes": 4194304, "io_buffer_bytes": 16777216, "per_session_state_bytes": 100663296, "sidecar_process_bytes": 536870912, "os_reserve_bytes": 0, "backend_reserve_bytes": 402653184},
+  "max_concurrent_sessions": 1,
+  "degraded_profile": null,
+  "model_blocks": {"speech": {"task": "stt", "serving_mode": "streaming", "languages": ["en", "ar"], "input_audio_formats": [{"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1}, {"encoding": "mulaw", "sample_rate_hz": 8000, "channels": 1}], "chunking": {"frame_ms_min": 20, "frame_ms_max": 320, "max_utterance_ms": 30000}, "algorithm_profile": {"id": "stt_vad_chunked", "digest": "sha256:cee024efffb88523584dc72cf848b3b6c43fb9e9889c4407155e7665795a615c"}, "quality_profile_digest": "sha256:004a3ba72fd6b782a8f7698743e2b2c740f8de39dc689dba23fc86c81fc1be2e", "benchmark_profile_digest": "sha256:15d0ee522824554187d409402a6b887510e35f1bef19e9a8d5a646e2d0624be7"}}
+}
