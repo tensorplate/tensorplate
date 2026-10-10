@@ -43,7 +43,8 @@ use std::collections::BTreeMap;
 
 use crate::backend_detection::BackendProbeReport;
 use crate::bundle::{
-    capacity_check, model_artifact_relative_path, verify_with_probes, VerifiedBundle,
+    capacity_check, model_artifact_relative_path, verify_before_staging, DeployFacts,
+    VerifiedBundle,
 };
 use crate::config::AgentConfig;
 use crate::error::{AgentError, AgentResult};
@@ -141,7 +142,7 @@ impl Coordinator {
     /// Attach packaging backend probe reports. The agent main calls
     /// this once at startup with the cached probe outcomes for every
     /// backend listed in `config.available_backends`. The coordinator
-    /// hands the map to [`crate::bundle::verify_with_probes`] so a
+    /// hands the map to [`crate::bundle::verify_before_staging`] so a
     /// deploy of a non-runnable backend (e.g. `python_pytorch` with no
     /// PyTorch installed) is rejected before staging.
     #[must_use]
@@ -237,7 +238,16 @@ impl Coordinator {
         }
 
         // Phase: verified.
-        let verified = match verify_with_probes(bundle_path, &self.config, &self.backend_probes) {
+        let verification = self.store.snapshot().and_then(|state| {
+            let facts = DeployFacts {
+                probes: &self.backend_probes,
+                registry: self.platform_registry.as_ref(),
+                admission: self.platform_admission.as_ref(),
+                state: Some(&state),
+            };
+            verify_before_staging(bundle_path, &self.config, &facts)
+        });
+        let verified = match verification {
             Ok(v) => v,
             Err(err) => {
                 return self.fail(&transaction_id, deployment_id, DeployState::Received, err)
