@@ -181,9 +181,10 @@ Some rules compare a manifest with facts only the target holds. The agent
 judges them in `verify_before_staging`, the one validation path of a deploy
 and of a deploy replayed at startup, before anything is staged. Each refusal
 is non-recoverable and carries its code in `ErrorRecord.context`. The error
-code says which side is at fault: `config_invalid` where the manifest is
-wrong for any target or contradicts itself, `unsupported` where it is a
-valid request this installation cannot serve. Format 0.1 bundles are not
+code is `unsupported` where the installation lacks the means to run the
+bundle (a package, a runner profile, a compute type), and `config_invalid`
+where the manifest's declarations contradict each other or what this target
+records (its platform rows, its deployed bases). Format 0.1 bundles are not
 judged by them.
 
 | Rule code | Error code | Refusal | Facts |

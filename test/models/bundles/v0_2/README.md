@@ -84,8 +84,8 @@ the parser accepts both twins of their pairs (`rule` is null) and the agent
 refuses one. Where a deploy's verdict differs from the parser's,
 `expected.json` carries `deploy_code`: the code the refusal returns in its
 error context. The error itself is `config_invalid`, as for every rule code,
-unless `deploy_error` names another: `unsupported` where the manifest is
-valid and this installation cannot serve it.
+unless `deploy_error` names another: `unsupported` where the installation
+lacks the means to run the bundle.
 `bundle_cross_field_rules.rs` deploys every directory here on
 an agent it builds with these facts, against a mock worker:
 

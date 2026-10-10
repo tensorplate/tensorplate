@@ -35,8 +35,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - The agent judges a format 0.2 bundle against what its target holds before
   anything is staged, with a typed code for each refusal in the error
-  context. The refusals are `config_invalid`, except the compute type one,
-  which is `unsupported`: a valid request this installation cannot serve. A variant's base must be a bundle the agent is serving on a
+  context. A refusal is `unsupported` where the installation lacks the
+  means to run the bundle (a package, a runner profile, a compute type),
+  and `config_invalid` where the manifest's declarations contradict each
+  other or what this target records (its platform rows, its deployed
+  bases). A variant's base must be a bundle the agent is serving on a
   platform row the machine holds, and the variant may ask for no more
   support than that row gives (`bundle_r8_base_reference`,
   `bundle_r8_variant_support_level`); a variant that passes is still
