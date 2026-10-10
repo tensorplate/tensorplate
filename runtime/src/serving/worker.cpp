@@ -114,13 +114,14 @@ struct ServingWorker::Impl {
   std::atomic<bool> stop_workers{false};
   std::mutex stop_mutex;
   ServingExitCode exit_code = ServingExitCode::Ok;
+#if TP_ENABLE_STREAMING_GRPC
+  std::unique_ptr<serving::StreamListener> stream;
+  /// When the drain that began at shutdown ends, for streams and HTTP alike.
+  std::atomic<std::chrono::steady_clock::rep> stream_drain_deadline{0};
+#endif
   // Declared last: the control thread stops before anything it could reach.
   serving::UnimplementedControlTarget control_target;
   std::unique_ptr<serving::ControlChannel> control;
-#if TP_ENABLE_STREAMING_GRPC
-  std::unique_ptr<serving::StreamListener> stream;
-  std::atomic<std::chrono::steady_clock::rep> stream_drain_deadline{0};
-#endif
 
   Result<void> attach_control();
   Result<void> build();
@@ -397,18 +398,14 @@ Result<void> ServingWorker::Impl::start_listener() {
   return Result<void>{};
 }
 
-// Dispatcher / evictor only reach `Impl` members through their
-// `unique_ptr` holders so clang-tidy concludes the methods can be
-// const. We keep them non-const so a future hook on `Impl` (e.g.
-// dispatcher state) does not force a signature churn.
-// NOLINTNEXTLINE(readability-make-member-function-const)
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static): members with the feature only.
 Result<void> ServingWorker::Impl::start_stream_listener() {
 #if TP_ENABLE_STREAMING_GRPC
   if (!config.streaming.enabled) {
     return Result<void>{};
   }
   const auto defaults = serving::SessionLimits::defaults();
-  // The streaming slice serves one session at a time.
+  // One stream session at a time.
   auto limits =
       serving::SessionLimits::create(defaults.idle_timeout(), defaults.heartbeat_interval(),
                                      defaults.liveness_timeout(), defaults.max_duration(), 1);
@@ -437,6 +434,7 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
   return Result<void>{};
 }
 
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static): members with the feature only.
 void ServingWorker::Impl::stop_stream_admission() noexcept {
 #if TP_ENABLE_STREAMING_GRPC
   if (stream) {
@@ -449,6 +447,7 @@ void ServingWorker::Impl::stop_stream_admission() noexcept {
 #endif
 }
 
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static): members with the feature only.
 void ServingWorker::Impl::stop_stream_listener() noexcept {
 #if TP_ENABLE_STREAMING_GRPC
   if (stream) {
@@ -461,6 +460,11 @@ void ServingWorker::Impl::stop_stream_listener() noexcept {
 #endif
 }
 
+// Dispatcher / evictor only reach `Impl` members through their
+// `unique_ptr` holders so clang-tidy concludes the methods can be
+// const. We keep them non-const so a future hook on `Impl` (e.g.
+// dispatcher state) does not force a signature churn.
+// NOLINTNEXTLINE(readability-make-member-function-const)
 void ServingWorker::Impl::dispatcher_loop() {
   while (!stop_workers.load()) {
     if (!pipeline->dispatch_one(*async_store)) {
@@ -487,7 +491,12 @@ void ServingWorker::Impl::run_drain() {
     async_store->cancel_all();
   }
   // Wait up to drain_deadline for in-flight to settle.
-  const auto deadline = std::chrono::steady_clock::now() + config.shutdown.drain_deadline;
+  auto deadline = std::chrono::steady_clock::now() + config.shutdown.drain_deadline;
+#if TP_ENABLE_STREAMING_GRPC
+  if (const auto shared = stream_drain_deadline.load(); shared != 0) {
+    deadline = std::chrono::steady_clock::time_point{std::chrono::steady_clock::duration{shared}};
+  }
+#endif
   while (std::chrono::steady_clock::now() < deadline) {
     const auto m = scheduler->metrics();
     if (m.queue_depth == 0 && m.in_flight == 0) {

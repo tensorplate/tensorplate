@@ -108,7 +108,7 @@ TEST(ServingConfig, StreamingPortAloneRoundTripsInEitherBuild) {
   EXPECT_FALSE(again->streaming.enabled);
 }
 
-TEST(ServingConfig, StreamingRefusesAGenerationAndAMalformedDeploymentId) {
+TEST(ServingConfig, StreamingRefusesAGenerationAMalformedDeploymentIdAndTheHttpPort) {
   ServingConfig with_generation;
   with_generation.streaming.enabled = true;
   with_generation.deployment.endpoint = "dep-a";
@@ -132,6 +132,18 @@ TEST(ServingConfig, StreamingRefusesAGenerationAndAMalformedDeploymentId) {
 #endif
   malformed.streaming.enabled = false;
   EXPECT_TRUE(malformed.validate().has_value());
+
+  ServingConfig shared_port;
+  shared_port.streaming.enabled = true;
+  shared_port.bind.port = 18080;
+  shared_port.streaming.port = 18080;
+  const auto clash = shared_port.validate();
+  ASSERT_FALSE(clash.has_value());
+#if TP_ENABLE_STREAMING_GRPC
+  EXPECT_EQ(clash.error().code, Error::Code::ConfigInvalid);
+  shared_port.streaming.port = 18081;
+  EXPECT_TRUE(shared_port.validate().has_value());
+#endif
 }
 
 TEST(ServingConfig, AcceptsIPv6LoopbackLiteral) {

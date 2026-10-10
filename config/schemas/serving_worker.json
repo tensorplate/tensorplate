@@ -22,7 +22,7 @@
           "minimum": 0,
           "maximum": 65535,
           "default": 0,
-          "description": "TCP port of the stream listener, on bind.host and under the same loopback rule. 0 requests an ephemeral port."
+          "description": "TCP port of the stream listener, on bind.host and under the same loopback rule; with streaming enabled it must differ from bind.port. 0 requests an ephemeral port."
         }
       }
     },

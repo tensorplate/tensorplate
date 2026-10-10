@@ -99,7 +99,7 @@ struct StreamListener::Impl final : wire::SessionService::CallbackService {
       grpc::CallbackServerContext* context) override;
 
   void on_transition(const ManagedSessionTransition& transition);
-  void stop_admission_locked() noexcept;
+  void close_admission() noexcept;
 
   StreamListenerOptions options;
   SessionDispatch* dispatch;
@@ -111,9 +111,12 @@ struct StreamListener::Impl final : wire::SessionService::CallbackService {
   std::mutex calls_mu;
   std::map<std::uint64_t, std::shared_ptr<CallState>> calls;
 
-  mutable std::mutex lifecycle_mu;
-  bool admission_stopped = false;
+  /// Serializes stop(); held through its wait.
+  std::mutex lifecycle_mu;
   bool stopped = false;
+  /// Guards `manager` against its reset and `admission_stopped`; held briefly.
+  mutable std::mutex manager_mu;
+  bool admission_stopped = false;
 };
 
 namespace {
@@ -198,8 +201,12 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
     if (!key) {
       return open(event);
     }
+    // A Cancel may be sent before the client has read Ready, without the id.
+    const bool id_matches =
+        event.session_id() == session_id() ||
+        (event.body_case() == ClientEvent::kCancel && event.session_id().empty());
     if (event.sequence() != expected_sequence_ || event.sequence() > stream::kMaxWireInteger ||
-        event.session_id() != session_id()) {
+        !id_matches) {
       fail(*key,
            Error::make(Error::Code::ConfigInvalid,
                        "client event out of sequence or for another session", "invalid_event"));
@@ -211,7 +218,8 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
         (void)listener_.manager->apply(*key, LogicalSessionEvent::Ping);
         return true;
       case ClientEvent::kOpen:
-        (void)listener_.manager->apply(*key, LogicalSessionEvent::Open);
+        fail(*key,
+             Error::make(Error::Code::ConfigInvalid, "a session is opened once", "invalid_event"));
         return false;
       case ClientEvent::BODY_NOT_SET:
         fail(*key, Error::make(Error::Code::ConfigInvalid, "client event with no known body",
@@ -494,7 +502,8 @@ void StreamListener::Impl::on_transition(const ManagedSessionTransition& transit
   }
 }
 
-void StreamListener::Impl::stop_admission_locked() noexcept {
+void StreamListener::Impl::close_admission() noexcept {
+  const std::lock_guard guard(manager_mu);
   if (admission_stopped || !manager) {
     return;
   }
@@ -560,11 +569,7 @@ std::uint16_t StreamListener::bound_port() const noexcept {
 }
 
 void StreamListener::stop_admission() noexcept {
-  // A stop() under way has already stopped admission and holds the lock.
-  const std::unique_lock lock(impl_->lifecycle_mu, std::try_to_lock);
-  if (lock.owns_lock()) {
-    impl_->stop_admission_locked();
-  }
+  impl_->close_admission();
 }
 
 void StreamListener::stop(std::chrono::steady_clock::time_point deadline) noexcept {
@@ -573,7 +578,7 @@ void StreamListener::stop(std::chrono::steady_clock::time_point deadline) noexce
     return;
   }
   impl_->stopped = true;
-  impl_->stop_admission_locked();
+  impl_->close_admission();
   while (impl_->manager->held_slots() > 0 && std::chrono::steady_clock::now() < deadline) {
     std::this_thread::sleep_for(std::chrono::milliseconds{10});
   }
@@ -586,11 +591,12 @@ void StreamListener::stop(std::chrono::steady_clock::time_point deadline) noexce
     impl_->dispatch->stop();
   }
   impl_->server.reset();
+  const std::lock_guard guard(impl_->manager_mu);
   impl_->manager.reset();
 }
 
 std::size_t StreamListener::live_sessions() const noexcept {
-  const std::lock_guard lock(impl_->lifecycle_mu);
+  const std::lock_guard lock(impl_->manager_mu);
   return impl_->manager ? impl_->manager->held_slots() : 0;
 }
 

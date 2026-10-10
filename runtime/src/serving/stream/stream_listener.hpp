@@ -23,7 +23,7 @@ struct StreamListenerOptions {
   /// The deployment an Open must name; the listener serves no generation and
   /// no descriptor digest.
   std::string deployment_id;
-  /// Session timers and the session count; the slice serves one at a time.
+  /// Session timers and the session count; the worker serves one at a time.
   SessionLimits limits = SessionLimits::defaults();
 };
 

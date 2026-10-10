@@ -54,8 +54,9 @@ does a true value in a worker with `deployment.generation`: `Ready` would have
 to name the descriptor that generation serves, which the worker is not given.
 With `streaming.enabled`, `deployment.endpoint` must be a deployment id (1 to
 128 of letters, digits, `.`, `_` and `-`). `streaming.port` (0 to 65535, 0 for
-an ephemeral port) is the stream listener's port; its host is `bind.host`, so
-the HTTP bind's loopback rule covers it. Null, non-boolean or out-of-range
+an ephemeral port) is the stream listener's port, which must differ from
+`bind.port`; its host is `bind.host`, so the HTTP bind's loopback rule covers
+it. Null, non-boolean or out-of-range
 values and unknown keys in `streaming` return `config_invalid`. A config with
 neither field set serializes without the optional block, preserving the
 existing agent-rendered config shape; the agent renders no `streaming` block,
@@ -95,8 +96,9 @@ runs speech jobs is wired in.
 - **What it serves.** `Open`, `Ready`, `Ping` (answered by `Pong`) and
   `SessionClosed`, and a half-close, which drains and closes the session.
   Every other client event fails the session with
-  `backend_unsupported_capability`; a body the schema does not define, an
-  event out of sequence or naming another session, with `invalid_event`.
+  `backend_unsupported_capability`; a body the schema does not define, a
+  second `Open`, or an event out of sequence or naming another session, with
+  `invalid_event`.
   `Ready` reports the deployment's limits and the session's initial credit; a
   text session's waiting-segment usage is zero then, since it has accepted
   nothing.
@@ -114,7 +116,7 @@ runs speech jobs is wired in.
   shutdown was asked, then shuts the gRPC server down with what is left of
   that window (a call still open is cancelled, which aborts its session),
   stops the dispatch and destroys the manager, and then runs the HTTP drain
-  below. The control channel and the signal pipe are unchanged and still
+  below, which waits only for what is left of the same window. The control channel and the signal pipe are unchanged and still
   end with the worker.
 
 The `ServingWorker::create(config)` factory builds, in this order:

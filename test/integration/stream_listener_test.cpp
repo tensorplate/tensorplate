@@ -16,6 +16,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,6 +25,8 @@
 #include "tensorplate/serving/worker.hpp"
 #include "tensorplate/stream/v1/session.grpc.pb.h"
 
+#include "serving/session/dispatch.hpp"
+#include "serving/session/session_manager.hpp"
 #include "stream_test_dispatch.hpp"
 
 namespace {
@@ -246,7 +249,7 @@ TEST(StreamListener, HalfCloseClosesTheSessionWithoutCause) {
   EXPECT_TRUE(client.call->Finish().ok());
 }
 
-TEST(StreamListener, EventsOutsideTheSliceFailTheSessionAsUnsupported) {
+TEST(StreamListener, EventsNotServedYetFailTheSessionAsUnsupported) {
   std::vector<wire::ClientEvent> events(5);
   events[0].mutable_audio()->set_data(std::string(640, '\0'));
   events[1].mutable_text_segment()->set_text("hi");
@@ -373,6 +376,67 @@ TEST(StreamListener, StopDrainsALiveSessionThenRefusesAndCloses) {
   served.listener().stop(began + 5s);
   EXPECT_LT(std::chrono::steady_clock::now() - began, 5s) << "nothing was left to wait for";
   EXPECT_EQ(served.listener().live_sessions(), 0U);
+}
+
+/// A dispatch that grants speech-to-text and never finishes a drain or
+/// confirms a release, so a session outlives any drain deadline.
+class HoldingDispatch final : public tensorplate::serving::SessionDispatch {
+ public:
+  void attach(tensorplate::serving::SessionManager& /*manager*/) override {}
+  void stop() noexcept override {}
+  [[nodiscard]] tensorplate::Result<tensorplate::serving::SessionTerms> negotiate(
+      const tensorplate::serving::SessionRequest& request) const override {
+    tensorplate::serving::SessionTerms terms;
+    terms.input_kind = request.input_kind;
+    terms.language = request.language;
+    terms.audio_format = request.input_format;
+    terms.min_frame = 20ms;
+    terms.max_frame = 320ms;
+    terms.max_utterance = 30s;
+    return terms;
+  }
+  [[nodiscard]] tensorplate::Result<void> open_session(
+      std::uint64_t /*session_key*/, const tensorplate::serving::SessionTerms& /*terms*/) override {
+    return {};
+  }
+  void on_transition(const tensorplate::serving::ManagedSessionTransition& /*t*/) override {}
+  void audio(std::uint64_t /*key*/, std::span<const std::byte> /*frame*/) override {}
+  void text_segment(std::uint64_t /*key*/, std::uint64_t /*id*/, std::string /*text*/) override {}
+  void finalize(std::uint64_t /*key*/, std::uint64_t /*sequence*/) override {}
+  void output_delivered(std::uint64_t /*key*/, tensorplate::serving::OutputKind /*kind*/) override {
+  }
+};
+
+TEST(StreamListener, StopAtTheDeadlineCancelsACallWhoseSessionNeverDrains) {
+  SystemSchedulerClock clock;
+  HoldingDispatch dispatch;
+  StreamListenerOptions options;
+  options.deployment_id = kDeployment;
+  auto listener = StreamListener::start(options, &dispatch, clock).value();
+  const auto stub = wire::SessionService::NewStub(grpc::CreateChannel(
+      "127.0.0.1:" + std::to_string(listener->bound_port()), grpc::InsecureChannelCredentials()));
+  grpc::ClientContext context;
+  context.set_deadline(std::chrono::system_clock::now() + 20s);
+  auto call = stub->Session(&context);
+  ASSERT_TRUE(call->Write(open_event(wire::SESSION_MODE_STT_STREAMING)));
+  wire::ServerEvent event;
+  ASSERT_TRUE(call->Read(&event));
+  ASSERT_TRUE(event.has_ready());
+
+  const auto began = std::chrono::steady_clock::now();
+  listener->stop(began + 300ms);
+  const auto took = std::chrono::steady_clock::now() - began;
+  EXPECT_GE(took, 300ms) << "the session never drained, so stop waited for the deadline";
+  EXPECT_LT(took, 10s);
+  EXPECT_EQ(listener->live_sessions(), 0U);
+  while (call->Read(&event)) {
+    EXPECT_FALSE(event.has_ready());
+  }
+  // The server cancels the call as it shuts down; the client reads that as
+  // the server going away or as the cancellation itself.
+  const auto code = call->Finish().error_code();
+  EXPECT_TRUE(code == grpc::StatusCode::UNAVAILABLE || code == grpc::StatusCode::CANCELLED) << code;
+  listener.reset();
 }
 
 TEST(StreamListener, BindsLoopbackOnlyAndOwnsItsPort) {

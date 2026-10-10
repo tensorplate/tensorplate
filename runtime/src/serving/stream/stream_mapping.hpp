@@ -22,7 +22,7 @@ namespace wire = ::tensorplate::stream::v1;
 /// Largest sequence, generation or id the stream schema allows: 2^53 - 1.
 inline constexpr std::uint64_t kMaxWireInteger = (std::uint64_t{1} << 53U) - 1U;
 
-/// The deployment a listener serves. The slice's worker serves no
+/// The deployment a listener serves. A worker without a generation serves no
 /// generation and no descriptor digest.
 struct ServedTarget {
   std::string deployment_id;
@@ -61,7 +61,7 @@ struct ServedTarget {
 /// @return Unsupported "target_unresolved" for a selector, ConfigInvalid
 ///   "invalid_event" for no target or a malformed deployment id, NotReady
 ///   "target_mismatch" for another deployment or any descriptor digest, and
-///   NotReady "stale_generation" for any generation: the slice serves none, and
+///   NotReady "stale_generation" for any generation: the worker serves none, and
 ///   is addressed by its deployment alone.
 [[nodiscard]] Result<void> check_target(const wire::Open& open, const ServedTarget& served);
 

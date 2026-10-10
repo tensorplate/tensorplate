@@ -96,12 +96,13 @@ std::optional<MetricsMode> metrics_mode_from_string(std::string_view name) noexc
 
 namespace {
 Result<void> validate_streaming(const StreamingConfig& streaming,
-                                const ActiveDeploymentConfig& deployment) {
+                                const ActiveDeploymentConfig& deployment, std::uint16_t http_port) {
   if (!streaming.enabled) {
     return {};
   }
 #if !TP_ENABLE_STREAMING_GRPC
   (void)deployment;
+  (void)http_port;
   return unexpected(Error::Code::Unsupported,
                     "serving config: streaming.enabled requires TP_ENABLE_STREAMING_GRPC");
 #else
@@ -116,13 +117,17 @@ Result<void> validate_streaming(const StreamingConfig& streaming,
                       "serving config: with streaming.enabled, deployment.endpoint must be 1 to "
                       "128 of letters, digits, '.', '_' and '-'");
   }
+  if (streaming.port != 0 && streaming.port == http_port) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "serving config: streaming.port must differ from bind.port");
+  }
   return {};
 #endif
 }
 }  // namespace
 
 Result<void> ServingConfig::validate() const {
-  if (auto checked = validate_streaming(streaming, deployment); !checked) {
+  if (auto checked = validate_streaming(streaming, deployment, bind.port); !checked) {
     return checked;
   }
   if (schema_version != "0.1") {

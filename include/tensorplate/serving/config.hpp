@@ -188,7 +188,8 @@ struct StreamingConfig {
   bool enabled = false;
 
   /// TCP port of the stream listener, on `bind.host` and under the same
-  /// loopback rule. 0 requests an ephemeral port, which the worker logs.
+  /// loopback rule; not `bind.port`. 0 requests an ephemeral port, which the
+  /// worker logs.
   std::uint16_t port = 0;
 };
 
