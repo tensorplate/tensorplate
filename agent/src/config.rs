@@ -430,15 +430,14 @@ fn validate_process_worker_config(
         ));
     }
     if let Some(range) = worker.serving_port_range {
-        if range.first == 0 || range.first > range.last {
-            return Err(AgentError::Config(format!(
-                "worker.serving_port_range {} to {} must run from a port above 0 up to a port not below it",
-                range.first, range.last
-            )));
+        if range.first == 0 {
+            return Err(AgentError::Config(
+                "worker.serving_port_range must start above port 0 in process mode".into(),
+            ));
         }
         if range.pairs().count() < 2 {
             return Err(AgentError::Config(format!(
-                "worker.serving_port_range {} to {} must hold at least two pairs of ports: a serving worker and its replacement are alive together",
+                "worker.serving_port_range {} to {} must hold at least two pairs of ports, `first` to `last` inclusive: a serving worker and its replacement are alive together",
                 range.first, range.last
             )));
         }
