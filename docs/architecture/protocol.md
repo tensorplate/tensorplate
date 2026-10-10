@@ -248,7 +248,8 @@ that wrote it and must stay safe across agent upgrades and downgrades: an
 agent reads every state version it knows and refuses a newer one.
 Its `schema_version` is a state version: `"0.1"` is the singleton layout
 every agent through 0.2.x reads, and `"0.2"` adds the deployment generation
-counter and the resident set. The agent decodes it with
+counter, the resident set and the descriptor identity a singleton record or
+the in-flight transaction may carry. The agent decodes it with
 `tensorplate_protocol::decode_agent_state`, which accepts exactly those
 versions and rejects any other with the same typed unsupported-version
 error; `decode_with_version_check` and every other payload stay at the
