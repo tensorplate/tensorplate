@@ -109,8 +109,6 @@ fn a_draining_members_ports_are_not_given_out_until_it_is_reaped() {
         assert_eq!(f.launcher.count(), 2);
         assert_eq!(f.next_generation.load(Ordering::SeqCst), 3);
 
-        // A prepare with time to wait is given the ports once the member
-        // that held them is gone.
         let waiting = scope.spawn(|| f.registry.prepare("tx", &candidate("third"), GRACE));
         std::thread::sleep(DRAIN);
         assert_eq!(f.launcher.count(), 2);
@@ -388,4 +386,88 @@ fn a_successor_that_yielded_to_a_deploy_is_the_generation_the_next_restart_repla
         stamps.lock().unwrap()[1..],
         [("stt".to_owned(), 2, 4, "stamped-2".to_owned())]
     );
+}
+
+/// What a packaged configuration can meet: a successor that yielded to a
+/// deploy is still draining on the first port when the next deploy comes.
+#[test]
+fn a_candidate_waits_for_the_port_of_a_successor_that_is_still_draining() {
+    let stop_deadline = Duration::from_secs(1);
+    let f = fixture_with(
+        |settings| RegistrySettings {
+            stop_deadline,
+            ..settings
+        },
+        |registry| registry,
+    );
+    exit(&f.serve("stt"));
+    f.registry.supervise();
+    f.clock.advance(Duration::from_secs(1));
+    f.launcher.stubborn.store(true, Ordering::SeqCst);
+    let (started, has_started) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *f.launcher.hold_first.lock().unwrap() = Some((started, released));
+
+    std::thread::scope(|scope| {
+        let release = release;
+        let restarting = scope.spawn(|| f.registry.supervise());
+        has_started
+            .recv_timeout(GRACE)
+            .expect("the restart launches");
+        f.prepare("tts").unwrap();
+        release.send(()).unwrap();
+        // The successor yields and drains on the first port; meanwhile the
+        // deploy is promoted and the next one begins.
+        f.health(CANDIDATE_PORT, "tts");
+        assert!(f.warm("tts").unwrap().ready);
+        f.registry.promote("tx", &candidate("tts")).unwrap();
+        let began = Instant::now();
+        let refused = f.prepare("third");
+        assert!(
+            matches!(refused, Err(AgentError::NoFreePort(_))),
+            "{refused:?}"
+        );
+
+        f.registry
+            .prepare("tx", &candidate("third"), GRACE)
+            .unwrap();
+
+        assert!(
+            began.elapsed() >= stop_deadline / 2,
+            "{:?}",
+            began.elapsed()
+        );
+        assert_eq!(restarting.join().unwrap(), []);
+    });
+    assert_eq!(f.launcher.handle(2).calls(), ["terminate", "kill"]);
+    assert_eq!(http_port(&f.launcher.handle(4)), ACTIVE_PORT);
+}
+
+#[test]
+fn a_member_unloaded_while_its_restart_was_in_hand_is_neither_stamped_nor_started() {
+    let (f, stamps) = stamped_fixture(|restamp| Ok(stamped_for(restamp)));
+    exit(&f.serve("stt"));
+    f.registry.supervise();
+    f.clock.advance(Duration::from_secs(1));
+    let (reading, is_reading) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    *f.registry.before_staged_read.lock().unwrap() = Some(Box::new(move || {
+        reading.send(()).unwrap();
+        let _ = released.recv();
+    }));
+
+    let events = std::thread::scope(|scope| {
+        let release = release;
+        let restarting = scope.spawn(|| f.registry.supervise());
+        is_reading
+            .recv_timeout(GRACE)
+            .expect("the manifest read begins");
+        f.registry.unload("stt");
+        release.send(()).unwrap();
+        restarting.join().unwrap()
+    });
+
+    assert_eq!(events, []);
+    assert_eq!(*stamps.lock().unwrap(), []);
+    assert_eq!(f.launcher.count(), 1);
 }

@@ -414,6 +414,10 @@ const RUNTIME_ONLY_RULES: &[(&str, &str)] = &[
         r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":{"first":18107,"last":18100}}}"#,
     ),
     (
+        "port range that ends at port zero",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":{"first":18100,"last":0}}}"#,
+    ),
+    (
         "port range with one pair",
         r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":{"first":18100,"last":18102}}}"#,
     ),

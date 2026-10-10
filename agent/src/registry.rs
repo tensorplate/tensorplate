@@ -214,7 +214,9 @@ pub struct Restamp<'a> {
 /// Called before a restart renders the new generation's config, so that
 /// whatever names the deployment's generation can be written for it.
 /// Returns what the new generation is started from, and restarted from
-/// after it; an error is a launch that failed.
+/// after it; an error is a launch that failed. The runner profile was read
+/// from the staged bundle before the call, so the stamp must keep the
+/// recipe's staged path and bundle digest.
 pub type RestartStamp = Arc<dyn Fn(&Restamp<'_>) -> AgentResult<CandidateRef> + Send + Sync>;
 
 /// A launch that failed, and what a restart stamp had written by then.
@@ -254,13 +256,14 @@ pub struct RegistrySettings {
 
 struct Member {
     deployment_id: String,
-    ports: Arc<PortLease>,
     config_path: PathBuf,
     process: Box<dyn MemberProcess>,
     /// What this generation was started from, to start its successor.
     recipe: CandidateRef,
+    /// Declared after `process`, as `outside` is: a member dropped while
+    /// its process runs is killed and reaped before either is released.
+    ports: Arc<PortLease>,
     /// Set while a thread holds the member outside the registry's map.
-    /// Declared last, so it is released after the process was reaped.
     outside: Option<Outside>,
 }
 
@@ -535,7 +538,7 @@ impl MemberRegistry {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err(AgentError::NoFreePort(format!(
-                    "`{}` was not started: each of the {} configured serving ports is held by a worker that is running or draining",
+                    "`{}` was not started: the configuration gives {} workers ports, and each is held by a worker that is running or draining, or kept for a restart",
                     candidate.deployment_id,
                     self.ports.ports.len()
                 )));
@@ -564,8 +567,16 @@ impl MemberRegistry {
         let generation = (self.generations)()?;
         // A stop gives up waiting on a write that hangs; once the write
         // returns, nothing is started for it.
-        if self.members()?.stopping {
-            return Err(AgentError::Stopping.into());
+        {
+            let members = self.members()?;
+            if members.stopping {
+                return Err(AgentError::Stopping.into());
+            }
+            // Unloaded or promoted over while the staged manifest was read:
+            // nothing is stamped or started for it.
+            if restart_of.is_some() && !members.restart_in_hand(&recipe.deployment_id) {
+                return Err(AgentError::WorkerNotReady.into());
+            }
         }
         let (recipe, stamped) = match (restart_of, &self.restart_stamp) {
             (Some(stopped_generation), Some(stamp)) => {
