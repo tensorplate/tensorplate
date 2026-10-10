@@ -182,6 +182,11 @@ pub enum AgentError {
     #[error("worker reported candidate is not ready")]
     WorkerNotReady,
 
+    /// The agent was told to stop: it starts no worker, and a transaction
+    /// this interrupts is left as it stands for the next start's recovery.
+    #[error("the agent is stopping")]
+    Stopping,
+
     #[error("internal agent error: {0}")]
     Internal(String),
 
@@ -218,6 +223,7 @@ impl AgentError {
             AgentError::InsufficientCapacity => (ErrorCode::OomError, true),
             AgentError::Busy(_) | AgentError::WorkerNotReady => (ErrorCode::NotReady, true),
             AgentError::WorkerControl(_) => (ErrorCode::InferenceFailed, true),
+            AgentError::Stopping => (ErrorCode::Unavailable, true),
             AgentError::WorkerStartupFailed { code, .. } => (
                 *code,
                 !matches!(
@@ -287,6 +293,13 @@ mod tests {
         let err = AgentError::Busy("tx-1".into());
         let r = err.to_record();
         assert_eq!(r.code, ErrorCode::NotReady);
+        assert!(r.recoverable);
+    }
+
+    #[test]
+    fn a_stopping_agent_answers_unavailable_and_recoverable() {
+        let r = AgentError::Stopping.to_record();
+        assert_eq!(r.code, ErrorCode::Unavailable);
         assert!(r.recoverable);
     }
 

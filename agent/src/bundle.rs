@@ -150,6 +150,33 @@ pub(crate) fn staged_runner_profile(bundle_path: &Path) -> AgentResult<Option<St
     Ok(descriptor.manifest.profile.and_then(|p| p.runner_profile))
 }
 
+/// Check that the bundle staged at `staged_path` is the one recorded under
+/// `bundle_digest`. Reads the manifest only: its digest names every
+/// artifact's digest, and artifacts are verified before they are staged.
+///
+/// # Errors
+///
+/// Returns [`AgentError::BundleIntegrity`] when the staged manifest's digest
+/// differs, and the errors of [`staged_runner_profile`] when it cannot be
+/// read.
+pub(crate) fn ensure_staged_bundle(staged_path: &Path, bundle_digest: &str) -> AgentResult<()> {
+    let options = ParseOptions {
+        verify_artifact_digests: false,
+    };
+    let staged = parse_bundle_with(staged_path, options).map_err(parse_error_to_agent_error)?;
+    if bundle_digests_equal(&staged.manifest_digest, bundle_digest) {
+        return Ok(());
+    }
+    Err(AgentError::BundleIntegrity {
+        path: "manifest.json".into(),
+        reason: format!(
+            "the bundle staged at `{}` is `{}`, not the recorded `{bundle_digest}`",
+            staged_path.display(),
+            staged.manifest_digest
+        ),
+    })
+}
+
 /// Verify the bundle at `bundle_path` against the agent config.
 ///
 /// bundle format migrates the implementation to the shared

@@ -217,6 +217,7 @@ impl Coordinator {
             ));
         }
 
+        self.refuse_while_stopping()?;
         let transaction_id = new_transaction_id();
         let tx_record = TransactionRecord {
             transaction_id: transaction_id.clone(),
@@ -458,6 +459,7 @@ impl Coordinator {
     /// and the typed [`AgentError`] of whichever phase fails otherwise.
     #[allow(clippy::too_many_lines)]
     pub fn rollback(&self, correlation_id: Option<String>) -> AgentResult<DeployOutcome> {
+        self.refuse_while_stopping()?;
         let prev = {
             let s = self.store.snapshot()?;
             s.previous_active
@@ -732,6 +734,16 @@ impl Coordinator {
         })
     }
 
+    /// Once the agent is stopping no transaction begins and none is
+    /// recorded failed: one in flight stays so, as after a kill, and the
+    /// next start's recovery decides it.
+    fn refuse_while_stopping(&self) -> AgentResult<()> {
+        if self.worker.stopping() {
+            return Err(AgentError::Stopping);
+        }
+        Ok(())
+    }
+
     fn advance(&self, tx: &str, from: DeployState, to: DeployState) -> AgentResult<()> {
         if !is_permitted(from, to) {
             return Err(AgentError::InvalidTransition(format!("{from:?} -> {to:?}")));
@@ -746,6 +758,7 @@ impl Coordinator {
         last_successful: DeployState,
         err: AgentError,
     ) -> AgentResult<DeployOutcome> {
+        self.refuse_while_stopping()?;
         let record = err.to_record();
         // Stamp the in-flight transaction with the last-successful phase
         // so the quarantine record reflects how far the candidate got
@@ -774,6 +787,7 @@ impl Coordinator {
         deployment_id: &str,
         err: AgentError,
     ) -> AgentResult<DeployOutcome> {
+        self.refuse_while_stopping()?;
         let record = err.to_record();
         let _ = self.store.update(|s| {
             if let Some(tx) = s.in_flight_transaction.as_mut() {

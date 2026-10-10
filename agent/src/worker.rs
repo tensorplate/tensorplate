@@ -178,8 +178,14 @@ pub trait WorkerControl: Send + Sync {
         None
     }
 
-    /// Stop every worker and start no other.
+    /// Stop every worker and start no other. When this returns no worker
+    /// process is running and none can be started.
     fn shutdown(&self) {}
+
+    /// Whether [`Self::shutdown`] has begun.
+    fn stopping(&self) -> bool {
+        false
+    }
 }
 
 /// What one supervision step did about the serving member.

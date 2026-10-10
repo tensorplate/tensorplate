@@ -28,6 +28,8 @@ struct Handle {
     exited: AtomicBool,
     obeys_terminate: AtomicBool,
     contact: Mutex<ControlContact>,
+    /// `startup_failure` says it has begun, then waits to be let finish.
+    hold_failure: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
 }
 
 impl Handle {
@@ -46,6 +48,11 @@ impl MemberProcess for FakeProcess {
         Ok(self.0.exited.load(Ordering::SeqCst))
     }
     fn startup_failure(&mut self) -> AgentError {
+        let held = self.0.hold_failure.lock().unwrap().take();
+        if let Some((started, release)) = held {
+            started.send(()).unwrap();
+            release.recv().unwrap();
+        }
         AgentError::WorkerExited(format!("generation {}", self.0.spec.member.generation))
     }
     fn control(&self) -> ControlContact {
@@ -104,6 +111,7 @@ impl ProcessLauncher for FakeLauncher {
             exited: AtomicBool::new(false),
             obeys_terminate: AtomicBool::new(true),
             contact: Mutex::new(ControlContact::Reporting),
+            hold_failure: Mutex::new(None),
         });
         self.launched.lock().unwrap().push(handle.clone());
         Ok(Box::new(FakeProcess(handle)))
@@ -187,10 +195,16 @@ fn bundle_fixture(bundle: &str) -> String {
 }
 
 fn candidate(id: &str) -> CandidateRef {
+    candidate_staged_at(id, &bundle_fixture("v0_1/x86_fixture_smoke"))
+}
+
+/// A candidate recorded with the digest of the bundle at `staged_path`.
+fn candidate_staged_at(id: &str, staged_path: &str) -> CandidateRef {
+    let staged = tensorplate_protocol::bundle::parse_bundle(std::path::Path::new(staged_path));
     CandidateRef {
         deployment_id: id.into(),
-        staged_path: bundle_fixture("v0_1/x86_fixture_smoke"),
-        bundle_digest: "sha256:cafe".into(),
+        staged_path: staged_path.into(),
+        bundle_digest: staged.expect("the staged bundle parses").manifest_digest,
         backend_hint: "mock".into(),
         model_class: "vision".into(),
         bundle_name: Some("m".into()),

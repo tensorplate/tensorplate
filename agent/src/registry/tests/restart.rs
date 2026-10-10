@@ -34,6 +34,24 @@ fn owed(events: &[MemberEvent]) -> Option<Duration> {
     })
 }
 
+/// Holds the launcher's next launch; returns what tells that it began and
+/// what lets it finish.
+fn hold_next_launch(f: &Fixture) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let (started, has_started) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *f.launcher.hold_first.lock().unwrap() = Some((started, released));
+    (has_started, release)
+}
+
+/// Waits, with a bound, until `handle` was asked to stop.
+fn wait_for_terminate(handle: &Handle) {
+    let deadline = Instant::now() + HELD_LAUNCH;
+    while handle.calls().is_empty() {
+        assert!(Instant::now() < deadline, "the member was never stopped");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn failed(events: &[MemberEvent]) -> bool {
     events
         .iter()
@@ -45,8 +63,14 @@ fn failed(events: &[MemberEvent]) -> bool {
 fn crash_and_recover(f: &Fixture, generation: u64) -> Duration {
     exit(&f.launcher.handle(generation));
     let after = owed(&step(f, Duration::ZERO)).expect("a restart is owed");
+    let early = Duration::from_millis(1);
     assert_eq!(
-        step(f, after),
+        step(f, after - early),
+        [],
+        "before the {after:?} wait is over"
+    );
+    assert_eq!(
+        step(f, early),
         [MemberEvent::Restarted {
             member: member("stt", generation + 1)
         }]
@@ -418,9 +442,84 @@ fn a_successor_started_as_a_deploy_began_is_stopped_and_owed_again() {
 
     assert_eq!(f.launcher.handle(2).calls(), ["terminate"]);
     assert!(f.launcher.handle(3).calls().is_empty());
+    assert_ne!(
+        port_of(&f.launcher.handle(3)),
+        port_of(&f.launcher.handle(2))
+    );
     // The deploy holds the member now, so the restart stays owed.
     assert_eq!(step(&f, secs(60)), []);
     assert_eq!(f.launcher.count(), 3);
+
+    // Once the deploy gives up, the owed restart starts at the next step.
+    f.probe.silent.store(true, Ordering::SeqCst);
+    assert!(!f.warm("stt").unwrap().ready);
+    f.probe.silent.store(false, Ordering::SeqCst);
+    assert_eq!(
+        step(&f, Duration::ZERO),
+        [MemberEvent::Restarted {
+            member: member("stt", 4)
+        }]
+    );
+    // The generation that yielded was not counted: this is the first restart.
+    exit(&f.launcher.handle(4));
+    assert_eq!(owed(&step(&f, Duration::ZERO)), Some(secs(2)));
+}
+
+#[test]
+fn a_successor_started_as_its_deployment_was_unloaded_is_stopped_and_nothing_is_owed() {
+    let f = fixture();
+    exit(&f.serve("stt"));
+    f.registry.supervise();
+    f.clock.advance(secs(1));
+    let (has_started, release) = hold_next_launch(&f);
+
+    std::thread::scope(|scope| {
+        let release = release;
+        let restart = scope.spawn(|| f.registry.supervise());
+        has_started
+            .recv_timeout(HELD_LAUNCH)
+            .expect("the restart launches");
+        f.registry.unload("stt");
+        release.send(()).unwrap();
+        assert_eq!(restart.join().unwrap(), []);
+    });
+
+    assert_eq!(f.launcher.handle(2).calls(), ["terminate"]);
+    assert_eq!(step(&f, secs(60)), []);
+    assert_eq!(f.launcher.count(), 2);
+    assert_eq!(f.registry.active_deployment_id().unwrap(), None);
+}
+
+#[test]
+fn a_member_promoted_over_while_its_stop_was_being_read_is_owed_nothing() {
+    let f = fixture();
+    let old = f.serve("stt");
+    let (started, has_started) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *old.hold_failure.lock().unwrap() = Some((started, released));
+    exit(&old);
+
+    std::thread::scope(|scope| {
+        let release = release;
+        let stopped = scope.spawn(|| f.registry.supervise());
+        has_started
+            .recv_timeout(HELD_LAUNCH)
+            .expect("the stop is read");
+        f.serve("tts");
+        release.send(()).unwrap();
+        let events = stopped.join().unwrap();
+        assert!(
+            matches!(&events[..], [MemberEvent::Stopped { member: gone, .. }] if *gone == member("stt", 1)),
+            "{events:?}"
+        );
+    });
+
+    assert_eq!(step(&f, secs(60)), []);
+    assert_eq!(f.launcher.count(), 2);
+    assert_eq!(
+        f.registry.active_deployment_id().unwrap().as_deref(),
+        Some("tts")
+    );
 }
 
 #[test]
@@ -478,14 +577,12 @@ fn unloading_another_deployment_leaves_the_restart_owed() {
 }
 
 #[test]
-fn a_successor_that_finishes_starting_after_shutdown_is_stopped() {
+fn shutdown_waits_for_a_successor_that_was_starting_and_stops_it() {
     let f = fixture();
     exit(&f.serve("stt"));
     f.registry.supervise();
     f.clock.advance(secs(1));
-    let (started, has_started) = mpsc::channel();
-    let (release, released) = mpsc::channel();
-    *f.launcher.hold_first.lock().unwrap() = Some((started, released));
+    let (has_started, release) = hold_next_launch(&f);
 
     std::thread::scope(|scope| {
         let release = release;
@@ -493,12 +590,22 @@ fn a_successor_that_finishes_starting_after_shutdown_is_stopped() {
         has_started
             .recv_timeout(HELD_LAUNCH)
             .expect("the restart launches");
-        f.registry.shutdown();
+        let (done, is_done) = mpsc::channel();
+        let stopping = &f;
+        scope.spawn(move || {
+            stopping.registry.shutdown();
+            assert_eq!(stopping.launcher.handle(2).calls(), ["terminate"]);
+            done.send(()).unwrap();
+        });
+        assert!(
+            is_done.recv_timeout(DRAIN).is_err(),
+            "shutdown returned while a worker was starting"
+        );
         release.send(()).unwrap();
         assert_eq!(restart.join().unwrap(), []);
+        is_done.recv_timeout(HELD_LAUNCH).expect("shutdown returns");
     });
 
-    assert_eq!(f.launcher.handle(2).calls(), ["terminate"]);
     assert_eq!(f.configs(), 0);
     assert_eq!(f.registry.active_deployment_id().unwrap(), None);
 }
@@ -559,48 +666,6 @@ fn a_failed_member_is_reported_until_a_deployment_is_promoted() {
     assert_eq!(f.registry.member_failure(), None);
 }
 
-/// The failed state lives in the registry only: nothing durable carries it
-/// to the next agent process, which starts the recorded deployment again.
-#[test]
-fn a_failed_member_is_not_remembered_by_the_next_registry() {
-    let f = fixture();
-    f.serve("stt");
-    for generation in 1..=3 {
-        crash_and_recover(&f, generation);
-    }
-    exit(&f.launcher.handle(4));
-    assert!(failed(&f.registry.supervise()));
-    let Fixture {
-        td,
-        launcher,
-        probe,
-        next_generation,
-        clock,
-        registry,
-    } = f;
-    drop(registry);
-
-    let counter = next_generation.clone();
-    let next = Fixture {
-        registry: MemberRegistry::new(
-            settings(td.path()),
-            launcher.clone(),
-            probe.clone(),
-            Arc::new(move || Ok(counter.fetch_add(1, Ordering::SeqCst))),
-        )
-        .with_clock(clock.clone()),
-        td,
-        launcher,
-        probe,
-        next_generation,
-        clock,
-    };
-
-    assert_eq!(next.registry.member_failure(), None);
-    next.serve("stt");
-    assert_eq!(crash_and_recover(&next, 5), secs(1));
-}
-
 #[test]
 fn shutdown_stops_every_member_and_nothing_starts_after_it() {
     let f = fixture();
@@ -613,13 +678,12 @@ fn shutdown_stops_every_member_and_nothing_starts_after_it() {
     assert_eq!(serving.calls(), ["terminate"]);
     assert_eq!(candidate_handle.calls(), ["terminate"]);
     assert_eq!(f.configs(), 0);
+    assert!(f.registry.stopping());
+    assert!(matches!(f.prepare("stt"), Err(AgentError::Stopping)));
+    assert!(matches!(f.warm("tts"), Err(AgentError::Stopping)));
     assert!(matches!(
-        f.prepare("stt"),
-        Err(AgentError::WorkerControl(message)) if message.contains("stopping")
-    ));
-    assert!(matches!(
-        f.warm("tts"),
-        Err(AgentError::WorkerControl(message)) if message.contains("stopping")
+        f.registry.promote("tx", &candidate("tts")),
+        Err(AgentError::Stopping)
     ));
     assert_eq!(step(&f, secs(60)), []);
     assert_eq!(f.launcher.count(), 2);
@@ -652,11 +716,9 @@ fn a_member_that_ignores_shutdown_is_killed_at_the_stop_deadline() {
 }
 
 #[test]
-fn a_launch_that_finishes_after_shutdown_is_stopped() {
+fn shutdown_waits_for_a_launch_that_had_begun_and_stops_it() {
     let f = fixture();
-    let (started, has_started) = mpsc::channel();
-    let (release, released) = mpsc::channel();
-    *f.launcher.hold_first.lock().unwrap() = Some((started, released));
+    let (has_started, release) = hold_next_launch(&f);
 
     std::thread::scope(|scope| {
         let release = release;
@@ -664,14 +726,146 @@ fn a_launch_that_finishes_after_shutdown_is_stopped() {
         has_started
             .recv_timeout(HELD_LAUNCH)
             .expect("the launch starts");
-        f.registry.shutdown();
+        let (done, is_done) = mpsc::channel();
+        let stopping = &f;
+        scope.spawn(move || {
+            stopping.registry.shutdown();
+            assert_eq!(stopping.launcher.handle(1).calls(), ["terminate"]);
+            done.send(()).unwrap();
+        });
+        assert!(
+            is_done.recv_timeout(DRAIN).is_err(),
+            "shutdown returned while a worker was starting"
+        );
         release.send(()).unwrap();
-        assert!(matches!(
-            held.join().unwrap(),
-            Err(AgentError::WorkerControl(message)) if message.contains("stopping")
-        ));
+        assert!(matches!(held.join().unwrap(), Err(AgentError::Stopping)));
+        is_done.recv_timeout(HELD_LAUNCH).expect("shutdown returns");
     });
 
-    assert_eq!(f.launcher.handle(1).calls(), ["terminate"]);
     assert_eq!(f.configs(), 0);
+}
+
+#[test]
+fn no_launch_begins_once_shutdown_has_begun() {
+    let f = fixture();
+    f.prepare("stt").unwrap();
+    let displaced = f.launcher.handle(1);
+    displaced.obeys_terminate.store(false, Ordering::SeqCst);
+
+    std::thread::scope(|scope| {
+        // Past its first check, and held stopping the candidate it displaces.
+        let held = scope.spawn(|| f.prepare("stt"));
+        wait_for_terminate(&displaced);
+        f.registry.shutdown();
+        assert_eq!(displaced.calls(), ["terminate", "kill"]);
+        assert!(matches!(held.join().unwrap(), Err(AgentError::Stopping)));
+    });
+
+    assert_eq!(f.launcher.count(), 1);
+    assert_eq!(f.next_generation.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn shutdown_waits_for_a_member_another_thread_is_stopping() {
+    let f = fixture();
+    let old = f.serve("stt");
+    old.obeys_terminate.store(false, Ordering::SeqCst);
+    f.prepare("tts").unwrap();
+    let port = u16::try_from(port_of(&f.launcher.handle(2))).unwrap();
+    f.health(port, "tts");
+    assert!(f.warm("tts").unwrap().ready);
+
+    std::thread::scope(|scope| {
+        let promotion = scope.spawn(|| f.registry.promote("tx", &candidate("tts")));
+        wait_for_terminate(&old);
+        f.registry.shutdown();
+        assert_eq!(old.calls(), ["terminate", "kill"]);
+        promotion.join().unwrap().unwrap();
+    });
+
+    assert_eq!(f.launcher.handle(2).calls(), ["terminate"]);
+}
+
+/// A staged root of its own, holding a copy of `bundle`.
+fn stage(f: &Fixture, bundle: &str) -> String {
+    let staged = f.td.path().join("staged");
+    std::fs::create_dir_all(&staged).unwrap();
+    for entry in std::fs::read_dir(bundle_fixture(bundle)).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), staged.join(entry.file_name())).unwrap();
+    }
+    staged.display().to_string()
+}
+
+fn serve_staged(f: &Fixture, staged: &str) {
+    let recorded = candidate_staged_at("stt", staged);
+    f.registry.prepare("tx", &recorded, WARM).unwrap();
+    f.health(ACTIVE_PORT, "stt");
+    assert!(f.registry.warm("tx", &recorded, WARM).unwrap().ready);
+    f.registry.promote("tx", &recorded).unwrap();
+}
+
+#[test]
+fn a_member_whose_staged_bundle_was_replaced_is_failed_instead_of_restarted() {
+    let f = fixture();
+    let staged = stage(&f, "v0_1/x86_fixture_smoke");
+    serve_staged(&f, &staged);
+    // What a deploy of the same id leaves when it fails after staging.
+    stage(&f, "v0_1/x86_cuda_smoke");
+    exit(&f.launcher.handle(1));
+    assert_eq!(owed(&f.registry.supervise()), Some(secs(1)));
+
+    let events = step(&f, secs(1));
+
+    assert!(
+        matches!(&events[..], [MemberEvent::Failed { deployment_id, error }]
+            if deployment_id == "stt"
+                && error.code == tensorplate_protocol::ErrorCode::LoadFailed
+                && !error.recoverable
+                && error.message.contains("not the recorded")),
+        "{events:?}"
+    );
+    assert_eq!(
+        f.registry.member_failure().map(|e| e.code),
+        Some(events_code(&events))
+    );
+    assert_eq!(step(&f, secs(600)), []);
+    assert_eq!(f.launcher.count(), 1);
+    assert_eq!(f.next_generation.load(Ordering::SeqCst), 2);
+    assert_eq!(f.configs(), 0);
+}
+
+fn events_code(events: &[MemberEvent]) -> tensorplate_protocol::ErrorCode {
+    match events {
+        [MemberEvent::Failed { error, .. }] => error.code,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_member_whose_staged_manifest_is_gone_is_failed_instead_of_restarted() {
+    let f = fixture();
+    let staged = stage(&f, "v0_1/x86_fixture_smoke");
+    serve_staged(&f, &staged);
+    std::fs::remove_file(std::path::Path::new(&staged).join("manifest.json")).unwrap();
+    exit(&f.launcher.handle(1));
+    f.registry.supervise();
+
+    let events = step(&f, secs(1));
+
+    assert!(
+        matches!(&events[..], [MemberEvent::Failed { .. }]),
+        "{events:?}"
+    );
+    assert_eq!(f.launcher.count(), 1);
+    assert_eq!(f.next_generation.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_member_whose_staged_bundle_is_unchanged_is_restarted_from_it() {
+    let f = fixture();
+    let staged = stage(&f, "v0_1/x86_fixture_smoke");
+    serve_staged(&f, &staged);
+
+    assert_eq!(crash_and_recover(&f, 1), secs(1));
 }

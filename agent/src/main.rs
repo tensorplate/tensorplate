@@ -940,8 +940,9 @@ fn run_until_stopped(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     eprintln!("tensorplate-agent stopping: asking the serving workers to drain");
-    // Workers first: a deploy the server is still answering then fails at
-    // once instead of holding the listener's thread to its warm timeout.
+    // Requests are answered on threads of their own, which nothing joins:
+    // from here none of them can start a worker, and a deploy one of them
+    // was running is left in flight for the next start's recovery.
     worker.shutdown();
     server.shutdown();
     eprintln!("tensorplate-agent stopped");

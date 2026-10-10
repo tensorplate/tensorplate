@@ -13,6 +13,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -139,6 +140,27 @@ struct Member {
     process: Box<dyn MemberProcess>,
     /// What this generation was started from, to start its successor.
     recipe: CandidateRef,
+    /// Set while a thread holds the member outside the registry's map.
+    /// Declared last, so it is released after the process was reaped.
+    outside: Option<Outside>,
+}
+
+/// Counts a member process, or a launch, that a thread holds outside the
+/// registry's map. Taken under the registry's lock; `shutdown` returns once
+/// none is left.
+struct Outside(Arc<AtomicUsize>);
+
+impl Outside {
+    fn new(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Ordering::SeqCst);
+        Self(count.clone())
+    }
+}
+
+impl Drop for Outside {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Default)]
@@ -153,7 +175,10 @@ struct Members {
     restart: Restart,
     /// When each restart inside [`RESTART_WINDOW`] was made, oldest first.
     restarts: VecDeque<Instant>,
+    /// Set by `shutdown` before it stops the first member; no launch begins
+    /// and no failure is recorded from then on.
     stopping: bool,
+    outside: Arc<AtomicUsize>,
 }
 
 /// What the registry owes the deployment that was serving.
@@ -201,10 +226,6 @@ impl Drop for Preparing<'_> {
     }
 }
 
-fn stopping() -> AgentError {
-    AgentError::WorkerControl("the agent is stopping; no serving worker is started".into())
-}
-
 /// The one owner of every serving worker process the agent starts.
 pub struct MemberRegistry {
     settings: RegistrySettings,
@@ -245,7 +266,18 @@ impl Members {
     fn take_candidate(&mut self) -> Option<(u64, Member)> {
         let generation = self.candidate.take()?;
         self.candidate_abandoned = false;
-        Some((generation, self.by_generation.remove(&generation)?))
+        Some((generation, self.take(generation)?))
+    }
+
+    fn take(&mut self, generation: u64) -> Option<Member> {
+        let mut member = self.by_generation.remove(&generation)?;
+        member.outside = Some(Outside::new(&self.outside));
+        Some(member)
+    }
+
+    fn admit(&mut self, generation: u64, mut member: Member) {
+        member.outside = None;
+        self.by_generation.insert(generation, member);
     }
 
     /// Whether a deploy holds the member: it is preparing a candidate, or
@@ -288,7 +320,7 @@ impl Members {
 
     fn take_serving(&mut self) -> Option<Member> {
         let generation = self.serving.take()?;
-        self.by_generation.remove(&generation)
+        self.take(generation)
     }
 
     fn names(&self, slot: Option<u64>, deployment_id: &str) -> bool {
@@ -357,8 +389,16 @@ impl MemberRegistry {
         }
     }
 
-    /// Start the next generation of `recipe` on `port`.
+    /// Start the next generation of `recipe` on `port`. Refused once the
+    /// registry is stopping; a launch that began before is waited for.
     fn launch(&self, recipe: &CandidateRef, port: u16) -> AgentResult<(u64, Member)> {
+        let outside = {
+            let members = self.members()?;
+            if members.stopping {
+                return Err(AgentError::Stopping);
+            }
+            Outside::new(&members.outside)
+        };
         let generation = (self.generations)()?;
         let spec = LaunchSpec {
             member: MemberRef::new(recipe.deployment_id.clone(), generation),
@@ -373,6 +413,7 @@ impl MemberRegistry {
                     config_path: spec.config_path,
                     process,
                     recipe: recipe.clone(),
+                    outside: Some(outside),
                 },
             )),
             Err(err) => {
@@ -466,7 +507,7 @@ impl MemberRegistry {
         let (generation, mut member, exited) = {
             let mut members = self.members()?;
             if members.stopping {
-                return Err(stopping());
+                return Err(AgentError::Stopping);
             }
             let Some(member) = members
                 .candidate
@@ -676,7 +717,16 @@ impl MemberRegistry {
             };
             (recipe, port)
         };
-        let launched = self.launch(&recipe, port);
+        // A deploy of the same id that failed after staging left its own
+        // bundle in the staged root, which this member was not started from.
+        let staged = crate::bundle::ensure_staged_bundle(
+            Path::new(&recipe.staged_path),
+            &recipe.bundle_digest,
+        );
+        let launched = match staged {
+            Ok(()) => self.launch(&recipe, port).map_err(|err| (err, true)),
+            Err(err) => Err((err, false)),
+        };
         let mut yielded = None;
         if let Ok(mut members) = self.members() {
             let in_hand = !members.stopping
@@ -687,7 +737,7 @@ impl MemberRegistry {
             match launched {
                 Ok((generation, member)) if in_hand && !members.held_by_a_deploy() => {
                     members.restarts.push_back(now);
-                    members.by_generation.insert(generation, member);
+                    members.admit(generation, member);
                     members.serving = Some(generation);
                     members.restart = Restart::Loading {
                         deadline: later(now, self.settings.restart_warm_timeout),
@@ -709,7 +759,7 @@ impl MemberRegistry {
                     }
                     yielded = Some(member);
                 }
-                Err(err) if in_hand => {
+                Err((err, true)) if in_hand => {
                     members.restarts.push_back(now);
                     let error = err.to_record();
                     events.push(MemberEvent::LaunchFailed {
@@ -717,6 +767,25 @@ impl MemberRegistry {
                         error: error.clone(),
                     });
                     events.extend(owe_restart(&mut members, recipe, port, error, now));
+                }
+                // Another attempt would read the same staged root.
+                Err((err, false)) if in_hand => {
+                    let error = err.to_record();
+                    let error = ErrorRecord {
+                        message: format!(
+                            "`{}` is not restarted: {}",
+                            recipe.deployment_id, error.message
+                        ),
+                        ..error
+                    };
+                    members.restart = Restart::Failed {
+                        deployment_id: recipe.deployment_id.clone(),
+                        error: error.clone(),
+                    };
+                    events.push(MemberEvent::Failed {
+                        deployment_id: recipe.deployment_id,
+                        error,
+                    });
                 }
                 Err(_) => {}
             }
@@ -800,7 +869,7 @@ impl WorkerControl for MemberRegistry {
         let displaced = {
             let mut members = self.members()?;
             if members.stopping {
-                return Err(stopping());
+                return Err(AgentError::Stopping);
             }
             members.preparing += 1;
             members.take_candidate()
@@ -818,14 +887,14 @@ impl WorkerControl for MemberRegistry {
                 (Some(member), true)
             } else {
                 let displaced = members.take_candidate();
-                members.by_generation.insert(generation, member);
+                members.admit(generation, member);
                 members.candidate = Some(generation);
                 (displaced.map(|(_, member)| member), false)
             }
         };
         self.retire(displaced.into_iter().collect());
         if stopped {
-            return Err(stopping());
+            return Err(AgentError::Stopping);
         }
         Ok(())
     }
@@ -876,6 +945,9 @@ impl WorkerControl for MemberRegistry {
     fn promote(&self, _transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
         let retired = {
             let mut members = self.members()?;
+            if members.stopping {
+                return Err(AgentError::Stopping);
+            }
             if members.candidate_abandoned {
                 return Err(AgentError::WorkerNotReady);
             }
@@ -902,7 +974,7 @@ impl WorkerControl for MemberRegistry {
                     .unwrap_or_else(|| prepared.process.startup_failure()));
             }
             let old = members.take_serving();
-            members.by_generation.insert(generation, prepared);
+            members.admit(generation, prepared);
             members.serving = Some(generation);
             members.forget_restart();
             old
@@ -916,6 +988,7 @@ impl WorkerControl for MemberRegistry {
         if let Ok(mut members) = self.members() {
             if members.names(members.serving, deployment_id) {
                 stopped.extend(members.take_serving());
+                members.forget_restart();
             }
             if members.names(members.candidate, deployment_id) {
                 stopped.extend(members.take_candidate().map(|(_, member)| member));
@@ -951,16 +1024,28 @@ impl WorkerControl for MemberRegistry {
     }
 
     fn shutdown(&self) {
-        let members = {
+        let (members, outside) = {
             let Ok(mut members) = self.members() else {
                 return;
             };
             members.stopping = true;
             members.serving = None;
             members.candidate = None;
-            std::mem::take(&mut members.by_generation)
+            (
+                std::mem::take(&mut members.by_generation),
+                members.outside.clone(),
+            )
         };
         self.retire(members.into_values().collect());
+        // What another thread was starting or stopping when the flag was
+        // set: it ends stopped, by that thread, within the stop deadline.
+        while outside.load(Ordering::SeqCst) > 0 {
+            std::thread::sleep(DRAIN_POLL);
+        }
+    }
+
+    fn stopping(&self) -> bool {
+        self.members().map_or(true, |members| members.stopping)
     }
 }
 
