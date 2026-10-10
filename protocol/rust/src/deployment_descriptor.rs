@@ -20,6 +20,7 @@ use crate::bundle_profile::{
     PipelineStage, SpeechContract, Warmup, PROFILE_FORMAT_VERSION,
 };
 use crate::canonical_json::{self, CanonicalJsonError, CANONICAL_JSON_VERSION};
+use crate::descriptor_identity::DescriptorIdentity;
 use crate::member_quota::{MemberQuota, MemberQuotaError};
 use crate::model_spec::{ModelClass, PrecisionHint};
 use crate::resident_set::{AdmissionMode, MAX_STATE_COUNTER};
@@ -533,6 +534,44 @@ impl DeploymentDescriptor {
         }
         descriptor.verify_digests()?;
         Ok(descriptor)
+    }
+
+    /// This descriptor at a later generation of the same deployment, as a
+    /// restart, a recovery or a rollback starts one: the generation and
+    /// `descriptor_digest` are new, everything else is this descriptor's.
+    /// It reads no manifest and no installed profile.
+    ///
+    /// # Errors
+    ///
+    /// [`DeploymentDescriptorError`] when this descriptor does not verify,
+    /// so a change made to it after it was read is never re-signed, or
+    /// when `generation` is not newer than its own.
+    pub fn restamp(&self, generation: u64) -> Result<Self, DeploymentDescriptorError> {
+        self.verify()?;
+        if generation <= self.generation {
+            return Err(invalid(
+                "generation",
+                format!("{generation} is not newer than {}", self.generation),
+            ));
+        }
+        let mut next = Self {
+            generation,
+            ..self.clone()
+        };
+        next.validate()?;
+        next.descriptor_digest = next.computed_descriptor_digest()?;
+        Ok(next)
+    }
+
+    /// What a durable record or a candidate reference carries to name this
+    /// descriptor.
+    #[must_use]
+    pub fn identity(&self) -> DescriptorIdentity<'_> {
+        DescriptorIdentity {
+            generation: self.generation,
+            descriptor_digest: &self.descriptor_digest,
+            configuration_digest: &self.configuration_digest,
+        }
     }
 
     /// The member identity the worker control channel and the sidecar's

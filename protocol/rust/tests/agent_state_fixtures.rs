@@ -26,6 +26,11 @@
 //   speech-to-text and a text-to-speech member on a discrete-GPU host, the
 //   second with a retained previous generation. Every digest, quota and
 //   endpoint in it is synthetic; no measured quota exists yet.
+// - `agent_state_0_2_descriptor_identity.json` is authored to the schema: a
+//   singleton layout in the middle of a deploy, whose active record,
+//   candidate and in-flight transaction each name a deployment descriptor
+//   (the committed `protocol/fixtures/deployment_descriptor_{stt,tts}.json`)
+//   beside a previous record that names none.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -47,7 +52,8 @@ use tensorplate_protocol::{
 const LEGACY: &str = "agent_state_0_1_legacy.json";
 const RESTORE: &str = "agent_state_0_2_restore_step.json";
 const TWO_MEMBER: &str = "agent_state_0_2_two_member_set.json";
-const FIXTURES: [&str; 3] = [LEGACY, RESTORE, TWO_MEMBER];
+const IDENTITY: &str = "agent_state_0_2_descriptor_identity.json";
+const FIXTURES: [&str; 4] = [LEGACY, RESTORE, TWO_MEMBER, IDENTITY];
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -99,7 +105,7 @@ fn decode(instance: &Value) -> Result<AgentState, DecodeError> {
 // ---- The committed fixtures -------------------------------------------------
 
 #[test]
-fn the_fixture_set_is_exactly_the_three_documented_files() {
+fn the_fixture_set_is_exactly_the_documented_files() {
     let mut found: Vec<String> = std::fs::read_dir(fixtures_dir())
         .expect("read fixtures dir")
         .map(|e| e.expect("entry").file_name().into_string().expect("utf8"))
@@ -148,6 +154,11 @@ fn the_legacy_fixture_is_the_writers_exact_encoding() {
     let encoded =
         String::from_utf8(serde_json::to_vec_pretty(&decoded).expect("encode")).expect("utf8");
     assert_eq!(format!("{encoded}\n"), raw);
+    // A state whose records name no descriptor is written as before.
+    for record in [&decoded.active, &decoded.previous_active] {
+        let record = record.as_ref().expect("record");
+        assert_eq!(record.descriptor_identity(), Ok(None));
+    }
     // What the recording covers.
     assert!(decoded.active.is_some() && decoded.previous_active.is_some());
     assert!(decoded.last_error.is_some() && decoded.quarantined.len() == 1);
@@ -167,7 +178,7 @@ fn the_legacy_fixture_is_the_writers_exact_encoding() {
 fn the_protocol_wide_decoder_refuses_every_0_2_fixture() {
     // Agents through 0.2.x read the state file through
     // `decode_with_version_check`, which stays pinned to "0.1".
-    for name in [RESTORE, TWO_MEMBER] {
+    for name in [RESTORE, TWO_MEMBER, IDENTITY] {
         match decode_with_version_check::<AgentState>(&load(name)).expect_err(name) {
             DecodeError::UnsupportedSchemaVersion { got, expected } => {
                 assert_eq!(got, "0.2", "{name}");
@@ -399,6 +410,7 @@ fn remove(v: &mut Value, pointer: &str, key: &str) {
 }
 
 const M0: &str = "/resident_set/members/0";
+const IDENTITY_KEYS: [&str; 3] = ["generation", "descriptor_digest", "configuration_digest"];
 const M1: &str = "/resident_set/members/1";
 
 /// Quarantine the first member and drop its endpoint, so a fault in that
@@ -470,6 +482,94 @@ fn refused_by_both() -> Vec<Refusal> {
             },
             "",
             "cannot read (the generation counter",
+        ),
+        refusal(
+            "a 0.1 stamp on a record that names a descriptor",
+            LEGACY,
+            |v| {
+                for key in IDENTITY_KEYS {
+                    v["active"][key] = load_value(IDENTITY)["active"][key].clone();
+                }
+            },
+            "/active",
+            "cannot read (the generation counter",
+        ),
+        refusal(
+            "a 0.1 stamp on a previous record that names a descriptor",
+            LEGACY,
+            |v| {
+                for key in IDENTITY_KEYS {
+                    v["previous_active"][key] = load_value(IDENTITY)["active"][key].clone();
+                }
+            },
+            "/previous_active",
+            "cannot read (the generation counter",
+        ),
+        refusal(
+            "a 0.1 stamp on a candidate that names a descriptor",
+            LEGACY,
+            |v| v["candidate"] = load_value(IDENTITY)["candidate"].clone(),
+            "/candidate",
+            "cannot read (the generation counter",
+        ),
+        refusal(
+            "a 0.1 stamp on a transaction that names a descriptor",
+            LEGACY,
+            |v| v["in_flight_transaction"] = load_value(IDENTITY)["in_flight_transaction"].clone(),
+            "/in_flight_transaction",
+            "cannot read (the generation counter",
+        ),
+        refusal(
+            "a record with two digests and no generation",
+            IDENTITY,
+            |v| remove(v, "/active", "generation"),
+            "/active",
+            "`active` carries some of",
+        ),
+        refusal(
+            "a candidate with a generation and no digest",
+            IDENTITY,
+            |v| {
+                remove(v, "/candidate", "descriptor_digest");
+                remove(v, "/candidate", "configuration_digest");
+            },
+            "/candidate",
+            "`candidate` carries some of",
+        ),
+        refusal(
+            "a transaction without its configuration digest",
+            IDENTITY,
+            |v| remove(v, "/in_flight_transaction", "configuration_digest"),
+            "/in_flight_transaction",
+            "`in_flight_transaction` carries some of",
+        ),
+        refusal(
+            "a record at generation zero",
+            IDENTITY,
+            |v| *at(v, "/active/generation") = json!(0),
+            "/active/generation",
+            "`active` generation 0 is outside",
+        ),
+        refusal(
+            "a record whose descriptor digest is not a digest",
+            IDENTITY,
+            |v| *at(v, "/candidate/descriptor_digest") = json!("416e1fc7"),
+            "/candidate/descriptor_digest",
+            "`candidate` `descriptor_digest` is not a digest",
+        ),
+        refusal(
+            "a transaction whose configuration digest is not a digest",
+            IDENTITY,
+            |v| *at(v, "/in_flight_transaction/configuration_digest") = json!("sha256:"),
+            "/in_flight_transaction/configuration_digest",
+            "`in_flight_transaction` `configuration_digest` is not a digest",
+        ),
+        refusal(
+            "an unknown field beside a record's identity",
+            IDENTITY,
+            |v| *at(v, "/active/later") = json!(1),
+            "/active",
+            "unknown field `later` in `active`",
         ),
         refusal(
             "a resident set without the counter",
@@ -1155,6 +1255,23 @@ fn documents_both_accept() {
         ("labels on a member", TWO_MEMBER, |v| {
             *at(v, &format!("{M0}/labels")) = json!({"team": "speech"});
         }),
+        ("records that name descriptors", IDENTITY, |_| {}),
+        ("a transaction that names no descriptor", IDENTITY, |v| {
+            for key in IDENTITY_KEYS {
+                remove(v, "/in_flight_transaction", key);
+            }
+        }),
+        (
+            "a 0.2 state whose records name no descriptor",
+            IDENTITY,
+            |v| {
+                for record in ["/active", "/candidate", "/in_flight_transaction"] {
+                    for key in IDENTITY_KEYS {
+                        remove(v, record, key);
+                    }
+                }
+            },
+        ),
     ];
     for (label, base, edit) in cases {
         let doc = edited(base, edit);
@@ -1266,6 +1383,91 @@ fn the_decoder_enforces_the_cross_record_rules() {
             other => panic!("{label}: expected InvalidPayload, got {other:?}"),
         }
     }
+}
+
+/// A generation a record names was handed out by this file's counter: a
+/// rule across records, so the decoder's alone.
+#[test]
+fn a_named_generation_is_below_the_counter() {
+    let cases: Vec<(&str, Edit, &str)> = vec![
+        (
+            "a candidate at the next generation",
+            |v| v["next_generation"] = json!(5),
+            "`candidate` generation 5 was never allocated (next_generation is 5)",
+        ),
+        (
+            "a transaction beyond the counter",
+            |v| {
+                remove(v, "", "candidate");
+                *at(v, "/in_flight_transaction/generation") = json!(6);
+            },
+            "`in_flight_transaction` generation 6 was never allocated (next_generation is 6)",
+        ),
+        (
+            "an identity in a state with no counter",
+            |v| remove(v, "", "next_generation"),
+            "`active` generation 3 was never allocated (the state has no next_generation)",
+        ),
+    ];
+    for (label, edit, message) in cases {
+        let doc = edited(IDENTITY, edit);
+        let errors = schema_errors(&doc);
+        assert!(
+            errors.is_empty(),
+            "{label}: the schema refused it: {errors:?}"
+        );
+        match decode(&doc) {
+            Err(DecodeError::InvalidPayload(got)) => assert!(
+                got.ends_with(message),
+                "{label}: expected `{message}`, got `{got}`"
+            ),
+            other => panic!("{label}: expected InvalidPayload, got {other:?}"),
+        }
+    }
+}
+
+/// The three fields are those of a resident-set member, so a singleton
+/// record becomes a member without renaming or reshaping any of them.
+#[test]
+fn a_records_descriptor_identity_has_the_members_names_and_shapes() {
+    let schema = schema_document();
+    let defs = &schema["definitions"];
+    for record in ["DeploymentRecord", "TransactionRecord"] {
+        for key in IDENTITY_KEYS {
+            assert_eq!(
+                defs[record]["properties"][key], defs["ResidentMember"]["properties"][key],
+                "{record}.{key}"
+            );
+            assert_eq!(
+                defs[record]["properties"][key], defs["RetainedGeneration"]["properties"][key],
+                "{record}.{key}"
+            );
+            let needs: BTreeSet<&str> = defs[record]["dependencies"][key]
+                .as_array()
+                .expect("dependencies")
+                .iter()
+                .map(|v| v.as_str().expect("key"))
+                .collect();
+            let others: BTreeSet<&str> = IDENTITY_KEYS.into_iter().filter(|k| *k != key).collect();
+            assert_eq!(needs, others, "{record}.{key}");
+        }
+    }
+    let fixture = decode_agent_state(&load(IDENTITY)).expect("decode");
+    let active = fixture.active.as_ref().expect("active");
+    let named = active.descriptor_identity().expect("whole").expect("named");
+    assert_eq!(named.generation, 3);
+    let candidate = fixture.candidate.as_ref().expect("candidate");
+    let transaction = fixture.in_flight_transaction.as_ref().expect("transaction");
+    assert_eq!(
+        transaction.descriptor_identity(),
+        candidate.descriptor_identity(),
+        "the transaction carries its candidate's identity"
+    );
+    let previous = fixture.previous_active.as_ref().expect("previous");
+    assert_eq!(previous.descriptor_identity(), Ok(None));
+    // The fixture is the store's encoding: the identity is written last.
+    let encoded = serde_json::to_string_pretty(&fixture).expect("encode");
+    assert_eq!(format!("{encoded}\n"), load(IDENTITY));
 }
 
 /// Where the two readers knowingly disagree.

@@ -40,6 +40,7 @@ pub mod control_loop_metrics;
 pub mod correlation_id;
 pub mod deploy_transaction;
 pub mod deployment_descriptor;
+pub mod descriptor_identity;
 pub mod desired_state;
 pub mod error;
 pub mod failure_reason;
@@ -122,6 +123,7 @@ pub use deployment_descriptor::{
     DeploymentConfiguration, DeploymentDescriptor, DeploymentDescriptorError, DescriptorArtifact,
     DescriptorBundle, DescriptorInputs, DescriptorRunnerProfile, RunnerEnvironment,
 };
+pub use descriptor_identity::{DescriptorIdentity, DescriptorIdentityError};
 pub use desired_state::{DesiredState, DesiredStateError, Rollout, RolloutStrategy};
 pub use error::{ErrorCode, ProtocolError};
 pub use failure_reason::{

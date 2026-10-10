@@ -20,10 +20,11 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 use tensorplate_protocol::{
-    decode_with_version_check, encode_frame, DecodeError, ErrorCode, LedgerStatus, MemberQuota,
-    MemberRef, PressureDirective, PressureLevel, WorkerControlFrameError, WorkerControlRequest,
-    WorkerControlResponse, WorkerControlResponseError, WorkerError, WorkerOp, WorkerStatusOutcome,
-    MAX_MEMBER_SESSIONS, WORKER_CONTROL_MAX_FRAME_BYTES, WORKER_CONTROL_MAX_LEDGER_SESSIONS,
+    decode_with_version_check, encode_frame, DecodeError, DeploymentDescriptor, ErrorCode,
+    LedgerStatus, MemberQuota, MemberRef, PressureDirective, PressureLevel,
+    WorkerControlFrameError, WorkerControlRequest, WorkerControlResponse,
+    WorkerControlResponseError, WorkerError, WorkerOp, WorkerStatusOutcome, MAX_MEMBER_SESSIONS,
+    WORKER_CONTROL_MAX_FRAME_BYTES, WORKER_CONTROL_MAX_LEDGER_SESSIONS,
 };
 
 const FRAME_FILES: [&str; 8] = [
@@ -1472,4 +1473,126 @@ fn legacy_frames_keep_decoding() {
         json!({"schema_version": "0.1", "transaction_id": "tx-1", "status": "ok", "ready": true});
     assert!(schema_error_paths(&ok).is_empty());
     decode_with_version_check::<WorkerControlResponse>(&ok.to_string()).expect("legacy response");
+}
+
+// ---- The candidate reference ------------------------------------------------
+
+// A candidate reference is a field of the legacy operations, which never
+// cross the channel, so these two are documents and not frames: one `prepare`
+// with a candidate that names its deployment descriptor and one without.
+const CANDIDATE_PLAIN: &str = "candidate_ref_without_descriptor.json";
+const CANDIDATE_NAMED: &str = "candidate_ref_with_descriptor.json";
+const IDENTITY_KEYS: [&str; 3] = ["generation", "descriptor_digest", "configuration_digest"];
+
+fn candidate_document(name: &str) -> Value {
+    serde_json::from_slice(&load_bytes(name)).expect("fixture parses")
+}
+
+fn decode_request(doc: &Value) -> Result<WorkerControlRequest, DecodeError> {
+    decode_with_version_check(&doc.to_string())
+}
+
+fn candidate_refusal(doc: &Value) -> String {
+    match decode_request(doc) {
+        Err(DecodeError::InvalidPayload(message)) => message,
+        other => panic!("expected InvalidPayload for {doc}, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_candidate_names_its_descriptor_whole_or_not_at_all() {
+    let plain = candidate_document(CANDIDATE_PLAIN);
+    let named = candidate_document(CANDIDATE_NAMED);
+    for doc in [&plain, &named] {
+        assert!(schema_error_paths(doc).is_empty(), "{doc}");
+        let request = decode_request(doc).expect("decodes");
+        assert_eq!(serde_json::to_value(&request).expect("encode"), *doc);
+    }
+    let mut stripped = named.clone();
+    for key in IDENTITY_KEYS {
+        stripped["candidate"]
+            .as_object_mut()
+            .expect("candidate")
+            .remove(key);
+    }
+    assert_eq!(stripped, plain, "the pair differs by the identity alone");
+
+    let candidate_of = |doc: &Value| {
+        decode_request(doc)
+            .expect("decodes")
+            .candidate
+            .expect("candidate")
+    };
+    assert_eq!(candidate_of(&plain).descriptor_identity(), Ok(None));
+    let descriptor_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/deployment_descriptor_stt.json");
+    let descriptor = DeploymentDescriptor::from_json(
+        &std::fs::read_to_string(descriptor_path).expect("descriptor fixture"),
+    )
+    .expect("descriptor verifies");
+    assert_eq!(
+        candidate_of(&named).descriptor_identity(),
+        Ok(Some(descriptor.identity()))
+    );
+
+    // Every way of carrying one or two of the three.
+    for kept in 1..7_u8 {
+        let mut doc = named.clone();
+        for (bit, key) in IDENTITY_KEYS.iter().enumerate() {
+            if kept & (1 << bit) == 0 {
+                doc["candidate"]
+                    .as_object_mut()
+                    .expect("candidate")
+                    .remove(*key);
+            }
+        }
+        assert_eq!(
+            schema_error_paths(&doc),
+            BTreeSet::from(["/candidate".to_string()]),
+            "kept {kept:03b}"
+        );
+        assert!(
+            candidate_refusal(&doc).contains("all three or none"),
+            "kept {kept:03b}"
+        );
+    }
+
+    for (key, value, message) in [
+        ("generation", json!(0), "generation 0 is outside"),
+        (
+            "generation",
+            json!(9_007_199_254_740_992_u64),
+            "generation 9007199254740992 is outside",
+        ),
+        (
+            "descriptor_digest",
+            json!("f0859d3e"),
+            "`descriptor_digest` is not a digest",
+        ),
+        (
+            "configuration_digest",
+            json!("sha256:"),
+            "`configuration_digest` is not a digest",
+        ),
+    ] {
+        let mut doc = named.clone();
+        doc["candidate"][key] = value;
+        assert_eq!(
+            schema_error_paths(&doc),
+            BTreeSet::from([format!("/candidate/{key}")]),
+            "{key}"
+        );
+        assert!(candidate_refusal(&doc).contains(message), "{key}");
+    }
+
+    // A present null is not an absent field.
+    for key in IDENTITY_KEYS {
+        let mut doc = named.clone();
+        doc["candidate"][key] = Value::Null;
+        assert!(!schema_error_paths(&doc).is_empty(), "{key}");
+        assert!(
+            matches!(decode_request(&doc), Err(DecodeError::Malformed(_))),
+            "{key}"
+        );
+    }
 }
