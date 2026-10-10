@@ -4,12 +4,12 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "documentNamespace": "https://spdx.org/spdxdocs/vcpkg-cmake-get-vars-x64-linux-2025-05-29-00000000-0000-4000-8000-00000000000c",
-  "name": "vcpkg-cmake-get-vars:x64-linux@2025-05-29 4dc29079865129c1996799e5d84de3696f69b340f98bf4c80fef04fbf162dd8c",
+  "name": "vcpkg-cmake-get-vars:x64-linux@2025-05-29 0a72b5d6f75997181cf51f1cdcb1a1225c339b06f997d937b458f1d999698a5b",
   "creationInfo": {
     "creators": [
-      "Tool: vcpkg-2026-07-27-98d7cb0cf1f4686a3e43aa5672b6230c1d56bce8"
+      "Tool: vcpkg-2026-09-26-51bf87ca6e9bf3e622d84ff323bd202ab1ca0c0b"
     ],
-    "created": "2026-10-07T16:24:20Z"
+    "created": "2026-10-10T12:47:47Z"
   },
   "relationships": [
     {
@@ -49,7 +49,7 @@
     {
       "name": "vcpkg-cmake-get-vars:x64-linux",
       "SPDXID": "SPDXRef-binary",
-      "versionInfo": "4dc29079865129c1996799e5d84de3696f69b340f98bf4c80fef04fbf162dd8c",
+      "versionInfo": "0a72b5d6f75997181cf51f1cdcb1a1225c339b06f997d937b458f1d999698a5b",
       "downloadLocation": "NONE",
       "licenseConcluded": "MIT",
       "licenseDeclared": "NOASSERTION",

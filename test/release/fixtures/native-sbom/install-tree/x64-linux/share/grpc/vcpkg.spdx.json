@@ -4,12 +4,12 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "documentNamespace": "https://spdx.org/spdxdocs/grpc-x64-linux-1.81.1-00000000-0000-4000-8000-000000000003",
-  "name": "grpc:x64-linux@1.81.1 71f9f1746935362803ebbfdeca27c32e0b78f8c0d09ca79a461c46551496c46a",
+  "name": "grpc:x64-linux@1.81.1 f528f0db878346a842efeae04c3e14a17b0f2da54211506bda4450d0f1cd4a69",
   "creationInfo": {
     "creators": [
-      "Tool: vcpkg-2026-07-27-98d7cb0cf1f4686a3e43aa5672b6230c1d56bce8"
+      "Tool: vcpkg-2026-09-26-51bf87ca6e9bf3e622d84ff323bd202ab1ca0c0b"
     ],
-    "created": "2026-10-07T17:06:10Z"
+    "created": "2026-10-10T13:47:45Z"
   },
   "relationships": [
     {
@@ -51,7 +51,7 @@
     {
       "name": "grpc:x64-linux",
       "SPDXID": "SPDXRef-binary",
-      "versionInfo": "71f9f1746935362803ebbfdeca27c32e0b78f8c0d09ca79a461c46551496c46a",
+      "versionInfo": "f528f0db878346a842efeae04c3e14a17b0f2da54211506bda4450d0f1cd4a69",
       "downloadLocation": "NONE",
       "licenseConcluded": "Apache-2.0",
       "licenseDeclared": "NOASSERTION",
