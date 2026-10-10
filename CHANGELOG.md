@@ -162,11 +162,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `load_failed` instead. On SIGTERM or SIGINT the agent asks its workers
   to drain, kills what is left 10 seconds later and exits 0. No worker is
   started once the stop has begun; a deploy or rollback in flight is
-  answered `unavailable` and left in flight for the next start's recovery,
+  answered status `error` with the code `unavailable` (the CLI exits 3)
+  and left in flight for the next start's recovery,
   as after a kill: one interrupted before its candidate was prepared is
   run again, and one interrupted while its candidate warmed is quarantined
   by a start that launches nothing, the deployment that was serving coming
-  back at the start after that. `signal-hook` is a new pinned dependency.
+  back at the start after that. A deploy or rollback that returns without
+  promoting its candidate, a failed state write included, no longer keeps
+  the serving member from being restarted. `signal-hook` is a new pinned dependency.
   (V030-E03-F01-T03)
 
 - The Python sidecar acts on the `speech_jobs_v1` job and session messages.

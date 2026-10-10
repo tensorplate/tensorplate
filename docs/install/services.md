@@ -189,7 +189,11 @@ operator overrides (e.g. `RUST_LOG=info`). The leading `-` in
 
 - `systemctl restart tensorplate-agent` triggers a graceful shutdown:
   the agent asks its serving workers to drain (each gives its sessions
-  5 s), kills any still running 10 s later, and then exits 0.
+  5 s), kills any still running 10 s later, and then exits 0. A restart
+  while a deploy is warming its candidate leaves the node serving nothing:
+  the start that follows quarantines the candidate and launches no worker,
+  and since the agent exited 0 nothing starts it again by itself. Restart
+  it once more, or deploy, to serve again.
 - `systemctl restart tensorplate-observability` discards in-memory
   diagnostics by design; persistent state lives in
   `/var/log/tensorplate/` only when the `diagnostics_retention`

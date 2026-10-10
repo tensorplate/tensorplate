@@ -283,15 +283,16 @@ member is failed at once and nothing is started. A staged manifest that
 cannot be read counts as a restart that could not be launched.
 
 No restart starts while a deploy holds the member, from the moment its
-`prepare` begins until its candidate is promoted or fails, or its `warm`
-gives up. A promoted generation is therefore never older than the one it
-replaces.
+`prepare` begins until its candidate is promoted or fails, its `warm`
+gives up, or its transaction returns without promoting it. A promoted
+generation is therefore never older than the one it replaces.
 
 On SIGTERM or SIGINT the agent asks every worker, serving and candidate, to
 drain, kills what is still running at the one 10-second stop deadline they
 share, stops its listener and exits 0. No worker is started once the stop
 has begun, and a deploy in flight is left in flight for the next start's
-recovery.
+recovery; its caller is answered status `error` with the code
+`unavailable`. A second signal during the stop does nothing.
 
 ## Runtime control client
 
