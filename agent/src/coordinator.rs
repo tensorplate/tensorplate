@@ -188,7 +188,8 @@ impl Coordinator {
         &self.config
     }
 
-    /// Read-only handle on the worker client. Reserved for tests.
+    /// The worker client: the agent's loop supervises and stops the serving
+    /// workers through it.
     #[must_use]
     pub fn worker_client(&self) -> &Arc<dyn WorkerControl> {
         &self.worker
@@ -625,7 +626,13 @@ impl Coordinator {
     /// [`Self::status`] accounts for a store that refuses writes.
     fn durable_status(&self) -> AgentResult<AgentStatus> {
         let s = self.store.snapshot()?;
-        let mut agent_state = if s.last_error.is_some() {
+        // A member whose restarts are used up is why nothing serves, so it
+        // is reported ahead of the last transaction's error.
+        let last_error = self
+            .worker
+            .member_failure()
+            .or_else(|| s.last_error.clone());
+        let mut agent_state = if last_error.is_some() {
             AgentRunState::Degraded
         } else {
             AgentRunState::Ready
@@ -665,10 +672,10 @@ impl Coordinator {
                 recoverable: f.recoverable,
             }),
         });
-        let last_error = s.last_error.as_ref().map(|e| ResponseError {
+        let last_error = last_error.map(|e| ResponseError {
             code: e.code,
-            message: e.message.clone(),
-            context: e.context.clone(),
+            message: e.message,
+            context: e.context,
         });
         let quarantined = s
             .quarantined

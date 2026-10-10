@@ -180,3 +180,39 @@ fn homebrew_agent_config_uses_prefix_local_paths() {
     assert_eq!(cfg.available_backends, ["python_pytorch"]);
     assert!(cfg.supervision.is_none());
 }
+
+/// `TimeoutStopSec` of the packaged agent unit.
+#[cfg(unix)]
+fn unit_stop_timeout() -> std::time::Duration {
+    let unit = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("packaging")
+        .join("debian")
+        .join("tensorplate-agent.service");
+    let text = fs::read_to_string(unit).expect("read the agent unit");
+    let values: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("TimeoutStopSec="))
+        .collect();
+    let [seconds] = values[..] else {
+        panic!("the unit sets TimeoutStopSec once, as plain seconds: {values:?}");
+    };
+    std::time::Duration::from_secs(seconds.trim().parse().expect("plain seconds"))
+}
+
+/// The service manager kills the control group when the unit's stop timeout
+/// ends. The agent needs the registry's stop deadline to stop its workers
+/// itself, and is left as long again to finish what it was answering.
+#[cfg(unix)]
+#[test]
+fn the_unit_waits_twice_the_stop_deadline_before_it_kills_the_agent() {
+    use tensorplate_agent::registry::{STOP_DEADLINE, WORKER_DRAIN};
+
+    let unit = unit_stop_timeout();
+
+    assert!(
+        unit >= STOP_DEADLINE * 2,
+        "TimeoutStopSec {unit:?} leaves the agent less than twice its {STOP_DEADLINE:?} stop deadline"
+    );
+    assert!(WORKER_DRAIN < STOP_DEADLINE);
+}

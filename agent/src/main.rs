@@ -39,7 +39,7 @@ use tensorplate_agent::{
         ensure_supervisor_directories, DesiredWorker, HttpReadinessProbe, MonotonicClock,
         RingEventSink, SystemMonotonicClock, SystemWorkerProcess, TickOutcome, WorkerSupervisor,
     },
-    worker,
+    worker::{self, MemberEvent},
 };
 use tensorplate_platform::{
     identify_platform, AdmissionPosture, HostSources, MachineTypeSource, NvidiaSmiProbe,
@@ -890,15 +890,29 @@ fn main() -> ExitCode {
     };
     eprintln!("tensorplate-agent listening on {}", server.address);
 
-    // v0.1.0 agent process model: rely on systemd / supervisor to deliver
-    // SIGTERM. Without an installed handler the default action is process
-    // termination, which is safe because every durable mutation lands
-    // through `StateStore::update`'s atomic-replace path before each
-    // phase advances. The `stop` flag lets tests request a clean exit;
-    // production termination is still owned by the process manager.
+    run_until_stopped(&mut server, supervisor.as_ref());
+    ExitCode::SUCCESS
+}
+
+/// Supervise the serving workers until a termination signal arrives, then
+/// stop them and the listener.
+fn run_until_stopped(server: &mut Server, supervisor: Option<&Arc<WorkerSupervisor>>) {
+    // Installed only now: until the agent serves, a termination signal ends
+    // it at once, as it always has. The handler stores the flag and does
+    // nothing else; the loop below does the stopping.
     let stop = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        if let Err(err) = signal_hook::flag::register(signal, stop.clone()) {
+            eprintln!("no handler for signal {signal}: {err}; the agent ends on it without stopping its workers");
+        }
+    }
+    let worker = server.coordinator().worker_client().clone();
     while !stop.load(Ordering::Relaxed) {
-        if let Some(supervisor) = supervisor.as_ref() {
+        for event in worker.supervise() {
+            log_member_event(&event);
+        }
+        if let Some(supervisor) = supervisor {
             match supervisor.tick() {
                 Ok(TickOutcome::Continue) => {}
                 Ok(TickOutcome::Fault(fault)) => {
@@ -917,8 +931,46 @@ fn main() -> ExitCode {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    eprintln!("tensorplate-agent stopping: asking the serving workers to drain");
+    // Workers first: a deploy the server is still answering then fails at
+    // once instead of holding the listener's thread to its warm timeout.
+    worker.shutdown();
     server.shutdown();
-    ExitCode::SUCCESS
+    eprintln!("tensorplate-agent stopped");
+}
+
+fn log_member_event(event: &MemberEvent) {
+    match event {
+        MemberEvent::Stopped { member, error } => eprintln!(
+            "serving worker `{}` generation {} stopped: {}",
+            member.deployment_id, member.generation, error.message
+        ),
+        MemberEvent::RestartDue {
+            deployment_id,
+            after,
+        } => eprintln!(
+            "serving worker `{deployment_id}` restarts in {} ms",
+            after.as_millis()
+        ),
+        MemberEvent::Restarted { member } => eprintln!(
+            "serving worker `{}` restarted as generation {}",
+            member.deployment_id, member.generation
+        ),
+        MemberEvent::LaunchFailed {
+            deployment_id,
+            error,
+        } => eprintln!(
+            "serving worker `{deployment_id}` could not be restarted: {}",
+            error.message
+        ),
+        MemberEvent::Serving { member } => eprintln!(
+            "serving worker `{}` generation {} is serving",
+            member.deployment_id, member.generation
+        ),
+        MemberEvent::Failed { error, .. } => {
+            eprintln!("serving worker failed: {}", error.message);
+        }
+    }
 }
 
 #[cfg(test)]
