@@ -61,6 +61,8 @@ VCPKG_ACTION_USE = "./.github/actions/release-vcpkg"
 VCPKG_ACTION = REPO_ROOT / VCPKG_ACTION_USE / "action.yml"
 CACHE_WARMER = WORKFLOWS / "release-dependencies.yml"
 SELECT_CLANG = REPO_ROOT / "tools/ci/select-clang.sh"
+CPP_WORKFLOW = WORKFLOWS / "cpp.yml"
+CHECKOUT_VCPKG = REPO_ROOT / "tools/ci/checkout-vcpkg.sh"
 SOURCE_INSTALL = REPO_ROOT / "packaging/scripts/build-install-from-source.sh"
 CLOSURE_CHECK = REPO_ROOT / "tools/release/assert-static-streaming-closure.sh"
 FIXTURE_SOURCES = (
@@ -5385,6 +5387,168 @@ class ReleaseDriverSuiteTests(unittest.TestCase):
         text = (REPO_ROOT / "test/release/run.sh").read_text()
         piped = re.findall(r"\$\([^()]*\bcargo run\b[^()]*\|\s*head\b[^()]*\)", text)
         self.assertEqual(piped, [], "capture the whole output, then take its first line")
+
+
+class CheckoutVcpkgTests(unittest.TestCase):
+    """tools/ci/checkout-vcpkg.sh against a repository that stands in for vcpkg."""
+
+    URL = "https://github.com/microsoft/vcpkg.git"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+        self.origin = self.root / "origin"
+        self.work = self.root / "work"
+        self.work.mkdir()
+        self.runner_temp = self.root / "runner-temp"
+        self.runner_temp.mkdir()
+        self.github_env = self.root / "github-env"
+        # Reads of the real vcpkg address go to the stand-in; nothing else is configured.
+        self.env = {
+            "PATH": os.environ["PATH"], "HOME": str(self.root), "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_COUNT": "2", "GIT_CONFIG_KEY_0": f"url.{self.origin}.insteadOf",
+            "GIT_CONFIG_VALUE_0": self.URL, "GIT_CONFIG_KEY_1": "uploadpack.allowAnySHA1InWant",
+            "GIT_CONFIG_VALUE_1": "true",
+        }
+
+    def git(self, *args: str, cwd: Path | None = None) -> str:
+        done = subprocess.run(
+            ["git", "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", *args],
+            cwd=cwd or self.origin, env=self.env, text=True, capture_output=True, check=True)
+        return done.stdout.strip()
+
+    def vcpkg(self, bootstrap_status: int = 0) -> str:
+        """A repository of three commits; returns the middle one, the baseline."""
+        self.origin.mkdir()
+        self.git("init", "--quiet", "-b", "master")
+        self.git("commit", "--quiet", "--allow-empty", "-m", "history")
+        (self.origin / "scripts/buildsystems").mkdir(parents=True)
+        (self.origin / "scripts/buildsystems/vcpkg.cmake").write_text("# toolchain\n")
+        write_executable(
+            self.origin / "bootstrap-vcpkg.sh",
+            f'#!/bin/sh\nprintf \'%s\\n\' "$@" >"$(dirname "$0")/bootstrap.args"\nexit {bootstrap_status}\n')
+        self.git("add", ".")
+        self.git("commit", "--quiet", "-m", "baseline")
+        baseline = self.git("rev-parse", "HEAD")
+        (self.origin / "newer").write_text("later\n")
+        self.git("add", ".")
+        self.git("commit", "--quiet", "-m", "later")
+        return baseline
+
+    def run_script(self, baseline: object) -> subprocess.CompletedProcess:
+        manifest = {"name": "fixture"}
+        if baseline is not None:
+            manifest["builtin-baseline"] = baseline
+        (self.work / "vcpkg.json").write_text(json.dumps(manifest))
+        env = {**self.env, "RUNNER_TEMP": str(self.runner_temp), "GITHUB_ENV": str(self.github_env)}
+        return subprocess.run([shutil.which("bash"), str(CHECKOUT_VCPKG)], cwd=self.work, env=env,
+                              text=True, capture_output=True, timeout=60, check=False)
+
+    def exported(self) -> str:
+        return self.github_env.read_text() if self.github_env.exists() else ""
+
+    def test_it_checks_out_the_baseline_alone_and_bootstraps_there(self):
+        baseline = self.vcpkg()
+        result = self.run_script(baseline)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        checkout = self.runner_temp / "vcpkg"
+        self.assertEqual(self.git("rev-parse", "HEAD", cwd=checkout), baseline)
+        self.assertFalse((checkout / "newer").exists())
+        self.assertEqual(self.git("rev-list", "--count", "HEAD", cwd=checkout), "1")
+        self.assertEqual((checkout / "bootstrap.args").read_text(), "-disableMetrics\n")
+        self.assertEqual(self.exported(), f"VCPKG_ROOT={checkout}\n")
+
+    def test_a_manifest_without_a_usable_baseline_fails_before_anything_is_fetched(self):
+        self.vcpkg()
+        for baseline in (None, "AB" * 20, "ab" * 19, 5):
+            with self.subTest(baseline=baseline):
+                result = self.run_script(baseline)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertRegex(result.stdout, r"(?m)^::error::vcpkg\.json names no builtin-baseline")
+                self.assertEqual(self.exported(), "")
+                self.assertFalse((self.runner_temp / "vcpkg").exists())
+
+    def test_a_baseline_the_remote_lacks_fails_naming_the_commit(self):
+        self.vcpkg()
+        result = self.run_script("0" * 40)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertRegex(result.stdout, r"(?m)^::error::could not fetch the vcpkg commit 0{40}")
+        self.assertEqual(self.exported(), "")
+
+    def test_a_failed_bootstrap_exports_nothing(self):
+        baseline = self.vcpkg(bootstrap_status=1)
+        result = self.run_script(baseline)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertRegex(result.stdout, r"(?m)^::error::bootstrapping vcpkg at ")
+        self.assertEqual(self.exported(), "")
+
+
+class CppWorkflowVcpkgTests(unittest.TestCase):
+    """Where the C++ workflow gets its vcpkg, and what its dependency cache key names."""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+        self.jobs = yaml.safe_load(CPP_WORKFLOW.read_text())["jobs"]
+
+    def test_no_job_builds_with_the_runner_images_vcpkg(self):
+        self.assertNotIn("VCPKG_INSTALLATION_ROOT", CPP_WORKFLOW.read_text())
+
+    def test_every_job_that_configures_through_vcpkg_checks_it_out_first(self):
+        users = {name for name, job in self.jobs.items()
+                 if "scripts/buildsystems/vcpkg.cmake" in json.dumps(job)}
+        self.assertEqual(users, {"build-test", "adapter-shells", "tidy"})
+        for name in users:
+            steps = self.jobs[name]["steps"]
+            checkouts = [i for i, step in enumerate(steps)
+                         if "tools/ci/checkout-vcpkg.sh" in (step.get("run") or "")]
+            self.assertEqual(len(checkouts), 1, name)
+            used = next(i for i, step in enumerate(steps) if "VCPKG_ROOT" in json.dumps(step))
+            self.assertLess(checkouts[0], used, name)
+
+    def test_the_key_names_the_checkout_the_packages_are_built_from(self):
+        steps = self.jobs["build-test"]["steps"]
+        step = steps[next(i for i, s in enumerate(steps) if s.get("id") == "toolchain")]
+        tools = self.root / "bin"
+        tools.mkdir()
+        for name in ("clang", "clang++"):
+            write_executable(tools / name, "#!/bin/sh\n")
+        write_executable(tools / "cmake", "#!/bin/sh\necho 'cmake version 3.31.6'\n")
+        write_executable(tools / "sha256sum", (
+            "#!/usr/bin/env python3\nimport hashlib, sys\n"
+            "data = open(sys.argv[1], 'rb').read() if len(sys.argv) > 1 else sys.stdin.buffer.read()\n"
+            "print(hashlib.sha256(data).hexdigest(), sys.argv[1] if len(sys.argv) > 1 else '-')\n"))
+        readlink = tools / "readlink"
+        readlink.symlink_to(shutil.which("readlink"))
+        env = {"HOME": str(self.root), "GIT_CONFIG_NOSYSTEM": "1"}
+
+        def checkout(name: str) -> Path:
+            path = self.root / name
+            path.mkdir()
+            for cmd in (["init", "--quiet", "-b", "master"],
+                        ["-c", "user.name=f", "-c", "user.email=f@example.invalid",
+                         "commit", "--quiet", "--allow-empty", "-m", name]):
+                subprocess.run(["git", *cmd], cwd=path, env={**os.environ, **env}, check=True,
+                               capture_output=True)
+            return path
+
+        def digest(vcpkg: Path, image: Path | None) -> str:
+            output = self.root / "output"
+            output.write_text("")
+            values = {"PATH": f"{tools}{os.pathsep}{os.environ['PATH']}", "CC": "clang",
+                      "CXX": "clang++", "VCPKG_ROOT": str(vcpkg), "GITHUB_OUTPUT": str(output)}
+            if image:
+                values["VCPKG_INSTALLATION_ROOT"] = str(image)
+            result = run_step(step, self.root, **values)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return output.read_text().strip()
+
+        first, other, image = checkout("first"), checkout("other"), checkout("image")
+        self.assertNotEqual(digest(first, None), digest(other, None))
+        # The image's own checkout is not an input: it may change every week.
+        self.assertEqual(digest(first, None), digest(first, image))
 
 
 if __name__ == "__main__":

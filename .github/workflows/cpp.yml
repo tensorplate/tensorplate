@@ -78,17 +78,20 @@ jobs:
             ca-certificates
           tools/ci/select-clang.sh
 
+      - name: Check out vcpkg at the manifest's baseline
+        run: tools/ci/checkout-vcpkg.sh
+
       # vcpkg rebuilds a package when a part of its checkout the port names,
-      # a compiler binary or the cmake it runs changes, and each runner image
-      # brings another checkout. A key that names none of them still matches
-      # exactly, and a tree restored on an exact match is not saved again.
-      # vcpkg runs the image's cmake only once that is new enough for it.
+      # a compiler binary or the cmake it runs changes. A key that names none
+      # of them still matches exactly, and a tree restored on an exact match
+      # is not saved again. vcpkg runs the image's cmake only once that is
+      # new enough for it.
       - name: Identify what builds the dependency packages
         id: toolchain
         shell: bash
         run: |
           set -Eeuo pipefail
-          vcpkg_commit="$(git -C "$VCPKG_INSTALLATION_ROOT" rev-parse HEAD)"
+          vcpkg_commit="$(git -C "$VCPKG_ROOT" rev-parse HEAD)"
           c_compiler="$(sha256sum "$(readlink -f "$(command -v "$CC")")")"
           cxx_compiler="$(sha256sum "$(readlink -f "$(command -v "$CXX")")")"
           cmake_version="$(cmake --version)"
@@ -133,7 +136,7 @@ jobs:
             -DTP_ENABLE_STREAMING_GRPC=ON \
             -DVCPKG_MANIFEST_FEATURES="$TP_VCPKG_FEATURES" \
             -DVCPKG_TARGET_TRIPLET="$TP_VCPKG_TRIPLET" \
-            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
 
       # Here, not at the end of the job: a failing test must not cost the
@@ -207,6 +210,9 @@ jobs:
             ca-certificates
           tools/ci/select-clang.sh
 
+      - name: Check out vcpkg at the manifest's baseline
+        run: tools/ci/checkout-vcpkg.sh
+
       - name: Configure adapter shells
         env:
           CC: clang
@@ -220,7 +226,7 @@ jobs:
             -DTP_ENABLE_TENSORRT=ON \
             -DTP_ENABLE_LIBTORCH=ON \
             -DTP_ENABLE_STREAMING_GRPC=OFF \
-            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
 
       - name: Build adapter shells
@@ -320,6 +326,9 @@ jobs:
           tools/ci/select-clang.sh
           sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-15 100
 
+      - name: Check out vcpkg at the manifest's baseline
+        run: tools/ci/checkout-vcpkg.sh
+
       - name: Configure (export compile_commands.json)
         env:
           CC: clang
@@ -328,7 +337,7 @@ jobs:
           cmake -S . -B build \
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
 
       - name: Run clang-tidy

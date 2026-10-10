@@ -233,9 +233,12 @@ Two workflows live under `.github/workflows/`:
 
 ### Caching
 
-- The three `cpp.yml` build legs share one cache of the vcpkg installed
+- The `cpp.yml` jobs that use vcpkg check it out at the `builtin-baseline`
+  of `vcpkg.json` (`tools/ci/checkout-vcpkg.sh`), as the release jobs do, so
+  a baseline does not depend on the runner image's own vcpkg checkout. The
+  three build legs share one cache of the vcpkg installed
   tree. Its key names what vcpkg's package identity depends on there: the
-  triplet, the manifest features, the runner image's vcpkg checkout, the
+  triplet, the manifest features, the vcpkg checkout, the
   compiler binaries, the image's cmake version (which vcpkg runs once it
   is new enough) and `vcpkg.json`. The tree is saved as soon as the
   dependencies are installed. A change to any of those costs at most one
