@@ -8,10 +8,17 @@ use std::sync::mpsc;
 use std::time::Instant;
 use tempfile::TempDir;
 
+use crate::supervision::FakeClock;
+use crate::worker::MemberEvent;
+
+mod restart;
+
 const ACTIVE_PORT: u16 = 41_080;
 const CANDIDATE_PORT: u16 = 41_081;
 const DRAIN: Duration = Duration::from_millis(60);
 const WARM: Duration = Duration::from_millis(40);
+/// On the fake clock: no test waits it out in real time.
+const RESTART_WARM: Duration = Duration::from_secs(30);
 
 /// What a test sees and steers of one launched process.
 struct Handle {
@@ -129,6 +136,7 @@ struct Fixture {
     launcher: Arc<FakeLauncher>,
     probe: Arc<FakeProbe>,
     next_generation: Arc<AtomicU64>,
+    clock: Arc<FakeClock>,
     registry: MemberRegistry,
 }
 
@@ -142,6 +150,7 @@ fn settings(dir: &std::path::Path) -> RegistrySettings {
         status_poll_interval: Duration::from_millis(1),
         worker_drain: DRAIN / 2,
         stop_deadline: DRAIN,
+        restart_warm_timeout: RESTART_WARM,
     }
 }
 
@@ -151,17 +160,20 @@ fn fixture() -> Fixture {
     let probe = Arc::new(FakeProbe::default());
     let next_generation = Arc::new(AtomicU64::new(1));
     let counter = next_generation.clone();
+    let clock = Arc::new(FakeClock::new());
     let registry = MemberRegistry::new(
         settings(td.path()),
         launcher.clone(),
         probe.clone(),
         Arc::new(move || Ok(counter.fetch_add(1, Ordering::SeqCst))),
-    );
+    )
+    .with_clock(clock.clone());
     Fixture {
         td,
         launcher,
         probe,
         next_generation,
+        clock,
         registry,
     }
 }
@@ -420,6 +432,7 @@ fn a_serving_member_that_exited_is_no_longer_active() {
 
     assert_eq!(f.registry.active_deployment_id().unwrap(), None);
     assert_eq!(f.registry.active_serving_url().unwrap(), None);
+    f.registry.supervise();
     assert_eq!(f.configs(), 0);
 }
 

@@ -23,6 +23,7 @@ use crate::config::AgentConfig;
 use crate::control_channel::{ContactState, ControlChannel};
 use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
+use crate::supervision::{MonotonicClock, SystemMonotonicClock};
 use crate::worker::{
     forward_stderr, get_health_json, send_sigterm, spawn_with_control, startup_error,
     WorkerControl, WorkerReadiness, WorkerStderr, WorkerStderrSink,
@@ -38,6 +39,17 @@ pub const STOP_DEADLINE: Duration = Duration::from_secs(10);
 const _: () = assert!(WORKER_DRAIN.as_millis() < STOP_DEADLINE.as_millis());
 
 const DRAIN_POLL: Duration = Duration::from_millis(10);
+
+/// The wait before the first, second and third restart of a member inside
+/// [`RESTART_WINDOW`]; a member that stops with all three used is failed.
+pub const RESTART_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+
+/// How long a restart counts against its member.
+pub const RESTART_WINDOW: Duration = Duration::from_secs(300);
 
 /// What a member's control channel has shown so far.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,6 +127,8 @@ pub struct RegistrySettings {
     pub status_poll_interval: Duration,
     pub worker_drain: Duration,
     pub stop_deadline: Duration,
+    /// How long a restarted generation is given to become ready.
+    pub restart_warm_timeout: Duration,
 }
 
 struct Member {
@@ -137,6 +151,7 @@ pub struct MemberRegistry {
     launcher: Arc<dyn ProcessLauncher>,
     probe: Arc<dyn HealthProbe>,
     generations: GenerationSource,
+    clock: Arc<dyn MonotonicClock>,
     inner: Mutex<Members>,
 }
 
@@ -153,8 +168,16 @@ impl MemberRegistry {
             launcher,
             probe,
             generations,
+            clock: Arc::new(SystemMonotonicClock),
             inner: Mutex::new(Members::default()),
         }
+    }
+
+    /// Read restart delays, windows and deadlines from `clock`.
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn MonotonicClock>) -> Self {
+        self.clock = clock;
+        self
     }
 }
 
@@ -207,6 +230,7 @@ impl MemberRegistry {
             status_poll_interval: Duration::from_millis(agent.worker.status_poll_interval_ms),
             worker_drain: WORKER_DRAIN,
             stop_deadline: STOP_DEADLINE,
+            restart_warm_timeout: Duration::from_millis(agent.worker.warm_timeout_ms),
         };
         remove_stale_configs(&settings.config_dir);
         let probe = Arc::new(HttpHealth {
