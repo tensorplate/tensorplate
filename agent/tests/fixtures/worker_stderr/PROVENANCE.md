@@ -27,3 +27,7 @@ hand, for a worker's control thread: it answers ledger polls in the shape of
 `protocol/rust/tests/fixtures/worker_control_ledger_status.jsonl` with an
 empty ledger. `stub-worker.sh` runs it with `python3`, which these tests
 need on `PATH`.
+
+`pid-recording-worker.sh` is not a recording either. It writes its process
+id beside the serving config and then runs `stub-worker.sh` in the same
+process, so a test can signal the stand-in worker and see that it is gone.

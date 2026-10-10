@@ -188,9 +188,8 @@ operator overrides (e.g. `RUST_LOG=info`). The leading `-` in
 ### Lifecycle expectations
 
 - `systemctl restart tensorplate-agent` triggers a graceful shutdown:
-  the agent flushes desired-state, gives the supervised serving
-  worker its `graceful_stop_timeout_ms` window (default 5 s), and then
-  exits.
+  the agent asks its serving workers to drain (each gives its sessions
+  5 s), kills any still running 10 s later, and then exits 0.
 - `systemctl restart tensorplate-observability` discards in-memory
   diagnostics by design; persistent state lives in
   `/var/log/tensorplate/` only when the `diagnostics_retention`

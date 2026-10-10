@@ -418,6 +418,45 @@ fn a_successor_started_as_a_deploy_began_is_stopped_and_owed_again() {
 }
 
 #[test]
+fn a_restart_does_not_start_while_a_prepare_is_running() {
+    let f = fixture();
+    exit(&f.serve("stt"));
+    f.registry.supervise();
+    f.clock.advance(secs(1));
+    let (started, has_started) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *f.launcher.hold_first.lock().unwrap() = Some((started, released));
+
+    std::thread::scope(|scope| {
+        let release = release;
+        let held = scope.spawn(|| f.prepare("tts"));
+        has_started
+            .recv_timeout(HELD_LAUNCH)
+            .expect("the launch starts");
+        // The candidate is not in its slot yet; the prepare already holds.
+        assert_eq!(f.registry.supervise(), []);
+        assert_eq!(f.next_generation.load(Ordering::SeqCst), 3);
+        release.send(()).unwrap();
+        held.join().unwrap().unwrap();
+    });
+
+    assert_eq!(f.launcher.count(), 2);
+}
+
+#[test]
+fn unloading_a_deployment_drops_the_restart_owed_to_it() {
+    let f = fixture();
+    exit(&f.serve("stt"));
+    assert_eq!(owed(&f.registry.supervise()), Some(secs(1)));
+
+    f.registry.unload("tts");
+    f.registry.unload("stt");
+
+    assert_eq!(step(&f, secs(60)), []);
+    assert_eq!(f.launcher.count(), 1);
+}
+
+#[test]
 fn a_candidate_prepared_while_a_restart_is_owed_takes_the_other_port() {
     let f = fixture();
     let old = f.serve("stt");

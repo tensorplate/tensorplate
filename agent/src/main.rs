@@ -881,6 +881,7 @@ fn main() -> ExitCode {
         }
     }
 
+    let stop = stop_on_termination();
     let mut server = match Server::start(&cfg, coordinator) {
         Ok(s) => s,
         Err(err) => {
@@ -890,16 +891,13 @@ fn main() -> ExitCode {
     };
     eprintln!("tensorplate-agent listening on {}", server.address);
 
-    run_until_stopped(&mut server, supervisor.as_ref());
+    run_until_stopped(&mut server, supervisor.as_ref(), &stop);
     ExitCode::SUCCESS
 }
 
-/// Supervise the serving workers until a termination signal arrives, then
-/// stop them and the listener.
-fn run_until_stopped(server: &mut Server, supervisor: Option<&Arc<WorkerSupervisor>>) {
-    // Installed only now: until the agent serves, a termination signal ends
-    // it at once, as it always has. The handler stores the flag and does
-    // nothing else; the loop below does the stopping.
+/// The flag SIGTERM and SIGINT set from here on. The handler stores it and
+/// does nothing else; until it is installed a signal ends the agent at once.
+fn stop_on_termination() -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
@@ -907,6 +905,16 @@ fn run_until_stopped(server: &mut Server, supervisor: Option<&Arc<WorkerSupervis
             eprintln!("no handler for signal {signal}: {err}; the agent ends on it without stopping its workers");
         }
     }
+    stop
+}
+
+/// Supervise the serving workers until `stop` is set, then stop them and
+/// the listener.
+fn run_until_stopped(
+    server: &mut Server,
+    supervisor: Option<&Arc<WorkerSupervisor>>,
+    stop: &AtomicBool,
+) {
     let worker = server.coordinator().worker_client().clone();
     while !stop.load(Ordering::Relaxed) {
         for event in worker.supervise() {

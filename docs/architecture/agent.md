@@ -356,12 +356,18 @@ pub trait WorkerControl: Send + Sync {
     fn promote(&self, transaction_id, candidate) -> Result;
     fn unload(&self, deployment_id);
     fn active_deployment_id(&self) -> Result<Option<String>>;
+    fn supervise(&self) -> Vec<MemberEvent>;
+    fn member_failure(&self) -> Option<ErrorRecord>;
+    fn shutdown(&self);
 }
 ```
 
 `promote` is the only call that mutates the worker's active deployment.
 `unload` is best-effort (failure is logged but never undoes a successful
-promotion).
+promotion). `supervise`, `member_failure` and `shutdown` do nothing by
+default; the [member registry](#member-registry) implements them to
+restart a serving worker that stops, to report one it no longer restarts,
+and to stop every worker when the agent is told to stop.
 
 The process-backed implementation is selected with
 `worker.mode = "process"` and requires an absolute
@@ -488,7 +494,8 @@ for framing, deadlines, ownership and loss-of-contact behavior.
 - **Generation.** Before a worker starts, the registry takes the next
   generation from the durable state's counter in a committed write, so a
   generation is never used twice, including across agent restarts and by a
-  start that then fails. The first allocation moves the state file to state
+  start that then fails. A restart takes one too, in a write of its own before
+  its launch. The first allocation moves the state file to state
   version `0.2` (see [durable state](#durable-state-store-v01-e08-f02)); startup
   recovery relaunches the recorded active deployment through the same path,
   so it happens on the first start that has a deployment to restore.
@@ -509,10 +516,43 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   sessions for 5 seconds (`shutdown.drain_deadline_ms`), so its own drain
   ends before the registry would kill it. The signal goes to the worker's
   process id only: a worker that has to be killed leaves its sidecar to
-  exit when it sees its peer closed.
+  exit when it sees its peer closed. Every member is stopped this way when
+  the agent itself is told to stop.
 - **Promotion.** A candidate that exited after it was warmed is not
   promoted: the deploy fails with the worker's failure and the serving
   member stays.
+- **Supervision.** The agent's loop runs the registry's supervision step
+  (`WorkerControl::supervise`) every 100 ms and logs what it did. The step
+  takes the serving generation out of service when its process has exited,
+  when its control channel has failed (10 seconds without an answered
+  ledger poll), or, for a generation started by a restart, when it is not
+  ready within `worker.warm_timeout_ms`; in the last two cases the worker
+  is killed. Nothing else stops a serving member: a slow `/health` answer
+  or slow inference does not, and `/health` is not polled once a
+  generation is ready.
+- **Restart.** The successor is a new generation: a new generation number
+  and serving config, on the same port, from the same staged bundle. It
+  starts 1, 2 and 4 seconds after the stop for the first, second and third
+  restart inside a sliding five-minute window; a restart that cannot be
+  launched counts as one. From the stop until the new generation is ready,
+  by the candidate's rule, status carries no `active.serving_url`.
+- **Failure.** A member that stops with three restarts inside the last five
+  minutes is failed: nothing is started for it until a deployment is
+  promoted, by a deploy or a rollback. Status then reports
+  `agent_state: degraded` and the failure as `last_error`, ahead of the
+  last transaction's error, and `active` has no `serving_url`.
+
+A failed member is held in the agent's memory only; it is not written to
+the state file. An agent restart starts the recorded deployment again with
+all three restarts available, and until then status reports the member as
+failed.
+
+A restart never starts while a deploy holds the member: from the moment
+`prepare` begins until its candidate is promoted or fails, or its `warm`
+gives up. A promoted generation is therefore never older than the one it
+replaces, and a promotion drops the restart that was owed and gives the
+member its three restarts back. A candidate whose `warm` gave up is left
+where it was, as before, but is not promoted afterwards.
 
 A member's name is its deployment id, and the serving worker accepts only 1
 to 128 of ASCII letters, digits, `-`, `_` and `.`. Deploys have been held to
@@ -521,15 +561,26 @@ id breaks it is not restored at start. The agent comes up without a worker
 and with the reason in `last_error`.
 
 The registry keeps the two configured ports (`serving_bind_port`,
-`serving_candidate_bind_port`): a candidate binds the one the serving member
-is not on. It does not restart a member that exits or loses contact after
-promotion, and it writes no resident set. `WorkerSupervisor` is a separate
-process manager that no packaged configuration enables; a configuration that
-enables `supervision` beside `worker.mode: process` is refused at start,
-since each would start its own worker.
+`serving_candidate_bind_port`): a candidate binds the one the serving member,
+or the restart owed to it, is not on. The registry writes no resident set.
+`WorkerSupervisor` is a separate process manager that no packaged
+configuration enables; a configuration that enables `supervision` beside
+`worker.mode: process` is refused at start, since each would start its own
+worker. The registry reuses that module's clock trait and nothing else: its
+backoff scheduler does not time these restarts.
 
-The agent installs no termination handler, so when the agent itself is
-stopped the registry's stop does not run. What ends the workers then is the
-service manager: under the packaged systemd unit every process in the
-unit's control group, workers and sidecars included, is sent SIGTERM and
-whatever remains after the unit's stop timeout is killed.
+The agent installs a handler for SIGTERM and SIGINT after startup recovery,
+just before its listener opens, so the handler is in place by the time the
+agent logs that it is listening. Before that a signal ends the agent at
+once. The handler only stores a flag. The agent's loop
+then stops the registry: every worker, serving and candidate, is sent
+SIGTERM, all share the one 10-second stop deadline, what is left is killed
+and reaped, nothing is started afterwards, and a deploy still in flight
+fails at once. Then the listener stops and the agent exits 0.
+
+The packaged systemd unit keeps the default control-group kill and
+`TimeoutStopSec=30`, which a test holds at twice the stop deadline or more.
+Under systemd the workers therefore receive the service manager's SIGTERM
+as well as the registry's, which is harmless: a worker ignores a second
+request while it drains. Whatever remains in the unit's control group after
+the stop timeout, sidecars included, is killed by the service manager.
