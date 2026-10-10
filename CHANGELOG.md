@@ -117,6 +117,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The synthetic session dispatch leaves the runtime library. It is now
+  `test/mocks/synthetic_session_dispatch.{hpp,cpp}` in namespace
+  `tensorplate::testing`, built as the static test library
+  `tp_synthetic_session_dispatch`, so no production binary contains it.
+  What it yields became a function of the bytes handed over (a transcript
+  that is a digest of the utterance's audio, PCM that follows the text
+  byte by byte); it refuses a language or voice outside a small served
+  set, ends an utterance at the longest its terms grant with an automatic
+  endpoint, and can be paused before work or inside a job. Its tests run
+  through a reference binding with no wire
+  (`test/mocks/session_dispatch_binding.hpp`) as a parameterised suite in
+  the unit test binary, which the dispatch that runs backend jobs will be
+  added to. (V030-E04-F03-T02)
+
 - The `SessionDispatch` contract states the rules its first version left
   open, with no signature change: the output queue's consumer callback is
   never unregistered, may run on two threads at once and may find nothing

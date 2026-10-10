@@ -69,6 +69,7 @@ target_include_directories(tp_test_unit
 target_link_libraries(tp_test_unit
   PRIVATE
     tp::runtime
+    tp::synthetic_session_dispatch
     GTest::gtest_main
 )
 

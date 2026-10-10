@@ -797,13 +797,34 @@ thread itself. Slots still held at `stop()` are released by nobody: they
 end with the manager.
 
 `SyntheticSessionDispatch` is a dispatch with no backend, for exercising
-a binding: each utterance yields its endpoint and a fixed transcript,
-each text segment a fixed PCM pattern, under the same credit,
-backpressure, drain and cleanup rules. It serves both input kinds on one
-thread, confirms cleanup at once, accepts any language and voice, and
-keeps no audio, so it never ends an utterance itself. The dispatch that
-runs backend jobs is not built yet, and the serving worker constructs
-neither.
+a binding. It is not part of the runtime: it lives in
+`test/mocks/synthetic_session_dispatch.hpp` and is built as the test
+library `tp_synthetic_session_dispatch`, which a test of a binding links.
+What it yields is a function of the bytes handed over, so a binding that
+hands over the wrong bytes of the right size is caught: an utterance's
+transcript is a digest of its audio (`transcript_of`), and a segment's
+PCM follows its text byte by byte (`sample_of`). It serves both input
+kinds on one thread under the credit, backpressure, drain and cleanup
+rules above, grants a fixed set of languages and voices and refuses any
+other, and ends an utterance at the longest its terms grant with an
+automatic endpoint. It can be paused at two points. Before work: the
+thread parks at the next hand-over, so input stays accepted with its
+credit not returned. In a job: an utterance being transcribed or a
+segment being synthesized does not complete, and the cleanup of a
+session that has one stays unanswered, as with a backend that has not
+confirmed a release.
+
+`ReferenceBinding` (`test/mocks/session_dispatch_binding.hpp`) is a
+binding with no wire. It keeps what the cases need of the binding's side
+of this section: the calls and their order, credit reported from the
+sink while input is taken, and no audio after a short frame. It does not
+check frame bounds, sample offsets, segment ids or text limits. The
+cases written against it (`SessionDispatchContract`, in
+`test/unit/session_dispatch_test.cpp`) hold for every dispatch: that
+test binary instantiates the suite once for each dispatch it builds,
+with what the dispatch serves, what it yields for given input and how
+its jobs are held. The dispatch that runs backend jobs is not built yet,
+and the serving worker constructs none.
 
 ## Test surface
 
