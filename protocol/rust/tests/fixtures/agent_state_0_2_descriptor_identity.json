@@ -1,0 +1,53 @@
+{
+  "schema_version": "0.2",
+  "store_version": 12,
+  "active": {
+    "deployment_id": "speech-stt",
+    "bundle_digest": "sha256:1b92187c5834ea34102b73e798e3d23dd1368e88a17b41575fafccaf438de7c7",
+    "bundle_name": "speech-stt-streaming",
+    "bundle_version": "0.2.0",
+    "backend_hint": "python_pytorch",
+    "model_class": "speech",
+    "staged_path": "/var/lib/tensorplate/bundles/staging/speech-stt/3",
+    "promoted_monotonic_ns": 1790206528928482543,
+    "generation": 3,
+    "descriptor_digest": "sha256:f0859d3ed80535ae615803058c926913a495854c5e34e035721be6a119fa6985",
+    "configuration_digest": "sha256:6eafccdcd19c9df08cb81cadc708245ea9d135995762375958bc864ac105bafa"
+  },
+  "previous_active": {
+    "deployment_id": "vision-v2",
+    "bundle_digest": "sha256:7732ef17a25dd9aaf695e8d2e06599f97ca6bf0aa0abaf8f2f5a96382ae3c56e",
+    "bundle_name": "bundle-vision-v2",
+    "bundle_version": "vision-v2",
+    "backend_hint": "mock",
+    "model_class": "vision",
+    "staged_path": "/var/lib/tensorplate/bundles/staging/vision-v2",
+    "promoted_monotonic_ns": 1790206528928482543
+  },
+  "candidate": {
+    "deployment_id": "speech-tts",
+    "bundle_digest": "sha256:77a813f90b6239be44541510a1d20482c89f1265f6e4dcb9d7164ffc7ed03de3",
+    "bundle_name": "speech-tts-streaming",
+    "bundle_version": "0.2.0",
+    "backend_hint": "python_pytorch",
+    "model_class": "speech",
+    "staged_path": "/var/lib/tensorplate/bundles/staging/speech-tts/5",
+    "generation": 5,
+    "descriptor_digest": "sha256:416e1fc722a11e1083f125cb40e2712275d596836af633e7b6a31c73186f6054",
+    "configuration_digest": "sha256:3a40ffd30e8ab6ad407a1b842cf225eef3009740300f84c94826b17ab0b22204"
+  },
+  "in_flight_transaction": {
+    "transaction_id": "tx-00000000-0000-4000-8000-000000000004",
+    "deployment_id": "speech-tts",
+    "phase": "staged",
+    "kind": "deploy",
+    "bundle_digest": "sha256:77a813f90b6239be44541510a1d20482c89f1265f6e4dcb9d7164ffc7ed03de3",
+    "bundle_path": "/var/lib/tensorplate/bundles/incoming/speech-tts-streaming",
+    "started_monotonic_ns": 1790206529100000000,
+    "last_transition_monotonic_ns": 1790206529200000000,
+    "generation": 5,
+    "descriptor_digest": "sha256:416e1fc722a11e1083f125cb40e2712275d596836af633e7b6a31c73186f6054",
+    "configuration_digest": "sha256:3a40ffd30e8ab6ad407a1b842cf225eef3009740300f84c94826b17ab0b22204"
+  },
+  "next_generation": 6
+}

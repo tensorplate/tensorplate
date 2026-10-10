@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/agent_state.json",
   "title": "TensorPlate Agent Durable State",
-  "description": "Durable file format owned by `tensorplate-agent` (V01-E08). The file is rewritten atomically with `write_new + rename(2)`, beside a same-directory `state.json.bak` the agent falls back to when `state.json` is damaged. The state file is the only durable record of what is deployed: the singleton active, previous active and candidate deployments, the in-flight transaction phase, the last error and the quarantine list, and from state version 0.2 the resident set and the deployment generation counter. Bundle bytes and request payloads are never persisted here; only digests and paths.\n\nVersioning: this file has its own version track, independent of the protocol version every other payload carries. State version `0.1` is the singleton layout every agent through 0.2.x reads. State version `0.2` adds `next_generation` and `resident_set`. The agent stamps the oldest version whose readers decode the file without loss: `0.2` from the first generation it allocates, `0.1` otherwise; a `0.1` file carries only the error codes, phases and transaction kinds agents through 0.2.x know. When it writes a `0.2` file it refreshes `state.json.bak` before `state.json`, so a `0.2` primary never sits beside a `0.1` backup an older agent would fall back to. An older agent refuses a `0.2` file with its unsupported-schema-version error and changes nothing; the documented downgrade sets the state directory aside rather than migrating it. A reader refuses a `0.2` file that carries any field it does not know; once a release writes `0.2`, any later change to its shape takes a new state version. The agent rejects unknown state versions without mutation.",
+  "description": "Durable file format owned by `tensorplate-agent` (V01-E08). The file is rewritten atomically with `write_new + rename(2)`, beside a same-directory `state.json.bak` the agent falls back to when `state.json` is damaged. The state file is the only durable record of what is deployed: the singleton active, previous active and candidate deployments, the in-flight transaction phase, the last error and the quarantine list, and from state version 0.2 the resident set and the deployment generation counter. Bundle bytes and request payloads are never persisted here; only digests and paths.\n\nVersioning: this file has its own version track, independent of the protocol version every other payload carries. State version `0.1` is the singleton layout every agent through 0.2.x reads. State version `0.2` adds `next_generation`, `resident_set` and the descriptor identity (`generation`, `descriptor_digest`, `configuration_digest`) on the singleton records and the in-flight transaction. The agent stamps the oldest version whose readers decode the file without loss: `0.2` from the first generation it allocates, `0.1` otherwise; a `0.1` file carries only the error codes, phases and transaction kinds agents through 0.2.x know. When it writes a `0.2` file it refreshes `state.json.bak` before `state.json`, so a `0.2` primary never sits beside a `0.1` backup an older agent would fall back to. An older agent refuses a `0.2` file with its unsupported-schema-version error and changes nothing; the documented downgrade sets the state directory aside rather than migrating it. A reader refuses a `0.2` file that carries any field it does not know; once a release writes `0.2`, any later change to its shape takes a new state version. The agent rejects unknown state versions without mutation.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "store_version"],
@@ -34,13 +34,17 @@
   },
   "allOf": [
     {
-      "$comment": "State version 0.1 is exactly what agents through 0.2.x read: no generation counter (and so no resident set, which requires it), and only the error codes, phases and transaction kinds those agents know.",
+      "$comment": "State version 0.1 is exactly what agents through 0.2.x read: no generation counter (and so no resident set, which requires it), no descriptor identity on a record, and only the error codes, phases and transaction kinds those agents know.",
       "if": {"properties": {"schema_version": {"const": "0.1"}}},
       "then": {
         "not": {"required": ["next_generation"]},
         "properties": {
+          "active": {"$ref": "#/definitions/NoDescriptorIdentity"},
+          "previous_active": {"$ref": "#/definitions/NoDescriptorIdentity"},
+          "candidate": {"$ref": "#/definitions/NoDescriptorIdentity"},
           "last_error": {"$ref": "#/definitions/LegacyErrorRecord"},
           "in_flight_transaction": {
+            "allOf": [{"$ref": "#/definitions/NoDescriptorIdentity"}],
             "properties": {
               "phase": {"$ref": "#/definitions/LegacyPhase"},
               "kind": {"enum": ["deploy", "rollback"]},
@@ -78,6 +82,15 @@
         "code": {
           "enum": ["config_invalid", "load_failed", "not_ready", "shape_mismatch", "unsupported", "oom_error", "timeout", "inference_failed", "internal"]
         }
+      }
+    },
+    "NoDescriptorIdentity": {
+      "not": {
+        "anyOf": [
+          {"required": ["generation"]},
+          {"required": ["descriptor_digest"]},
+          {"required": ["configuration_digest"]}
+        ]
       }
     },
     "LegacyPhase": {
@@ -221,6 +234,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["deployment_id", "bundle_digest", "staged_path", "bundle_name", "bundle_version", "backend_hint", "model_class"],
+      "description": "One singleton deployment. `generation`, `descriptor_digest` and `configuration_digest` name the deployment descriptor verified for the generation this record was last started at (`deployment_descriptor.json`), with the names and shapes a resident-set member gives them; a record carries all three or none, and only in a state of version 0.2. Rule the decoder enforces beyond this schema: the generation is below `next_generation`.",
       "properties": {
         "deployment_id": {"type": "string", "minLength": 1},
         "bundle_digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"},
@@ -233,13 +247,22 @@
         "labels": {
           "type": "object",
           "additionalProperties": {"type": "string"}
-        }
+        },
+        "generation": {"$ref": "#/definitions/StateCounter"},
+        "descriptor_digest": {"$ref": "#/definitions/Digest"},
+        "configuration_digest": {"$ref": "#/definitions/Digest"}
+      },
+      "dependencies": {
+        "generation": ["descriptor_digest", "configuration_digest"],
+        "descriptor_digest": ["generation", "configuration_digest"],
+        "configuration_digest": ["generation", "descriptor_digest"]
       }
     },
     "TransactionRecord": {
       "type": "object",
       "additionalProperties": false,
       "required": ["transaction_id", "deployment_id", "phase", "kind"],
+      "description": "The transaction in flight. `generation`, `descriptor_digest` and `configuration_digest` are its candidate's descriptor identity, under the rules `DeploymentRecord` states.",
       "properties": {
         "transaction_id": {"type": "string", "minLength": 1},
         "deployment_id": {"type": "string", "minLength": 1},
@@ -267,7 +290,15 @@
         "correlation_id": {"type": "string"},
         "started_monotonic_ns": {"type": "integer", "minimum": 0},
         "last_transition_monotonic_ns": {"type": "integer", "minimum": 0},
-        "failure": {"$ref": "#/definitions/ErrorRecord"}
+        "failure": {"$ref": "#/definitions/ErrorRecord"},
+        "generation": {"$ref": "#/definitions/StateCounter"},
+        "descriptor_digest": {"$ref": "#/definitions/Digest"},
+        "configuration_digest": {"$ref": "#/definitions/Digest"}
+      },
+      "dependencies": {
+        "generation": ["descriptor_digest", "configuration_digest"],
+        "descriptor_digest": ["generation", "configuration_digest"],
+        "configuration_digest": ["generation", "descriptor_digest"]
       }
     },
     "ErrorRecord": {
