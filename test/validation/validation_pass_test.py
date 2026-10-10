@@ -28,6 +28,9 @@ sys.path.insert(0, str(ROOT / "tools/validation"))
 import jsonschema  # noqa: E402
 import validation_index as index_mod  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "test/validation"))
+import slice_record_builder as stream_mod  # noqa: E402
+
 ENVELOPE = {
     "date": "2026-10-01",
     "session": "recorded runs of 2026-10-01",
@@ -794,6 +797,87 @@ def check_first_request_and_cold_deploy(lines: dict[str, dict]) -> None:
             assert completed.returncode == 2 and needle in completed.stderr, completed
 
 
+def check_streaming_line() -> None:
+    commit = "a" * 40
+    line = index_mod.streaming_line(stream_mod.build_record(commit), envelope())
+    assert line["subject"] == "streaming-latency" and line["result"] == "complete"
+    assert line["run_id"] == f"2026-10-01-{ROW}-streaming-latency"
+    assert line["checks"] == {"stt.sessions": "3 completed", "tts.sessions": "3 completed"}
+    assert line["settings"] == {"startup_timeout_ms": 120000, "streaming_iterations": 3}
+    metrics = line["metrics"]
+    # Nearest rank over 283, 383 and 483 ms; 70, 80 and 90 ms.
+    assert [metrics[f"stt.call_start_to_first_transcript.{key}"] for key in ("p50_ms", "p95_ms", "p99_ms")] == [383.0, 483.0, 483.0]  # fmt: skip
+    assert [metrics[f"tts.segment_to_first_audio.{key}"] for key in ("p50_ms", "p95_ms", "p99_ms")] == [80.0, 90.0, 90.0]  # fmt: skip
+    assert metrics["stt.session_initialization.p50_ms"] == 2.0
+    assert metrics["tts.segment_to_completion.count"] == 3
+    assert metrics["tts.segment_to_completion.misses"] == 0
+    assert len(metrics) == 3 * 5 + 4 * 5, sorted(metrics)
+    assert line["settings"] != envelope()["settings"], "the iteration count is part of the line"
+
+    # A mode that did not run has no figures, and the line says so.
+    partial = index_mod.streaming_line(stream_mod.build_record(commit, modes=("stt",)), envelope())
+    assert partial["result"] == "incomplete" and partial["checks"]["tts.sessions"] == "not run"
+    assert not any(key.startswith("tts.") for key in partial["metrics"])
+    # Measurements with no sample have a count of zero and no percentile, never a zero latency.
+    record = stream_mod.build_record(commit)
+    late = stream_mod.delay_input(record, "tts", 150_000_000)
+    unsampled = index_mod.streaming_line(late, envelope())
+    assert unsampled["result"] == "incomplete"
+    assert unsampled["metrics"]["tts.segment_to_first_audio.count"] == 0
+    assert unsampled["metrics"]["tts.segment_to_first_audio.misses"] == 3
+    assert not any(k.startswith("tts.segment_to_first_audio.p") for k in unsampled["metrics"])
+    assert "tts.session_initialization.p50_ms" in unsampled["metrics"]
+
+    # A session that did not complete is a miss, and the line counts it under its outcome.
+    stopped = stream_mod.stop_session(stream_mod.build_record(commit), "stt", 1)
+    missed = index_mod.streaming_line(stopped, envelope())
+    assert missed["result"] == "failed"
+    assert missed["checks"] == {"stt.sessions": "2 completed, 1 stopped", "tts.sessions": "3 completed"}  # fmt: skip
+    assert missed["metrics"]["stt.session_initialization.count"] == 2
+    assert missed["metrics"]["stt.session_initialization.misses"] == 1
+
+    # Only a record the client's own check accepts, and one that measured something, is indexed.
+    refused(
+        lambda: index_mod.streaming_line(stream_mod.build_record(None, "synthetic"), envelope()),
+        "a synthetic record measured nothing",
+    )
+    tampered = stream_mod.build_record(commit)
+    tampered["stt"]["summary"]["session_initialization"]["p50_ns"] += 1
+    refused(lambda: index_mod.streaming_line(tampered, envelope()), "the measurement record is invalid")  # fmt: skip
+    refused(lambda: index_mod.streaming_line({}, envelope()), "the measurement record is invalid")
+
+    # Two passes compare by percentile, within the tolerance, and a missing figure is no verdict.
+    slower = stream_mod.build_record(commit, tts_first_audio_after_ms=(150, 120, 130))
+    moved = statuses(index_mod.compare_lines(line, index_mod.streaming_line(slower, envelope())))
+    assert moved["metrics.tts.segment_to_first_audio.p50_ms"] == "regressed"
+    assert moved["metrics.stt.call_start_to_first_transcript.p50_ms"] == "unchanged"
+    assert moved["metrics.tts.segment_to_first_audio.count"] == "unchanged"
+    findings = index_mod.compare_lines(line, unsampled)
+    assert statuses(findings)["metrics.tts.segment_to_first_audio.p50_ms"] == "missing"
+    assert statuses(findings)["metrics.tts.segment_to_first_audio.count"] == "changed"
+    assert index_mod.verdict(findings) == index_mod.EXIT_NOT_COMPARABLE
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        tmp = Path(raw_tmp)
+        record_file = tmp / "record.json"
+        record_file.write_text(json.dumps(stream_mod.build_record(commit)), encoding="utf-8")
+        arguments = (
+            "index", "--date", "2026-10-01", "--session", "recorded runs of 2026-10-01",
+            "--row", ROW, "--machine", "g2-standard-8, one NVIDIA L4", "--build", "v0.3.1-rc.1",
+            "--kind", "evidence", "--records", "docs/validation/evidence",
+            "--setting", "startup_timeout_ms=120000",
+        )  # fmt: skip
+        completed = run_tool(*arguments, "--streaming-record", str(record_file))
+        assert completed.returncode == 0, completed
+        assert json.loads(completed.stdout) == line
+        for bad in (tmp / "absent.json", tmp):
+            completed = run_tool(*arguments, "--streaming-record", str(bad))
+            assert completed.returncode == 2 and "validation-pass:" in completed.stderr, completed
+        record_file.write_text(json.dumps({"record_kind": "slice_measurement"}), encoding="utf-8")
+        completed = run_tool(*arguments, "--streaming-record", str(record_file))
+        assert completed.returncode == 2 and "is invalid" in completed.stderr, completed
+
+
 def main() -> int:
     lines = check_derivation()
     check_derivation_guards()
@@ -804,6 +888,7 @@ def main() -> int:
     check_index_file_and_cli(lines)
     check_more_guards(lines)
     check_more_cli(lines)
+    check_streaming_line()
     print("validation pass: recorded runs index, compare and fail closed as expected")
     return 0
 

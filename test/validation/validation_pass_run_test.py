@@ -6,7 +6,9 @@ The stubbed tree is a real git repository with fakes at the paths the driver
 runs, and a directory of fake commands shadows `sudo` and everything run
 through it. The fake harness and qualify tool replay the lifecycle report and
 the candidate records filed on 2026-10-01. Doctor's output is synthetic: no
-recorded run carries the runner-profile findings yet.
+recorded run carries the runner-profile findings yet, and the fake streaming
+client writes a record the test builds, because no streaming run has been
+recorded on a machine.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -37,7 +40,13 @@ sys.path.insert(0, str(ROOT / "tools/validation"))
 import validation_index as index_mod  # noqa: E402
 import validation_pass_run as run_mod  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "test/validation"))
+import slice_record_builder as stream_mod  # noqa: E402
+
 DEB_VERSION = "0.3.1~rc.1"
+GPU_MIB = 20000
+GPU_BYTES = GPU_MIB * 1024 * 1024
+BUNDLES = ROOT / "test/models/bundles/v0_1"
 RUNNER_FINDINGS = ("runner_profiles", "runner_profile_dependencies", "runner_launch_environment")
 
 # Every fake logs its call, then exits with the code FAKE_FAIL gives its name, if any.
@@ -59,6 +68,7 @@ FAKES = {
     + 'exec /usr/bin/install "$@"\n',
     "python3.12": EXIT,
     "dpkg-deb": EXIT + f"echo '{DEB_VERSION}-1'\n",
+    "nvidia-smi": EXIT + '[ -z "$FAKE_GPU" ] || echo "$FAKE_GPU"\n',
     "tensorplate": """case " $* " in *" --output json "*) ;; *) exit 64 ;; esac
 case "$1" in
   status) name=status ;; doctor) name=doctor ;; bundle) name=provision ;; deploy) name=deploy ;;
@@ -103,6 +113,11 @@ bundle=$2
 while [ "$1" != --evidence-dir ]; do shift; done
 mkdir -p "$2" && cp "$(cat "$bundle/filed-record")" "$2/record.json"
 exit 2
+""",
+    "tools/validation/slice_measure.py": """[ -z "$code" ] || exit "$code"
+while [ "$1" != --out ]; do shift; done
+cp "$FAKE_STREAM_RECORD" "$2"
+exit "${FAKE_STREAM_EXIT:-0}"
 """,
     "tools/release/stage-debian-changelog.sh": EXIT + 'echo "$1" >.staged-version\n',
     "packaging/scripts/build-deb.sh": EXIT
@@ -186,6 +201,11 @@ class Machine:
             provisioned["payload"]["path"] = str(bundle)
             (bundle / "provision.json").write_text(json.dumps(provisioned))
         (tmp / "clips").mkdir()
+        # The CUDA smoke fixture, and the CPU one the lifecycle harness stages.
+        self.cuda_predecessor = tmp / "x86_cuda_smoke"
+        self.cpu_predecessor = tmp / "x86_fixture_smoke"
+        shutil.copytree(BUNDLES / "x86_cuda_smoke", self.cuda_predecessor)
+        shutil.copytree(BUNDLES / "x86_fixture_smoke", self.cpu_predecessor)
         self.environment_file = tmp / "tensorplate-agent"
         self.runs = 0
 
@@ -199,12 +219,19 @@ class Machine:
         candidates: bool = True,
         staging: bool = True,
         interrupt: int | None = None,
+        gpu: str = "",
+        stream: dict | None = None,
+        stream_exit: int = 0,
     ) -> Result:
+        """`gpu` is what the fake nvidia-smi prints; `stream` the record the fake client writes."""
         self.runs += 1
         out = self.tmp / f"pass-{self.runs}"
         scratch = {
-            name: self.tmp / f"{name}-{self.runs}" for name in ("calls", "fail", "doctor", "pids")
+            name: self.tmp / f"{name}-{self.runs}"
+            for name in ("calls", "fail", "doctor", "pids", "stream")
         }
+        record = stream or stream_mod.build_record(self.commit)
+        scratch["stream"].write_text(json.dumps(record), encoding="utf-8")
         scratch["calls"].touch()
         scratch["fail"].write_text(
             "".join(f"{name} {code}\n" for name, code in (fail or {}).items()), encoding="utf-8"
@@ -217,6 +244,9 @@ class Machine:
             "FAKE_FAIL": str(scratch["fail"]),
             "FAKE_DOCTOR": str(scratch["doctor"]),
             "FAKE_PIDS": str(scratch["pids"]),
+            "FAKE_GPU": gpu,
+            "FAKE_STREAM_RECORD": str(scratch["stream"]),
+            "FAKE_STREAM_EXIT": str(stream_exit),
             "FAKE_BUNDLES": str(self.bundles),
             "FAKE_INSTALL_HOOK": install_hook,
             "FILED_LIFECYCLE": str(FILED_LIFECYCLE),
@@ -306,7 +336,8 @@ def check_full_pass(machine: Machine) -> None:
     result = machine.run(
         "--baseline-assets-dir", str(machine.baseline), "--allow-unsigned",
         "--predecessor-bundle", str(machine.bundles), "--sampler", str(machine.bin / "sync"),
-        "--qualify-arg=--window=5s", "--oom-ballast-bytes", "123",
+        "--qualify-arg=--window=5s", "--qualify-arg=--predecessor-deployment-id=prior",
+        "--oom-ballast", "stt-whisper=bytes:123", "--oom-ballast", "tts-kokoro=bytes:456",
         "--oom-ballast-python", "/usr/bin/python3",
     )  # fmt: skip
     # The replayed records' own results are `fail`, so the qualify tool exits 2 as it did.
@@ -317,6 +348,9 @@ def check_full_pass(machine: Machine) -> None:
     assert result.statuses(*[name for name in names if name not in qualify]) == ["ok"] * 9
     assert [result.steps[name]["exit_code"] for name in qualify] == [2, 2]
     assert result.statuses("streaming-latency", "index") == ["not_run", "ok"]
+    assert result.steps["streaming-latency"]["reason"] == (
+        "no --streaming-arg names a stream endpoint"
+    )
     # The record's own verdict stays beside the step's status.
     assert result.steps["lifecycle"]["result"] == "pass"
     assert [result.steps[name]["result"] for name in qualify] == ["fail", "fail"]
@@ -373,10 +407,16 @@ def check_full_pass(machine: Machine) -> None:
         f"--sampler {machine.bin / 'sync'}", "--agent-timeout-ms 120000", "--window=5s",
         "--deploy-wait-timeout-ms 300000", "--tensorplate tensorplate",
         "--oom-ballast-bytes 123 --oom-ballast-python /usr/bin/python3",
-        f"--staging-dir {result.staging / 'stt-whisper'}",
+        f"--staging-dir {result.staging / 'stt-whisper'}", "--predecessor-deployment-id=prior",
     ):  # fmt: skip
         assert expected in whisper, (expected, whisper)
     assert "--clips" not in kokoro and f"--staging-dir {result.staging / 'tts-kokoro'}" in kokoro
+    assert "--oom-ballast-bytes 456 --oom-ballast-python /usr/bin/python3" in kokoro
+    # No GPU answered: the figure is absent with the reason, and a byte count is used as given.
+    assert result.report["device_memory"] == {
+        "bytes": None,
+        "reason": "`nvidia-smi` printed no single memory figure for device 0",
+    }
     made = result.called(
         f"sudo install --directory --mode=0755 --owner={os.getuid()} --group={os.getgid()} "
     )
@@ -800,12 +840,52 @@ def check_arguments(machine: Machine) -> None:
     no_pass("SUBJECT:BUNDLE[:CLIPS]", "--candidate", "stt-whisper")
     no_pass("SUBJECT:BUNDLE[:CLIPS]", "--candidate", ":bundle")
     # A subject names a directory made through sudo and an index subject.
-    for subject in ("..", "a/b", "lifecycle", "doctor", "logs", "Upper", "-flag", "a b"):
+    for subject in (
+        "..", "a/b", "lifecycle", "doctor", "logs", "streaming-latency", "Upper", "-flag", "a b"
+    ):  # fmt: skip
         no_pass("is reserved or does not match", f"--candidate={subject}:bundle")
     for bundle in ("-flag", "../x", "a/b"):
         no_pass("is not a name", "--candidate", f"other:{bundle}")
     no_pass("--speech-family none installs none", family="none")
     no_pass("a candidate needs --staging-dir", staging=False)
+    for bad in (
+        "stt-whisper", "stt-whisper=5", "stt-whisper=bytes", "stt-whisper=bytes:", "=bytes:5",
+        "stt-whisper=bytes:0", "stt-whisper=bytes:-5", "stt-whisper=bytes:+5",
+        "stt-whisper=bytes:05", "stt-whisper=bytes:1e9", "stt-whisper=bytes:5 ",
+        "stt-whisper=bytes:\u0665", "stt-whisper=headroom:0", "stt-whisper=percent:5",
+        "stt-whisper=bytes=5", "stt-whisper:bytes:5",
+    ):  # fmt: skip
+        no_pass("--oom-ballast takes SUBJECT=bytes:N or SUBJECT=headroom:N", "--oom-ballast", bad)
+    no_pass("names 'other', which no --candidate declares", "--oom-ballast", "other=bytes:5")
+    no_pass("no --candidate declares", "--oom-ballast", "stt-whisper=bytes:5", candidates=False)
+    no_pass(
+        "names 'stt-whisper' twice",
+        "--oom-ballast", "stt-whisper=bytes:5", "--oom-ballast", "stt-whisper=headroom:7",
+    )  # fmt: skip
+    # The pass-wide count is gone: one value could not fit two models.
+    no_pass("unrecognized arguments: --oom-ballast-bytes", "--oom-ballast-bytes", "5")
+    for named, given in (
+        ("--oom-ballast-bytes", "--oom-ballast-bytes=5"),
+        ("--oom-ballast-bytes", "--oom-ballast-b=5"),
+        ("--oom-ballast-bytes", "--oom-ballast-bytes"),
+        ("--oom-ballast-bytes", "--oom"),
+        ("--predecessor-bundle", "--predecessor-bundle=/x"),
+        ("--predecessor-bundle", "--predecessor-b=/x"),
+        ("--predecessor-bundle", "--pred=/x"),
+    ):
+        no_pass(f"--qualify-arg may not set {named}", f"--qualify-arg={given}")
+    stream = ("--streaming-arg=--stt-endpoint=127.0.0.1:9", "--streaming-arg=--worker-build=b")
+    for named, given in (
+        ("--out", "--out=/x"),
+        ("--out", "--ou=/x"),
+        ("--source-commit", f"--source-commit={'0' * 40}"),
+        ("--source-commit", "--source=x"),
+    ):
+        no_pass(f"--streaming-arg may not set {named}", *stream, f"--streaming-arg={given}")
+    no_pass("names no stream endpoint", "--streaming-arg=--worker-version=x")
+    no_pass("names no stream endpoint", "--streaming-arg=--iterations=3")
+    no_pass("needs --worker-version or --worker-build", "--streaming-arg=--tts-endpoint=h:1")
+    no_pass("needs --worker-version or --worker-build", "--streaming-arg=--stt-e=h:1")
     for bad in ("lifecycle", "lifecycle=0", "lifecycle=soon", "index=5"):
         no_pass("--step-timeout takes STEP=SECONDS", "--step-timeout", bad)
     no_pass("given twice", "--setting", "a=1", "--setting", "a=2")
@@ -893,9 +973,312 @@ def check_names_match_their_sources() -> None:
     assert run_mod.AGENT_HIDDEN_ROOTS == ("/home", "/root", "/run/user", "/tmp", "/var/tmp")
     for relative in TREE:
         assert relative == "install.sh" or os.access(ROOT / relative, os.X_OK), relative
+    runner = ROOT / "backends/python_pytorch/src/tensorplate_pytorch_backend/runner.py"
+    registry = runner.read_text(encoding="utf-8").split("def default_backend_factories", 1)[1]
+    assert set(run_mod.DEVICE_PROFILES) <= set(re.findall(r'"(\w+)":', registry.split("}", 1)[0]))
+    assert run_mod.STREAMING_LATENCY == index_mod.STREAMING_SUBJECT
+    client = (ROOT / "tools/validation/slice_measure.py").read_text(encoding="utf-8")
+    for option in ("--out", "--source-commit", *run_mod.WORKER_STATEMENTS):
+        assert f'"{option}"' in client, option
+    assert {o[2:5] for o in run_mod.STREAM_ENDPOINTS} == set(index_mod.slice_record.MODES)
+    for option in run_mod.STREAM_ENDPOINTS:
+        assert f'f"--{{mode}}-{option.rsplit("-", 1)[1]}"' in client, option
     assert (ROOT / "packaging/scripts/install.sh").is_file()
     assert (ROOT / "packaging/speech-runtime/build-environment.py").is_file()
     assert (ROOT / "packaging/speech-runtime/lock").is_dir()
+
+
+PROBE = "nvidia-smi --id=0 --query-gpu=memory.total --format=csv,noheader,nounits"
+
+
+def sampled(machine: Machine, *arguments: str, **options: object) -> Result:
+    return machine.run("--sampler", str(machine.bin / "sync"), *arguments, **options)
+
+
+def ballast_of(result: Result, subject: str) -> str:
+    commands = result.steps[f"qualify:{subject}"]["commands"]
+    argv = next(command for command in commands if "--oom-ballast-bytes" in command)
+    return argv[argv.index("--oom-ballast-bytes") + 1]
+
+
+def check_ballast_per_candidate(machine: Machine) -> None:
+    result = sampled(
+        machine, "--predecessor-bundle", str(machine.cuda_predecessor),
+        "--oom-ballast", "stt-whisper=bytes:5000000000",
+        "--oom-ballast", "tts-kokoro=headroom:1000000000",
+        "--oom-ballast-python", "/usr/bin/python3", gpu=str(GPU_MIB),
+    )  # fmt: skip
+    assert result.statuses("preflight") == ["ok"], result.steps["preflight"]
+    assert result.called("nvidia-smi") == [PROBE]
+    whisper, kokoro = (ballast_of(result, subject) for subject in ("stt-whisper", "tts-kokoro"))
+    assert (whisper, kokoro) == ("5000000000", str(GPU_BYTES - 1_000_000_000))
+    assert result.report["device_memory"] == {"bytes": GPU_BYTES, "reason": None}
+    assert result.report["oom_ballast"] == {
+        "stt-whisper": {"rule": "bytes", "bytes": 5_000_000_000, "headroom_bytes": None, "reason": None},
+        "tts-kokoro": {
+            "rule": "headroom",
+            "bytes": GPU_BYTES - 1_000_000_000,
+            "headroom_bytes": 1_000_000_000,
+            "reason": None,
+        },
+    }  # fmt: skip
+
+    # The edges of what fits: one byte of ballast, and one byte of headroom less than the device.
+    result = sampled(
+        machine, "--predecessor-bundle", str(machine.cuda_predecessor),
+        "--oom-ballast", f"stt-whisper=headroom:{GPU_BYTES - 1}",
+        "--oom-ballast", f"tts-kokoro=bytes:{GPU_BYTES - 1}", gpu=str(GPU_MIB),
+    )  # fmt: skip
+    assert result.statuses("preflight") == ["ok"]
+    assert ballast_of(result, "stt-whisper") == "1"
+    assert ballast_of(result, "tts-kokoro") == str(GPU_BYTES - 1)
+
+    # A candidate no rule names gets none and the report says why; nothing is guessed for it.
+    result = sampled(
+        machine, "--predecessor-bundle", str(machine.cuda_predecessor),
+        "--oom-ballast", "stt-whisper=bytes:5000", gpu=str(GPU_MIB),
+    )  # fmt: skip
+    kokoro = result.steps["qualify:tts-kokoro"]["commands"]
+    assert not any("--oom-ballast-bytes" in command for command in kokoro)
+    assert result.report["oom_ballast"]["tts-kokoro"] == {
+        "rule": None,
+        "bytes": None,
+        "headroom_bytes": None,
+        "reason": "no --oom-ballast names this candidate",
+    }
+    # Nothing asks the device a question when no rule and no memory window needs the answer.
+    result = machine.run()
+    assert result.called("nvidia-smi") == [] and result.report["device_memory"] is None
+    assert {entry["rule"] for entry in result.report["oom_ballast"].values()} == {None}
+
+
+def refused_in_preflight(machine: Machine, needle: str, *arguments: str, **options: object) -> None:
+    result = machine.run(*arguments, **options)
+    reason = result.steps["preflight"]["reason"]
+    assert result.code == 1 and result.steps["preflight"]["status"] == "failed", result.done
+    assert needle in reason, (needle, reason)
+    later = [step for name, step in result.steps.items() if name not in ("preflight", "index")]
+    assert all(step["status"] == "not_run" for step in later), later
+    # Nothing was deployed: only the reading of the device ran before the refusal.
+    assert [c for c in result.calls if not c.startswith(("git", "nvidia-smi"))] == [], result.calls
+    assert not result.lines
+
+
+def check_device_refusals(machine: Machine) -> None:
+    sync = str(machine.bin / "sync")
+    cpu = str(machine.cpu_predecessor)
+    headroom = ("--oom-ballast", "stt-whisper=headroom:1000")
+
+    # A rule is evaluated on the machine; a machine that gives no figure is refused, not guessed.
+    for printed in ("", "N/A", "0", "-5", "20000 MiB", "20000\n20000", "2.3e4", "\u0662\u0663"):
+        refused_in_preflight(
+            machine, "printed no single memory figure", *headroom, gpu=printed
+        )  # fmt: skip
+    refused_in_preflight(machine, "`nvidia-smi` exited 9", *headroom, fail={"nvidia-smi": 9})
+    refused_in_preflight(
+        machine, "cannot be run (No such file or directory)", *headroom, "--nvidia-smi", str(machine.tmp / "absent")
+    )  # fmt: skip
+    refused_in_preflight(machine, "leaves no ballast", "--oom-ballast", f"stt-whisper=headroom:{GPU_BYTES}", gpu=str(GPU_MIB))  # fmt: skip
+    refused_in_preflight(machine, "does not fit", "--oom-ballast", f"stt-whisper=bytes:{GPU_BYTES}", gpu=str(GPU_MIB))  # fmt: skip
+
+    # A pass that samples memory on a machine with a device needs a predecessor that loads onto it.
+    refused_in_preflight(machine, "none is named", "--sampler", sync, gpu=str(GPU_MIB))
+    refused_in_preflight(
+        machine, "holds no device memory", "--sampler", sync, "--predecessor-bundle", cpu,
+        gpu=str(GPU_MIB),
+    )  # fmt: skip
+    refused_in_preflight(
+        machine, "cannot be read as a bundle (FileNotFoundError)", "--sampler", sync,
+        "--predecessor-bundle", str(machine.tmp / "absent"), gpu=str(GPU_MIB),
+    )  # fmt: skip
+    # A directory of bundles is not a bundle.
+    refused_in_preflight(
+        machine, "predecessor_idle", "--sampler", sync, "--predecessor-bundle", str(machine.bundles),
+        gpu=str(GPU_MIB),
+    )  # fmt: skip
+
+    # Where the windows cannot exist, or are not taken, the predecessor is the operator's choice.
+    for options in (
+        {"gpu": str(GPU_MIB), "sampler": False},
+        {"gpu": "", "sampler": True},
+        {"gpu": str(GPU_MIB), "sampler": True, "candidates": False},
+    ):
+        arguments = ["--predecessor-bundle", cpu]
+        if options.pop("sampler"):
+            arguments += ["--sampler", sync]
+        assert machine.run(*arguments, **options).statuses("preflight") == ["ok"], options
+    assert machine.run("--sampler", sync, gpu="N/A").statuses("preflight") == ["ok"]
+
+
+def write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def check_predecessor_problem(machine: Machine) -> None:
+    def problem(edit=None, entry: dict | None = None, manifest: object = None) -> str | None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            bundle = Path(raw_tmp) / "bundle"
+            shutil.copytree(machine.cuda_predecessor, bundle)
+            if entry is not None:
+                write_json(bundle / "x86-cuda-smoke.json", entry)
+            if manifest is not None:
+                write_json(bundle / "manifest.json", manifest)
+            if edit is not None:
+                edit(bundle)
+            return run_mod.predecessor_problem(bundle)
+
+    def manifest_of(**changes: object) -> dict:
+        document = json.loads((machine.cuda_predecessor / "manifest.json").read_text())
+        document["artifacts"][0].update(changes)
+        return document
+
+    cuda = {"backend_profile": "cuda_fixture", "device": "cuda"}
+    assert problem() is None
+    assert run_mod.predecessor_problem(machine.cuda_predecessor) is None
+    assert "holds no device memory" in run_mod.predecessor_problem(machine.cpu_predecessor)
+    # The candidates' own bundles list weights and auxiliary files beside their one entry.
+    for candidate in ("stt_whisper_candidate", "tts_kokoro_candidate"):
+        assert run_mod.predecessor_problem(BUNDLES / candidate) is None, candidate
+    for profile in run_mod.DEVICE_PROFILES:
+        assert problem(entry={**cuda, "backend_profile": profile}) is None, profile
+    for entry in (
+        {**cuda, "device": "cpu"},
+        {**cuda, "device": "CUDA"},
+        {"backend_profile": "cuda_fixture"},
+        {"device": "cuda"},
+        {**cuda, "backend_profile": "fixture"},
+        {**cuda, "backend_profile": "mps_fixture"},
+    ):
+        assert "holds no device memory" in (problem(entry=entry) or ""), entry
+
+    assert "lists 0" in problem(manifest=manifest_of(kind="weights"))
+    twice = manifest_of()
+    twice["artifacts"].append(dict(twice["artifacts"][0]))
+    assert "lists 2" in problem(manifest=twice)
+    for path in ("../escape.json", "/etc/hosts"):
+        assert "lies outside the bundle" in problem(manifest=manifest_of(path=path)), path
+
+    def link_out(bundle: Path) -> None:
+        elsewhere = bundle.parent / "elsewhere.json"
+        write_json(elsewhere, cuda)
+        (bundle / "x86-cuda-smoke.json").unlink()
+        (bundle / "x86-cuda-smoke.json").symlink_to(elsewhere)
+
+    assert "lies outside the bundle" in problem(edit=link_out)
+    for edit, name in (
+        (lambda bundle: (bundle / "manifest.json").write_text("{"), "JSONDecodeError"),
+        (lambda bundle: (bundle / "manifest.json").unlink(), "FileNotFoundError"),
+        (lambda bundle: (bundle / "x86-cuda-smoke.json").unlink(), "FileNotFoundError"),
+        (lambda bundle: (bundle / "x86-cuda-smoke.json").write_text("[]"), "AttributeError"),
+        (
+            lambda bundle: (bundle / "x86-cuda-smoke.json").write_bytes(b"\xff"),
+            "UnicodeDecodeError",
+        ),
+    ):
+        assert problem(edit=edit) == f"it cannot be read as a bundle ({name})", name
+    assert "(KeyError)" in problem(manifest={"name": "no artifacts"})
+    assert "(TypeError)" in problem(manifest={"artifacts": 5})
+    assert "(AttributeError)" in problem(manifest={"artifacts": [5]})
+    assert "(KeyError)" in problem(manifest=manifest_of(path=None) | {"artifacts": [{"kind": "python_pytorch_entry"}]})  # fmt: skip
+
+
+def check_device_memory_figure() -> None:
+    mib = 1024 * 1024
+    for text, expected in (
+        ("20000\n", 20000 * mib), (" 20000 \n\n", 20000 * mib), ("1", mib),
+        ("", None), ("\n", None), ("0", None), ("00", None), ("-1", None), ("+5", None),
+        ("N/A", None), ("[N/A]", None), ("20000 MiB", None), ("20000\n20000\n", None),
+        ("20000\nN/A", None), ("1e3", None), ("\u0663", None),
+    ):  # fmt: skip
+        assert run_mod.device_memory_bytes(text) == expected, text
+
+
+def check_options_the_pass_sets_cannot_be_overridden() -> None:
+    claims = run_mod.claims
+    assert claims("--oom-ballast-bytes", ["--oom-ballast-bytes"])
+    assert claims("--oom-ballast-bytes", ["--oom-ballast-bytes=5"])
+    assert claims("--oom-ballast-bytes", ["--oom-ballast-b=5", "x"])
+    assert claims("--oom-ballast-bytes", ["--oom"])
+    assert not claims("--oom-ballast-bytes", ["--oom-ballast-python=x", "--window=5s", "5"])
+    assert not claims("--predecessor-bundle", ["--predecessor-deployment-id=x"])
+    assert not claims("--predecessor-bundle", ["--predecessor-bundles"])
+    # A lone dash pair or a single dash is not an abbreviation of anything.
+    assert not claims("--out", ["--", "-", "-o", "--=x", ""])
+    assert run_mod.claims_any(("--a", "--b"), ["--b"])
+    assert not run_mod.claims_any(("--a", "--b"), ["--c"])
+
+
+def check_streaming(machine: Machine) -> None:
+    named = (
+        "--streaming-python", "/bin/sh", "--streaming-arg=--stt-endpoint=127.0.0.1:9",
+        "--streaming-arg=--tts-endpoint=127.0.0.1:9",
+        "--streaming-arg=--worker-version=stub-build", "--streaming-arg=--iterations=3",
+        "--step-timeout", "streaming-latency=60",
+    )  # fmt: skip
+    result = machine.run(*named, candidates=False, family="none")
+    assert result.code == 0, result.done
+    assert list(result.steps) == [
+        "preflight", "lifecycle", "install", "doctor", "streaming-latency", "index"
+    ]  # fmt: skip
+    step = result.steps["streaming-latency"]
+    assert (step["status"], step["result"], step["exit_code"]) == ("ok", "complete", 0)
+    record = result.out / "streaming-latency/record.json"
+    expected = (
+        f"slice_measure.py run --out {record} --source-commit {machine.commit} "
+        "--stt-endpoint=127.0.0.1:9 --tts-endpoint=127.0.0.1:9 "
+        "--worker-version=stub-build --iterations=3"
+    )
+    assert result.called("slice_measure.py") == [expected]
+    result.order("tensorplate doctor", "slice_measure.py")
+    line = result.lines["streaming-latency"]
+    assert line["result"] == "complete" and line["kind"] == "validation"
+    assert line["metrics"]["stt.call_start_to_first_transcript.p50_ms"] == 383.0
+    assert line["metrics"]["tts.segment_to_first_audio.count"] == 3
+    assert line["settings"]["streaming_iterations"] == 3
+    assert list(result.lines) == ["lifecycle", "doctor", "streaming-latency"]
+
+    # With candidates the step comes after theirs.
+    result = machine.run(*named)
+    names = list(result.steps)
+    assert names.index("streaming-latency") > names.index("qualify:tts-kokoro")
+    assert names[-1] == "index" and "streaming-latency" in result.lines
+
+    # The client's own verdict is the step's: an incomplete record fails the step and is indexed.
+    partial = stream_mod.build_record(machine.commit, modes=("stt",))
+    result = machine.run(*named, candidates=False, family="none", stream=partial, stream_exit=2)
+    step = result.steps["streaming-latency"]
+    assert (step["status"], step["result"], step["exit_code"]) == ("failed", "incomplete", 2)
+    assert result.code == 1 and result.statuses("index") == ["ok"]
+    assert result.lines["streaming-latency"]["result"] == "incomplete"
+    assert result.lines["streaming-latency"]["checks"]["tts.sessions"] == "not run"
+    assert not any(key.startswith("tts.") for key in result.lines["streaming-latency"]["metrics"])
+    # Either statement of the worker's release lets the client write a recorded record.
+    build = [a for a in named if "--worker-version" not in a] + ["--streaming-arg=--worker-build=b"]
+    result = machine.run(*build, candidates=False, family="none")
+    assert result.code == 0 and result.statuses("streaming-latency") == ["ok"], result.done
+    # A client that wrote nothing leaves a step, a result of null, and no line.
+    result = machine.run(*named, candidates=False, family="none", fail={"slice_measure.py": 3})
+    step = result.steps["streaming-latency"]
+    assert (step["status"], step["result"], step["exit_code"]) == ("failed", None, 3)
+    assert "streaming-latency" not in result.lines and result.code == 1
+    assert result.statuses("index") == ["ok"]
+
+    # A record that cannot be trusted or measured nothing is not indexed, and the others are kept.
+    for broken, needle in (
+        ({"record_kind": "slice_measurement"}, "the measurement record is invalid"),
+        (stream_mod.build_record(None, "synthetic"), "a synthetic record measured nothing"),
+    ):
+        result = machine.run(*named, candidates=False, family="none", stream=broken)
+        assert result.statuses("streaming-latency", "index") == ["ok", "failed"]
+        assert needle in result.steps["index"]["reason"], result.steps["index"]
+        assert list(result.lines) == ["lifecycle", "doctor"]
+
+    # The step needs the machine the other steps need.
+    result = machine.run(*named, candidates=False, family="none", fail={"install.sh": 3})
+    assert result.statuses("install", "streaming-latency") == ["failed", "not_run"]
+    assert result.steps["streaming-latency"]["reason"] == "install is failed"
+    assert not result.called("slice_measure.py") and result.code == 1
 
 
 def main() -> int:
@@ -915,6 +1298,12 @@ def main() -> int:
         check_an_interrupted_pass(machine)
         check_a_command_that_cannot_be_stopped(machine)
         check_arguments(machine)
+        check_ballast_per_candidate(machine)
+        check_device_refusals(machine)
+        check_predecessor_problem(machine)
+        check_streaming(machine)
+    check_device_memory_figure()
+    check_options_the_pass_sets_cannot_be_overridden()
     print("validation pass: the driver runs its steps in order and records each failure")
     return 0
 

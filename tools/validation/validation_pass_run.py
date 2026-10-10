@@ -19,6 +19,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -45,6 +46,7 @@ STEP_TIMEOUTS_S = {
     "provision": 3600,
     "cold-deploy": 900,
     "qualify": 3600,
+    "streaming-latency": 1800,
 }
 AGENT_WAIT_S = 120
 # Above the harness's own cleanup, which can wait three minutes for its units.
@@ -52,8 +54,13 @@ STOP_GRACE_S = 240
 # What the agent's unit cannot read: it runs with ProtectHome and PrivateTmp.
 AGENT_HIDDEN_ROOTS = ("/home", "/root", "/run/user", "/tmp", "/var/tmp")
 STREAMING_LATENCY = "streaming-latency"
+STREAM_ENDPOINTS = ("--stt-endpoint", "--tts-endpoint")
+WORKER_STATEMENTS = ("--worker-version", "--worker-build")
 # A candidate's subject names a directory and an index subject beside these.
-RESERVED_SUBJECTS = ("lifecycle", "doctor", "logs")
+RESERVED_SUBJECTS = ("lifecycle", "doctor", "logs", STREAMING_LATENCY)
+# Runner profiles whose load puts the entry's `device` to use.
+DEVICE_PROFILES = ("cuda_fixture", "faster_whisper", "kokoro")
+BALLAST_RULES = ("bytes", "headroom")
 BUNDLE_NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 EXIT_OK, EXIT_STEP_FAILED = 0, 1
 
@@ -185,6 +192,66 @@ def deploy_outcome(envelope: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def claims(option: str, items: list[str]) -> bool:
+    """Whether a pass-through argument names `option`, in full or as an argparse abbreviation."""
+    return any(
+        len(name) > 2 and option.startswith(name)
+        for name in (item.partition("=")[0] for item in items)
+    )
+
+
+def claims_any(options: tuple[str, ...], items: list[str]) -> bool:
+    return any(claims(option, items) for option in options)
+
+
+def device_memory_bytes(text: str) -> int | None:
+    """Device 0's memory from `nvidia-smi --format=csv,noheader,nounits`: one figure, in MiB."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) != 1 or re.fullmatch(r"[0-9]+", lines[0]) is None or int(lines[0]) == 0:
+        return None
+    return int(lines[0]) * 1024 * 1024
+
+
+def predecessor_problem(bundle: Path) -> str | None:
+    """Why a bundle cannot leave the sidecar holding device memory once deployed, or None."""
+    try:
+        manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+        entries = [a for a in manifest["artifacts"] if a.get("kind") == "python_pytorch_entry"]
+        if len(entries) != 1:
+            return f"its manifest lists {len(entries)} python_pytorch_entry artifacts, not one"
+        path = (bundle / entries[0]["path"]).resolve()
+        if bundle.resolve() not in path.parents:
+            return "its entry lies outside the bundle"
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        profile, device = entry.get("backend_profile"), entry.get("device")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return f"it cannot be read as a bundle ({type(exc).__name__})"
+    if device != "cuda" or profile not in DEVICE_PROFILES:
+        return (
+            f"its entry runs profile {profile!r} on device {device!r}, which holds no device memory"
+        )
+    return None
+
+
+def parse_ballast(items: list[str], subjects: list[str]) -> dict[str, tuple[str, int]]:
+    rules: dict[str, tuple[str, int]] = {}
+    for item in items:
+        subject, _, rule = item.partition("=")
+        kind, _, count = rule.partition(":")
+        if not subject or kind not in BALLAST_RULES or re.fullmatch(r"[1-9][0-9]*", count) is None:
+            raise index_mod.IndexLineError(
+                f"--oom-ballast takes SUBJECT=bytes:N or SUBJECT=headroom:N, not {item!r}"
+            )
+        if subject not in subjects:
+            raise index_mod.IndexLineError(
+                f"--oom-ballast names {subject!r}, which no --candidate declares"
+            )
+        if subject in rules:
+            raise index_mod.IndexLineError(f"--oom-ballast names {subject!r} twice")
+        rules[subject] = (kind, int(count))
+    return rules
+
+
 class Candidate:
     def __init__(self, spec: str) -> None:
         parts = spec.split(":", 2)
@@ -230,6 +297,25 @@ class Pass:
             raise index_mod.IndexLineError(
                 "a candidate needs a speech runtime family: --speech-family none installs none"
             )
+        self.ballast_rules = parse_ballast(args.oom_ballast, subjects)
+        for option in ("--oom-ballast-bytes", "--predecessor-bundle"):
+            if claims(option, args.qualify_arg):
+                raise index_mod.IndexLineError(
+                    f"--qualify-arg may not set {option}: the pass does, from its own options"
+                )
+        self.streaming = claims_any(STREAM_ENDPOINTS, args.streaming_arg)
+        for option in ("--out", "--source-commit"):
+            if claims(option, args.streaming_arg):
+                raise index_mod.IndexLineError(f"--streaming-arg may not set {option}")
+        if args.streaming_arg and not self.streaming:
+            raise index_mod.IndexLineError(
+                "--streaming-arg names no stream endpoint (--stt-endpoint or --tts-endpoint)"
+            )
+        if self.streaming and not claims_any(WORKER_STATEMENTS, args.streaming_arg):
+            raise index_mod.IndexLineError(
+                "--streaming-arg needs --worker-version or --worker-build: "
+                "a record that states neither is synthetic and cannot be indexed"
+            )
         self.timeouts = dict(STEP_TIMEOUTS_S)
         for item in args.step_timeout:
             name, _, seconds = item.partition("=")
@@ -256,6 +342,8 @@ class Pass:
         self.pending: str | None = None
         self.environment: dict[str, list[str]] = {}
         self.sets: dict[str, str] = {}
+        self.device: dict[str, Any] | None = None
+        self.ballast: dict[str, dict[str, Any]] = {}
 
     # -- running --
 
@@ -264,6 +352,8 @@ class Pass:
             "source_commit": self.args.source_commit,
             "artifact_sets": self.sets,
             "agent_environment": self.environment,
+            "device_memory": self.device,
+            "oom_ballast": self.ballast,
             "row": self.args.row,
             "speech_family": self.args.speech_family,
             "started_at": self.started_at.isoformat(timespec="seconds"),
@@ -468,9 +558,76 @@ class Pass:
         # Not the predecessor bundle: the harness may be what stages it.
         if self.args.sampler and not Path(self.args.sampler).exists():
             raise StepFailed(f"--sampler {self.args.sampler} does not exist")
+        self.check_device(step)
         # Last, so a refused pass has run nothing through sudo.
         if self.run(step, ["sudo", "-n", "true"], check=False).returncode != 0:
             raise StepFailed("sudo would ask for a password, which the pass cannot answer")
+
+    def device_memory(self, step: dict[str, Any]) -> tuple[int | None, str | None]:
+        """Device 0's memory in bytes, or None and why the machine did not say."""
+        argv = [self.args.nvidia_smi, "--id=0", "--query-gpu=memory.total"]
+        argv.append("--format=csv,noheader,nounits")
+        program = Path(argv[0]).name
+        try:
+            done = self.run(step, argv, capture=True, check=False)
+        except OSError as exc:
+            return None, f"`{program}` cannot be run ({exc.strerror})"
+        if done.returncode != 0:
+            return None, f"`{program}` exited {done.returncode}"
+        total = device_memory_bytes(done.stdout)
+        if total is None:
+            return None, f"`{program}` printed no single memory figure for device 0"
+        return total, None
+
+    def size_ballast(self, subject: str, total: int | None, reason: str | None) -> dict[str, Any]:
+        sized: dict[str, Any] = {
+            "rule": None,
+            "bytes": None,
+            "headroom_bytes": None,
+            "reason": "no --oom-ballast names this candidate",
+        }
+        if subject not in self.ballast_rules:
+            return sized
+        kind, count = self.ballast_rules[subject]
+        if kind == "headroom":
+            if total is None:
+                raise StepFailed(
+                    f"{subject}: --oom-ballast headroom:{count} needs the device's memory, "
+                    f"and {reason}"
+                )
+            if count >= total:
+                raise StepFailed(
+                    f"{subject}: a headroom of {count} bytes leaves no ballast on a device "
+                    f"of {total} bytes"
+                )
+            sized.update(rule=kind, bytes=total - count, headroom_bytes=count, reason=None)
+        else:
+            if total is not None and count >= total:
+                raise StepFailed(
+                    f"{subject}: a ballast of {count} bytes does not fit a device of {total} bytes"
+                )
+            sized.update(rule=kind, bytes=count, reason=None)
+        return sized
+
+    def check_device(self, step: dict[str, Any]) -> None:
+        """Size each candidate's ballast and hold the predecessor to the device windows."""
+        windows = bool(self.candidates and self.args.sampler)
+        total, reason = None, None
+        if self.ballast_rules or windows:
+            total, reason = self.device_memory(step)
+            self.device = {"bytes": total, "reason": reason}
+        for candidate in self.candidates:
+            self.ballast[candidate.subject] = self.size_ballast(candidate.subject, total, reason)
+        if not (windows and total is not None):
+            return
+        bundle = self.args.predecessor_bundle
+        problem = "none is named" if not bundle else predecessor_problem(Path(bundle))
+        if problem:
+            raise StepFailed(
+                "this machine has a GPU and the pass samples memory, so the predecessor_idle "
+                f"and after_teardown device windows need a predecessor that loads onto it; "
+                f"--predecessor-bundle: {problem}"
+            )
 
     def lifecycle(self, step: dict[str, Any]) -> None:
         argv = [str(self.repo / "tools/validation/ubuntu-l4-cloud-lifecycle.sh")]
@@ -602,7 +759,7 @@ class Pass:
             "--clips": candidate.clips,
             "--predecessor-bundle": args.predecessor_bundle,
             "--sampler": args.sampler,
-            "--oom-ballast-bytes": args.oom_ballast_bytes,
+            "--oom-ballast-bytes": self.ballast[candidate.subject]["bytes"],
             "--oom-ballast-python": args.oom_ballast_python,
         }
         for flag, value in optional.items():
@@ -615,6 +772,17 @@ class Pass:
             self.run(step, [*argv, "--staging-dir", str(staging), *args.qualify_arg])
         finally:
             step["result"] = read_result(directory / "qualify/record.json", "result", "status")
+
+    def streaming_latency(self, step: dict[str, Any]) -> None:
+        directory = self.out / STREAMING_LATENCY
+        directory.mkdir(exist_ok=True)
+        argv = [self.args.streaming_python, str(self.repo / "tools/validation/slice_measure.py")]
+        argv += ["run", "--out", str(directory / "record.json")]
+        argv += ["--source-commit", self.args.source_commit, *self.args.streaming_arg]
+        try:
+            self.run(step, argv)
+        finally:
+            step["result"] = read_result(directory / "record.json", "result", "status")
 
     def index(self, step: dict[str, Any]) -> None:
         """Index whatever the steps above left; a subject that left nothing has no line."""
@@ -663,6 +831,11 @@ class Pass:
                         )
                     ),
                 )
+        streaming = self.out / STREAMING_LATENCY / "record.json"
+        if streaming.exists():
+            derive(
+                STREAMING_LATENCY, lambda: index_mod.streaming_line(load(streaming), self.envelope)
+            )
         (self.out / "lines.jsonl").write_text(
             "".join(index_mod.dump_line(line) for line in lines), encoding="utf-8"
         )
@@ -706,11 +879,14 @@ class Pass:
                 lambda step, c=candidate: self.qualify(c, step),
                 (provision,),
             )
-        self.not_run(STREAMING_LATENCY, "a pass does not run the streaming measurement yet")
+        if self.streaming:
+            self.step(STREAMING_LATENCY, self.streaming_latency, tuple(ready))
+        else:
+            self.not_run(STREAMING_LATENCY, "no --streaming-arg names a stream endpoint")
         self.step("index", self.index)
         self.write_report(finished=True)
         print(f"pass report: {self.out / 'pass-report.json'}")
-        steps = [step for step in self.steps if step["name"] != STREAMING_LATENCY]
+        steps = [step for step in self.steps if self.streaming or step["name"] != STREAMING_LATENCY]
         return EXIT_OK if all(step["status"] == "ok" for step in steps) else EXIT_STEP_FAILED
 
 
@@ -735,8 +911,30 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--predecessor-bundle", help="deployed first, so teardown can roll back")
     parser.add_argument("--sampler", help="the memory_sample binary for the qualify tool")
-    parser.add_argument("--oom-ballast-bytes", type=int, default=0)
+    parser.add_argument(
+        "--oom-ballast",
+        action="append",
+        default=[],
+        metavar="SUBJECT=bytes:N|headroom:N",
+        help="the device memory a candidate's out-of-memory case holds: N bytes, or the "
+        "device's memory minus N bytes, read from nvidia-smi on this machine; repeatable, "
+        "and a candidate with none skips that case",
+    )
     parser.add_argument("--oom-ballast-python")
+    parser.add_argument("--nvidia-smi", default="nvidia-smi", help="the nvidia-smi to run")
+    parser.add_argument(
+        "--streaming-arg",
+        action="append",
+        default=[],
+        metavar="ARG",
+        help="appended to the slice measurement client's run command; one that names "
+        "--stt-endpoint or --tts-endpoint makes the pass run the streaming-latency step",
+    )
+    parser.add_argument(
+        "--streaming-python",
+        default=sys.executable,
+        help="the interpreter that has the slice measurement client's packages",
+    )
     parser.add_argument(
         "--qualify-arg", action="append", default=[], help="appended to every qualify command"
     )

@@ -29,19 +29,75 @@ tools/validation/validation-pass.py run \
   --candidate stt-whisper:stt-whisper-candidate:$HOME/clips \
   --candidate tts-kokoro:tts-kokoro-candidate \
   --staging-dir /opt/tensorplate-validation/pass-staging \
-  --predecessor-bundle /opt/tensorplate-validation/x86-fixture-smoke \
+  --predecessor-bundle /opt/tensorplate-validation/x86_cuda_smoke \
   --sampler target/release/examples/memory_sample \
+  --oom-ballast-python <an interpreter that imports the runtime's torch> \
+  --oom-ballast stt-whisper=headroom:<bytes> \
+  --oom-ballast tts-kokoro=headroom:<bytes> \
   --session "<the session's name>" --row ubuntu2404-x86-l4-g2s8 \
   --machine "g2-standard-8, one NVIDIA L4" --build "<branch and commit>" \
   --out-dir ~/pass --confirm RESET-TENSORPLATE
 ```
 
 A candidate's subject is its index subject and names its directories, so it
-is lower-case letters, digits and hyphens, and not `lifecycle`, `doctor` or
-`logs`. `--predecessor-bundle`, `--sampler`, `--oom-ballast-bytes`,
-`--oom-ballast-python` and each `--qualify-arg` go to the recipe unchanged.
-The path above is where the harness leaves its own deploy bundle staged for
-the agent to read, which makes it a predecessor every pass has.
+is lower-case letters, digits and hyphens, and not `lifecycle`, `doctor`,
+`logs` or `streaming-latency`. `--predecessor-bundle`, `--sampler`,
+`--oom-ballast-python` and each `--qualify-arg` go to the recipe unchanged,
+and `--oom-ballast` becomes the recipe's `--oom-ballast-bytes` for the one
+candidate it names. A `--qualify-arg` that sets `--oom-ballast-bytes` or
+`--predecessor-bundle`, or abbreviates either, is refused: the report would
+no longer say what ran.
+
+### The predecessor
+
+The recipe deploys the predecessor first so that the teardown can roll back
+to it, and samples memory while it is the active deployment (`predecessor_idle`)
+and again after the rollback (`after_teardown`). A window is `incomplete` when
+a process it samples is never observed, and the device window samples the
+sidecar. A predecessor has to put something on the device for that: the
+fixture the lifecycle harness stages (`x86_fixture_smoke`) selects the
+device-neutral `fixture` profile and does not, and `x86_cuda_smoke` selects
+`cuda_fixture`, whose load runs a matrix product on the device.
+
+Where `nvidia-smi` reports device 0, a pass that has candidates and
+`--sampler` therefore needs `--predecessor-bundle` to name a bundle that does:
+its manifest lists one `python_pytorch_entry`, inside the bundle, and that
+entry names the `cuda` device and one of the runner profiles `cuda_fixture`,
+`faster_whisper` or `kokoro`. `test/models/bundles/v0_1/x86_cuda_smoke` is the
+CUDA smoke fixture; copy it where the agent can read it, as the
+[cloud-row runbook](cloud-row-runbooks.md) does. Preflight refuses any other
+predecessor, and none, before anything runs. Without `--sampler` no window is
+taken, and where `nvidia-smi` reports no device 0 the pass cannot tell that
+the machine has one, so the predecessor is the operator's choice.
+
+### The out-of-memory ballast
+
+The recipe's out-of-memory case deploys the candidate again while a process
+holds device memory, and the case holds only when the load no longer fits in
+what is left. Two candidates of different size do not fit one amount, so each
+candidate is given its own with `--oom-ballast SUBJECT=RULE`, repeatable:
+
+| Rule | Ballast |
+| --- | --- |
+| `bytes:N` | N bytes |
+| `headroom:N` | the memory `nvidia-smi --id=0 --query-gpu=memory.total` reports for device 0 on this machine, less N bytes |
+
+The pass does not know how much memory a candidate needs or how much the
+ballast process takes beside its allocation: choose N from a run of the
+recipe by hand on the same machine type, and expect to adjust it. A
+`headroom` rule is read with `nvidia-smi` (`--nvidia-smi` names another
+program) and evaluated in preflight, so a machine that reports no single
+figure for device 0 is refused there; so is a headroom that leaves no
+ballast and, where the machine reports a figure, a ballast that does not fit
+the device. A candidate that no `--oom-ballast` names gets none: the recipe
+records its out-of-memory case as `not_run`, and a recipe result with a case
+that did not run is not `pass`.
+
+`pass-report.json` records what was used. `device_memory` holds the figure in
+bytes, or null with the reason, and is null when nothing needed it.
+`oom_ballast` holds, for each candidate, the rule (`bytes`, `headroom` or
+null), the resulting `bytes` (null when none), the `headroom_bytes` of a
+headroom rule, and for a candidate without a ballast the reason.
 
 `--staging-dir` is where the recipe writes the bundles of its negative cases,
 which the agent has to read. The agent's unit runs with `ProtectHome` and
@@ -65,7 +121,7 @@ command left none.
 
 | Step | What it runs | When it does not end `ok` |
 | --- | --- | --- |
-| `preflight` | Verifies every file the two sets' `SHA256SUMS` list; that the candidate set's manifest and the checkout are both at `--source-commit`, with no uncommitted change; that the agent's environment file names no interpreter yet; that the staging directory is not hidden from the agent; that the pass is not run as root; and, last, that `sudo` does not ask for a password | Nothing else runs |
+| `preflight` | Verifies every file the two sets' `SHA256SUMS` list; that the candidate set's manifest and the checkout are both at `--source-commit`, with no uncommitted change; that the agent's environment file names no interpreter yet; that the staging directory is not hidden from the agent; that each ballast fits the device and the predecessor can leave the sidecar on it ([above](#the-predecessor)); that the pass is not run as root; and, last, that `sudo` does not ask for a password | Nothing else runs |
 | `lifecycle` | [`ubuntu-l4-cloud-lifecycle.sh`](cloud-row-runbooks.md) on the candidate set, with the upgrade and rollback stages when `--baseline-assets-dir` is given | The pass goes on, and a report the harness wrote is still indexed |
 | `install` | The candidate set's own `install.sh`, then enables both services and waits for the agent to answer. A run with a baseline ends with the baseline installed, so this is an upgrade over it | No later step runs |
 | `speech-family` | With `--speech-family host-built` only: builds the speech runtime packages from a scratch clone of the checkout, as [the family's README](../../packaging/speech-runtime/README.md) describes, at the version of the candidate set's serving package, and installs them with `apt-get` | Doctor still runs; no candidate does |
@@ -74,17 +130,18 @@ command left none.
 | `provision:<subject>` | `tensorplate bundle provision <bundle>` | That candidate's two other steps do not run |
 | `cold-deploy:<subject>` | `sync`, drops the page cache, then times one `tensorplate deploy` of the bundle | The candidate is still qualified |
 | `qualify:<subject>` | Creates the subject's staging directory, then [`candidate-qualify.py`](speech-candidate-recipes.md) on the provisioned bundle | The other candidates still run |
-| `streaming-latency` | Nothing: a pass does not run the streaming measurement yet, so the step is always `not_run` | |
+| `streaming-latency` | The [slice measurement client](slice-measurement.md) with the `--streaming-arg` arguments, when one names a stream endpoint; `not_run` otherwise | The pass goes on, and a record the client wrote is still indexed |
 | `index` | Derives a line for each subject that left a record, into `lines.jsonl` | A subject whose record is malformed has no line; the others keep theirs |
 
 The harness and the recipe report a failing verdict through their exit code,
 so a `lifecycle` or `qualify` step is `failed` when the subject failed, and
 the line indexed from its record says how. The pass exits 0 when every step
-but `streaming-latency` ended `ok`, 1 when one did not, and 2 when it could
-not start: an argument is refused, or the output or scratch directory is not
-new or empty. Exit 0 says the steps ran, not that the indexed lines passed:
-a `doctor` line can read `fail` after a `doctor` step that ended `ok`, and
-the comparison is what judges the lines.
+ended `ok`, not counting `streaming-latency` when no argument named a stream
+endpoint, 1 when one did not, and 2 when it could not start: an argument is
+refused, or the output or scratch directory is not new or empty. Exit 0 says
+the steps ran, not that the indexed lines passed: a `doctor` line can read
+`fail` after a `doctor` step that ended `ok`, and the comparison is what judges
+the lines.
 
 A pass leaves behind the subjects' directories under `--staging-dir`, the
 scratch directory of the family build (`<out-dir>-work` unless `--work-dir`
@@ -106,6 +163,39 @@ group's `SIGKILL` reaches a command that `sudo` runs on a terminal of its
 own (`use_pty`) has not been observed on hardware; check it on the first
 pass. Commands
 that need root run through `sudo`, which must not ask for a password.
+
+### The streaming measurement
+
+`--streaming-arg` appends to the command line of `slice_measure.py run`,
+repeatably, and is written `--streaming-arg=--name=value`, because an argument
+that begins with `--` is not accepted after a space. The pass sets `--out` (`streaming-latency/record.json` in the output directory) and
+`--source-commit` itself and refuses them, or an abbreviation of either, in
+`--streaming-arg`.
+
+```sh
+  --streaming-python <an interpreter with the client's packages> \
+  --streaming-arg=--stt-endpoint=127.0.0.1:<port> \
+  --streaming-arg=--stt-target=<deployment> \
+  --streaming-arg=--stt-language=<language> \
+  --streaming-arg=--audio=<utterance.wav> \
+  --streaming-arg=--worker-version=<release> \
+  --streaming-arg=--iterations=20 \
+```
+
+The step runs only when an argument names `--stt-endpoint` or
+`--tts-endpoint`. With no `--streaming-arg` at all it is `not_run`, and
+arguments that name neither are refused. An endpoint also needs
+`--worker-version` or `--worker-build`: without one the client writes a
+`synthetic` record, which the index refuses. `--streaming-python` is the
+interpreter that has the client's packages, the one running the pass when it
+is not given. The pass starts and stops no worker; the endpoint is one the
+operator already serves. The step runs after the steps a candidate's
+`provision` step needs and, like a candidate's, is `not_run` when one of them
+did not end `ok`.
+
+The client exits 0 only for a `complete` record, so any other result leaves
+the step `failed` with that result beside it, and the record is indexed all
+the same. The index checks the record again before it derives a line.
 
 ### The speech runtime family
 
@@ -183,6 +273,7 @@ is the shape. A subject is one thing a session ran:
 | --- | --- | --- | --- |
 | `lifecycle` | the harness's `lifecycle-report.json` | stages passed, stages total, harness wall time | each stage's status |
 | `doctor` | `tensorplate doctor --output json` | findings, failing findings | each finding's status, and whether the agent's environment file names an interpreter for the backend |
+| `streaming-latency` | the slice measurement client's `record.json` | for each mode and measurement the number of samples and of misses, and the 50th, 95th and 99th percentile in milliseconds, none of them when no session gave a sample | each mode's session outcomes, or `not run` for a mode the record did not run |
 | a candidate, for example `stt-whisper` | the recipe's `record.json`, and the pass's `cold-deploy.json` when there is one | runner load time, deploy wall time, the first request's exchange time, each fixture's median real-time factor and exchange time, per memory window and domain the consumed maximum and each process's peak, and the cold-cache deploy time | the bundle's name, each negative case's outcome with the code observed, teardown, deploy, the cold deploy, the two status snapshots, each memory window's status |
 
 A line is derived, never written by hand:
@@ -288,8 +379,10 @@ The three `runner_*` findings come with the doctor change that reports
 installed runner profiles; a build without it records them as `absent` and
 its `doctor` line cannot be `pass`.
 
-Streaming latency is not part of a pass yet. The measurement exists
-([`slice-measurement.md`](slice-measurement.md)), but no serving worker
-answers it, so a pass names the gap with a `streaming-latency` step that is
-always `not_run`. When a pass runs it, it is a subject of its own, and the
-first pass that carries it names it with `--new-subject`.
+Streaming latency is a subject of its own, `streaming-latency`, and the first
+pass that carries it names it with `--new-subject`. The line's settings carry
+`streaming_iterations`, because percentiles over different numbers of
+sessions are not the same measurement. The measurement is described in
+[`slice-measurement.md`](slice-measurement.md); no serving worker answers it
+yet, so a pass without a stream endpoint names the gap with a
+`streaming-latency` step that is `not_run`.
