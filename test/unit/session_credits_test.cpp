@@ -126,5 +126,27 @@ TEST(InputCredit, CasesMatchFixture) {
   }
   EXPECT_EQ(steps_run, 50U);
 }
+
+TEST(InputCredit, WaitingSegmentsAreThoseNotYetStarted) {
+  InputCredit text{SessionBudgets::for_text_input(48'000).value()};
+  EXPECT_EQ(text.waiting_segments().used(), 0U);
+  EXPECT_EQ(text.waiting_segments().limit(), SessionBudgets::kWaitingTextSegments);
+  ASSERT_TRUE(text.charge(10));
+  ASSERT_TRUE(text.charge(20));
+  EXPECT_EQ(text.waiting_segments().used(), 2U);
+  ASSERT_TRUE(text.start_segment());
+  EXPECT_EQ(text.waiting_segments().used(), 1U);
+  EXPECT_EQ(text.depth(), 2U);
+  ASSERT_TRUE(text.finish_segment());
+  EXPECT_EQ(text.waiting_segments().used(), 1U);
+  // A refused charge leaves the count as it was.
+  ASSERT_TRUE(text.charge(30));
+  ASSERT_FALSE(text.charge(40));
+  EXPECT_EQ(text.waiting_segments().used(), 2U);
+
+  InputCredit audio{SessionBudgets::for_audio_input(32'000).value()};
+  ASSERT_TRUE(audio.charge(640));
+  EXPECT_EQ(audio.waiting_segments(), LogicalSessionUsage{});
+}
 }  // namespace
 }  // namespace tensorplate::serving

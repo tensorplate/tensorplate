@@ -517,6 +517,9 @@ TEST(SessionManager, TextCreditKeepsTwoWaitingSegmentsAndOneActive) {
   ASSERT_FALSE(fourth);
   EXPECT_EQ(fourth.error().context, "input_credit_exceeded");
   EXPECT_EQ(manager.state(key).value(), LogicalSessionState::Failed);
+  // The failure shows what was waiting when the segment was refused.
+  EXPECT_EQ(under_test.observed.back().event, LogicalSessionEvent::Fail);
+  EXPECT_EQ(under_test.observed.back().waiting_segments.used(), 2U);
 }
 
 TEST(SessionManager, CreditReleaseTheCreditRefusesFailsTheSession) {
@@ -885,6 +888,83 @@ TEST(SessionManager, TimerThreadEndsASessionWhoseOutputStalls) {
   (*manager)->notify_clock_advanced();
   ASSERT_EQ(cause.wait_for(1s), std::future_status::ready);
   EXPECT_EQ(cause.get().context, "slow_consumer");
+}
+
+// A stream reports both budgets of its input credit from what the sink is
+// shown, so the waiting-segment count travels with the status it was taken
+// with.
+TEST(SessionManager, TransitionsCarryTheWaitingSegmentUsage) {
+  ManagerUnderTest under_test;
+  auto& manager = *under_test.manager;
+  auto& observed = under_test.observed;
+  const auto text_budgets = SessionBudgets::for_text_input(48'000).value();
+  const auto opened = manager.open(5, text_budgets);
+  ASSERT_TRUE(opened);
+  const auto key = opened->session_key;
+  EXPECT_EQ(opened->waiting_segments.used(), 0U);
+  EXPECT_EQ(opened->waiting_segments.limit(), SessionBudgets::kWaitingTextSegments);
+
+  // Accepted: each segment waits.
+  const auto first = manager.accept_input(key, 100);
+  const auto second = manager.accept_input(key, 200);
+  ASSERT_TRUE(first && second);
+  EXPECT_EQ(first->waiting_segments.used(), 1U);
+  EXPECT_EQ(second->waiting_segments.used(), 2U);
+  EXPECT_EQ(observed.back().waiting_segments, second->waiting_segments);
+
+  // Started: the credit return the sink is shown has one fewer waiting, and
+  // a segment finishing changes nothing that waits.
+  ASSERT_TRUE(manager.start_text_segment(key));
+  EXPECT_FALSE(observed.back().event.has_value());
+  EXPECT_EQ(observed.back().waiting_segments.used(), 1U);
+  EXPECT_EQ(observed.back().status.input_queue_depth, 2U);
+  ASSERT_TRUE(manager.finish_text_segment(key));
+  EXPECT_EQ(observed.back().waiting_segments.used(), 1U);
+  EXPECT_EQ(observed.back().status.input_queue_depth, 1U);
+
+  // A Finalize and a drain take nothing from what waits; the segment that
+  // starts while the session drains still does.
+  const auto finalizing = manager.apply(key, LogicalSessionEvent::Finalize);
+  ASSERT_TRUE(finalizing);
+  EXPECT_EQ(finalizing->waiting_segments.used(), 1U);
+  const auto draining = manager.apply(key, LogicalSessionEvent::HalfClose);
+  ASSERT_TRUE(draining);
+  EXPECT_EQ(draining->state, LogicalSessionState::Draining);
+  EXPECT_EQ(draining->waiting_segments.used(), 1U);
+  EXPECT_EQ(draining->waiting_segments.limit(), SessionBudgets::kWaitingTextSegments);
+  ASSERT_TRUE(manager.start_text_segment(key));
+  EXPECT_EQ(observed.back().state, LogicalSessionState::Draining);
+  EXPECT_EQ(observed.back().waiting_segments.used(), 0U);
+
+  // A cancel shows what was waiting when it was applied.
+  const auto other = manager.open(5, text_budgets)->session_key;
+  ASSERT_TRUE(manager.accept_input(other, 50));
+  const auto cancelled = manager.apply(other, LogicalSessionEvent::Cancel);
+  ASSERT_TRUE(cancelled);
+  EXPECT_EQ(cancelled->waiting_segments.used(), 1U);
+  EXPECT_EQ(observed.back().waiting_segments, cancelled->waiting_segments);
+
+  // A worker's drain of every session carries it too.
+  const auto third = manager.open(5, text_budgets)->session_key;
+  ASSERT_TRUE(manager.accept_input(third, 50));
+  const auto drained = manager.stop_admission_and_drain(
+      Error::make(Error::Code::Unavailable, "worker shutting down", "worker_shutdown"));
+  bool third_seen = false;
+  for (const auto& transition : drained) {
+    if (transition.session_key == third) {
+      third_seen = true;
+      EXPECT_EQ(transition.waiting_segments.used(), 1U);
+    }
+  }
+  EXPECT_TRUE(third_seen);
+
+  // Audio input has no such budget.
+  ManagerUnderTest audio_under_test;
+  const auto audio = audio_under_test.manager->open(5, kBudgets);
+  ASSERT_TRUE(audio);
+  const auto accepted = audio_under_test.manager->accept_input(audio->session_key, 640);
+  ASSERT_TRUE(accepted);
+  EXPECT_EQ(accepted->waiting_segments, LogicalSessionUsage{});
 }
 
 TEST(SessionManager, SinkSeesCreditReturnsAndReactivationInTheOrderApplied) {

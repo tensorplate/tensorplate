@@ -33,6 +33,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Every transition the session manager's sink is shown now carries how
+  many text segments are waiting to start, against the count that may
+  wait (`ManagedSessionTransition::waiting_segments`), taken in the same
+  step as the transition's status. It is the second budget of the input
+  credit a stream reports with each accepted input; the status type under
+  `include/tensorplate/` is unchanged, and a session with audio input
+  reports no use of a zero budget. (V030-E04-F01-T02)
 - A measurement client for the streaming path,
   `tools/validation/slice_measure.py`. It runs paced speech-to-text sessions
   and text-to-speech segments over the stream session envelope and takes a

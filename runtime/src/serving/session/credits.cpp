@@ -105,4 +105,9 @@ LogicalSessionUsage InputCredit::usage() const {
   return LogicalSessionUsage::create(held_bytes_, budgets_.input_credit_bytes())
       .value_or(LogicalSessionUsage{});
 }
+
+LogicalSessionUsage InputCredit::waiting_segments() const {
+  return LogicalSessionUsage::create(waiting_segments_.size(), budgets_.waiting_items())
+      .value_or(LogicalSessionUsage{});
+}
 }  // namespace tensorplate::serving

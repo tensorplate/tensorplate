@@ -25,13 +25,16 @@ namespace tensorplate::serving {
 struct ManagedSessionTransition {
   std::uint64_t session_key = 0;
   /// The event that was applied. None when input credit was returned, which
-  /// changes only `status`.
+  /// changes only `status` and `waiting_segments`.
   std::optional<LogicalSessionEvent> event;
   LogicalSessionState state = LogicalSessionState::Opening;
   LogicalSessionEffects effects;
   std::optional<Error> cause;
   /// State, input credit and output budgets once the event was applied.
   LogicalSessionStatus status;
+  /// Text segments waiting to start, taken with `status`: the second budget
+  /// of the input credit a stream reports. No use of a zero budget for audio.
+  LogicalSessionUsage waiting_segments;
   /// The session's output queue, where the sink queues what the effects
   /// publish. It stays usable after the slot is released.
   std::shared_ptr<BoundedOutputQueue> output;
