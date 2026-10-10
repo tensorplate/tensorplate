@@ -53,6 +53,8 @@ inline constexpr std::string_view kJobMessageMalformed = "job_message_malformed"
 /// @return the header, or Error::Code::ConfigInvalid with reason
 ///   "message_id_empty", or "wire_integer_out_of_range" when an identity
 ///   field, `start_sample` or `utterance_id` exceeds kMaxWireInteger.
+///   A `message_id` is the adapter's own and well-formed UTF-8; an
+///   ill-formed byte would be sent as U+FFFD.
 [[nodiscard]] Result<std::string> encode_job_submit(const JobRequest& request,
                                                     std::string_view message_id);
 
@@ -80,7 +82,8 @@ inline constexpr std::string_view kJobMessageMalformed = "job_message_malformed"
 
 /// The job classes a successful `load_model_response` header declares for a
 /// load that enabled kSpeechJobsCapability, in the header's order. A class
-/// name this adapter does not know is left out.
+/// name this adapter does not know is left out, so the list is empty when it
+/// knows none of them.
 ///
 /// @return Error::Code::InferenceFailed with reason "job_classes_malformed"
 ///   when the field is absent, empty, not an array of strings or repeats a
@@ -92,11 +95,14 @@ inline constexpr std::string_view kJobMessageMalformed = "job_message_malformed"
 
 /// Publishes the PCM of one `audio_chunk` into a buffer the receiver of the
 /// event releases. Called at most once per frame, after every other check of
-/// the message passed.
+/// the message passed. A handle it returns that is released or smaller than
+/// the chunk faults the job with Error::Code::Internal,
+/// "pcm_publisher_handle_unusable", and stays the publisher's to release.
 using PcmPublisher = std::function<Result<BufferRef>(std::span<const std::byte>)>;
 
 /// A frame the job channel does not own: a unary response, a `ready_event`
-/// or a `metric_event`, or a header that is not a JSON object with a `kind`.
+/// or a `metric_event`, an `error_event` without a readable `message_id` and
+/// error, or a header that is not a JSON object with a `kind`.
 struct NotJobMessage {
   friend bool operator==(const NotJobMessage&, const NotJobMessage&) noexcept = default;
 };
@@ -117,10 +123,12 @@ struct MessageRefused {
   friend bool operator==(const MessageRefused&, const MessageRefused&) noexcept = default;
 };
 
-/// A job or session message that cannot be delivered as it stands. `error` is
+/// A job or session message that cannot be delivered as it stands, a `job_*`
+/// or `session_*` kind the sidecar does not send among them. `error` is
 /// Error::Code::InferenceFailed with, in Error::context, the reason the job
-/// value objects give or kJobMessageMalformed; a publisher's error is passed
-/// on unchanged. `job_id` is zero when the message names no readable job.
+/// value objects give or kJobMessageMalformed, except for the publisher
+/// faults named at PcmPublisher and decode_sidecar_message; a publisher's own
+/// error is passed on unchanged. `job_id` is zero when the message names no readable job.
 struct JobMessageFault {
   std::uint64_t job_id = 0;
   Error error;

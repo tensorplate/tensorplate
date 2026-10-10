@@ -213,7 +213,8 @@ the phoneme count, which a backend reports as `failed`.
 [`protocol/fixtures/job_seam.json`](../../protocol/fixtures/job_seam.json)
 holds the ceilings, the stable names, every validation reason, construction
 vectors and per-job event traces. `test/unit/job_value_objects_test.cpp`
-replays all of them. Another implementation of these objects replays every
+replays all of them, reading the file's notation through
+`test/mocks/job_seam_vectors.hpp`. Another implementation of these objects replays every
 vector whose `scope` is `all` and holds its own bounds to `limits`. The
 sidecar's job messages in `python_pytorch_ipc.json` carry these objects over
 the socket; `protocol/rust/tests/python_pytorch_ipc_speech_jobs.rs` replays
@@ -223,6 +224,51 @@ or rule edits the header and the vectors in the same commit. There is no
 `protocol/schemas/job_*.json`: no process exchanges these objects as
 standalone JSON, and a socket transport carries PCM as frame payload bytes,
 not as buffer handles.
+
+### Job messages in the C++ adapter
+
+`runtime/src/adapters/python_pytorch/job_wire.{hpp,cpp}` is the adapter's
+codec for the same messages: an internal unit with no socket, no thread and
+no buffer manager. It builds the header of a `job_submit`, a `job_cancel`
+and a `session_release` from the objects above, and reads one sidecar frame
+into exactly one of:
+
+- a `JobEvent`, for the six `job_*` kinds the sidecar sends;
+- a session release, for `session_released`;
+- a refusal that names one of the adapter's own messages by `message_id`,
+  for an `error_event`: the sidecar names no job in it, so whoever sent the
+  message knows which job, if any, it was;
+- a fault that names the job, for a job message that cannot be delivered as
+  it stands, and for a `job_*` kind the sidecar does not send;
+- nothing of the job protocol's, for every other frame: a unary response,
+  a `ready_event`, a `metric_event`, an `error_event` without a readable
+  `message_id` and error, or a header that is not a JSON object with a
+  `kind`.
+
+The decoder reads the fields it uses by name and ignores any other, as the
+unary exchange does. What it reads it first holds to the schema's type and
+range (an identity is an integer of at most 2^53 - 1, never a boolean or a
+fraction; a token fits 32 bits; only an `audio_chunk` has payload bytes, and
+exactly `payload_length` of them), and a miss is the fault
+`job_message_malformed`. The value then goes through the same factories as
+any other event, so a refusal carries the seam's own reason (`job_id_zero`,
+`token_count_exceeded`, `pcm_misaligned`), with the code `inference_failed`
+that a backend protocol violation carries. An error's texts are cut to the
+seam's 512 bytes at a character boundary instead of being refused, and an
+error code the adapter does not know reads as `internal`. The PCM of an
+`audio_chunk` is published through a callable the caller supplies, once, and
+only after the chunk passed every check against a handle that names no
+buffer, so a chunk the sidecar got wrong is never published. A handle the
+callable returns that cannot hold the chunk is the caller's fault, reported
+as `internal`, and stays the caller's to release.
+
+It also reads the two negotiation fields: whether a `ready_event` lists
+`speech_jobs_v1`, and the `job_classes` of a load response, leaving out a
+capability or class name it does not know. `test/unit/job_wire_test.cpp`
+replays the golden frames and all four sections of the vectors through it;
+the six vectors the socket cannot carry (an in-process buffer handle,
+ill-formed UTF-8, a non-finite probability) are listed there by name. The adapter does not send or read
+these messages on a socket yet.
 
 ### Job messages in the Python sidecar
 

@@ -155,6 +155,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   credit a stream reports with each accepted input; the status type under
   `include/tensorplate/` is unchanged, and a session with audio input
   reports no use of a zero budget. (V030-E04-F01-T02)
+- A codec for the speech job messages in the Python/PyTorch adapter
+  (`runtime/src/adapters/python_pytorch/job_wire.{hpp,cpp}`, internal). It
+  builds the `job_submit`, `job_cancel` and `session_release` headers from
+  the job value objects and reads a sidecar frame into a job event, a
+  session release, a refusal that names one of the adapter's messages, or a
+  fault that names the job; it also reads the `speech_jobs_v1` capability
+  from a `ready_event` and the job classes from a load response. The golden
+  frames and the job seam's vectors are replayed through it. The adapter
+  does not exchange these messages with a sidecar yet. Additive inside
+  protocol 0.1; version constants unchanged. (V030-E04-F03-T01)
 - A measurement client for the streaming path,
   `tools/validation/slice_measure.py`. It runs paced speech-to-text sessions
   and text-to-speech segments over the stream session envelope and takes a

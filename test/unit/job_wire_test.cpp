@@ -9,6 +9,12 @@
 
 #include <gtest/gtest.h>
 
+#if !defined(TP_ENABLE_PYTHON_PYTORCH_SIDECAR) || !TP_ENABLE_PYTHON_PYTORCH_SIDECAR
+TEST(JobWire, FeatureFlagDisabled) {
+  GTEST_SKIP() << "TP_ENABLE_PYTHON_PYTORCH_SIDECAR=OFF";
+}
+#else
+
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -571,6 +577,8 @@ TEST(JobWireDecode, AMessageWithAFieldOfTheWrongShapeFaultsItsJob) {
       {"text is a number", progress, "/result/text", 7, 1},
       {"tokens is an object", progress, "/result/tokens", Json::object(), 1},
       {"a token is text", progress, "/result/tokens/0", "1", 1},
+      {"a token is negative", progress, "/result/tokens/0", -1, 1},
+      {"a token is a fraction", progress, "/result/tokens/0", 1.5, 1},
       {"a token above 2^32-1", progress, "/result/tokens/0", std::uint64_t{1} << 32U, 1},
       {"words is text", progress, "/result/words", "w", 1},
       {"a word is a number", completed_transcript(), "/result/words/0", 7, 1},
@@ -634,6 +642,14 @@ TEST(JobWireDecode, AProgressSequenceOutsideTheSeamsRangeIsNamedByTheSeam) {
   }
 }
 
+TEST(JobWireDecode, AProbabilityNoFloatHoldsIsOutOfRange) {
+  Json vad = golden("vad_frames").at(2);
+  for (const double beyond : {1e300, -1e300, 1.00000000001, -1e-50}) {
+    vad["result"]["probabilities"][1] = beyond;
+    expect_fault(decode(vad), 1, "vad_probability_out_of_range", std::to_string(beyond));
+  }
+}
+
 TEST(JobWireDecode, AnAudioChunkIsPublishedOnceWithItsBytes) {
   ipc::SidecarFrame frame = frame_of(completed_audio(), 1920);
   for (std::size_t i = 0; i < frame.payload.size(); ++i) {
@@ -647,6 +663,42 @@ TEST(JobWireDecode, AnAudioChunkIsPublishedOnceWithItsBytes) {
   const auto& chunk = std::get<AudioChunkResult>(std::get<JobEvent>(message).result()->payload());
   EXPECT_EQ(chunk, (AudioChunkResult{kJobOutputAudioFormat,
                                      PcmWindow{published.handles.front(), 0, 1920}, 0}));
+}
+
+TEST(JobWireDecode, AnAudioChunkTheCodecFaultsIsNeverPublished) {
+  Json progress = completed_audio();
+  progress["kind"] = "job_progress";
+  struct Case {
+    const char* pointer;
+    Json value;
+    std::uint64_t job_id;
+    std::string_view reason;
+  };
+  const std::vector<Case> cases{
+      {"/progress_sequence", 0, 1, "progress_sequence_zero"},
+      {"/progress_sequence", 1501, 1, "progress_sequence_too_large"},
+      {"/session_key", 0, 1, "session_key_zero"},
+      {"/generation", 0, 1, "generation_zero"},
+      {"/job_id", 0, 0, "job_id_zero"},
+      {"/result/format/encoding", "opus", 1, "audio_format_unsupported"},
+      {"/result/format/channels", 2, 1, "audio_format_unsupported"},
+  };
+  for (const Case& c : cases) {
+    Json header = progress;
+    header["progress_sequence"] = 1;
+    header[Json::json_pointer(c.pointer)] = c.value;
+    Published published;
+    const auto message = decode_sidecar_message(frame_of(header, 1920), published.publisher());
+    expect_fault(message, c.job_id, c.reason, c.pointer);
+    EXPECT_TRUE(published.chunks.empty()) << c.pointer;
+  }
+  Json first = progress;
+  first["progress_sequence"] = 1500;
+  Published published;
+  const auto message = decode_sidecar_message(frame_of(first, 1920), published.publisher());
+  ASSERT_TRUE(std::holds_alternative<JobEvent>(message));
+  EXPECT_EQ(std::get<JobEvent>(message).progress_sequence(), 1500U);
+  EXPECT_EQ(published.chunks.size(), 1U);
 }
 
 TEST(JobWireDecode, AnAudioChunkWithoutAPublisherOrWithAFailingOneFaultsItsJob) {
@@ -664,10 +716,18 @@ TEST(JobWireDecode, AnAudioChunkWithoutAPublisherOrWithAFailingOneFaultsItsJob) 
   ASSERT_TRUE(std::holds_alternative<JobMessageFault>(failing));
   EXPECT_EQ(std::get<JobMessageFault>(failing), (JobMessageFault{1, full}));
 
-  // A handle the seam refuses is the publisher's to release.
-  const auto released = decode_sidecar_message(
-      frame, [](std::span<const std::byte>) { return Result<BufferRef>{BufferRef{}}; });
-  expect_fault(released, 1, "pcm_buffer_invalid", "null handle");
+  // A handle that cannot hold the chunk is the publisher's fault and stays its
+  // to release.
+  for (const BufferRef& unusable :
+       {BufferRef{}, BufferRef::create(9, 1918, BufferOwnership::Owned).value()}) {
+    const auto refused = decode_sidecar_message(
+        frame, [&](std::span<const std::byte>) { return Result<BufferRef>{unusable}; });
+    ASSERT_TRUE(std::holds_alternative<JobMessageFault>(refused));
+    const JobMessageFault& fault = std::get<JobMessageFault>(refused);
+    EXPECT_EQ(fault.job_id, 1U);
+    EXPECT_EQ(fault.error.code, Error::Code::Internal);
+    EXPECT_EQ(fault.error.context.value_or(""), "pcm_publisher_handle_unusable");
+  }
 }
 
 TEST(JobWireDecode, FieldsTheAdapterDoesNotReadAreIgnored) {
@@ -781,6 +841,12 @@ TEST(JobWireDecode, ASessionReleasedNeedsItsKeyAndGeneration) {
     header.erase(field);
     expect_fault(decode(header), 0, kJobMessageMalformed, field);
   }
+  Json other = released;
+  other["session_key"] = 7;
+  other["generation"] = 3;
+  const auto message = decode(other);
+  ASSERT_TRUE(std::holds_alternative<SessionReleased>(message));
+  EXPECT_EQ(std::get<SessionReleased>(message), (SessionReleased{7, 3}));
   Json versioned = released;
   versioned["schema_version"] = "1.0";
   expect_fault(decode(versioned), 0, kJobMessageMalformed, "schema_version");
@@ -901,3 +967,5 @@ TEST(JobWireNegotiation, JobClassesAreReadByNameAndHeldToTheirShape) {
 
 }  // namespace
 }  // namespace tensorplate::adapters::python_pytorch
+
+#endif  // TP_ENABLE_PYTHON_PYTORCH_SIDECAR
