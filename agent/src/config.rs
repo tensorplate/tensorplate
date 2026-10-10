@@ -69,6 +69,23 @@ pub struct BackendCapability {
     pub supported_artifact_kinds: Vec<String>,
 }
 
+/// Loopback ports `first` to `last`, inclusive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortRange {
+    pub first: u16,
+    pub last: u16,
+}
+
+impl PortRange {
+    /// The (HTTP, stream) pairs the range holds, in order from `first`.
+    pub fn pairs(self) -> impl Iterator<Item = (u16, u16)> {
+        (self.first..=self.last)
+            .step_by(2)
+            .filter_map(move |http| Some((http, http.checked_add(1).filter(|s| *s <= self.last)?)))
+    }
+}
+
 /// Worker-control bounded-timeout knobs.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,6 +100,10 @@ pub struct WorkerConfig {
     pub serving_bind_port: u16,
     #[serde(default = "default_serving_candidate_bind_port")]
     pub serving_candidate_bind_port: u16,
+    /// The pool the workers' ports are leased from; absent, the two ports
+    /// above are the pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving_port_range: Option<PortRange>,
     #[serde(default)]
     pub serving_use_mock_session: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,6 +124,7 @@ impl Default for WorkerConfig {
             serving_bind_host: default_serving_bind_host(),
             serving_bind_port: default_serving_bind_port(),
             serving_candidate_bind_port: default_serving_candidate_bind_port(),
+            serving_port_range: None,
             serving_use_mock_session: false,
             serving_config_dir: None,
             warm_timeout_ms: default_warm_timeout_ms(),
@@ -406,6 +428,20 @@ fn validate_process_worker_config(
         return Err(AgentError::Config(
             "worker serving active and candidate ports must differ".into(),
         ));
+    }
+    if let Some(range) = worker.serving_port_range {
+        if range.first == 0 || range.first > range.last {
+            return Err(AgentError::Config(format!(
+                "worker.serving_port_range {} to {} must run from a port above 0 up to a port not below it",
+                range.first, range.last
+            )));
+        }
+        if range.pairs().count() < 2 {
+            return Err(AgentError::Config(format!(
+                "worker.serving_port_range {} to {} must hold at least two pairs of ports: a serving worker and its replacement are alive together",
+                range.first, range.last
+            )));
+        }
     }
     if worker.serving_config_dir.is_none() {
         worker.serving_config_dir = Some(state_dir.join("worker-configs"));
