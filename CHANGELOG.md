@@ -154,9 +154,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   new generation, 1, 2 and 4 seconds after the stop, at most three times
   in five minutes. A member that stops again after that is failed until a
   deploy or a rollback is promoted, and `status` reports the failure as
-  `last_error` with `agent_state: degraded`. On SIGTERM or SIGINT the agent
-  asks its workers to drain, kills what is left 10 seconds later and exits
-  0; `signal-hook` is a new pinned dependency. (V030-E03-F01-T03)
+  `last_error` with `agent_state: degraded`. The failure is held in the
+  agent's memory, so an agent restart starts the recorded deployment again
+  with all three restarts available. A restart is not started when the
+  staged manifest's digest is no longer the member's bundle digest, as
+  after a failed deploy of the same id; the member is failed with
+  `load_failed` instead. On SIGTERM or SIGINT the agent asks its workers
+  to drain, kills what is left 10 seconds later and exits 0. No worker is
+  started once the stop has begun; a deploy or rollback in flight is
+  answered `unavailable` and left in flight for the next start's recovery,
+  as after a kill. `signal-hook` is a new pinned dependency.
+  (V030-E03-F01-T03)
 
 - The Python sidecar acts on the `speech_jobs_v1` job and session messages.
   Its `ready_event` lists the capability, and a `load_model` that enables it
@@ -372,8 +380,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   id. Serving config files are named
   `serving-<deployment>-<generation>.json`. A `/health` read that times
   out now counts as not ready instead of failing the deploy as
-  `internal`. A crashed worker is still not restarted, and the two
-  configured serving ports are unchanged. (V030-E03-F01-T03)
+  `internal`. The two configured serving ports are unchanged.
+  (V030-E03-F01-T03)
 
 ## [0.3.1] - 2026-10-01
 

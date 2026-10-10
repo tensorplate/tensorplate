@@ -277,6 +277,10 @@ The failed state is not written to the state file. An agent restart starts
 the recorded deployment again with all three restarts available, and
 status reports the member as failed until then.
 
+Before a restart the registry compares the digest of the staged manifest
+with the bundle digest the member was started under; when they differ the
+member is failed at once and nothing is started.
+
 No restart starts while a deploy holds the member, from the moment its
 `prepare` begins until its candidate is promoted or fails, or its `warm`
 gives up. A promoted generation is therefore never older than the one it
@@ -284,7 +288,9 @@ replaces.
 
 On SIGTERM or SIGINT the agent asks every worker, serving and candidate, to
 drain, kills what is still running at the one 10-second stop deadline they
-share, stops its listener and exits 0.
+share, stops its listener and exits 0. No worker is started once the stop
+has begun, and a deploy in flight is left in flight for the next start's
+recovery.
 
 ## Runtime control client
 

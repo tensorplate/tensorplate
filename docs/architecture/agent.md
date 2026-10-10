@@ -359,6 +359,7 @@ pub trait WorkerControl: Send + Sync {
     fn supervise(&self) -> Vec<MemberEvent>;
     fn member_failure(&self) -> Option<ErrorRecord>;
     fn shutdown(&self);
+    fn stopping(&self) -> bool;
 }
 ```
 
@@ -367,7 +368,10 @@ pub trait WorkerControl: Send + Sync {
 promotion). `supervise`, `member_failure` and `shutdown` do nothing by
 default; the [member registry](#member-registry) implements them to
 restart a serving worker that stops, to report one it no longer restarts,
-and to stop every worker when the agent is told to stop.
+and to stop every worker when the agent is told to stop. `stopping` is
+false by default and true once the registry's `shutdown` has begun; the
+coordinator reads it to begin no transaction and record no failure from
+then on.
 
 The process-backed implementation is selected with
 `worker.mode = "process"` and requires an absolute
@@ -531,21 +535,30 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   or slow inference does not, and `/health` is not polled once a
   generation is ready.
 - **Restart.** The successor is a new generation: a new generation number
-  and serving config, on the same port, from the same staged bundle. It
+  and serving config, on the same port, from the member's staged root. It
   starts 1, 2 and 4 seconds after the stop for the first, second and third
   restart inside a sliding five-minute window; a restart that cannot be
   launched counts as one. From the stop until the new generation is ready,
   by the candidate's rule, status carries no `active.serving_url`.
+- **Staged bundle check.** The staged root is `staging_dir/<deployment_id>`,
+  and a deploy of the same id that fails after staging leaves its own
+  bundle there. Before a restart the registry therefore reads the staged
+  manifest and compares its digest with the bundle digest the member was
+  started under. When they differ, or the manifest cannot be read, nothing
+  is started and the member is failed at once with a `load_failed` error
+  that names both digests. The manifest's digest covers each artifact's
+  digest; artifact bytes are not hashed again. Startup recovery starts the
+  recorded deployment from the same root without this check.
 - **Failure.** A member that stops with three restarts inside the last five
   minutes is failed: nothing is started for it until a deployment is
   promoted, by a deploy or a rollback. Status then reports
   `agent_state: degraded` and the failure as `last_error`, ahead of the
   last transaction's error, and `active` has no `serving_url`.
 
-A failed member is held in the agent's memory only; it is not written to
-the state file. An agent restart starts the recorded deployment again with
-all three restarts available, and until then status reports the member as
-failed.
+A failed member is held in the agent's memory only; neither it nor its
+error is written to the state file, and status reads it from the registry.
+An agent restart therefore starts the recorded deployment again with all
+three restarts available; until then status reports the member as failed.
 
 A restart never starts while a deploy holds the member: from the moment
 `prepare` begins until its candidate is promoted or fails, or its `warm`
@@ -573,10 +586,23 @@ The agent installs a handler for SIGTERM and SIGINT after startup recovery,
 just before its listener opens, so the handler is in place by the time the
 agent logs that it is listening. Before that a signal ends the agent at
 once. The handler only stores a flag. The agent's loop
-then stops the registry: every worker, serving and candidate, is sent
-SIGTERM, all share the one 10-second stop deadline, what is left is killed
-and reaped, nothing is started afterwards, and a deploy still in flight
-fails at once. Then the listener stops and the agent exits 0.
+then stops the registry, which sets its stopping flag before it stops the
+first member: every worker, serving and candidate, is sent SIGTERM, all
+share the one 10-second stop deadline, and what is left is killed and
+reaped. From the flag on no launch begins. Requests are answered on threads
+that are not joined, so the registry also waits for a worker one of them
+was starting or stopping when the flag was set: that thread stops it,
+within the same deadline. When the registry's stop returns, no worker
+process is running and none can be started. The listener stops and the
+agent exits 0.
+
+A deploy or rollback in flight at that moment is not recorded as failed.
+Its caller is answered `unavailable`, if the answer is sent before the
+agent exits, and the transaction stays in the state file at the last phase
+it wrote, exactly as an agent that was killed leaves it; the next start's
+recovery resumes or quarantines it by that phase. A deploy or rollback
+that arrives after the flag is refused with `unavailable` before it writes
+anything.
 
 The packaged systemd unit keeps the default control-group kill and
 `TimeoutStopSec=30`, which a test holds at twice the stop deadline or more.
