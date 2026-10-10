@@ -62,11 +62,12 @@ RUN set -eux; \
     rustup component add rustfmt clippy; \
     chmod -R a+rwX "${RUSTUP_HOME}" "${CARGO_HOME}"
 
-# Bootstrap vcpkg in manifest mode. CI uses the runner-provided vcpkg, but
-# the dev container ships its own so contributors can build offline once
-# the binary cache is warm.
+# Bootstrap vcpkg in manifest mode. The dev container ships its own so
+# contributors can build offline once the binary cache is warm. The clone
+# keeps its history: vcpkg reads the manifest's builtin-baseline commit from
+# it, and a one-commit clone does not hold that commit.
 RUN set -eux; \
-    git clone --depth 1 https://github.com/microsoft/vcpkg "${VCPKG_ROOT}"; \
+    git clone https://github.com/microsoft/vcpkg "${VCPKG_ROOT}"; \
     "${VCPKG_ROOT}/bootstrap-vcpkg.sh" -disableMetrics; \
     mkdir -p "${VCPKG_DEFAULT_BINARY_CACHE}"; \
     chmod -R a+rwX "${VCPKG_ROOT}" "${VCPKG_DEFAULT_BINARY_CACHE}"
