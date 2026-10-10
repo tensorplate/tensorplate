@@ -104,8 +104,11 @@ class BoundedOutputQueue {
   /// stand for several items. If something is already unsent it is also
   /// called here, on the caller's thread, before this returns: do not
   /// register while holding a lock the consumer takes. It must not block or
-  /// call the session manager, whose sink may be the one offering, and it
-  /// must stay callable for as long as any producer holds the queue.
+  /// call the session manager, whose sink may be the one offering. It is
+  /// never unregistered and must stay callable for as long as any producer
+  /// holds the queue, so it captures shared or weak state, not a stream that
+  /// may end first. Two producers may call it at once, and a call may find
+  /// nothing to take: another call's take() or suppress() got there first.
   /// @return false, changing nothing, if `on_takeable` is empty or a
   ///   consumer was already registered.
   [[nodiscard]] bool set_consumer(Consumer on_takeable);

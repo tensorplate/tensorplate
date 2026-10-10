@@ -138,6 +138,8 @@ struct SynthesisCompletedOutput {
   std::uint64_t finalize_sequence = 0;
 };
 
+/// Will gain alternatives, a partial transcript first: a visitor over it
+/// needs a default.
 using TaskOutput = std::variant<EndpointDetectedOutput, FinalTranscriptOutput, AudioChunkOutput,
                                 SegmentCompletedOutput, SynthesisCompletedOutput>;
 
@@ -219,7 +221,11 @@ class SessionDispatch {
 
   /// Every transition the manager's sink receives, in that order, from the
   /// sink: on a transport thread, the manager's timer thread or a dispatch
-  /// thread inside its own report. It only records.
+  /// thread inside its own report. It only records. The sink runs inside
+  /// the manager call that caused the transition, before that call returns.
+  /// Credit returns (no event) arrive while the slot is held, in any state:
+  /// a binding reports one only in active or finalizing, where no
+  /// transition carries a status it must hold back.
   ///
   /// Audio input: a client's half-close finalizes the open utterance, if it
   /// holds audio, with an endpoint of its own reason, once every frame the
@@ -239,12 +245,12 @@ class SessionDispatch {
   /// One audio frame, after SessionManager::accept_input, charged exactly
   /// `frame.size()`, returned `accept_input` for it. The binding has checked
   /// it against the terms; a frame shorter than `min_frame` is accepted, and
-  /// more audio before a Finalize or half-close then fails the session. The
-  /// bytes are copied before the call returns. The frame's credit returns
-  /// when it joins the utterance being collected, which the dispatch ends
-  /// itself (`automatic_endpoint`, DurationLimit) at
-  /// SessionTerms::max_utterance; what it collected stays readable for as
-  /// long as a backend job may read it.
+  /// more audio before a Finalize or half-close then fails the session, an
+  /// automatic endpoint in between or not. The bytes are copied before the
+  /// call returns. The frame's credit returns when it joins the utterance
+  /// being collected, which the dispatch ends itself (`automatic_endpoint`,
+  /// DurationLimit) at SessionTerms::max_utterance; what it collected stays
+  /// readable for as long as a backend job may read it.
   virtual void audio(std::uint64_t session_key, std::span<const std::byte> frame) = 0;
 
   /// One text segment, after SessionManager::accept_input, charged exactly
@@ -259,7 +265,10 @@ class SessionDispatch {
   /// for it. Audio input: the utterance ends here and its final carries
   /// `client_sequence`. Text input: answered by a SynthesisCompletedOutput
   /// when every accepted segment's output was delivered. `finalize_completed`
-  /// is reported before the answer is offered.
+  /// is reported before the answer is offered. A Finalize or an automatic
+  /// endpoint applied while a finalization runs joins it: the manager counts
+  /// one finalization, so exactly one `finalize_completed` is applied for
+  /// all of them, and a second fails the session.
   virtual void finalize(std::uint64_t session_key, std::uint64_t client_sequence) = 0;
 
   /// The transport delivered an item of `kind`, task output or not: call it
