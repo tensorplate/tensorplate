@@ -41,7 +41,10 @@ evaluate_compatibility(descriptor, device_context)
 
 The agent calls `parse_bundle` once, builds a `DeviceContext` from
 `AgentConfig`, runs `evaluate_compatibility`, and projects the first
-violation onto its typed `AgentError`. Callers that want every violation
+violation onto its typed `AgentError`. A deploy then judges the manifest
+against the target's own facts, described under
+[rules judged against the target](#rules-judged-against-the-target).
+Callers that want every violation
 (CLI deploy/doctor rendering) use `parse_and_check` instead — it returns
 the full `CompatibilityResult` without short-circuiting.
 `AgentConfig.backend_capabilities` carries backend capability flags,
@@ -91,12 +94,13 @@ The agent's deploy transaction (V01-E08) runs the verifier **before
 staging**. Phases:
 
 1. `received` — deploy request accepted, correlation ID assigned.
-2. `verified` — `bundle::verify()` returns `Ok`. Parser + compat both passed.
+2. `verified` — `bundle::verify_before_staging()` returns `Ok`. The parser,
+   the compatibility checks and the rules judged against the target passed.
 3. `staged` — bundle copied into `<staging_dir>/<bundle_id>/`.
 4. `capacity_checked` — second-pass memory check against the running worker.
 5. `prepared` / `warmed` / `promoted` / `active` — worker control plane.
 
-If `verify()` returns `Err`, the transaction transitions to `failed` with
+If it returns `Err`, the transaction transitions to `failed` with
 the typed error and never modifies the active deployment.
 
 The serving worker receives the verified candidate through the agent's
@@ -168,8 +172,53 @@ The parser has no facts about other bundles, so a variant declaration that
 reaches it and is otherwise valid always ends in `bundle_r8_reserved_variant`.
 The two codes marked "from the lineage check only", and the unknown-base case
 of `bundle_r8_base_reference`, come from `BundleProfile::check_lineage`, which
-takes the known bases from its caller and has no caller in the deploy path
-yet. See [variant lineage](manifest.md#variant-lineage).
+takes the known bases from its caller. The agent is that caller at deploy.
+See [variant lineage](manifest.md#variant-lineage).
+
+### Rules judged against the target
+
+Some rules compare a manifest with facts only the target holds. The agent
+judges them in `verify_before_staging`, the one validation path of a deploy
+and of a deploy replayed at startup, before anything is staged. Each refusal
+has the shape of the table above: `config_invalid`, non-recoverable, the
+code in `ErrorRecord.context`. Format 0.1 bundles are not judged by them.
+
+| Rule code | Refusal | Facts |
+| --- | --- | --- |
+| `bundle_r8_base_reference`, `bundle_r8_variant_support_level` | A variant's base is not a bundle this agent is serving on a row it holds, or the variant asks for more support than that row gives. | The active deployment and the serving members of the resident set, by name, version and bundle digest; the support level of the row the machine was admitted on. |
+| `bundle_r9_hardware_row` | A `hardware_compatibility` id is not a row of the installed registry. | The registry's rows, whatever their level. |
+| `bundle_r9_support_claim` | The manifest asks for `production` and names a row that is not Production. | Each named row's own support level. |
+| `bundle_r6_runner_selector` | The manifest names a runner profile under a backend that has no descriptor (`tensorrt`, `libtorch`, `vitis_ai`, `mock`) and so declares none. | The backend the hint names. |
+| `bundle_r6_compute_type` | The installed runner profile does not list the manifest's `compute_type`. | The profile's `compute_types` in the probed backend descriptor. |
+
+A runner profile that is not installed, or whose interpreter cannot run, is
+the same rule's refusal and keeps the reason it already had:
+`unsupported` with the platform reason `missing_backend_package` or
+`accelerator_runtime_unavailable` in `context` (see
+[backend registry](../architecture/backend-registry.md)). Parsing a bundle
+never requires its runner to be installed.
+
+The lineage check runs first, on the profile decoded from the manifest text,
+because the parser refuses every variant as reserved. A relational failure
+returns its own code; a declaration that passes goes on to the parser and is
+refused as `bundle_r8_reserved_variant`. A manifest the agent cannot read or
+decode at that point is left to the parser, which reports why. A machine
+holds a row when it was admitted on it and the row's evidence covers it: a
+machine admitted on technical prerequisites, or an agent with no registry,
+knows no base. `bundle_r8_variant_identity` cannot come from a deploy yet:
+no variant deploys, so none is recorded on a base.
+
+The row and claim checks need a loaded registry. A production agent that
+has none refuses every deploy before this point; an embedder that builds a
+coordinator without one skips them, as it skips platform admission.
+A `production` request on rows that are all Production passes these checks.
+That is not a grant: whether the row's evidence covers this bundle's
+artifacts and configuration is not resolved yet, and the level a deployed
+bundle is known at is always the row's, never the one its manifest asks for.
+
+Not judged yet: quotas that several members claim from the same free
+capacity, a warmup declaration required by the target row's benchmark
+profile, and the resolution of a Production request to evidence.
 
 All format 0.2 manifests require `support_level`, `hardware_compatibility` and
 exactly the class block selected by `model_class`. Speech additionally requires
@@ -197,8 +246,10 @@ aggregate budget, capability declarations, legacy selectors and minimum-runtime 
 before descriptor derivation and are not reconstructed from the descriptor.
 The descriptor omits disabled degradation rather than carrying manifest `null`.
 
-The fixture pairs under `test/models/bundles/v0_2/` are synthetic parser tests.
-They do not exercise installed-runner resolution, registry evidence,
-per-domain admission or real speech execution. The lineage fixtures are judged
-against the base facts in `lineage_known_bases.json`, which is test input and
-not a published format.
+The fixture pairs under `test/models/bundles/v0_2/` are synthetic. The parser
+replays every pair, and the agent deploys every pair against a mock worker on
+an agent given the committed platform rows, two installed runner profiles and
+the lineage base bundle. They do not exercise a real runner installation,
+registry evidence, per-domain admission or real speech execution. The lineage
+fixtures are also judged against the base facts in `lineage_known_bases.json`,
+which is test input and not a published format.

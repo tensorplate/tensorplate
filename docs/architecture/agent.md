@@ -284,7 +284,13 @@ overflow.
 
 ## Bundle verifier (V01-E08-F03)
 
-`bundle::verify` is the single deploy-time gate. It checks, in order:
+`bundle::verify_before_staging` is the single deploy-time gate; the
+coordinator passes it the durable state, the platform registry, the
+platform admission and the backend probe reports it holds. A format 0.2
+manifest that declares a variant is first judged against the bundles the
+agent is serving (see
+[rules judged against the target](../bundles/compatibility.md#rules-judged-against-the-target)).
+The gate then checks, in order:
 
 1. The bundle path exists and is a directory.
 2. `manifest.json` is readable JSON with `schema_version: "0.1"`.
@@ -304,8 +310,13 @@ overflow.
    with the typed `Unsupported` error.
 10. `capability_requirements` are satisfied by the configured
     `backend_capabilities` map. Missing capabilities are rejected.
+11. For format 0.2, every `hardware_compatibility` id is a row of the loaded
+    registry, and a `production` request names only Production rows.
+12. The backend's probe report, and the named runner profile's, is
+    `Runnable`; a named runner profile belongs to a backend that declares
+    runner profiles and lists the manifest's `compute_type`.
 
-Manifest-local rule failures retain their typed rule code in the existing
+Rule failures, the parser's and these, retain their typed rule code in the existing
 `ErrorRecord.context`, through the control response and quarantine record. They
 leave the active deployment unchanged and reach neither staging nor the worker.
 
