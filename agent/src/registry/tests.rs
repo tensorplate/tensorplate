@@ -74,6 +74,8 @@ impl MemberProcess for FakeProcess {
 struct FakeLauncher {
     launched: Mutex<Vec<Arc<Handle>>>,
     refuse: AtomicBool,
+    /// Processes launched from now on ignore a request to stop.
+    stubborn: AtomicBool,
     /// The first launch says it has started, then waits to be let finish.
     hold_first: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
 }
@@ -109,7 +111,7 @@ impl ProcessLauncher for FakeLauncher {
             config,
             calls: Mutex::new(Vec::new()),
             exited: AtomicBool::new(false),
-            obeys_terminate: AtomicBool::new(true),
+            obeys_terminate: AtomicBool::new(!self.stubborn.load(Ordering::SeqCst)),
             contact: Mutex::new(ControlContact::Reporting),
             hold_failure: Mutex::new(None),
         });

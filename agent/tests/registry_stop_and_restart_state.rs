@@ -25,6 +25,7 @@ use tensorplate_agent::state::StateStore;
 use tensorplate_agent::supervision::FakeClock;
 use tensorplate_agent::worker::{MemberEvent, WorkerControl};
 use tensorplate_protocol::agent_control::{AgentRunState, RecoveryAction};
+use tensorplate_protocol::agent_state::TransactionKind;
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::ErrorCode;
 
@@ -58,6 +59,7 @@ struct Launcher {
     launched: Mutex<Vec<Arc<AtomicBool>>>,
     /// The next launch says it has started, then waits to be let finish.
     hold: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    ready: Arc<Ready>,
 }
 
 impl Launcher {
@@ -78,7 +80,8 @@ impl Launcher {
 }
 
 impl ProcessLauncher for Launcher {
-    fn launch(&self, _spec: &LaunchSpec) -> AgentResult<Box<dyn MemberProcess>> {
+    fn launch(&self, spec: &LaunchSpec) -> AgentResult<Box<dyn MemberProcess>> {
+        *self.ready.0.lock().unwrap() = Some(spec.member.deployment_id.clone());
         let held = self.hold.lock().unwrap().take();
         if let Some((started, release)) = held {
             started.send(()).unwrap();
@@ -90,12 +93,13 @@ impl ProcessLauncher for Launcher {
     }
 }
 
-/// Every port reports `stt` ready.
-struct Ready;
+/// Every port reports the model of the launch before it ready.
+#[derive(Default)]
+struct Ready(Mutex<Option<String>>);
 
 impl HealthProbe for Ready {
     fn ready_model(&self, _port: u16, _timeout: Duration) -> AgentResult<Option<String>> {
-        Ok(Some("stt".into()))
+        Ok(self.0.lock().unwrap().clone())
     }
 }
 
@@ -128,7 +132,7 @@ fn start_agent(h: &Harness) -> Agent {
         MemberRegistry::new(
             settings,
             launcher.clone(),
-            Arc::new(Ready),
+            launcher.ready.clone(),
             durable_generations(store.clone()),
         )
         .with_clock(clock.clone()),
@@ -144,31 +148,41 @@ fn start_agent(h: &Harness) -> Agent {
 }
 
 fn deploy(agent: &Agent, bundle: &Path) -> AgentResult<()> {
+    deploy_as(agent, "stt", bundle)
+}
+
+fn deploy_as(agent: &Agent, id: &str, bundle: &Path) -> AgentResult<()> {
     agent
         .coord
-        .deploy("stt", bundle, BTreeMap::new(), None, None)
+        .deploy(id, bundle, BTreeMap::new(), None, None)
         .map(|_| ())
 }
 
-#[test]
-fn a_deploy_held_in_prepare_when_the_agent_stops_stays_in_flight_and_the_next_start_resumes_it() {
-    let h = Harness::new();
-    let bundle = common::vision_bundle(h.td.path(), "stt");
-    let agent = start_agent(&h);
+/// Hold the next launch; returns what tells that it began and what lets
+/// it finish.
+fn hold_next_launch(agent: &Agent) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
     let (started, has_started) = mpsc::channel();
     let (release, released) = mpsc::channel();
     *agent.launcher.hold.lock().unwrap() = Some((started, released));
+    (has_started, release)
+}
 
-    let answer = std::thread::scope(|scope| {
+/// Stop `agent`'s registry while `request` is held in a launch; returns
+/// the request's answer once both have ended.
+fn stop_during<T: Send>(
+    agent: &Agent,
+    request: impl FnOnce() -> AgentResult<T> + Send,
+) -> AgentResult<T> {
+    let (has_started, release) = hold_next_launch(agent);
+    std::thread::scope(|scope| {
         // Dropped if this closure panics, which lets the held launch end.
         let release = release;
-        let deploying = scope.spawn(|| deploy(&agent, &bundle));
+        let requesting = scope.spawn(request);
         has_started.recv_timeout(HELD).expect("the launch starts");
         let (done, is_done) = mpsc::channel();
-        let stopping = &agent;
         scope.spawn(move || {
-            stopping.registry.shutdown();
-            assert_eq!(stopping.launcher.running(), 0, "a worker outlived shutdown");
+            agent.registry.shutdown();
+            assert_eq!(agent.launcher.running(), 0, "a worker outlived shutdown");
             done.send(()).unwrap();
         });
         assert!(
@@ -176,10 +190,18 @@ fn a_deploy_held_in_prepare_when_the_agent_stops_stays_in_flight_and_the_next_st
             "shutdown returned while a worker was starting"
         );
         release.send(()).unwrap();
-        let answer = deploying.join().unwrap();
+        let answer = requesting.join().unwrap();
         is_done.recv_timeout(HELD).expect("shutdown returns");
         answer
-    });
+    })
+}
+
+#[test]
+fn a_deploy_held_in_prepare_when_the_agent_stops_stays_in_flight_and_the_next_start_resumes_it() {
+    let h = Harness::new();
+    let bundle = common::vision_bundle(h.td.path(), "stt");
+    let agent = start_agent(&h);
+    let answer = stop_during(&agent, || deploy(&agent, &bundle));
 
     let err = answer.expect_err("the deploy does not complete");
     assert!(matches!(err, AgentError::Stopping), "{err}");
@@ -219,6 +241,29 @@ fn a_deploy_held_in_prepare_when_the_agent_stops_stays_in_flight_and_the_next_st
         Some("stt")
     );
     assert_eq!(next.launcher.running(), 1);
+}
+
+#[test]
+fn a_rollback_held_in_prepare_when_the_agent_stops_stays_in_flight() {
+    let h = Harness::new();
+    let agent = start_agent(&h);
+    deploy_as(&agent, "stt", &common::vision_bundle(h.td.path(), "stt")).expect("deploy");
+    deploy_as(&agent, "tts", &common::vision_bundle(h.td.path(), "tts")).expect("deploy");
+
+    let answer = stop_during(&agent, || agent.coord.rollback(None));
+
+    let err = answer.expect_err("the rollback does not complete");
+    assert!(matches!(err, AgentError::Stopping), "{err}");
+    let state = agent.store.snapshot().expect("state");
+    let tx = state.in_flight_transaction.expect("still in flight");
+    assert_eq!(tx.kind, TransactionKind::Rollback);
+    assert_eq!(tx.phase, DeployState::CapacityChecked);
+    assert_eq!(tx.failure, None);
+    assert_eq!(state.last_error, None);
+    assert_eq!(
+        state.active.map(|active| active.deployment_id).as_deref(),
+        Some("tts")
+    );
 }
 
 /// Stop the serving worker and step the registry until its successor serves.

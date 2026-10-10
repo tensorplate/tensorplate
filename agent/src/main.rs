@@ -2120,4 +2120,96 @@ mod tests {
              exactly the failure the retry exists for"
         );
     }
+
+    /// Records what the agent's loop asks of its worker control, and sets
+    /// the loop's stop flag at the third supervision step.
+    struct RecordingWorkers {
+        inner: tensorplate_agent::MockWorkerControl,
+        calls: std::sync::Mutex<Vec<&'static str>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl tensorplate_agent::WorkerControl for RecordingWorkers {
+        fn prepare(
+            &self,
+            tx: &str,
+            candidate: &tensorplate_protocol::worker_control::CandidateRef,
+            timeout: Duration,
+        ) -> tensorplate_agent::AgentResult<()> {
+            self.inner.prepare(tx, candidate, timeout)
+        }
+        fn warm(
+            &self,
+            tx: &str,
+            candidate: &tensorplate_protocol::worker_control::CandidateRef,
+            timeout: Duration,
+        ) -> tensorplate_agent::AgentResult<tensorplate_agent::worker::WorkerReadiness> {
+            self.inner.warm(tx, candidate, timeout)
+        }
+        fn promote(
+            &self,
+            tx: &str,
+            candidate: &tensorplate_protocol::worker_control::CandidateRef,
+        ) -> tensorplate_agent::AgentResult<()> {
+            self.inner.promote(tx, candidate)
+        }
+        fn unload(&self, deployment_id: &str) {
+            self.inner.unload(deployment_id);
+        }
+        fn active_deployment_id(&self) -> tensorplate_agent::AgentResult<Option<String>> {
+            self.inner.active_deployment_id()
+        }
+        fn supervise(&self) -> Vec<tensorplate_agent::worker::MemberEvent> {
+            let mut calls = self.calls.lock().expect("calls");
+            calls.push("supervise");
+            if calls.len() == 3 {
+                self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Vec::new()
+        }
+        fn shutdown(&self) {
+            self.calls.lock().expect("calls").push("shutdown");
+        }
+    }
+
+    #[test]
+    fn the_loop_supervises_the_workers_until_it_is_told_to_stop_and_then_stops_them() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let td = tempfile::TempDir::new().expect("temp dir");
+        let mut config = shipped_config();
+        config.socket_path = Some(td.path().join("agent.sock"));
+        config.state_dir = td.path().join("state");
+        let stop = Arc::new(AtomicBool::new(false));
+        let workers = Arc::new(RecordingWorkers {
+            inner: tensorplate_agent::MockWorkerControl::new(),
+            calls: Mutex::new(Vec::new()),
+            stop: stop.clone(),
+        });
+        let store = Arc::new(
+            tensorplate_agent::StateStore::open(&config.state_dir).expect("open the state"),
+        );
+        let coordinator = Arc::new(tensorplate_agent::Coordinator::new(
+            config.clone(),
+            store,
+            workers.clone(),
+        ));
+        let mut server =
+            tensorplate_agent::Server::start(&config, coordinator).expect("start the listener");
+        // Ends the loop if it never supervises, so the test fails instead
+        // of hanging.
+        let watchdog = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(10));
+            watchdog.store(true, Ordering::Relaxed);
+        });
+
+        super::run_until_stopped(&mut server, None, &stop);
+
+        assert_eq!(
+            *workers.calls.lock().expect("calls"),
+            ["supervise", "supervise", "supervise", "shutdown"]
+        );
+    }
 }

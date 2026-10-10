@@ -582,6 +582,7 @@ fn shutdown_waits_for_a_successor_that_was_starting_and_stops_it() {
     exit(&f.serve("stt"));
     f.registry.supervise();
     f.clock.advance(secs(1));
+    f.launcher.stubborn.store(true, Ordering::SeqCst);
     let (has_started, release) = hold_next_launch(&f);
 
     std::thread::scope(|scope| {
@@ -594,7 +595,7 @@ fn shutdown_waits_for_a_successor_that_was_starting_and_stops_it() {
         let stopping = &f;
         scope.spawn(move || {
             stopping.registry.shutdown();
-            assert_eq!(stopping.launcher.handle(2).calls(), ["terminate"]);
+            assert_eq!(stopping.launcher.handle(2).calls(), ["terminate", "kill"]);
             done.send(()).unwrap();
         });
         assert!(
@@ -718,6 +719,8 @@ fn a_member_that_ignores_shutdown_is_killed_at_the_stop_deadline() {
 #[test]
 fn shutdown_waits_for_a_launch_that_had_begun_and_stops_it() {
     let f = fixture();
+    // The thread that launched it stops it, which takes the stop deadline.
+    f.launcher.stubborn.store(true, Ordering::SeqCst);
     let (has_started, release) = hold_next_launch(&f);
 
     std::thread::scope(|scope| {
@@ -730,7 +733,7 @@ fn shutdown_waits_for_a_launch_that_had_begun_and_stops_it() {
         let stopping = &f;
         scope.spawn(move || {
             stopping.registry.shutdown();
-            assert_eq!(stopping.launcher.handle(1).calls(), ["terminate"]);
+            assert_eq!(stopping.launcher.handle(1).calls(), ["terminate", "kill"]);
             done.send(()).unwrap();
         });
         assert!(

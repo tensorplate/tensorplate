@@ -868,9 +868,6 @@ impl WorkerControl for MemberRegistry {
         }
         let displaced = {
             let mut members = self.members()?;
-            if members.stopping {
-                return Err(AgentError::Stopping);
-            }
             members.preparing += 1;
             members.take_candidate()
         };
@@ -988,7 +985,6 @@ impl WorkerControl for MemberRegistry {
         if let Ok(mut members) = self.members() {
             if members.names(members.serving, deployment_id) {
                 stopped.extend(members.take_serving());
-                members.forget_restart();
             }
             if members.names(members.candidate, deployment_id) {
                 stopped.extend(members.take_candidate().map(|(_, member)| member));
