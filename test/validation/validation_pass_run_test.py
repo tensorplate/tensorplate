@@ -54,6 +54,9 @@ FAKES = {
     "sysctl": EXIT,
     "sync": EXIT,
     "apt-get": EXIT,
+    # BSD install has no --directory, so the staging directory is made here.
+    "install": 'if [ "$1" = --directory ]; then\n  for last; do :; done\n  mkdir -p "$last"\n  exit 0\nfi\n'
+    + 'exec /usr/bin/install "$@"\n',
     "python3.12": EXIT,
     "dpkg-deb": EXIT + f"echo '{DEB_VERSION}-1'\n",
     "tensorplate": """case " $* " in *" --output json "*) ;; *) exit 64 ;; esac
