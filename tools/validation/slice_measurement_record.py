@@ -65,6 +65,7 @@ CHAIN = {
         "call_start",
         "ready",
         "first_audio_sent",
+        "last_audio_scheduled",
         "last_audio_sent",
         "finalize_sent",
         "endpoint",
@@ -73,6 +74,7 @@ CHAIN = {
     "tts": (
         "call_start",
         "ready",
+        "text_segment_scheduled",
         "text_segment_sent",
         "first_audio_chunk",
         "segment_completed",
@@ -93,13 +95,23 @@ RECEIVED = (
     "synthesis_completed",
 )
 
+# The input a mode's answer is timed from: when it was due, and when it was sent.
+INPUT = {
+    "stt": ("last_audio_scheduled", "last_audio_sent"),
+    "tts": ("text_segment_scheduled", "text_segment_sent"),
+}
+
+# A session whose timed input was sent later than this after it was due gives
+# no sample for a measurement that starts there.
+MAX_INPUT_LAG_MS = 100
+
 # name -> (from, to, the server event that ends it)
 MEASUREMENTS = {
     "stt": {
         "session_initialization": ("call_start", "ready", "ready"),
         "call_start_to_first_transcript": ("call_start", "final_transcript", "final_transcript"),
         "last_audio_to_final_transcript": (
-            "last_audio_sent",
+            "last_audio_scheduled",
             "final_transcript",
             "final_transcript",
         ),
@@ -107,10 +119,17 @@ MEASUREMENTS = {
     "tts": {
         "session_initialization": ("call_start", "ready", "ready"),
         "call_start_to_first_audio": ("call_start", "first_audio_chunk", "audio_chunk"),
-        "segment_to_first_audio": ("text_segment_sent", "first_audio_chunk", "audio_chunk"),
-        "segment_to_completion": ("text_segment_sent", "segment_completed", "segment_completed"),
+        "segment_to_first_audio": ("text_segment_scheduled", "first_audio_chunk", "audio_chunk"),
+        "segment_to_completion": (
+            "text_segment_scheduled",
+            "segment_completed",
+            "segment_completed",
+        ),
     },
 }
+
+# The answers a completed session holds, each a single server event.
+ANSWERS = {"stt": ("endpoint", "final"), "tts": ("segment", "synthesis")}
 
 BYTES_PER_SAMPLE = {"pcm_s16le": 2, "mulaw": 1}
 
@@ -145,6 +164,7 @@ def new_session(mode: str, index: int, call_start_ns: int) -> dict[str, Any]:
             "credit_waits": 0,
             "finalize_sequence": None,
             "max_pacing_lag_ns": None,
+            "input_lag_ns": None,
         }
         server: dict[str, Any] = {"partials": 0, "limits": None, "endpoint": None, "final": None}
     else:
@@ -154,6 +174,7 @@ def new_session(mode: str, index: int, call_start_ns: int) -> dict[str, Any]:
             "credit_waits": 0,
             "segment_id": None,
             "finalize_sequence": None,
+            "input_lag_ns": None,
         }
         server = {
             "limits": None,
@@ -185,9 +206,11 @@ def new_session(mode: str, index: int, call_start_ns: int) -> dict[str, Any]:
 
 def derive_measurements(mode: str, session: dict[str, Any]) -> dict[str, Any]:
     boundaries = session["boundaries"]
+    due, sent = (boundaries[name] for name in INPUT[mode])
+    late = sent is not None and sent - due > MAX_INPUT_LAG_MS * 1_000_000
     derived = {}
     for name, (start, end, event) in MEASUREMENTS[mode].items():
-        valid = True
+        valid = not (late and start == INPUT[mode][0])
         if name == "call_start_to_first_transcript":
             if boundaries["first_partial"] is not None:
                 end, event = "first_partial", "partial_transcript"
@@ -216,11 +239,14 @@ def distribution(samples: list[int | None]) -> dict[str, Any]:
     return summary
 
 
-def derive_summary(mode: str, sessions: list[dict[str, Any]]) -> dict[str, Any]:
-    measured = [derive_measurements(mode, session) for session in sessions]
-    return {
-        name: distribution([entry[name]["ns"] for entry in measured]) for name in MEASUREMENTS[mode]
-    }
+def derive_summary(mode: str, section: dict[str, Any]) -> dict[str, Any]:
+    """Each measurement over the sessions that completed with no finding; the rest are misses."""
+    samples: dict[str, list[int | None]] = {name: [] for name in MEASUREMENTS[mode]}
+    for session in section["sessions"]:
+        sound = session["outcome"] == "completed" and not session_findings(mode, section, session)
+        for name, entry in derive_measurements(mode, session).items():
+            samples[name].append(entry["ns"] if sound else None)
+    return {name: distribution(values) for name, values in samples.items()}
 
 
 def derive_gpu_summary(samples: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -303,10 +329,16 @@ def _describe(session: dict[str, Any]) -> str:
     return outcome
 
 
+_RUN_ENDS = {None: "did not end", "interrupt": "interrupted", "error": "ended by an error ({})"}
+
+
 def derive_result(record: dict[str, Any]) -> dict[str, Any]:
-    """The run's status and why, from the sessions only."""
+    """The run's status and why, from how it ended and from the sessions."""
     failed: list[str] = []
     incomplete: list[str] = []
+    ended = record["run"]["ended_by"]
+    if ended != "completed":
+        failed.append(f"run: {_RUN_ENDS[ended].format(record['run']['error'])}")
     for mode in MODES:
         section = record[mode]
         if section is None:
@@ -337,7 +369,7 @@ def finalize(record: dict[str, Any]) -> dict[str, Any]:
             continue
         for session in section["sessions"]:
             session["measurements"] = derive_measurements(mode, session)
-        section["summary"] = derive_summary(mode, section["sessions"])
+        section["summary"] = derive_summary(mode, section)
     record["gpu"]["summary"] = derive_gpu_summary(record["gpu"]["samples"])
     record["result"] = derive_result(record)
     return record
@@ -415,11 +447,10 @@ def _check_outcome(mode: str, label: str, session: dict[str, Any], vocab: dict[s
                 )
     ended_clean = closed is not None and closed["state"] == "closed" and closed["reason"] is None
     if outcome == "completed":
-        answers = ("endpoint", "final") if mode == "stt" else ("segment", "synthesis")
         reached = all(boundaries[name] is not None for name in CHAIN[mode])
         if not (reached and ended_clean and status == "OK" and closed["code"] is None):
             raise RecordError(f"{label}: completed without every boundary, a clean close and OK")
-        if any(server[name] is None for name in answers) or server["limits"] is None:
+        if any(server[name] is None for name in ANSWERS[mode]) or server["limits"] is None:
             raise RecordError(f"{label}: completed without the answers it measures")
         if mode == "tts" and server["output_format"] is None:
             raise RecordError(f"{label}: completed without an output format")
@@ -447,25 +478,49 @@ def _check_stt_input(section: dict[str, Any]) -> int:
     return declared["frame_ms"] * 1_000_000
 
 
-def _check_pacing(label: str, section: dict[str, Any], session: dict[str, Any], frame: int) -> None:
+def _check_counts(mode: str, label: str, session: dict[str, Any]) -> None:
+    """Hold the session's counts to the events its other fields record."""
+    server, boundaries = session["server"], session["boundaries"]
+    single = sum(server[name] is not None for name in (*ANSWERS[mode], "closed"))
+    many = server["partials"] if mode == "stt" else server["chunks"]
+    counted = server["accepted_events"] + server["ignored_events"] + many + single
+    if server["events_received"] < counted + (boundaries["ready"] is not None):
+        raise RecordError(f"{label}: events_received is below the events the record counts")
+    if mode == "stt":
+        if boundaries["first_partial"] is not None and not server["partials"]:
+            raise RecordError(f"{label}: first_partial is set and no partial arrived")
+        return
+    audio = (server["audio_bytes"], server["audio_samples"], server["audio_sha256"])
+    if not server["chunks"] and (*audio, boundaries["first_audio_chunk"]) != (0, 0, None, None):
+        raise RecordError(f"{label}: audio is recorded and no chunk arrived")
+
+
+def _check_input(
+    mode: str, label: str, section: dict[str, Any], session: dict[str, Any], frame: int
+) -> None:
     client, boundaries = session["client"], session["boundaries"]
-    first, last = boundaries["first_audio_sent"], boundaries["last_audio_sent"]
+    due, sent = (boundaries[name] for name in INPUT[mode])
+    lag = None if sent is None else sent - due
+    if client["input_lag_ns"] != lag:
+        raise RecordError(f"{label}: input_lag_ns is not {INPUT[mode][1]} less {INPUT[mode][0]}")
+    if mode == "tts":
+        return
+    first = boundaries["first_audio_sent"]
     if (first is None) != (client["frames_sent"] == 0):
         raise RecordError(f"{label}: frames_sent and first_audio_sent do not agree")
     if (first is None) != (client["max_pacing_lag_ns"] is None):
         raise RecordError(f"{label}: max_pacing_lag_ns and first_audio_sent do not agree")
-    if last is None:
+    if lag is None:
         return
     if client["frames_sent"] != section["input"]["frames"]:
         raise RecordError(f"{label}: last_audio_sent is set before every frame was sent")
-    lag = last - first - (client["frames_sent"] - 1) * frame
-    if lag < 0:
-        raise RecordError(f"{label}: the audio was sent faster than real time")
+    if due != first + (client["frames_sent"] - 1) * frame:
+        raise RecordError(f"{label}: last_audio_scheduled is not the last frame's place in time")
     if client["max_pacing_lag_ns"] < lag:
         raise RecordError(f"{label}: max_pacing_lag_ns is below the last frame's lag")
 
 
-def _check_gpu(gpu: dict[str, Any]) -> None:
+def _check_gpu(gpu: dict[str, Any], loopback: bool) -> None:
     status, samples = gpu["status"], gpu["samples"]
     if status == "sampled":
         if not samples or gpu["reason"] is not None or not gpu["interval_ms"]:
@@ -474,10 +529,30 @@ def _check_gpu(gpu: dict[str, Any]) -> None:
         raise RecordError(f"gpu: {status} carries samples or the wrong reason")
     if status == "not_requested" and gpu["interval_ms"] is not None:
         raise RecordError("gpu: not_requested carries an interval")
+    whose = None if status != "sampled" else "serving" if loopback else "client_only"
+    if gpu["machine"] != whose:
+        raise RecordError(f"gpu: machine is {gpu['machine']!r} and the targets make it {whose!r}")
+    named = [device["index"] for device in gpu["devices"]]
+    if sorted(set(named)) != named or set(named) != {sample["index"] for sample in samples}:
+        raise RecordError("gpu: devices are not the devices the samples name, each once in order")
     for earlier, later in itertools.pairwise(samples):
         if later["at_ns"] < earlier["at_ns"]:
             raise RecordError("gpu: samples are not in time order")
     _require_derived("gpu summary", gpu["summary"], derive_gpu_summary(samples))
+
+
+def _check_claims(record: dict[str, Any]) -> None:
+    """Hold what the record says of itself to what it carries."""
+    tool, worker, run = record["tool"], record["worker"], record["run"]
+    if tool["generator"] != tool["grpcio"]:
+        raise RecordError("tool: the generator is not the grpcio release")
+    if record["provenance"] == "recorded" and tool["source_commit"] is None:
+        raise RecordError("provenance: recorded needs the tool's source commit")
+    stated = worker["version"] is not None or worker["build"] is not None
+    if stated != (worker["source"] == "operator_stated"):
+        raise RecordError("worker: source does not agree with the version and build")
+    if (run["error"] is None) != (run["ended_by"] != "error"):
+        raise RecordError("run: error does not agree with ended_by")
 
 
 def check_record(record: Any) -> tuple[str, str]:
@@ -491,18 +566,21 @@ def check_record(record: Any) -> tuple[str, str]:
         "codes": _enum(ERROR_SCHEMA_PATH, "code") | {"unspecified"},
     }
     try:
-        if record["tool"]["generator"] != record["tool"]["grpcio"]:
-            raise RecordError("tool: the generator is not the grpcio release")
+        _check_claims(record)
+        ended = record["run"]["ended_by"] == "completed"
+        loopback = True
         for mode in MODES:
             section = record[mode]
             if section is None:
                 continue
+            target = section["target"]
+            loopback = loopback and target["loopback"]
+            if (target["generation"] is None) != (target["descriptor_digest"] is None):
+                raise RecordError(f"{mode} target: a generation without a digest, or the reverse")
             frame = _check_stt_input(section) if mode == "stt" else 0
             sessions = section["sessions"]
-            expected = (
-                0 if section["target"]["connect_ns"] is None else record["settings"]["iterations"]
-            )
-            if len(sessions) != expected:
+            expected = 0 if target["connect_ns"] is None else record["settings"]["iterations"]
+            if len(sessions) > expected or (ended and len(sessions) < expected):
                 raise RecordError(f"{mode}: {len(sessions)} sessions recorded, {expected} expected")
             latest = 0
             for position, session in enumerate(sessions):
@@ -513,15 +591,15 @@ def check_record(record: Any) -> tuple[str, str]:
                 if [entry["stage"] for entry in session["server_stages"]] != list(SERVER_STAGES):
                     raise RecordError(f"{label}: server_stages is not the registered stage list")
                 _check_outcome(mode, label, session, vocab)
-                if mode == "stt":
-                    _check_pacing(label, section, session, frame)
+                _check_counts(mode, label, session)
+                _check_input(mode, label, section, session, frame)
                 _require_derived(
                     f"{label}: measurements",
                     session["measurements"],
                     derive_measurements(mode, session),
                 )
-            _require_derived(f"{mode} summary", section["summary"], derive_summary(mode, sessions))
-        _check_gpu(record["gpu"])
+            _require_derived(f"{mode} summary", section["summary"], derive_summary(mode, section))
+        _check_gpu(record["gpu"], loopback)
         _require_derived("result", record["result"], derive_result(record))
     except RecordError as exc:
         return "invalid", str(exc)

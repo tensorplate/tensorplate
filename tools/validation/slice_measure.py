@@ -8,14 +8,17 @@ monotonic clock, at every boundary a caller can see. It speaks the stream
 session envelope through bindings generated at start from
 `protocol/proto/tensorplate/stream/v1/session.proto` with `grpcio-tools`;
 it does not use or import the SDK. The record's shape and its check are in
-`slice_measurement_record.py`; it holds counts, sizes, digests and times only.
+`slice_measurement_record.py`; it holds no audio, text, transcript or address.
 
-Exit status of `run`: the record check's, or 2 when no record could be written.
+`run` writes the record before the first session and again after each one, so
+a run that is interrupted or fails leaves a record that says so. Exit status
+of `run`: the record check's, or 2 when no record could be written.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import hashlib
 import importlib
@@ -27,13 +30,14 @@ import platform
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import wave
-from collections.abc import Callable
+import traceback
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -43,15 +47,25 @@ PROTO_PATH = REPO_ROOT / "protocol/proto/tensorplate/stream/v1/session.proto"
 
 sys.path.insert(0, str(HERE))
 import slice_measurement_record as record_mod  # noqa: E402
+from candidate_audio import AudioError, pcm16_bytes, read_wav_pcm16_mono  # noqa: E402
+from candidate_record import sha256_digest  # noqa: E402
 
 MS = 1_000_000
-GPU_QUERY = ("--query-gpu=index,utilization.gpu,memory.used,memory.total", "--format=csv")
+GPU_QUERY = ("--query-gpu=index,name,utilization.gpu,memory.used,memory.total", "--format=csv")
 GPU_COLUMNS = {
     "index": "index",
     "utilization.gpu [%]": "utilization_percent",
     "memory.used [MiB]": "memory_used_mib",
     "memory.total [MiB]": "memory_total_mib",
 }
+# The server events a session of each mode can be sent, beside those of every session.
+SESSION_BODIES = ("ready", "accepted", "session_closed")
+MODE_BODIES = {
+    "stt": ("partial_transcript", "endpoint_detected", "final_transcript"),
+    "tts": ("audio_chunk", "segment_completed", "synthesis_completed"),
+}
+PROTOCOL_NAME = "[ -~]{1,64}"
+LABEL = "[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}"
 
 
 class MeasureError(Exception):
@@ -78,10 +92,6 @@ class Bindings(NamedTuple):
 
 
 _bindings: Bindings | None = None
-
-
-def sha256_digest(data: bytes) -> str:
-    return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 def load_bindings(out_dir: Path) -> Bindings:
@@ -130,16 +140,20 @@ def numbers(message: Any, *fields: str) -> dict[str, Any]:
 
 
 class Target(NamedTuple):
+    """A deployment as the Open names it; a worker that reports no generation has neither."""
+
     endpoint: str
     deployment_id: str
-    generation: int
-    descriptor_digest: str
+    generation: int | None
+    descriptor_digest: str | None
 
     @classmethod
     def parse(cls, endpoint: str, spec: str) -> Target:
         parts = spec.split(":", 2)
+        if len(parts) == 1 and spec:
+            return cls(endpoint, spec, None, None)
         if len(parts) != 3 or not parts[1].isdigit() or int(parts[1]) < 1:
-            raise MeasureError(f"target {spec!r} is not DEPLOYMENT:GENERATION:DIGEST")
+            raise MeasureError(f"target {spec!r} is not DEPLOYMENT or DEPLOYMENT:GENERATION:DIGEST")
         if re.fullmatch("sha256:[0-9a-f]{64}", parts[2]) is None:
             raise MeasureError(f"target {spec!r}: the digest is not sha256: and 64 hex digits")
         return cls(endpoint, parts[0], int(parts[1]), parts[2])
@@ -155,14 +169,13 @@ class Target(NamedTuple):
 def load_audio(path: Path, frame_ms: int) -> dict[str, Any]:
     """Mono 16-bit PCM from a WAV file, cut into frames of `frame_ms`."""
     try:
-        with wave.open(str(path), "rb") as source:
-            shape = (source.getnchannels(), source.getsampwidth(), source.getcomptype())
-            rate, data = source.getframerate(), source.readframes(source.getnframes())
-    except (OSError, EOFError, wave.Error) as exc:
-        raise MeasureError(f"{path.name}: not a readable WAV file: {exc}") from exc
+        rate, samples = read_wav_pcm16_mono(path)
+    except AudioError as exc:
+        raise MeasureError(str(exc)) from exc
+    data = pcm16_bytes(samples)
     per_frame, remainder = divmod(rate * frame_ms, 1000)
-    if shape != (1, 2, "NONE") or not data or remainder:
-        raise MeasureError(f"{path.name}: need mono 16-bit PCM in whole {frame_ms} ms frames")
+    if not data or remainder:
+        raise MeasureError(f"{path.name}: need audio in whole {frame_ms} ms frames")
     return {
         "frames": [data[at : at + per_frame * 2] for at in range(0, len(data), per_frame * 2)],
         "rate": rate,
@@ -173,27 +186,46 @@ def load_audio(path: Path, frame_ms: int) -> dict[str, Any]:
     }
 
 
-def parse_gpu_csv(text: str) -> list[dict[str, int | None]]:
+def parse_gpu_csv(text: str) -> list[dict[str, Any]]:
     """Rows of `nvidia-smi --query-gpu=... --format=csv`, by the header's column names."""
     lines = [line for line in text.splitlines() if line.strip()]
     header = [name.strip() for name in lines[0].split(",")] if lines else []
-    if not set(GPU_COLUMNS) <= set(header) or len(lines) < 2:
+    if not {"name", *GPU_COLUMNS} <= set(header) or len(lines) < 2:
         raise ValueError("no reading under the expected header")
     rows = []
     for line in lines[1:]:
         cells = dict(zip(header, (cell.strip() for cell in line.split(",")), strict=True))
-        row: dict[str, int | None] = {}
+        row: dict[str, Any] = {"name": cells["name"]}
         for column, field in GPU_COLUMNS.items():
-            number = cells[column].split()[0]
-            row[field] = int(number) if number.isdigit() else None
-        if row["index"] is None:
-            raise ValueError("a reading without a device index")
+            number = cells[column].split()[:1]
+            row[field] = int(number[0]) if number and number[0].isdigit() else None
+        if row["index"] is None or not row["name"]:
+            raise ValueError("a reading without a device index or name")
         rows.append(row)
     return rows
 
 
+def machine_facts() -> dict[str, Any]:
+    """What a latency depends on in the measuring machine, and nothing that names it."""
+    model = None
+    with contextlib.suppress(OSError):
+        cpuinfo = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
+        found = re.search(r"^model name\s*:\s*([ -~]{1,128})", cpuinfo, re.MULTILINE)
+        model = found and found.group(1).strip()
+    return {
+        "system": platform.system(),
+        "release": platform.release(),
+        "machine": platform.machine(),
+        "cpu_count": os.cpu_count(),
+        "cpu_model": model or None,
+    }
+
+
 class Run:
-    """One clock and one origin for every timestamp of a run."""
+    """A run's clock, with one origin for every timestamp, and its transport.
+
+    A test replaces it to make time and arrival deterministic.
+    """
 
     def __init__(self) -> None:
         self.origin = time.monotonic_ns()
@@ -201,24 +233,53 @@ class Run:
     def now(self) -> int:
         return time.monotonic_ns() - self.origin
 
+    def outbound(self) -> Any:
+        """Where a call puts the events gRPC is to send; None ends them."""
+        return queue.Queue()
 
-def sample_gpu(program: str, interval_ms: int) -> int:
-    """Print one line per device reading until the starting process stops or ends this one.
+    def take(self, inbound: queue.Queue[tuple[int, Any]], until: int) -> tuple[int, Any] | None:
+        """What a call read next and when, or None once the clock reaches `until`."""
+        try:
+            return inbound.get(timeout=max(0, until - self.now()) / 1e9)
+        except queue.Empty:
+            return None
 
-    Exits 1 when the first query gives no reading; a later one that fails is skipped.
+    @contextlib.contextmanager
+    def connect(
+        self, bindings: Bindings, endpoint: str, timeout_ms: int
+    ) -> Iterator[tuple[Any, int | None]]:
+        """A stub on a ready channel and the time to it, or neither when it never was ready."""
+        import grpc
+
+        with grpc.insecure_channel(endpoint) as channel:
+            started = self.now()
+            try:
+                grpc.channel_ready_future(channel).result(timeout=timeout_ms / 1000)
+            except grpc.FutureTimeoutError:
+                yield None, None
+            else:
+                yield bindings.rpc.SessionServiceStub(channel), self.now() - started
+
+
+def sample_gpu(program: str, interval_ms: int, alive: Callable[[], bool] | None = None) -> int:
+    """Print one line per device reading, and one per query that gave none, while `alive`.
+
+    By default that is until the starting process stops or ends this one.
+    Exits 1 when the first query gives no reading.
     """
     parent, printed = os.getppid(), False
-    while os.getppid() == parent:
+    alive = alive or (lambda: os.getppid() == parent)
+    while alive():
         at = time.monotonic_ns()
         try:
             done = subprocess.run(
-                [program, *GPU_QUERY], capture_output=True, text=True, timeout=10, check=False
+                [program, *GPU_QUERY], capture_output=True, text=True, timeout=10, check=True
             )
-            rows = parse_gpu_csv(done.stdout) if done.returncode == 0 else []
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            rows = []
-        if not (rows or printed):
-            return 1
+            rows = parse_gpu_csv(done.stdout)
+        except Exception:  # noqa: BLE001 - a query that fails in any way is counted, not fatal
+            if not printed:
+                return 1
+            rows = [{"failed": True}]
         for row in rows:
             print(json.dumps({"at_ns": at, **row}), flush=True)
         printed = True
@@ -234,12 +295,14 @@ class GpuSampler:
     runs `nvidia-smi`. Both read the system's monotonic clock.
     """
 
-    def __init__(self, run: Run, mode: str, interval_ms: int, program: str = "nvidia-smi") -> None:
+    def __init__(
+        self, run: Run, enabled: bool, interval_ms: int, program: str = "nvidia-smi"
+    ) -> None:
         self._run, self._interval_ms = run, interval_ms
         self._process: subprocess.Popen[str] | None = None
         self._reason: str | None = None
-        self._status = "not_requested" if mode == "off" else "unavailable"
-        if mode == "off":
+        self._status = "unavailable" if enabled else "not_requested"
+        if not enabled:
             return
         if shutil.which(program) is None:
             self._reason = "no nvidia-smi on this machine"
@@ -253,28 +316,46 @@ class GpuSampler:
         while self._process.poll() is None and not os.fstat(self._lines.fileno()).st_size:
             time.sleep(0.01)
 
-    def finish(self) -> dict[str, Any]:
-        samples: list[dict[str, Any]] = []
-        if self._process is not None:
-            self._process.terminate()
-            self._process.wait()
-            self._lines.seek(0)
-            for line in self._lines.read().splitlines():
-                sample = json.loads(line)
-                samples.append({**sample, "at_ns": sample["at_ns"] - self._run.origin})
-            self._lines.close()
-            if samples:
-                self._status = "sampled"
-            else:
-                self._reason = "nvidia-smi gave no reading"
+    def section(self, reason: str | None, lines: list[dict[str, Any]], serving: bool) -> Any:
+        """The record's GPU section: what was not sampled and why, or `lines` as samples."""
+        samples = [
+            {key: value for key, value in line.items() if key != "name"}
+            for line in lines
+            if "failed" not in line
+        ]
+        names = {line["index"]: line["name"] for line in lines if "failed" not in line}
+        sampled = bool(samples)
+        status = "sampled" if sampled else self._status
         return {
-            "status": self._status,
-            "reason": self._reason,
+            "status": status,
+            "reason": None if sampled or status == "not_requested" else self._reason or reason,
             "scope": "device_wide",
-            "interval_ms": None if self._status == "not_requested" else self._interval_ms,
+            "machine": None if not sampled else "serving" if serving else "client_only",
+            "interval_ms": None if status == "not_requested" else self._interval_ms,
+            "failed_queries": len(lines) - len(samples),
+            "devices": [{"index": index, "name": names[index]} for index in sorted(names)],
             "samples": samples,
             "summary": None,
         }
+
+    def finish(self, serving: bool) -> dict[str, Any]:
+        """End the sampling process and return the section; no sample outlives a dead sampler."""
+        if self._process is None:
+            return self.section(None, [], serving)
+        died = self._process.poll() is not None
+        self._process.terminate()
+        self._process.wait()
+        self._lines.seek(0)
+        text = self._lines.read()
+        self._lines.close()
+        if not text:
+            return self.section("nvidia-smi gave no reading", [], serving)
+        if died:
+            return self.section("the sampling process ended before the run did", [], serving)
+        lines = [json.loads(line) for line in text.splitlines()]
+        return self.section(
+            None, [{**line, "at_ns": line["at_ns"] - self._run.origin} for line in lines], serving
+        )
 
 
 class Call:
@@ -284,7 +365,8 @@ class Call:
         self, run: Run, bindings: Bindings, stub: Any, mode: str, index: int, timeout_ns: int
     ) -> None:
         self._run, self._pb, self._timeout_ns = run, bindings.pb, timeout_ns
-        self._requests: queue.Queue[Any] = queue.Queue()
+        self._mode, self.now = mode, run.now
+        self._requests = run.outbound()
         self._inbound: queue.Queue[tuple[int, Any]] = queue.Queue()
         self._sequence = 0
         self._session_id = ""
@@ -325,15 +407,21 @@ class Call:
         """Whether both budgets, bytes and waiting segments, admit `wanted` more."""
         held = [sum(sent) for sent in zip(*self._pending.values(), strict=True)] or [0, 0]
         return all(
-            budget.limit == 0 or budget.used + sent + more <= budget.limit
+            budget.used + sent + more <= budget.limit
             for budget, sent, more in zip(self._budgets, held, wanted, strict=True)
         )
+
+    def _credit(self, credit: Any) -> None:
+        """Take the budgets a Ready or an Accepted reports; no byte limit is not unlimited."""
+        if not credit.bytes.limit:
+            raise _Stop("credit_missing")
+        self._budgets = (credit.bytes, credit.waiting_segments)
 
     def send_input(self, size: int, segments: int, **body: Any) -> int:
         """Send an Audio or a TextSegment once the session's credit admits it."""
         if not self._fits(size, segments):
             wanted = zip(self._budgets, (size, segments), strict=True)
-            if any(budget.limit and more > budget.limit for budget, more in wanted):
+            if any(more > budget.limit for budget, more in wanted):
                 raise _Stop("input_outside_limits")
             self.session["client"]["credit_waits"] += 1
             self.wait(lambda: self._fits(size, segments))
@@ -362,22 +450,25 @@ class Call:
                 self._next_ping += self._ping_every
                 continue
             wake = deadline if self._next_ping is None else min(deadline, self._next_ping)
-            try:
-                return self._inbound.get(timeout=max(0, wake - now) / 1e9)
-            except queue.Empty:
-                if self._run.now() >= deadline:
-                    return None
+            item = self._run.take(self._inbound, wake)
+            if item is not None or self._run.now() >= deadline:
+                return item
 
-    def wait(self, done: Callable[[], bool], timeout_ns: int | None = None) -> None:
-        """Handle server events until `done`; the call ending or the timeout ends the wait."""
-        deadline = self._run.now() + (self._timeout_ns if timeout_ns is None else timeout_ns)
+    def wait(self, done: Callable[[], bool]) -> None:
+        """Handle server events until `done`.
+
+        The call ending ends the wait, and so does the timeout, which is
+        counted again from each event the session needs.
+        """
+        deadline = self._run.now() + self._timeout_ns
         while not done():
             if self.status is not None:
                 raise _CallEnded
             item = self._next(deadline)
             if item is None:
                 raise _Timeout
-            self._handle(*item)
+            if self._handle(*item):
+                deadline = self._run.now() + self._timeout_ns
 
     def pace(self, until: int) -> None:
         """Handle what arrives until `until`, the time the next frame is due."""
@@ -386,28 +477,29 @@ class Call:
             if self.status is not None:
                 raise _CallEnded
 
-    def _handle(self, at: int, item: Any) -> None:
+    def _handle(self, at: int, item: Any) -> bool:
+        """Take one item read at `at`; whether it was an event the session needs."""
         server = self.session["server"]
         if not isinstance(item, self._pb.ServerEvent):
             self.status = item
             self.session["grpc_status"] = item.name
-            return
+            return True
         server["events_received"] += 1
         if item.sequence != server["events_received"]:
             raise _Stop("sequence_gap")
         body = item.WhichOneof("body")
         if body is None:
             server["ignored_events"] += 1
-            return
+            return False
         allowed = body in ("ready", "session_closed") if self.ready is None else body != "ready"
         if server["closed"] is not None or not allowed:
             raise _Stop("unexpected_event")
         if body in ("pong", "status"):
-            return
-        handler = getattr(self, f"_on_{body}", None)
-        if handler is None:
+            return False
+        if body not in (*SESSION_BODIES, *MODE_BODIES[self._mode]):
             raise _Stop("unexpected_event")
-        handler(at, getattr(item, body))
+        getattr(self, f"_on_{body}")(at, getattr(item, body))
+        return True
 
     def _follows(self, at: int, sent: str) -> bool:
         """Whether an event read at `at` can answer what the boundary `sent` records."""
@@ -420,14 +512,13 @@ class Call:
         if ready.limits.heartbeat_interval_ms:
             self._ping_every = ready.limits.heartbeat_interval_ms * MS
             self._next_ping = at + self._ping_every
-        credit = ready.status.input_credit
-        self._budgets = (credit.bytes, credit.waiting_segments)
+        self._credit(ready.status.input_credit)
 
     def _on_accepted(self, at: int, accepted: Any) -> None:
         self.session["server"]["accepted_events"] += 1
         for sequence in [s for s in self._pending if s <= accepted.accepted_sequence]:
             del self._pending[sequence]
-        self._budgets = (accepted.input_credit.bytes, accepted.input_credit.waiting_segments)
+        self._credit(accepted.input_credit)
 
     def _on_session_closed(self, at: int, closed: Any) -> None:
         pb = self._pb
@@ -461,7 +552,7 @@ class Call:
         if not self._follows(at, "first_audio_sent") or server["endpoint"] is not None:
             raise _Stop("unexpected_event")
         server["partials"] += 1
-        if partial.text and boundaries["first_partial"] is None:
+        if partial.text.strip() and boundaries["first_partial"] is None:
             boundaries["first_partial"] = at
 
     def _on_endpoint_detected(self, at: int, endpoint: Any) -> None:
@@ -482,13 +573,13 @@ class Call:
             return
         if server["endpoint"] is None:
             raise _Stop("unexpected_event")
-        text = "".join(segment.text for segment in final.segments).encode()
+        text = "".join(segment.text for segment in final.segments)
         self.session["boundaries"]["final_transcript"] = at
         server["final"] = {
             **numbers(final, "finalize_sequence", "end_sample_offset"),
             "segments": len(final.segments),
-            "text_bytes": len(text),
-            "text_sha256": sha256_digest(text),
+            "text_bytes": len(text.strip().encode()),
+            "text_sha256": sha256_digest(text.encode()),
         }
 
     # --- text-to-speech ---------------------------------------------------
@@ -544,14 +635,17 @@ def decode_open_refusal(trailing_metadata: Any) -> None:
 def _open(call: Call, pb: Any, target: Target, **fields: Any) -> Any:
     resolved = pb.ResolvedTarget(
         deployment_id=target.deployment_id,
-        generation=target.generation,
-        descriptor_digest=target.descriptor_digest,
+        generation=target.generation or 0,
+        descriptor_digest=target.descriptor_digest or "",
     )
     opened = pb.Open(resolved=resolved, **fields)
     call.send(open=opened)
     call.wait(lambda: call.ready is not None)
     ready = call.ready
-    if (ready.generation, ready.descriptor_digest) != (target.generation, target.descriptor_digest):
+    if (ready.generation, ready.descriptor_digest) != (
+        resolved.generation,
+        resolved.descriptor_digest,
+    ):
         raise _Stop("ready_mismatch")
     return ready
 
@@ -584,22 +678,24 @@ def _stt(call: Call, pb: Any, target: Target, plan: dict[str, Any]) -> None:
     if not fits or plan["samples"] * 1000 > limits.max_utterance_ms * plan["rate"]:
         raise _Stop("input_outside_limits")
     client, boundaries = call.session["client"], call.session["boundaries"]
-    first = at = 0
+    first = due = at = 0
     for position, frame in enumerate(plan["frames"]):
+        # Each frame is due at its place counted from the first, whenever the one before went.
+        due = first + position * frame_ms * MS
         if position:
-            call.pace(first + position * frame_ms * MS)
+            call.pace(due)
         body = pb.Audio(
             data=frame, sample_count=len(frame) // 2, sample_offset=client["samples_sent"]
         )
         at = call.send_input(len(frame), 0, audio=body)
         if not position:
-            first = boundaries["first_audio_sent"] = at
-        lag = at - first - position * frame_ms * MS
-        client["max_pacing_lag_ns"] = max(client["max_pacing_lag_ns"] or 0, lag)
+            first = due = boundaries["first_audio_sent"] = at
+        client["max_pacing_lag_ns"] = max(client["max_pacing_lag_ns"] or 0, at - due)
         client["frames_sent"] += 1
         client["bytes_sent"] += len(frame)
         client["samples_sent"] += len(frame) // 2
-    boundaries["last_audio_sent"] = at
+    boundaries["last_audio_scheduled"], boundaries["last_audio_sent"] = due, at
+    client["input_lag_ns"] = at - due
     _finalize(call, pb, "final")
 
 
@@ -623,9 +719,12 @@ def _tts(call: Call, pb: Any, target: Target, plan: dict[str, Any]) -> None:
     size = len(plan["text"].encode())
     if size > min(limits.max_segment_text_bytes, limits.max_synthesis_text_bytes):
         raise _Stop("input_outside_limits")
-    call.session["client"]["segment_id"] = 1
+    client, boundaries = call.session["client"], call.session["boundaries"]
+    client["segment_id"] = 1
     segment = pb.TextSegment(segment_id=1, text=plan["text"])
-    call.session["boundaries"]["text_segment_sent"] = call.send_input(size, 1, text_segment=segment)
+    due = boundaries["text_segment_scheduled"] = call.now()
+    boundaries["text_segment_sent"] = call.send_input(size, 1, text_segment=segment)
+    client["input_lag_ns"] = boundaries["text_segment_sent"] - due
     call.wait(lambda: server["segment"] is not None)
     _finalize(call, pb, "synthesis")
 
@@ -658,58 +757,53 @@ def run_session(
     return session
 
 
-def run_section(
-    run: Run, bindings: Bindings, mode: str, target: Target, plan: dict[str, Any],
-    iterations: int, timeout_ms: int,
-) -> dict[str, Any]:  # fmt: skip
-    import grpc
-
+def declared_input(mode: str, plan: dict[str, Any]) -> dict[str, Any]:
+    """What every session of a section sends, as the record states it."""
     if mode == "stt":
-        declared = {
+        return {
             "audio_sha256": plan["sha256"],
             "audio_bytes": plan["bytes"],
             "samples": plan["samples"],
             "format": {"encoding": "pcm_s16le", "sample_rate_hz": plan["rate"], "channels": 1},
             "frame_ms": plan["frame_ms"],
             "frames": len(plan["frames"]),
-            "language_sha256": sha256_digest(plan["language"].encode()),
+            "language": plan["language"],
         }
-    else:
-        text = plan["text"].encode()
-        declared = {
-            "text_sha256": sha256_digest(text),
-            "text_bytes": len(text),
-            "language_sha256": sha256_digest(plan["language"].encode()),
-            "voice_sha256": sha256_digest(plan["voice"].encode()),
+    text = plan["text"].encode()
+    return {
+        "text_sha256": sha256_digest(text),
+        "text_bytes": len(text),
+        "language": plan["language"],
+        "voice": plan["voice"],
+    }
+
+
+def run_section(
+    run: Run, bindings: Bindings, mode: str, target: Target, plan: dict[str, Any],
+    iterations: int, timeout_ms: int, record: dict[str, Any], save: Callable[[], None],
+) -> None:  # fmt: skip
+    """Fill `record[mode]`, saving the record after each session."""
+    with run.connect(bindings, target.endpoint, timeout_ms) as (stub, connect_ns):
+        sessions: list[dict[str, Any]] = []
+        record[mode] = {
+            "target": {
+                "generation": target.generation,
+                "descriptor_digest": target.descriptor_digest,
+                "loopback": target.is_loopback(),
+                "connect_ns": connect_ns,
+            },
+            "input": declared_input(mode, plan),
+            "sessions": sessions,
+            "summary": {},
         }
-    sessions: list[dict[str, Any]] = []
-    connect_ns = None
-    with grpc.insecure_channel(target.endpoint) as channel:
-        started = run.now()
-        try:
-            grpc.channel_ready_future(channel).result(timeout=timeout_ms / 1000)
-            connect_ns = run.now() - started
-        except grpc.FutureTimeoutError:
+        if stub is None:
             print(
                 f"{record_mod.TOOL_NAME}: {mode}: the channel never became ready", file=sys.stderr
             )
-        if connect_ns is not None:
-            stub = bindings.rpc.SessionServiceStub(channel)
-            for index in range(iterations):
-                sessions.append(
-                    run_session(run, bindings, stub, mode, index, target, plan, timeout_ms)
-                )
-    return {
-        "target": {
-            "generation": target.generation,
-            "descriptor_digest": target.descriptor_digest,
-            "loopback": target.is_loopback(),
-            "connect_ns": connect_ns,
-        },
-        "input": declared,
-        "sessions": sessions,
-        "summary": {},
-    }
+            return
+        for index in range(iterations):
+            sessions.append(run_session(run, bindings, stub, mode, index, target, plan, timeout_ms))
+            save()
 
 
 def measure(
@@ -719,25 +813,32 @@ def measure(
     tts: tuple[Target, dict[str, Any]] | None,
     iterations: int = 1,
     event_timeout_ms: int = 30_000,
-    provenance: str = "recorded",
+    provenance: str = "synthetic",
     source_commit: str | None = None,
+    worker_version: str | None = None,
+    worker_build: str | None = None,
     gpu_sampling: str = "auto",
     gpu_interval_ms: int = 1000,
     gpu_program: str = "nvidia-smi",
+    checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    run: Run | None = None,
 ) -> dict[str, Any]:
-    """Run the requested sections and return the finished record."""
-    run = Run()
-    sampler = GpuSampler(run, gpu_sampling, gpu_interval_ms, gpu_program)
-    sections: dict[str, Any] = {"stt": None, "tts": None}
-    try:
-        for mode, requested in (("stt", stt), ("tts", tts)):
-            if requested is not None:
-                sections[mode] = run_section(
-                    run, bindings, mode, *requested, iterations, event_timeout_ms
-                )
-    finally:
-        gpu = sampler.finish()
-    record = {
+    """Run the requested sections and return the finished record.
+
+    `checkpoint` is given the record as it stands before the first session
+    and after each one. An error or an interrupt ends the run and is
+    recorded; it is not raised.
+    """
+    run = run or Run()
+    requested = {"stt": stt, "tts": tts}
+    serving = all(section[0].is_loopback() for section in requested.values() if section)
+    # Elsewhere than on loopback the readings are not the serving machine's: only when asked.
+    sampler = GpuSampler(
+        run, gpu_sampling == "on" or (gpu_sampling == "auto" and serving), gpu_interval_ms,
+        gpu_program,
+    )  # fmt: skip
+    stated = worker_version is not None or worker_build is not None
+    record: dict[str, Any] = {
         "schema_version": "0.1",
         "record_kind": record_mod.RECORD_KIND,
         "provenance": provenance,
@@ -750,6 +851,12 @@ def measure(
             "generator": bindings.versions["grpcio-tools"],
             "stream_schema_sha256": bindings.schema_digest,
         },
+        "worker": {
+            "source": "operator_stated" if stated else "not_stated",
+            "version": worker_version,
+            "build": worker_build,
+        },
+        "client_platform": machine_facts(),
         "recorded_at_utc": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "clock": {
             "source": "caller_monotonic",
@@ -757,12 +864,45 @@ def measure(
             "resolution_ns": max(1, round(time.get_clock_info("monotonic").resolution * 1e9)),
         },
         "percentile_method": "nearest_rank",
-        "settings": {"iterations": iterations, "event_timeout_ms": event_timeout_ms},
-        **sections,
-        "gpu": gpu,
+        "settings": {
+            "iterations": iterations,
+            "event_timeout_ms": event_timeout_ms,
+            "max_input_lag_ms": record_mod.MAX_INPUT_LAG_MS,
+        },
+        "stt": None,
+        "tts": None,
+        "gpu": sampler.section("the run did not end", [], serving),
+        "run": {"ended_by": None, "error": None},
         "result": {},
     }
+
+    def save() -> None:
+        record_mod.finalize(record)
+        if checkpoint is not None:
+            checkpoint(record)
+
+    try:
+        save()
+        for mode, section in requested.items():
+            if section is not None:
+                run_section(
+                    run, bindings, mode, *section, iterations, event_timeout_ms, record, save
+                )
+        record["run"]["ended_by"] = "completed"
+    except KeyboardInterrupt:
+        record["run"]["ended_by"] = "interrupt"
+    except Exception as error:  # noqa: BLE001 - whatever ended the run, the record says so
+        traceback.print_exc()
+        record["run"].update(ended_by="error", error=type(error).__name__)
+    record["gpu"] = sampler.finish(serving)
     return record_mod.finalize(record)
+
+
+def write_record(out: Path, record: dict[str, Any]) -> None:
+    """Replace `out` whole, so a write that is cut short leaves the record before it."""
+    partial = out.with_name(out.name + ".partial")
+    partial.write_text(record_mod.dump(record), encoding="utf-8")
+    os.replace(partial, out)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -770,15 +910,26 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="measure and write the record")
     run.add_argument("--out", type=Path, required=True)
-    run.add_argument("--provenance", choices=("recorded", "synthetic"), default="recorded")
-    run.add_argument("--source-commit", default=None)
+    run.add_argument(
+        "--provenance",
+        choices=("recorded", "synthetic"),
+        help="default: recorded when --source-commit is given, synthetic otherwise",
+    )
+    run.add_argument("--source-commit", default=None, help="the commit this tool was run from")
+    run.add_argument("--worker-version", help="the serving worker's release, as the operator knows")
+    run.add_argument("--worker-build", help="the serving worker's build, as the operator knows it")
     run.add_argument("--iterations", type=int, default=1)
     run.add_argument("--event-timeout-ms", type=int, default=30_000)
-    run.add_argument("--gpu-sampling", choices=("auto", "off"), default="auto")
+    run.add_argument(
+        "--gpu-sampling",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="auto samples only when every target is a loopback address",
+    )
     run.add_argument("--gpu-interval-ms", type=int, default=1000)
     for mode in record_mod.MODES:
         run.add_argument(f"--{mode}-endpoint", metavar="HOST:PORT")
-        run.add_argument(f"--{mode}-target", metavar="DEPLOYMENT:GENERATION:DIGEST")
+        run.add_argument(f"--{mode}-target", metavar="DEPLOYMENT[:GENERATION:DIGEST]")
         run.add_argument(f"--{mode}-language", help="a language tag the deployment declares")
     run.add_argument("--audio", type=Path, help="mono 16-bit PCM WAV, one utterance")
     run.add_argument("--frame-ms", type=int, default=20)
@@ -790,6 +941,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     name = record_mod.TOOL_NAME
     if args.command == "sample-gpu":
+        # Ending this process ends the query in flight: `subprocess.run` kills it on the way out.
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
         return sample_gpu(args.program, args.interval_ms)
     try:
         if min(args.iterations, args.event_timeout_ms, args.gpu_interval_ms) < 1:
@@ -798,6 +951,16 @@ def main(argv: list[str] | None = None) -> int:
             raise MeasureError("a frame is 20 to 320 ms, the bounds of the stream schema")
         if args.source_commit and re.fullmatch("[0-9a-f]{40}", args.source_commit) is None:
             raise MeasureError("--source-commit is not a full commit id")
+        provenance = args.provenance or ("recorded" if args.source_commit else "synthetic")
+        if provenance == "recorded" and not args.source_commit:
+            raise MeasureError("--provenance recorded needs --source-commit")
+        for option, pattern in (
+            ("worker_version", LABEL), ("worker_build", LABEL), ("stt_language", PROTOCOL_NAME),
+            ("tts_language", PROTOCOL_NAME), ("voice", PROTOCOL_NAME),
+        ):  # fmt: skip
+            value = getattr(args, option)
+            if value and re.fullmatch(pattern, value) is None:
+                raise MeasureError(f"--{option.replace('_', '-')} does not match {pattern}")
         stt = tts = None
         if args.stt_endpoint:
             if not (args.stt_target and args.stt_language and args.audio):
@@ -824,12 +987,15 @@ def main(argv: list[str] | None = None) -> int:
                 tts=tts,
                 iterations=args.iterations,
                 event_timeout_ms=args.event_timeout_ms,
-                provenance=args.provenance,
+                provenance=provenance,
                 source_commit=args.source_commit,
+                worker_version=args.worker_version or None,
+                worker_build=args.worker_build or None,
                 gpu_sampling=args.gpu_sampling,
                 gpu_interval_ms=args.gpu_interval_ms,
+                checkpoint=lambda record: write_record(args.out, record),
             )
-        args.out.write_text(record_mod.dump(record), encoding="utf-8")
+        write_record(args.out, record)
     except (MeasureError, OSError, UnicodeDecodeError) as exc:
         print(f"{name}: cannot measure: {exc}", file=sys.stderr)
         return record_mod.EXIT_NO_VERDICT
