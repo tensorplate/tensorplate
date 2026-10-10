@@ -222,12 +222,14 @@ class SessionDispatch {
   /// thread inside its own report. It only records.
   ///
   /// Audio input: a client's half-close finalizes the open utterance, if it
-  /// holds audio, with an endpoint of its own reason. A drain the worker
-  /// starts completes only finalizations already asked: audio that was
-  /// accepted and not finalized is not transcribed. Text input: every
-  /// accepted segment is synthesized and delivered in either drain. Either
-  /// way `drain_completed` is reported once no accepted input or Finalize is
-  /// still to be handed over and the output of accepted work was delivered.
+  /// holds audio, with an endpoint of its own reason, once every frame the
+  /// manager accepted was handed over: those frames belong to it. A drain
+  /// the worker starts completes only finalizations already asked: audio
+  /// that was accepted and not finalized is not transcribed. Text input:
+  /// every accepted segment is synthesized and delivered in either drain.
+  /// Either way `drain_completed` is reported once no accepted input or
+  /// Finalize is still to be handed over and the output of accepted work was
+  /// delivered.
   ///
   /// A `request_cleanup` is answered by one `release_acknowledged` once the
   /// backend has released what the session held, also for a session never

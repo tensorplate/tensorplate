@@ -706,9 +706,14 @@ hands over everything the manager accepted while the session lives,
 whatever happened in between; a hand-over that never arrives leaves the
 drain to the session's finalize deadline. For audio input, a client's
 half-close finalizes the open utterance, if it holds audio, with an
-endpoint of its own reason, and a drain the worker starts completes only
-finalizations already asked: audio that was accepted and not finalized
-is not transcribed. For text input every accepted segment is synthesized
+endpoint of its own reason. That finalization waits, as the drain's
+completion does, until no frame the manager accepted is still to be
+handed over: a frame accepted before the half-close belongs to the
+utterance, so a dispatch that ended it at the half-close would cut the
+transcript short and start a second utterance with the frame that
+arrives later. A drain the worker starts completes only finalizations
+already asked: audio that was accepted and not finalized is not
+transcribed. For text input every accepted segment is synthesized
 and delivered in either drain.
 
 **Input.** Input belongs to the dispatch from the call that hands it
