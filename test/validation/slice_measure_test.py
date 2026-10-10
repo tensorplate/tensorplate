@@ -6,20 +6,25 @@ The first record is synthetic: its timestamps are written by hand, so every
 derived value has a known answer, and each rule of the check is broken once
 with a refusal that has to name that rule. The client then runs against a
 server built in this process from the same generated bindings, which holds
-the client to the stream schema and misbehaves once per client guard. Set
+the client to the stream schema and misbehaves once per client guard. What
+each timestamp means, and when each frame is due, is held in virtual time:
+a scripted server and a clock that moves only when the client waits. Set
 TP_SLICE_MEASURE_REQUIRE_PINS=1 to require the pinned grpcio and protobuf.
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import importlib.metadata
+import io
 import json
 import math
 import os
 import queue
 import re
+import signal
 import struct
 import subprocess
 import sys
@@ -48,6 +53,7 @@ import slice_measurement_record as record_mod  # noqa: E402
 MS = 1_000_000
 DIGEST = "sha256:" + "0" * 64
 FRAMES, FRAME_MS, RATE = 10, 20, 16000
+SEGMENT_LAG = MS // 2
 SAMPLES = FRAMES * FRAME_MS * RATE // 1000
 TOTALS = {
     "input_audio_samples": 0,
@@ -71,11 +77,13 @@ def closed(**totals: int) -> dict:
 
 def stt_session(index: int, start: int, final_after_ms: int) -> dict:
     session = record_mod.new_session("stt", index, start)
-    last_audio = start + 3 * MS + (FRAMES - 1) * FRAME_MS * MS + MS
-    final = last_audio + final_after_ms * MS
+    last_due = start + 3 * MS + (FRAMES - 1) * FRAME_MS * MS
+    last_audio = last_due + MS
+    final = last_due + final_after_ms * MS
     session["boundaries"].update(
         ready=start + 2 * MS,
         first_audio_sent=start + 3 * MS,
+        last_audio_scheduled=last_due,
         last_audio_sent=last_audio,
         finalize_sent=last_audio + 1,
         endpoint=final - MS,
@@ -89,6 +97,7 @@ def stt_session(index: int, start: int, final_after_ms: int) -> dict:
         bytes_sent=SAMPLES * 2,
         finalize_sequence=FRAMES + 2,
         max_pacing_lag_ns=2 * MS,
+        input_lag_ns=MS,
     )
     session["server"].update(
         events_received=5,
@@ -113,14 +122,17 @@ def tts_session(index: int, start: int, first_audio_after_ms: int) -> dict:
     first_audio = start + 3 * MS + first_audio_after_ms * MS
     session["boundaries"].update(
         ready=start + 2 * MS,
-        text_segment_sent=start + 3 * MS,
+        text_segment_scheduled=start + 3 * MS,
+        text_segment_sent=start + 3 * MS + SEGMENT_LAG,
         first_audio_chunk=first_audio,
         segment_completed=first_audio + MS,
         finalize_sent=first_audio + 2 * MS,
         synthesis_completed=first_audio + 3 * MS,
         session_closed=first_audio + 4 * MS,
     )
-    session["client"].update(events_sent=3, segment_id=1, finalize_sequence=3)
+    session["client"].update(
+        events_sent=3, segment_id=1, finalize_sequence=3, input_lag_ns=SEGMENT_LAG
+    )
     session["server"].update(
         events_received=7,
         accepted_events=1,
@@ -158,10 +170,18 @@ def synthetic_record() -> dict:
             "generator": "1.81.1",
             "stream_schema_sha256": DIGEST,
         },
+        "worker": {"source": "not_stated", "version": None, "build": None},
+        "client_platform": {
+            "system": "Linux",
+            "release": "6.8.0",
+            "machine": "x86_64",
+            "cpu_count": 8,
+            "cpu_model": None,
+        },
         "recorded_at_utc": "2026-01-01T00:00:00Z",
         "clock": {"source": "caller_monotonic", "origin": "run_start", "resolution_ns": 1},
         "percentile_method": "nearest_rank",
-        "settings": {"iterations": 3, "event_timeout_ms": 30000},
+        "settings": {"iterations": 3, "event_timeout_ms": 30000, "max_input_lag_ms": 100},
         "stt": {
             "target": dict(target),
             "input": {
@@ -171,7 +191,7 @@ def synthetic_record() -> dict:
                 "format": {"encoding": "pcm_s16le", "sample_rate_hz": RATE, "channels": 1},
                 "frame_ms": FRAME_MS,
                 "frames": FRAMES,
-                "language_sha256": DIGEST,
+                "language": "en",
             },
             "sessions": [
                 stt_session(0, 10 * MS, 300),
@@ -185,8 +205,8 @@ def synthetic_record() -> dict:
             "input": {
                 "text_sha256": DIGEST,
                 "text_bytes": 22,
-                "language_sha256": DIGEST,
-                "voice_sha256": DIGEST,
+                "language": "en",
+                "voice": VOICE,
             },
             "sessions": [
                 tts_session(0, 3000 * MS, 90),
@@ -199,7 +219,10 @@ def synthetic_record() -> dict:
             "status": "sampled",
             "reason": None,
             "scope": "device_wide",
+            "machine": "serving",
             "interval_ms": 1000,
+            "failed_queries": 0,
+            "devices": [{"index": 0, "name": "NVIDIA L4"}],
             "samples": [
                 {
                     "at_ns": at * MS,
@@ -212,6 +235,7 @@ def synthetic_record() -> dict:
             ],
             "summary": None,
         },
+        "run": {"ended_by": "completed", "error": None},
         "result": {},
     }
     return record_mod.finalize(record)
@@ -260,6 +284,8 @@ def check_stage_list() -> None:
     registered = labels["properties"]["labels"]["properties"]["stage"]["enum"]
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
     assert list(record_mod.SERVER_STAGES) == registered, registered
+    lag_bound = schema["properties"]["settings"]["properties"]["max_input_lag_ms"]["const"]
+    assert lag_bound == record_mod.MAX_INPUT_LAG_MS, lag_bound
     assert schema["definitions"]["ServerStage"]["properties"]["stage"]["enum"] == registered
     assert [entry["stage"] for entry in record_mod.server_stages()] == registered
 
@@ -279,12 +305,18 @@ def check_good_record(good: dict, work: Path) -> None:
         "ended_by": "ready",
         "ns": 2 * MS,
     }
-    assert first["last_audio_to_final_transcript"]["ns"] == 300 * MS
+    # Counted from when the last frame was due, 1 ms before it was sent.
+    assert first["last_audio_to_final_transcript"] == {
+        "from": "last_audio_scheduled",
+        "to": "final_transcript",
+        "ended_by": "final_transcript",
+        "ns": 300 * MS,
+    }
     assert first["call_start_to_first_transcript"] == {
         "from": "call_start",
         "to": "final_transcript",
         "ended_by": "final_transcript",
-        "ns": (3 + 9 * 20 + 1 + 300) * MS,
+        "ns": (3 + 9 * 20 + 300) * MS,
     }
     assert stt["summary"]["last_audio_to_final_transcript"] == {
         "count": 3,
@@ -298,7 +330,13 @@ def check_good_record(good: dict, work: Path) -> None:
     assert tts["summary"]["segment_to_first_audio"]["p50_ns"] == 80 * MS
     assert tts["summary"]["call_start_to_first_audio"]["max_ns"] == 93 * MS
     assert tts["summary"]["segment_to_completion"]["min_ns"] == 71 * MS
-    assert tts["sessions"][0]["measurements"]["segment_to_first_audio"]["ended_by"] == "audio_chunk"
+    # Counted from when the segment was due, half a millisecond before it was sent.
+    assert tts["sessions"][0]["measurements"]["segment_to_first_audio"] == {
+        "from": "text_segment_scheduled",
+        "to": "first_audio_chunk",
+        "ended_by": "audio_chunk",
+        "ns": 90 * MS,
+    }
     assert good["gpu"]["summary"] == {
         "samples": 3,
         "max_utilization_percent": 61,
@@ -311,7 +349,7 @@ def check_good_record(good: dict, work: Path) -> None:
     partial = copy.deepcopy(good)
     session = partial["stt"]["sessions"][0]
     session["boundaries"]["first_partial"] = session["boundaries"]["first_audio_sent"] + 40 * MS
-    session["server"]["partials"] = 1
+    session["server"].update(partials=1, events_received=6)
     record_mod.finalize(partial)
     assert session["measurements"]["call_start_to_first_transcript"] == {
         "from": "call_start",
@@ -343,10 +381,9 @@ def fail_session(record: dict, reason: str = "oom") -> None:
 
 def end_early(outcome: str, status: str | None, stop_reason: str | None = None):
     def apply(record: dict) -> None:
-        session = record["tts"]["sessions"][2]
-        session["boundaries"] = {**dict.fromkeys(session["boundaries"]), "call_start": 5000 * MS}
-        session["server"].update(closed=None, events_received=0)
+        session = record_mod.new_session("tts", 2, 5000 * MS)
         session.update(outcome=outcome, grpc_status=status, stop_reason=stop_reason)
+        record["tts"]["sessions"][2] = session
 
     return apply
 
@@ -355,15 +392,54 @@ def closed_before_start(record: dict) -> None:
     end_early("session_failed", "OK")(record)
     session = record["tts"]["sessions"][2]
     session["boundaries"]["session_closed"] = 4999 * MS
-    session["server"]["closed"] = {**closed(), "state": "failed"}
+    session["server"].update(closed={**closed(), "state": "failed"}, events_received=1)
 
 
 def no_gpu(status: str, reason: str | None, interval: int | None):
     def apply(record: dict) -> None:
         record["gpu"].update(status=status, reason=reason, interval_ms=interval, samples=[])
-        record["gpu"]["summary"] = None
+        record["gpu"].update(summary=None, machine=None, devices=[])
 
     return apply
+
+
+def stop_session(record: dict) -> None:
+    record["stt"]["sessions"][1].update(outcome="stopped", stop_reason="unexpected_event")
+
+
+def end_run(ended_by: str | None, error: str | None = None, sessions: int = 2):
+    """A run that did not end by itself, with `sessions` of its three text-to-speech sessions."""
+
+    def apply(record: dict) -> None:
+        record["run"].update(ended_by=ended_by, error=error)
+        del record["tts"]["sessions"][sessions:]
+
+    return apply
+
+
+def late_input(mode: str, lag: int):
+    """Session 0 sends its timed input `lag` after it was due; everything else stays in order."""
+
+    def apply(record: dict) -> None:
+        session = record[mode]["sessions"][0]
+        client, chain = session["client"], record_mod.CHAIN[mode]
+        shift = lag - client["input_lag_ns"]
+        for name in (*chain[chain.index(record_mod.INPUT[mode][1]) :], "session_closed"):
+            session["boundaries"][name] += shift
+        client["input_lag_ns"] = lag
+        if mode == "stt":
+            client["max_pacing_lag_ns"] = max(lag, client["max_pacing_lag_ns"])
+
+    return apply
+
+
+def too_many(record: dict) -> None:
+    end_run("interrupt")(record)
+    record["tts"]["sessions"] += [tts_session(2, 5000 * MS, 80), tts_session(3, 6000 * MS, 80)]
+
+
+def puts(*edits: tuple[str, object]):
+    return lambda record: [put(path, value)(record) for path, value in edits]
 
 
 def no_channel(record: dict) -> None:
@@ -378,8 +454,21 @@ S0, T0 = "stt.sessions.0", "tts.sessions.0"
 SHAPE_CASES = (
     (f"{S0}.server.final.text", "synthetic words"),
     (f"{S0}.audio", "AAAA"),
-    ("tts.input.voice", "synthetic_voice"),
-    ("tts.input.voice_sha256", "synthetic_voice"),
+    ("tts.input.voice", ""),
+    ("tts.input.voice_sha256", DIGEST),
+    ("stt.input.language", "\u00e9"),
+    ("stt.input.language_sha256", DIGEST),
+    ("record_kind", "deployment_measurement"),
+    ("settings.max_input_lag_ms", 5000),
+    ("run.ended_by", "killed"),
+    ("run.error", "no such file: /synthetic"),
+    ("worker.source", "reported"),
+    ("worker.version", "synthetic/path"),
+    ("client_platform.hostname", "synthetic-host"),
+    ("gpu.machine", "worker"),
+    ("gpu.devices.0.serial", "0000"),
+    ("gpu.failed_queries", None),
+    (f"{S0}.stop_reason", "credit"),
     ("stt.target.endpoint", "localhost:1"),
     ("stt.target.deployment_id", "synthetic-deployment"),
     (f"{S0}.boundaries.call_start", None),
@@ -398,7 +487,6 @@ SHAPE_CASES = (
 
 # Records of the right shape that contradict themselves: (edit, what the refusal names).
 STRUCTURE_CASES = (
-    (lambda r: r["stt"]["sessions"].pop(), "stt: 2 sessions recorded, 3 expected"),
     (put("settings.iterations", 2), "stt: 3 sessions recorded, 2 expected"),
     (put("tool.generator", "1.81.0"), "tool: the generator is not the grpcio release"),
     (closed_before_start, "tts session 2: session_closed precedes an event read"),
@@ -444,8 +532,25 @@ STRUCTURE_CASES = (
     (put(f"{S0}.client.frames_sent", 0), "frames_sent and first_audio_sent do not agree"),
     (put(f"{S0}.client.max_pacing_lag_ns", None), "max_pacing_lag_ns and first_audio_sent"),
     (put(f"{S0}.client.frames_sent", 9), "last_audio_sent is set before every frame was sent"),
-    (put(f"{S0}.boundaries.first_audio_sent", 15 * MS), "sent faster than real time"),
+    (put(f"{S0}.boundaries.first_audio_sent", 15 * MS), "is not the last frame's place in time"),
+    (put(f"{S0}.boundaries.last_audio_scheduled", 195 * MS), "last_audio_sent precedes"),
     (put(f"{S0}.client.max_pacing_lag_ns", MS - 1), "is below the last frame's lag"),
+    (put(f"{S0}.client.input_lag_ns", 0), "is not last_audio_sent less last_audio_scheduled"),
+    (put(f"{T0}.client.input_lag_ns", None), "is not text_segment_sent less text_segment_sched"),
+    (put(f"{S0}.server.events_received", 0), "events_received is below the events the record"),
+    (put(f"{T0}.server.events_received", 6), "events_received is below the events the record"),
+    (put("provenance", "recorded"), "provenance: recorded needs the tool's source commit"),
+    (put("stt.target.loopback", False), "gpu: machine is 'serving' and the targets make it"),
+    (put("gpu.machine", "client_only"), "gpu: machine is 'client_only' and the targets make"),
+    (put("gpu.devices", []), "gpu: devices are not the devices the samples name"),
+    (put("gpu.devices.0.index", 1), "gpu: devices are not the devices the samples name"),
+    (lambda r: r["gpu"]["devices"].append(r["gpu"]["devices"][0]), "gpu: devices are not"),
+    (put("worker.source", "operator_stated"), "worker: source does not agree"),
+    (put("worker.build", "b1"), "worker: source does not agree"),
+    (put("run.error", "KeyError"), "run: error does not agree with ended_by"),
+    (put("run.ended_by", "error"), "run: error does not agree with ended_by"),
+    (put("stt.target.generation", None), "stt target: a generation without a digest"),
+    (put("tts.target.descriptor_digest", None), "tts target: a generation without a digest"),
     (put("gpu.samples", []), "gpu: sampled needs samples, an interval and no reason"),
     (put("gpu.interval_ms", None), "gpu: sampled needs samples, an interval and no reason"),
     (put("gpu.reason", "it ran"), "gpu: sampled needs samples, an interval and no reason"),
@@ -485,6 +590,36 @@ VERDICT_CASES = (
     (put(f"{S0}.server.final.text_bytes", 0), "incomplete", "no sample for call_start_to_first"),
     (no_gpu("unavailable", "no sampler on this machine", 1000), "complete", ""),
     (no_gpu("not_requested", None, None), "complete", ""),
+    (end_run("interrupt"), "failed", "run: interrupted"),
+    (end_run("error", "KeyError", 0), "failed", "run: ended by an error (KeyError)"),
+    (end_run(None), "failed", "run: did not end"),
+    (late_input("stt", 100 * MS), "complete", ""),
+    (late_input("stt", 100 * MS + 1), "incomplete", "no sample for last_audio_to_final_trans"),
+    (late_input("tts", 100 * MS), "complete", ""),
+    (late_input("tts", 100 * MS + 1), "incomplete", "no sample for segment_to_first_audio"),
+    (late_input("tts", 100 * MS + 1), "incomplete", "no sample for segment_to_completion"),
+    (stop_session, "failed", "stt session 1: stopped (unexpected_event)"),
+    # Refused whatever the derived fields say: these are recomputed first.
+    (put(f"{S0}.boundaries.first_partial", 53 * MS), "invalid", "first_partial is set and no par"),
+    (
+        puts((f"{T0}.server.chunks", 0), (f"{T0}.server.segment.chunk_count", 0)),
+        "invalid",
+        "audio is recorded and no chunk arrived",
+    ),
+    (too_many, "invalid", "tts: 4 sessions recorded, 3 expected"),
+    (lambda r: r["stt"]["sessions"].pop(), "invalid", "stt: 2 sessions recorded, 3 expected"),
+    (
+        puts(("stt.target.generation", None), ("stt.target.descriptor_digest", None)),
+        "complete",
+        "",
+    ),
+    (puts(("tts.target.loopback", False), ("gpu.machine", "client_only")), "complete", ""),
+    (puts(("worker.source", "operator_stated"), ("worker.version", "0.3.1")), "complete", ""),
+    (
+        puts(("provenance", "recorded"), ("tool.source_commit", "0" * 40)),
+        "complete",
+        "",
+    ),
     (put(f"{S0}.server.closed.admission", "not_admitted"), "failed", "admission is"),
     (put(f"{S0}.client.samples_sent", SAMPLES - 1), "failed", "samples sent is"),
     (put(f"{S0}.client.bytes_sent", SAMPLES), "failed", "bytes sent is"),
@@ -562,10 +697,42 @@ def check_rejections(good: dict, work: Path) -> None:
     assert completed.returncode == 2 and "invalid:" in completed.stderr, completed
 
 
+def check_samples(good: dict) -> None:
+    """Only a session that completed with no finding gives a sample; the lag bound is exact."""
+    whole = good["stt"]["summary"]["last_audio_to_final_transcript"]
+    assert (whole["count"], whole["misses"], whole["min_ns"]) == (3, 0, 100 * MS), whole
+    for edit, status in (
+        (fail_session, "failed"),
+        (stop_session, "failed"),
+        (put("stt.sessions.1.server.final.finalize_sequence", 0), "failed"),
+    ):
+        record = copy.deepcopy(good)
+        edit(record)
+        record_mod.finalize(record)
+        assert record_mod.check_record(record)[0] == status, record_mod.check_record(record)
+        session = record["stt"]["sessions"][1]
+        # The session's own timestamps still give its durations: the fastest final of the three.
+        assert session["boundaries"]["final_transcript"] is not None
+        assert session["measurements"]["last_audio_to_final_transcript"]["ns"] == 100 * MS
+        for name, summary in record["stt"]["summary"].items():
+            assert (summary["count"], summary["misses"]) == (2, 1), (name, summary)
+        assert record["stt"]["summary"]["last_audio_to_final_transcript"]["min_ns"] == 200 * MS
+    for mode, late in (("stt", "last_audio_to_"), ("tts", "segment_to_")):
+        record = copy.deepcopy(good)
+        late_input(mode, record_mod.MAX_INPUT_LAG_MS * MS + 1)(record)
+        record_mod.finalize(record)
+        entries = record[mode]["sessions"][0]["measurements"]
+        for name, summary in record[mode]["summary"].items():
+            missed = name.startswith(late)
+            assert (summary["count"], summary["misses"]) == ((2, 1) if missed else (3, 0)), name
+            assert (entries[name]["ns"] is None) == missed, (name, entries[name])
+
+
 # --- the client, against a server built from the same generated code ----------
 
 TARGET = ("synthetic-deployment", 7, "sha256:" + "0" * 64)
 TEXT = "synthetic sentence one"
+VOICE = "voice-a"
 CHUNKS = (960, 960, 400)
 
 
@@ -592,6 +759,8 @@ class SliceServer:
         self.violations: list[str] = []
         self.seen: dict = {"opens": [], "audio_at": [], "pings": 0, "frames": []}
         self._sequence = 0
+        # Set once `client` and `out`, the process the `interrupt` fault signals, are known.
+        self.armed = threading.Event()
 
     def _emit(self, skip: int = 0, **body):
         self._sequence += 1 + skip
@@ -659,10 +828,14 @@ class SliceServer:
                 ready.limits.text_to_speech.max_synthesis_text_bytes = 4
             if fault == "segment_credit":
                 ready.status.input_credit.waiting_segments.used = 2
+            if fault == "no_segment_budget":
+                ready.status.input_credit.waiting_segments.limit = 0
             if fault == "byte_credit":
                 ready.status.input_credit.bytes.limit = 8
         if fault == "heartbeat":
             ready.limits.heartbeat_interval_ms = 50
+        if fault == "no_ready_status":
+            ready.ClearField("status")
         if fault == "slow_ready":
             time.sleep(0.08)
         yield self._emit(ready=ready)
@@ -674,6 +847,14 @@ class SliceServer:
             yield self._closed(0)
             return
         if fault == "wrong_mode_event":
+            # A well-formed event of the other mode, at a point its own mode would allow it.
+            other = (
+                {"audio_chunk": self._chunk(ready, 0, 0, 2)}
+                if stt
+                else {"partial_transcript": pb.PartialTranscript(utterance_id=1, text="s")}
+            )
+            yield self._emit(**other)
+        if fault == "cancel_accepted":
             yield self._emit(cancel_accepted=pb.CancelAccepted())
         if fault == "unknown_body":
             yield self._emit()
@@ -709,9 +890,11 @@ class SliceServer:
             self._expect(event.session_id == ready.session_id, "an event without the session id")
             yield at, event
 
-    def _accepted(self, sequence: int, used: int, limit: int):
+    def _accepted(self, sequence: int, used: int, limit: int, segments=None):
         pb = self.pb
-        credit = pb.InputCredit(bytes=pb.Usage(used=used, limit=limit))
+        credit = pb.InputCredit(bytes=pb.Usage(used=used, limit=limit), waiting_segments=segments)
+        if self.fault == "accepted_without_credit":
+            return self._emit(accepted=pb.Accepted(accepted_sequence=sequence))
         return self._emit(accepted=pb.Accepted(accepted_sequence=sequence, input_credit=credit))
 
     def _stt(self, requests, ready, opened):
@@ -751,8 +934,8 @@ class SliceServer:
                             reason=pb.ENDPOINT_REASON_SILENCE,
                         )
                     )
-                if fault == "partial" and len(self.seen["frames"]) <= 2:
-                    text = "synthetic" if len(self.seen["frames"]) == 2 else ""
+                if fault == "partial" and len(self.seen["frames"]) <= 3:
+                    text = ("", " \n", "synthetic")[len(self.seen["frames"]) - 1]
                     partial = pb.PartialTranscript(utterance_id=1, revision=1, text=text)
                     yield self._emit(partial_transcript=partial)
                 if len(self.seen["frames"]) % 2 == 0:
@@ -770,6 +953,11 @@ class SliceServer:
                 time.sleep(self.delay_s)
                 if fault == "stall":
                     continue
+                if fault == "interrupt" and len(self.seen["opens"]) == 2:
+                    self.armed.wait()
+                    self.seen["checkpoint"] = json.loads(self.out.read_text(encoding="utf-8"))
+                    os.kill(self.client.pid, signal.SIGINT)
+                    continue
                 if fault in ("fail_after_finalize", "event_after_closed"):
                     yield self._closed(last, (pb.FAILURE_REASON_OOM, pb.ERROR_CODE_OOM_ERROR))
                     if fault == "event_after_closed":
@@ -780,7 +968,7 @@ class SliceServer:
                     end_sample_offset=samples,
                     reason=pb.ENDPOINT_REASON_CLIENT_FINALIZE,
                 )
-                text = "" if fault == "empty" else "synthetic words"
+                text = {"empty": "", "blank": " \n"}.get(fault, "synthetic words")
                 final = pb.FinalTranscript(
                     utterance_id=1,
                     segments=[pb.TranscriptSegment(end_us=samples * 1_000_000 // rate, text=text)],
@@ -826,7 +1014,7 @@ class SliceServer:
                 text_bytes, last = len(segment.text.encode()), event.sequence
                 self._expect(segment.segment_id == 1, "the segment id is not 1")
                 self._expect(text_bytes <= credit.bytes.limit, "input credit exceeded")
-                yield self._accepted(last, text_bytes, credit.bytes.limit)
+                yield self._accepted(last, text_bytes, credit.bytes.limit, credit.waiting_segments)
                 time.sleep(self.delay_s)
                 if fault == "early_synthesis":
                     yield self._emit(synthesis_completed=pb.SynthesisCompleted(segment_count=1))
@@ -881,7 +1069,7 @@ class Harness:
         self.wav = write_wav(work / "synthetic.wav", 1, 16000, 11 * 320 - 160)
         self.audio = client_mod.load_audio(self.wav, 20)
         self.audio["language"] = "en"
-        self.text = {"text": TEXT, "language": "en", "voice": "synthetic_voice"}
+        self.text = {"text": TEXT, "language": "en", "voice": VOICE}
 
     def serve(self, servicer: SliceServer) -> tuple[grpc.Server, str]:
         server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
@@ -891,12 +1079,12 @@ class Harness:
         return server, f"127.0.0.1:{port}"
 
     def run(
-        self, mode: str, fault: str = "", delay_s: float = 0.0, **settings
+        self, mode: str, fault: str = "", delay_s: float = 0.0, identity=TARGET[1:], **settings
     ) -> tuple[dict, dict, SliceServer]:
         """One section against one server: the record, its first session and the server."""
         servicer = SliceServer(self.bindings, fault, delay_s)
         server, endpoint = self.serve(servicer)
-        target = client_mod.Target(endpoint, *TARGET)
+        target = client_mod.Target(endpoint, TARGET[0], *identity)
         plan = self.audio if mode == "stt" else self.text
         settings = {"gpu_sampling": "off", "provenance": "synthetic", **settings}
         servicer.seen["run_at"] = time.monotonic_ns()
@@ -911,6 +1099,7 @@ class Harness:
             server.stop(0)
         status, detail = record_mod.check_record(record)
         assert status == record["result"]["status"], (fault, status, detail)
+        assert record["run"] == {"ended_by": "completed", "error": None}, (fault, record["run"])
         return record, record[mode]["sessions"][0], servicer
 
 
@@ -965,6 +1154,7 @@ def check_sessions(harness: Harness) -> None:
     opened = server.seen["opens"][0]
     assert (opened.resolved.deployment_id, opened.resolved.generation) == TARGET[:2]
     assert opened.resolved.descriptor_digest == TARGET[2] and opened.language == "en"
+    assert record["stt"]["target"]["generation"] == 7 and record["stt"]["input"]["language"] == "en"
     assert opened.mode == pb.SESSION_MODE_STT_STREAMING and not opened.voice
     assert opened.input_format == pb.AudioFormat(
         encoding=pb.AUDIO_ENCODING_PCM_S16LE, sample_rate_hz=16000, channels=1
@@ -980,7 +1170,7 @@ def check_sessions(harness: Harness) -> None:
     assert measured["call_start_to_first_transcript"]["ns"] >= 200 * MS + delay_ns
     assert measured["call_start_to_first_transcript"]["ended_by"] == "final_transcript"
     assert measured["session_initialization"]["ns"] == bounds["ready"] - bounds["call_start"] > 0
-    assert session["client"] | {"max_pacing_lag_ns": 0} == {
+    assert session["client"] | {"max_pacing_lag_ns": 0, "input_lag_ns": 0} == {
         "events_sent": 13,
         "frames_sent": 11,
         "samples_sent": 3360,
@@ -989,7 +1179,13 @@ def check_sessions(harness: Harness) -> None:
         "credit_waits": 0,
         "finalize_sequence": 13,
         "max_pacing_lag_ns": 0,
+        "input_lag_ns": 0,
     }
+    assert bounds["last_audio_scheduled"] == bounds["first_audio_sent"] + 200 * MS
+    assert (
+        session["client"]["input_lag_ns"]
+        == bounds["last_audio_sent"] - 200 * MS - (bounds["first_audio_sent"])
+    )
     words = b"synthetic words"
     assert session["server"]["final"] == {
         "finalize_sequence": 13,
@@ -1014,18 +1210,25 @@ def check_sessions(harness: Harness) -> None:
     assert not server.violations, server.violations
     assert session["outcome"] == "completed" and server.seen["text"] == TEXT
     opened = server.seen["opens"][0]
-    assert opened.mode == pb.SESSION_MODE_TTS_STREAMING and opened.voice == "synthetic_voice"
+    assert opened.mode == pb.SESSION_MODE_TTS_STREAMING and opened.voice == VOICE
+    assert record["tts"]["input"] | {"text_sha256": ""} == {
+        "text_sha256": "",
+        "text_bytes": len(TEXT),
+        "language": "en",
+        "voice": VOICE,
+    }
     measured = session["measurements"]
     assert measured["segment_to_first_audio"]["ns"] >= delay_ns
     assert measured["segment_to_first_audio"]["ended_by"] == "audio_chunk"
     assert measured["segment_to_completion"]["ns"] >= measured["segment_to_first_audio"]["ns"]
     assert measured["call_start_to_first_audio"]["ns"] > measured["segment_to_first_audio"]["ns"]
-    assert session["client"] == {
+    assert session["client"] | {"input_lag_ns": 0} == {
         "events_sent": 3,
         "pings_sent": 0,
         "credit_waits": 0,
         "segment_id": 1,
         "finalize_sequence": 3,
+        "input_lag_ns": 0,
     }
     assert session["server"]["output_format"] == {
         "encoding": "pcm_s16le",
@@ -1041,6 +1244,20 @@ def check_sessions(harness: Harness) -> None:
     }
     assert record["tts"]["input"]["text_sha256"] == client_mod.sha256_digest(TEXT.encode())
     assert "synthetic" not in json.dumps({**record, "provenance": ""}), "a name or text is recorded"
+
+    # A worker that reports no generation and no digest: the Open names none, the record has none.
+    for mode in ("stt", "tts"):
+        record, session, server = harness.run(mode, identity=(None, None))
+        resolved = server.seen["opens"][0].resolved
+        assert (resolved.deployment_id, resolved.generation, resolved.descriptor_digest) == (
+            TARGET[0],
+            0,
+            "",
+        )
+        assert session["outcome"] == "completed" and not server.violations, session
+        target = record[mode]["target"]
+        assert (target["generation"], target["descriptor_digest"]) == (None, None), target
+        assert record["record_kind"] == "slice_measurement"
 
     # Three sessions one after another: every sample is kept and none overlaps.
     record, _, server = harness.run("tts", iterations=3)
@@ -1061,10 +1278,18 @@ STOP_CASES = (
     ("tts", "text_limit", "input_outside_limits"),
     ("tts", "synthesis_limit", "input_outside_limits"),
     ("tts", "byte_credit", "input_outside_limits"),
+    ("tts", "no_segment_budget", "input_outside_limits"),
     ("stt", "ready_twice", "unexpected_event"),
     ("stt", "event_before_ready", "unexpected_event"),
     ("stt", "event_after_closed", "unexpected_event"),
     ("stt", "wrong_mode_event", "unexpected_event"),
+    ("tts", "wrong_mode_event", "unexpected_event"),
+    ("stt", "cancel_accepted", "unexpected_event"),
+    ("stt", "no_byte_budget", "credit_missing"),
+    ("stt", "no_ready_status", "credit_missing"),
+    ("tts", "no_ready_status", "credit_missing"),
+    ("stt", "accepted_without_credit", "credit_missing"),
+    ("tts", "accepted_without_credit", "credit_missing"),
     ("tts", "closed_state", "unexpected_event"),
     ("stt", "partial_late", "unexpected_event"),
     ("stt", "endpoint_twice", "unexpected_event"),
@@ -1088,7 +1313,6 @@ END_CASES = (
     ("stt", "drop", "call_failed", "UNAVAILABLE", "failed", "after 1 server events"),
     ("stt", "abort_after_close", "call_failed", "INTERNAL", "failed", "call ended INTERNAL"),
     ("stt", "ok_without_closed", "call_failed", "OK", "failed", "call ended OK after"),
-    ("stt", "no_byte_budget", "completed", "OK", "incomplete", "tts: not run"),
     ("stt", "slow_ready", "completed", "OK", "incomplete", "tts: not run"),
     ("stt", "fail_before_ready", "session_failed", "OK", "failed", "(backend_unavailable)"),
     ("stt", "fail_after_finalize", "session_failed", "OK", "failed", "session failed (oom)"),
@@ -1097,6 +1321,7 @@ END_CASES = (
     ("stt", "wrong_finalize", "completed", "OK", "failed", "final finalize_sequence is 0"),
     ("tts", "odd_chunk", "completed", "OK", "failed", "the audio is not whole samples"),
     ("stt", "empty", "completed", "OK", "incomplete", "no sample for call_start_to_first"),
+    ("stt", "blank", "completed", "OK", "incomplete", "no sample for call_start_to_first"),
     ("stt", "unknown_body", "completed", "OK", "incomplete", "tts: not run"),
     ("stt", "trailing_utterance", "completed", "OK", "incomplete", "tts: not run"),
     ("stt", "partial", "completed", "OK", "incomplete", "tts: not run"),
@@ -1121,6 +1346,13 @@ def check_faults(harness: Harness) -> None:
         sessions[fault] = (session, server)
 
     assert not sessions["frame_limit"][1].seen["frames"], "audio was sent outside the limits"
+    for fault in ("no_byte_budget", "no_ready_status"):
+        session, server = sessions[fault]
+        assert session["boundaries"]["ready"] is not None and "text" not in server.seen
+        assert not server.seen["frames"], "input was sent without credit"
+    # The whitespace is digested as it came and counted as no text.
+    final = sessions["blank"][0]["server"]["final"]
+    assert (final["text_bytes"], final["text_sha256"]) == (0, client_mod.sha256_digest(b" \n"))
     assert sessions["event_after_closed"][0]["server"]["closed"]["reason"] == "oom"
     assert sessions["drop"][0]["client"]["frames_sent"] < 11, "audio was paced into an ended call"
     assert sessions["abort_after_close"][0]["server"]["closed"]["state"] == "closed"
@@ -1146,9 +1378,10 @@ def check_faults(harness: Harness) -> None:
     assert (first["to"], first["ended_by"]) == ("first_partial", "partial_transcript"), first
     assert first["ns"] < session["measurements"]["session_initialization"]["ns"] + 200 * MS
     bounds = session["boundaries"]
-    # The empty partial after the first frame is counted and ends nothing.
-    assert session["server"]["partials"] == 2
-    assert bounds["first_partial"] - bounds["first_audio_sent"] >= 15 * MS
+    # The empty partial after the first frame and the blank one after the second are counted
+    # and end nothing.
+    assert session["server"]["partials"] == 3
+    assert bounds["first_partial"] - bounds["first_audio_sent"] >= 35 * MS
 
     # The first chunk that holds whole samples ends the measurement, not the first chunk.
     session = sessions["odd_chunk"][0]
@@ -1163,6 +1396,10 @@ def check_faults(harness: Harness) -> None:
     assert bounds["last_audio_sent"] - bounds["first_audio_sent"] >= 300 * MS
     assert session["client"]["max_pacing_lag_ns"] >= 100 * MS
     assert session["server"]["accepted_events"] == 11
+    # The last frame went out 120 ms or more after it was due: no sample counted from it.
+    assert session["client"]["input_lag_ns"] >= 120 * MS, session["client"]
+    assert session["measurements"]["last_audio_to_final_transcript"]["ns"] is None
+    assert session["measurements"]["call_start_to_first_transcript"]["ns"] is not None
 
     # The time to Ready is counted from before the call started.
     initialization = sessions["slow_ready"][0]["measurements"]["session_initialization"]
@@ -1171,6 +1408,401 @@ def check_faults(harness: Harness) -> None:
     session, server = sessions["heartbeat"]
     assert session["client"]["pings_sent"] == server.seen["pings"] >= 2, session["client"]
     assert session["client"]["events_sent"] == 13 + session["client"]["pings_sent"]
+
+
+# --- the client's definitions, in virtual time ---------------------------------
+
+
+class FedCall:
+    """gRPC's side of a call: it reads what the test feeds it, and nothing once cancelled.
+
+    `asked` counts the times the client asked for the next event.
+    """
+
+    def __init__(self) -> None:
+        self.events: queue.Queue = queue.Queue()
+        self.asked = threading.Semaphore(0)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.asked.release()
+        event = self.events.get()
+        if event is None:
+            raise StopIteration
+        return event
+
+    def Session(self, requests):
+        return self
+
+    def code(self):
+        return grpc.StatusCode.CANCELLED
+
+    def cancel(self) -> None:
+        self.events.put(None)
+
+
+class Script(client_mod.Run):
+    """Virtual time and a scripted server, in place of the clock and gRPC.
+
+    The clock moves only when the client waits: to the next arrival, or to
+    the time it waited for. `tick` also moves it one nanosecond a reading,
+    which orders a stamp against what follows it. `reply(script, name,
+    event)` answers each event as the client hands it over, with pairs of a
+    delay and a ServerEvent body or the call's status; they arrive in order.
+    """
+
+    def __init__(self, bindings, reply, tick: int = 0) -> None:
+        self.origin = self.at = 0
+        self.pb, self.reply, self.tick = bindings.pb, reply, tick
+        self.owner = threading.current_thread()
+        self.calls: list[int] = []
+        self.handed: list[tuple[int, str]] = []
+
+    def now(self) -> int:
+        at = self.at
+        if threading.current_thread() is self.owner:
+            self.at += self.tick
+        return at
+
+    @contextlib.contextmanager
+    def connect(self, bindings, endpoint, timeout_ms):
+        yield self, 0
+
+    def Session(self, requests):
+        self.calls.append(self.at)
+        return FedCall()
+
+    def outbound(self):
+        self._arriving: list = []
+        self._sequence, self.state = 0, {}
+        return self
+
+    def get(self):
+        raise AssertionError("nothing reads what a scripted call sends")
+
+    def put(self, event) -> None:
+        name = "half_close" if event is None else event.WhichOneof("body")
+        self.handed.append((self.at, name))
+        for delay, item in self.reply(self, name, event):
+            if isinstance(item, dict):
+                self._sequence += 1
+                item = self.pb.ServerEvent(sequence=self._sequence, **item)
+            self._arriving.append((self.at + delay, item))
+
+    def take(self, inbound, until: int):
+        if not self._arriving or self._arriving[0][0] > until:
+            self.at = max(self.at, until)
+            return None
+        due, item = self._arriving.pop(0)
+        self.at = max(self.at, due)
+        return self.at, item
+
+    def sent(self, name: str) -> list[int]:
+        return [at for at, handed in self.handed if handed == name]
+
+
+def replies(pb, mode: str, **knobs):
+    """A server that answers as the schema states, moved by `knobs`.
+
+    ready: an edit of Ready. unasked: ns after Ready at which credit returns
+    unasked. hold: {input position: ns its Accepted is late}. answer_after:
+    ns from a Finalize, or from the segment, to its answer. chunks and
+    chunk_every: how many AudioChunks, and the ns between them. stall: no
+    answer to Finalize. pongs: how many Pings are answered. on_finalize:
+    called with the script as a Finalize is handed over. partials: the text
+    of a PartialTranscript after each of the first frames. final_text: the
+    final transcript's.
+    """
+    after = knobs.get("answer_after", 0)
+
+    def returned(state, sequence: int):
+        credit = pb.InputCredit()
+        credit.CopyFrom(state["ready"].status.input_credit)
+        credit.bytes.used = credit.waiting_segments.used = 0
+        return {"accepted": pb.Accepted(accepted_sequence=sequence, input_credit=credit)}
+
+    def reply(script, name: str, event):
+        state = script.state
+        if name == "finalize":
+            knobs.get("on_finalize", lambda script: None)(script)
+        if name == "open":
+            ready = recorded_ready(pb, f"{mode}_ready")
+            resolved = event.open.resolved
+            ready.generation, ready.descriptor_digest = (
+                resolved.generation,
+                resolved.descriptor_digest,
+            )
+            if mode == "stt":
+                ready.input_format.CopyFrom(event.open.input_format)
+            knobs.get("ready", lambda ready: None)(ready)
+            state.update(ready=ready, inputs=0, samples=0, last=0, pings=0, text=0)
+            yield 0, {"ready": ready}
+            if "unasked" in knobs:
+                yield knobs["unasked"], returned(state, 0)
+        elif name == "ping":
+            state["pings"] += 1
+            if state["pings"] <= knobs.get("pongs", state["pings"]):
+                yield 0, {"pong": pb.Pong()}
+        elif name in ("audio", "text_segment"):
+            position, state["last"] = state["inputs"], event.sequence
+            state["inputs"] += 1
+            yield knobs.get("hold", {}).get(position, 0), returned(state, event.sequence)
+            if name == "audio":
+                state["samples"] += event.audio.sample_count
+                for text in knobs.get("partials", ())[position : position + 1]:
+                    partial = pb.PartialTranscript(utterance_id=1, revision=position + 1, text=text)
+                    yield 0, {"partial_transcript": partial}
+                return
+            count, every = knobs.get("chunks", 3), knobs.get("chunk_every", 0)
+            state.update(text=len(event.text_segment.text.encode()), samples=count * 480)
+            for index in range(count):
+                chunk = pb.AudioChunk(
+                    segment_id=1,
+                    chunk_index=index,
+                    segment_sample_offset=index * 480,
+                    format=state["ready"].output_format,
+                    data=bytes(960),
+                )
+                yield after + index * every, {"audio_chunk": chunk}
+            done = pb.SegmentCompleted(segment_id=1, total_samples=count * 480, chunk_count=count)
+            yield after + count * every, {"segment_completed": done}
+        elif name == "finalize" and mode == "stt" and not knobs.get("stall"):
+            endpoint = pb.EndpointDetected(
+                utterance_id=1,
+                end_sample_offset=state["samples"],
+                reason=pb.ENDPOINT_REASON_CLIENT_FINALIZE,
+            )
+            final = pb.FinalTranscript(
+                utterance_id=1,
+                segments=[pb.TranscriptSegment(text=knobs.get("final_text", "words"))],
+                end_sample_offset=state["samples"],
+                finalize_sequence=event.sequence,
+            )
+            yield after, {"endpoint_detected": endpoint}
+            yield after, {"final_transcript": final}
+        elif name == "finalize" and mode == "tts":
+            done = pb.SynthesisCompleted(
+                segment_count=1, total_samples=state["samples"], finalize_sequence=event.sequence
+            )
+            yield 0, {"synthesis_completed": done}
+        elif name == "half_close":
+            stt = mode == "stt"
+            totals = pb.SessionTotals(
+                input_audio_samples=state["samples"] if stt else 0,
+                input_text_bytes=state["text"],
+                output_audio_samples=0 if stt else state["samples"],
+                utterances_completed=int(stt),
+                segments_completed=int(not stt),
+            )
+            closed = pb.SessionClosed(
+                state=pb.SESSION_STATE_CLOSED,
+                admission=pb.ADMISSION_ADMITTED,
+                last_accepted_sequence=state["last"],
+                totals=totals,
+            )
+            yield 0, {"session_closed": closed}
+            yield 0, grpc.StatusCode.OK
+
+    return reply
+
+
+def scripted(
+    harness: Harness, mode: str, tick: int = 0, settings: dict | None = None,
+    ended_by: str = "completed", **knobs,
+):  # fmt: skip
+    """One run against a scripted server at an address that is not loopback."""
+    script = Script(harness.bindings, replies(harness.bindings.pb, mode, **knobs), tick)
+    target = client_mod.Target("192.0.2.1:7", *TARGET)
+    plan = harness.audio if mode == "stt" else harness.text
+    record = client_mod.measure(
+        harness.bindings,
+        stt=(target, plan) if mode == "stt" else None,
+        tts=(target, plan) if mode == "tts" else None,
+        run=script,
+        **{"gpu_sampling": "off", **(settings or {})},
+    )
+    status, detail = record_mod.check_record(record)
+    assert status == record["result"]["status"], (status, detail)
+    assert record["run"]["ended_by"] == ended_by, record["run"]
+    sessions = record[mode]["sessions"] if record[mode] else []
+    return record, sessions[0] if sessions else None, script
+
+
+class HeldClock(client_mod.Run):
+    """The real waits on a clock that reads what the test set."""
+
+    def __init__(self) -> None:
+        self.origin = self.at = 0
+
+    def now(self) -> int:
+        return self.at
+
+
+# Each boundary a send stamps: (boundary, the event's body, which event of that body).
+SEND_STAMPS = {
+    "stt": (
+        ("first_audio_sent", "audio", 0),
+        ("last_audio_sent", "audio", -1),
+        ("finalize_sent", "finalize", 0),
+    ),
+    "tts": (("text_segment_sent", "text_segment", 0), ("finalize_sent", "finalize", 0)),
+}
+
+
+def check_stamps(harness: Harness) -> None:
+    """When each stamp is taken, against the action it stands for."""
+    pb, bounds = harness.bindings.pb, {}
+    for mode in ("stt", "tts"):
+        record, session, script = scripted(harness, mode, tick=1)
+        assert session["outcome"] == "completed", session
+        bounds = session["boundaries"]
+        # The call start is read before the call is made.
+        assert bounds["call_start"] < script.calls[0], (bounds, script.calls)
+        # A send is stamped before the event is handed to the transport.
+        for boundary, name, which in SEND_STAMPS[mode]:
+            assert bounds[boundary] < script.sent(name)[which], (boundary, bounds, script.handed)
+    assert bounds["text_segment_scheduled"] < bounds["text_segment_sent"]
+
+    # An event is stamped when it is read, however long it then waits to be handled.
+    clock, fed = HeldClock(), FedCall()
+    call = client_mod.Call(clock, harness.bindings, fed, "stt", 0, 400 * MS)
+    fed.asked.acquire()
+    clock.at = 100
+    fed.events.put(pb.ServerEvent(sequence=1, ready=recorded_ready(pb, "stt_ready")))
+    fed.asked.acquire()
+    clock.at = 500
+    call.wait(lambda: call.ready is not None)
+    call.close()
+    assert call.session["boundaries"]["ready"] == 100, call.session["boundaries"]
+
+
+def check_schedule(harness: Harness) -> None:
+    """Pacing, the scheduled start of each answer's measurement, and the event timeout."""
+    frame, bound = 20 * MS, record_mod.MAX_INPUT_LAG_MS * MS
+
+    def one_frame(ready) -> None:
+        ready.status.input_credit.bytes.limit = 640
+
+    # Frame 3 waits 7 ms for credit. The frames after it go at their own places, counted from
+    # the first frame and not from the late one.
+    record, session, script = scripted(harness, "stt", ready=one_frame, hold={2: 27 * MS})
+    sent = script.sent("audio")
+    assert [at - sent[0] for at in sent] == [
+        n * frame + (7 * MS if n == 3 else 0) for n in range(11)
+    ], sent
+    client, bounds = session["client"], session["boundaries"]
+    assert (client["credit_waits"], client["max_pacing_lag_ns"], client["input_lag_ns"]) == (
+        1,
+        7 * MS,
+        0,
+    ), client
+    assert bounds["last_audio_scheduled"] == bounds["last_audio_sent"] == sent[0] + 10 * frame
+
+    # Credit for the last frame comes 30 ms late and the final 50 ms after the Finalize. The
+    # time to final is counted from when the frame was due: 80 ms, not the 50 after it went.
+    for late, to_final in ((30 * MS, 80 * MS), (bound, bound + 50 * MS), (bound + 1, None)):
+        record, session, script = scripted(
+            harness, "stt", ready=one_frame, hold={9: frame + late}, answer_after=50 * MS
+        )
+        client, bounds = session["client"], session["boundaries"]
+        assert session["outcome"] == "completed" and client["credit_waits"] == 1, session
+        assert bounds["last_audio_scheduled"] == bounds["first_audio_sent"] + 10 * frame
+        assert bounds["last_audio_sent"] - bounds["last_audio_scheduled"] == late
+        assert client["input_lag_ns"] == late
+        assert bounds["final_transcript"] - bounds["last_audio_sent"] == 50 * MS
+        measured = session["measurements"]
+        assert measured["last_audio_to_final_transcript"]["ns"] == to_final, measured
+        assert measured["call_start_to_first_transcript"]["ns"] is not None
+        summary = record["stt"]["summary"]["last_audio_to_final_transcript"]
+        assert (summary["count"], summary["misses"]) == ((1, 0) if to_final else (0, 1)), summary
+        missed = "stt session 0: no sample for last_audio_to_final_transcript"
+        assert (missed in record["result"]["reasons"]) == (to_final is None), record["result"]
+        assert record["settings"]["max_input_lag_ms"] == record_mod.MAX_INPUT_LAG_MS
+
+    # The same for a text segment: no segment credit until it returns unasked.
+    def no_segment_credit(ready) -> None:
+        ready.status.input_credit.waiting_segments.used = 2
+
+    for late, to_audio in ((30 * MS, 70 * MS), (bound, bound + 40 * MS), (bound + 1, None)):
+        record, session, script = scripted(
+            harness, "tts", ready=no_segment_credit, unasked=late, answer_after=40 * MS
+        )
+        client, bounds = session["client"], session["boundaries"]
+        assert session["outcome"] == "completed" and client["credit_waits"] == 1, session
+        assert bounds["text_segment_scheduled"] == bounds["ready"]
+        assert client["input_lag_ns"] == late == script.sent("text_segment")[0] - bounds["ready"]
+        assert bounds["first_audio_chunk"] - bounds["text_segment_sent"] == 40 * MS
+        measured = session["measurements"]
+        assert measured["segment_to_first_audio"]["ns"] == to_audio, measured
+        assert measured["segment_to_completion"]["ns"] == to_audio, measured
+        assert measured["call_start_to_first_audio"]["ns"] is not None
+
+    # The timeout is counted from each event: ten chunks 100 ms apart outlast one of 400 ms.
+    slow = {"event_timeout_ms": 400}
+    record, session, script = scripted(
+        harness, "tts", settings=slow, chunks=10, chunk_every=100 * MS, answer_after=100 * MS
+    )
+    assert session["outcome"] == "completed" and session["server"]["chunks"] == 10, session
+    assert session["measurements"]["segment_to_completion"]["ns"] == 1100 * MS
+
+    # A Pong is not an event the session waits for: a server that answers Pings and not the
+    # Finalize times out 400 ms after the Finalize, seven Pings later.
+    def heartbeat(ready) -> None:
+        ready.limits.heartbeat_interval_ms = 50
+
+    record, session, script = scripted(
+        harness, "stt", settings=slow, ready=heartbeat, stall=True, pongs=40
+    )
+    assert session["outcome"] == "timeout", session
+    finalized = session["boundaries"]["finalize_sent"]
+    assert script.at - finalized == 400 * MS, (script.at, finalized)
+    assert len([at for at in script.sent("ping") if at > finalized]) == 7, script.sent("ping")
+
+    # A partial or a final of nothing but whitespace is no transcript: the first partial is
+    # the one read after the third frame, and a blank final is a miss.
+    record, session, script = scripted(harness, "stt", partials=("", " \n", "word"))
+    assert session["server"]["partials"] == 3, session["server"]
+    assert session["boundaries"]["first_partial"] == script.sent("audio")[2]
+    record, session, script = scripted(harness, "stt", final_text=" \n")
+    first = session["measurements"]["call_start_to_first_transcript"]
+    assert (first["ns"], session["server"]["final"]["text_bytes"]) == (None, 0), session
+
+
+def check_run_endings(harness: Harness) -> None:
+    """A run that an error or an interrupt ends still gives a record, and it says so."""
+
+    def fail_second(script) -> None:
+        if len(script.calls) == 2:
+            raise RuntimeError("synthetic failure")
+
+    saved: list[dict] = []
+    settings = {"iterations": 2, "checkpoint": lambda record: saved.append(copy.deepcopy(record))}
+    with contextlib.redirect_stderr(io.StringIO()) as stderr:
+        record, session, script = scripted(
+            harness, "stt", settings=settings, ended_by="error", on_finalize=fail_second
+        )
+    assert "RuntimeError: synthetic failure" in stderr.getvalue()
+    assert record["run"] == {"ended_by": "error", "error": "RuntimeError"}, record["run"]
+    assert record["result"]["status"] == "failed", record["result"]
+    assert "run: ended by an error (RuntimeError)" in record["result"]["reasons"]
+    assert "synthetic failure" not in json.dumps(record)
+    # Saved before the first session and after it; the second session never ended.
+    assert [entry["stt"] and len(entry["stt"]["sessions"]) for entry in saved] == [None, 1]
+    assert len(record["stt"]["sessions"]) == 1 and len(script.calls) == 2
+    for entry in saved:
+        assert entry["run"]["ended_by"] is None
+        status, detail = record_mod.check_record(entry)
+        assert status == "failed" and "run: did not end" in detail, (status, detail)
+
+    interrupt = {
+        "ended_by": "interrupt",
+        "on_finalize": lambda _: signal.raise_signal(signal.SIGINT),
+    }
+    record, session, script = scripted(harness, "tts", **interrupt)
+    assert record["run"] == {"ended_by": "interrupt", "error": None}, record["run"]
+    assert session is None and record["result"]["reasons"][0] == "run: interrupted"
 
 
 def check_arrival_order(harness: Harness) -> None:
@@ -1198,6 +1830,69 @@ def check_arrival_order(harness: Harness) -> None:
     assert call.session["boundaries"]["first_partial"] == 50
 
 
+def smi(work: Path, name: str, later: str) -> str:
+    """A fake nvidia-smi that replays the capture once and runs `later` each time after."""
+    program, mark = work / name, work / f"{name}-ran"
+    script = (
+        f'#!/bin/sh\nif [ -e "{mark}" ]; then\n{later}\nfi\n: > "{mark}"\ncat "{GPU_CAPTURE}"\n'
+    )
+    program.write_text(script)
+    program.chmod(0o755)
+    return str(program)
+
+
+def check_sampler(work: Path, silent: str) -> None:
+    """The sampling process: a query that fails is counted, and nothing outlives the run."""
+    count = work / "queries"
+    flaky = smi(
+        work,
+        "flaky-smi",
+        f'echo x >> "{count}"\n'
+        f'case $(wc -l < "{count}" | tr -d " ") in\n'
+        f'1) head -1 "{GPU_CAPTURE}"; echo "0, NVIDIA L4"; exit 0;;\n'
+        "2) exit 9;;\nesac",
+    )
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        assert client_mod.sample_gpu(flaky, 1, iter([True] * 4 + [False]).__next__) == 0
+        assert client_mod.sample_gpu(silent, 1, lambda: True) == 1
+    lines = [json.loads(line) for line in printed.getvalue().splitlines()]
+    assert ["failed" in line for line in lines] == [False, True, True, False], lines
+    sampler = client_mod.GpuSampler(client_mod.Run(), False, 20)
+    gpu = sampler.section(None, lines, False)
+    assert (gpu["status"], gpu["failed_queries"], len(gpu["samples"])) == ("sampled", 2, 2), gpu
+    assert gpu["devices"] == [{"index": 0, "name": "NVIDIA L4"}] and gpu["machine"] == "client_only"
+
+    # A sampling process that died says nothing was sampled, whatever it read before.
+    sampler = client_mod.GpuSampler(
+        client_mod.Run(), True, 1, smi(work, "fatal-smi", "kill -9 $PPID")
+    )
+    sampler._process.wait()
+    gpu = sampler.finish(True)
+    assert (gpu["status"], gpu["samples"], gpu["machine"]) == ("unavailable", [], None), gpu
+    assert gpu["reason"] == "the sampling process ended before the run did", gpu
+    record = synthetic_record()
+    record["gpu"] = gpu
+    assert record_mod.check_record(record_mod.finalize(record))[0] == "complete"
+
+    # A query in flight when the run ends is ended with it. It names itself through a pipe.
+    pipe = work / "query-pid"
+    os.mkfifo(pipe)
+    hanging = smi(work, "hanging-smi", f'echo $$ > "{pipe}"\nexec sleep 30')
+    sampler = client_mod.GpuSampler(client_mod.Run(), True, 1, hanging)
+    query = int(pipe.read_text())
+    try:
+        assert sampler.finish(True)["status"] == "sampled"
+        try:
+            os.kill(query, 0)
+        except ProcessLookupError:
+            return
+        raise AssertionError("a query in flight outlived the run")
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(query, signal.SIGKILL)
+
+
 def check_inputs_and_gpu(harness: Harness) -> None:
     work = harness.work
 
@@ -1209,26 +1904,37 @@ def check_inputs_and_gpu(harness: Harness) -> None:
             return
         raise AssertionError(f"not refused: expected {needle!r}")
 
-    refused(lambda: client_mod.load_audio(work / "absent.wav", 20), "not a readable WAV file")
-    for name, channels, rate, samples in (("stereo", 2, 16000, 640), ("odd", 1, 11025, 640)):
-        unusable = write_wav(work / f"{name}.wav", channels, rate, samples)
-        refused(lambda path=unusable: client_mod.load_audio(path, 20), "need mono 16-bit PCM")
+    refused(lambda: client_mod.load_audio(work / "absent.wav", 20), "unreadable WAV file")
+    for name, channels, rate, needle in (
+        ("stereo", 2, 16000, "not a mono 16-bit PCM WAV file"),
+        ("odd", 1, 11025, "need audio in whole 20 ms frames"),
+    ):
+        unusable = write_wav(work / f"{name}.wav", channels, rate, 640)
+        refused(lambda path=unusable: client_mod.load_audio(path, 20), needle)
     refused(lambda: client_mod.load_audio(write_wav(work / "empty.wav", 1, 16000, 0), 20), "need")
-    for spec in ("d:0:" + TARGET[2], "d:x:" + TARGET[2], "d:7", "d:7:sha256:00"):
+    for spec in ("d:0:" + TARGET[2], "d:x:" + TARGET[2], "d:7", "d:7:sha256:00", ""):
         refused(lambda spec=spec: client_mod.Target.parse("localhost:1", spec), "target")
     target = client_mod.Target.parse("[::1]:7", "d:7:" + TARGET[2])
     assert target == ("[::1]:7", "d", 7, TARGET[2]) and target.is_loopback()
+    assert client_mod.Target.parse("[::1]:7", "d") == ("[::1]:7", "d", None, None)
     assert client_mod.Target("localhost:7", *TARGET).is_loopback()
     assert not client_mod.Target("192.0.2.1:7", *TARGET).is_loopback()
     assert not client_mod.Target("speech.example:7", *TARGET).is_loopback()
 
     # The recorded capture of an L4 names the sampler's four columns as the sampler reads them.
     capture = GPU_CAPTURE.read_text(encoding="utf-8")
-    assert client_mod.parse_gpu_csv(capture) == [
-        {"index": 0, "utilization_percent": 0, "memory_used_mib": 256, "memory_total_mib": 23034}
-    ]
-    not_reported = capture.replace("256 MiB", "[N/A]")
-    assert client_mod.parse_gpu_csv(not_reported)[0]["memory_used_mib"] is None
+    reading = {
+        "name": "NVIDIA L4",
+        "index": 0,
+        "utilization_percent": 0,
+        "memory_used_mib": 256,
+        "memory_total_mib": 23034,
+    }
+    assert client_mod.parse_gpu_csv(capture) == [reading]
+    for cell in ("[N/A]", "", "MiB"):
+        not_reported = capture.replace("256 MiB", cell)
+        assert client_mod.parse_gpu_csv(not_reported) == [{**reading, "memory_used_mib": None}]
+    refused(lambda: client_mod.parse_gpu_csv(capture.replace("NVIDIA L4", "")), "index or name")
     refused(lambda: client_mod.parse_gpu_csv(""), "no reading")
     refused(lambda: client_mod.parse_gpu_csv(capture.splitlines()[0]), "no reading")
     refused(
@@ -1247,10 +1953,19 @@ def check_inputs_and_gpu(harness: Harness) -> None:
     gpu = record["gpu"]
     assert gpu["status"] == "sampled" and gpu["interval_ms"] == 20 and gpu["reason"] is None, gpu
     assert gpu["summary"]["max_memory_used_mib"] == 256 and gpu["summary"]["samples"] >= 1
+    # On loopback the readings are of the machine that serves, by default.
+    assert (gpu["machine"], gpu["failed_queries"]) == ("serving", 0), gpu
+    assert gpu["devices"] == [{"index": 0, "name": "NVIDIA L4"}] and "name" not in gpu["samples"][0]
     # The first reading precedes the first session, on the run's own clock.
     assert gpu["samples"][0]["at_ns"] <= record["tts"]["sessions"][0]["boundaries"]["call_start"]
     asked = set((work / "gpu-arguments").read_text().splitlines())
     assert asked == {" ".join(client_mod.GPU_QUERY)}, asked
+    # Away from loopback they are the client machine's: taken only when asked for.
+    elsewhere = {"gpu_program": str(fake), "gpu_interval_ms": 20}
+    gpu = scripted(harness, "tts", settings={**elsewhere, "gpu_sampling": "auto"})[0]["gpu"]
+    assert (gpu["status"], gpu["machine"], gpu["samples"]) == ("not_requested", None, []), gpu
+    gpu = scripted(harness, "tts", settings={**elsewhere, "gpu_sampling": "on"})[0]["gpu"]
+    assert (gpu["status"], gpu["machine"]) == ("sampled", "client_only"), gpu
     silent = work / "silent-smi"
     silent.write_text("#!/bin/sh\nexit 9\n")
     silent.chmod(0o755)
@@ -1263,6 +1978,7 @@ def check_inputs_and_gpu(harness: Harness) -> None:
             gpu
         )
     assert harness.run("tts")[0]["gpu"]["status"] == "not_requested"
+    check_sampler(work, str(silent))
 
     # A target nothing listens on: the record says the channel never became ready.
     target = client_mod.Target("127.0.0.1:1", *TARGET)
@@ -1288,14 +2004,16 @@ def check_command(harness: Harness) -> None:
     long.write_text("s" * 4097, encoding="utf-8")
     servers = [harness.serve(SliceServer(harness.bindings)) for _ in range(2)]
     spec = ":".join(str(part) for part in TARGET)
-    command = [
-        sys.executable, str(CLIENT_TOOL), "run", "--out", str(out), "--provenance", "synthetic",
-        "--iterations", "2", "--gpu-interval-ms", "20",
+    stt = [
         "--stt-endpoint", servers[0][1], "--stt-target", spec, "--stt-language", "en",
         "--audio", str(harness.wav),
+    ]  # fmt: skip
+    command = [
+        sys.executable, str(CLIENT_TOOL), "run", "--out", str(out),
+        "--iterations", "2", "--gpu-interval-ms", "20", *stt,
         "--tts-endpoint", servers[1][1], "--tts-target", spec, "--tts-language", "en",
         "--text-file", str(text),
-        "--voice", "synthetic_voice",
+        "--voice", VOICE,
     ]  # fmt: skip
     # The command runs as an operator runs it, without this process's gRPC setting.
     environment = {**os.environ, "PATH": f"{work / 'bin'}{os.pathsep}{os.environ['PATH']}"}
@@ -1305,7 +2023,14 @@ def check_command(harness: Harness) -> None:
         assert done.returncode == 0 and "complete: every session completed" in done.stdout, done
         record = json.loads(out.read_text(encoding="utf-8"))
         assert record["result"] == {"status": "complete", "reasons": []}
+        # Both targets are loopback, so the GPU is sampled; no commit, so nothing is `recorded`.
         assert record["gpu"]["status"] == "sampled" and record["provenance"] == "synthetic"
+        assert record["run"] == {"ended_by": "completed", "error": None}
+        assert record["worker"] == {"source": "not_stated", "version": None, "build": None}
+        assert set(record["client_platform"]) == {
+            "system", "release", "machine", "cpu_count", "cpu_model",
+        }  # fmt: skip
+        assert not [path for path in work.iterdir() if path.name.endswith(".partial")]
         assert [len(record[mode]["sessions"]) for mode in ("stt", "tts")] == [2, 2]
         assert record["tool"]["stream_schema_sha256"] == harness.bindings.schema_digest
         jsonschema.validate(record, json.loads(SCHEMA.read_text(encoding="utf-8")))
@@ -1313,8 +2038,14 @@ def check_command(harness: Harness) -> None:
         for extra, needle in (
             (["--iterations", "0"], "at least 1"),
             (["--source-commit", "abc"], "not a full commit id"),
-            (["--stt-target", "d:7"], "is not DEPLOYMENT:GENERATION:DIGEST"),
-            (["--audio", str(text)], "not a readable WAV file"),
+            (["--stt-target", "d:7"], "is not DEPLOYMENT or DEPLOYMENT:GENERATION:DIGEST"),
+            (["--audio", str(text)], "unreadable WAV file"),
+            (["--provenance", "recorded"], "--provenance recorded needs --source-commit"),
+            (["--worker-version", "synthetic/path"], "--worker-version does not match"),
+            (["--worker-build", "a b"], "--worker-build does not match"),
+            (["--voice", "\u00e9"], "--voice does not match"),
+            (["--tts-language", "e\tn"], "--tts-language does not match"),
+            (["--out", str(work / "absent" / "record.json")], "No such file or directory"),
             (["--frame-ms", "10"], "a frame is 20 to 320 ms"),
             (["--text-file", str(harness.wav)], "codec can't decode"),
             (["--text-file", str(empty)], "segment text of 1 to 4,096 bytes"),
@@ -1325,14 +2056,57 @@ def check_command(harness: Harness) -> None:
         ):
             done = subprocess.run([*command, *extra], capture_output=True, text=True, check=False)
             assert done.returncode == 2 and needle in done.stderr, done
-        done = subprocess.run(command[:7], capture_output=True, text=True, check=False)
+        done = subprocess.run(command[:5], capture_output=True, text=True, check=False)
         assert done.returncode == 2 and "nothing to measure" in done.stderr, done
+
+        # A commit makes the run `recorded`; the worker's release is what the operator states;
+        # a target given by its deployment alone has no generation and no digest.
+        stated = [
+            "--iterations", "1", "--gpu-sampling", "off", "--source-commit", "0" * 40,
+            "--worker-version", "0.3.1", "--worker-build", "b1", "--tts-target", TARGET[0],
+        ]  # fmt: skip
+        done = subprocess.run([*command, *stated], capture_output=True, text=True, check=False)
+        assert done.returncode == 0, done
+        record = json.loads(out.read_text(encoding="utf-8"))
+        assert record["provenance"] == "recorded" and record["gpu"]["status"] == "not_requested"
+        assert record["worker"] == {"source": "operator_stated", "version": "0.3.1", "build": "b1"}
+        assert record["stt"]["target"]["generation"] == 7
+        assert record["tts"]["target"] | {"connect_ns": 0} == {
+            "generation": None,
+            "descriptor_digest": None,
+            "loopback": True,
+            "connect_ns": 0,
+        }
+
+        # An interrupt in the second session: the record on disk holds the first and says so.
+        # The server reads what was on disk before it sends the signal.
+        servicer = SliceServer(harness.bindings, "interrupt")
+        servers.append(harness.serve(servicer))
+        interrupted = [*command[:5], "--iterations", "2", "--gpu-sampling", "off", *stt]
+        interrupted[4] = str(work / "interrupted.json")
+        interrupted[interrupted.index("--stt-endpoint") + 1] = servers[-1][1]
+        servicer.out = Path(interrupted[4])
+        servicer.client = subprocess.Popen(
+            interrupted, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment
+        )
+        servicer.armed.set()
+        _, stderr = servicer.client.communicate()
+        assert servicer.client.returncode == 1 and "failed: run: interrupted" in stderr, stderr
+        record = json.loads(servicer.out.read_text(encoding="utf-8"))
+        assert record["run"] == {"ended_by": "interrupt", "error": None}, record["run"]
+        before = servicer.seen["checkpoint"]
+        assert before["run"]["ended_by"] is None and record_mod.check_record(before)[0] == "failed"
+        for entry in (before, record):
+            sessions = entry["stt"]["sessions"]
+            assert [session["outcome"] for session in sessions] == ["completed"], sessions
     finally:
         for server, _ in servers:
             server.stop(0)
 
 
 def main() -> int:
+    # A shell that started this in the background left SIGINT ignored; the interrupt cases send it.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     check_nearest_rank()
     check_stage_list()
     with tempfile.TemporaryDirectory() as raw_tmp:
@@ -1340,11 +2114,15 @@ def main() -> int:
         good = synthetic_record()
         check_good_record(good, work)
         check_rejections(good, work)
+        check_samples(good)
         generated = work / "generated"
         generated.mkdir()
         bindings = client_mod.load_bindings(generated)
         check_bindings(bindings)
         harness = Harness(bindings, work)
+        check_stamps(harness)
+        check_schedule(harness)
+        check_run_endings(harness)
         check_sessions(harness)
         check_faults(harness)
         check_arrival_order(harness)

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/slice_measurement_record.json",
   "title": "Streaming slice measurement record",
-  "description": "Machine-readable result of one run of tools/validation/slice_measure.py: paced speech-to-text sessions and text-to-speech segments over the stream session envelope, each with a timestamp at every boundary the caller can see, on the caller's monotonic clock. It carries counts, sizes, digests and times only: no audio, text, voice name, address or caller identifier. Every duration, distribution and the result are derived from the timestamps and counts, and the checker recomputes them and refuses a record whose derived fields disagree. It evaluates no latency gate and is never Production lifecycle evidence.",
+  "description": "Machine-readable result of one run of tools/validation/slice_measure.py: paced speech-to-text sessions and text-to-speech segments over the stream session envelope, each with a timestamp at every boundary the caller can see, on the caller's monotonic clock. It carries counts, sizes, digests and times, the language and voice the sessions named, and facts of the measuring machine that name no machine: no audio, text, transcript, address, host name, path or caller identifier. Every duration, distribution and the result are derived from the timestamps and counts, and the checker recomputes them and refuses a record whose derived fields disagree. It evaluates no latency gate and is never Production lifecycle evidence.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -10,6 +10,8 @@
     "record_kind",
     "provenance",
     "tool",
+    "worker",
+    "client_platform",
     "recorded_at_utc",
     "clock",
     "percentile_method",
@@ -17,15 +19,20 @@
     "stt",
     "tts",
     "gpu",
+    "run",
     "result"
   ],
   "properties": {
     "schema_version": { "type": "string", "const": "0.1" },
-    "record_kind": { "type": "string", "const": "slice_measurement" },
+    "record_kind": {
+      "type": "string",
+      "const": "slice_measurement",
+      "description": "What the record is presented as, and the only thing: a measurement of the streaming slice from the caller's side. A target that reports no generation and no descriptor digest is recorded as such; the record identifies no deployment by them and is nothing more than this."
+    },
     "provenance": {
       "type": "string",
       "enum": ["recorded", "synthetic"],
-      "description": "`recorded` for a run against a serving worker; `synthetic` for a run against a test server, whose numbers measure nothing."
+      "description": "`recorded` for a run against a serving worker, which needs the tool's `source_commit`; `synthetic` for a run against a test server or by a tool whose commit was not given, whose numbers measure nothing."
     },
     "tool": {
       "type": "object",
@@ -45,6 +52,30 @@
           "$ref": "#/definitions/Digest",
           "description": "Digest of the session.proto the bindings were generated from."
         }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "version", "build"],
+      "description": "The serving worker's release and build. The stream session envelope reports neither, so they are what the operator stated, or null.",
+      "properties": {
+        "source": { "type": "string", "enum": ["operator_stated", "not_stated"] },
+        "version": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Label" }] },
+        "build": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Label" }] }
+      }
+    },
+    "client_platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system", "release", "machine", "cpu_count", "cpu_model"],
+      "description": "The measuring machine, by what a latency depends on. Where every target is a loopback address it is also the machine that serves. No host name, user name, path or serial number.",
+      "properties": {
+        "system": { "$ref": "#/definitions/Text" },
+        "release": { "$ref": "#/definitions/Text" },
+        "machine": { "$ref": "#/definitions/Text" },
+        "cpu_count": { "type": ["integer", "null"], "minimum": 1 },
+        "cpu_model": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Text" }] }
       }
     },
     "recorded_at_utc": {
@@ -70,10 +101,15 @@
     "settings": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["iterations", "event_timeout_ms"],
+      "required": ["iterations", "event_timeout_ms", "max_input_lag_ms"],
       "properties": {
         "iterations": { "type": "integer", "minimum": 1, "description": "Sessions requested per mode, run one after another." },
-        "event_timeout_ms": { "type": "integer", "minimum": 1, "description": "Longest the client waits for the next server event it needs." }
+        "event_timeout_ms": { "type": "integer", "minimum": 1, "description": "Longest the client waits for the next server event it needs, counted again from each one. A Pong or a SessionStatus is not one." },
+        "max_input_lag_ms": {
+          "type": "integer",
+          "const": 100,
+          "description": "A session whose last audio frame, or whose text segment, was sent later than this after it was due gives no sample for a measurement that starts at that input."
+        }
       }
     },
     "stt": {
@@ -85,6 +121,20 @@
       "description": "Null when no text-to-speech target was given."
     },
     "gpu": { "$ref": "#/definitions/Gpu" },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ended_by", "error"],
+      "description": "How the run ended. The record is written before the first session and after each one, so a run that was killed leaves one whose `ended_by` is null.",
+      "properties": {
+        "ended_by": { "type": ["string", "null"], "enum": [null, "completed", "interrupt", "error"] },
+        "error": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "description": "The type name of the error that ended the run; its message is not recorded."
+        }
+      }
+    },
     "result": {
       "type": "object",
       "additionalProperties": false,
@@ -93,7 +143,7 @@
         "status": {
           "type": "string",
           "enum": ["complete", "incomplete", "failed"],
-          "description": "`failed` when a session did not complete or an answer contradicts what was sent; otherwise `incomplete` when a mode was not run or a measurement has no sample; `complete` otherwise. Never a statement about a latency gate."
+          "description": "`failed` when the run did not end by itself, a session did not complete or an answer contradicts what was sent; otherwise `incomplete` when a mode was not run or a measurement has no sample; `complete` otherwise. Never a statement about a latency gate."
         },
         "reasons": { "type": "array", "items": { "type": "string", "minLength": 1 } }
       }
@@ -102,6 +152,13 @@
   "definitions": {
     "Version": { "type": "string", "pattern": "^[0-9]+(\\.[0-9A-Za-z+-]+)*$" },
     "Digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "Text": { "type": "string", "pattern": "^[ -~]{1,128}$" },
+    "Label": { "type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$" },
+    "ProtocolName": {
+      "type": "string",
+      "pattern": "^[ -~]{1,64}$",
+      "description": "A language tag or a voice name as the Open carried it: a value of the protocol, 1 to 64 ASCII characters."
+    },
     "Count": { "type": "integer", "minimum": 0 },
     "Ns": { "type": "integer", "minimum": 0 },
     "OptionalNs": { "type": ["integer", "null"], "minimum": 0 },
@@ -110,10 +167,10 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["generation", "descriptor_digest", "loopback", "connect_ns"],
-      "description": "The resolved target every Open of the section named, by generation and descriptor digest only.",
+      "description": "The resolved target every Open of the section named and every Ready confirmed, by generation and descriptor digest only. Both are null for a worker that reports neither: its Open named none and its Ready returned none.",
       "properties": {
-        "generation": { "type": "integer", "minimum": 1 },
-        "descriptor_digest": { "$ref": "#/definitions/Digest" },
+        "generation": { "type": ["integer", "null"], "minimum": 1 },
+        "descriptor_digest": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Digest" }] },
         "loopback": { "type": "boolean", "description": "Whether the endpoint is a loopback address. The address itself is not recorded." },
         "connect_ns": {
           "$ref": "#/definitions/OptionalNs",
@@ -135,7 +192,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["from", "to", "ended_by", "ns"],
-      "description": "One duration between two of the session's boundaries. `ended_by` names the server event that ended it; `ns` is null when either boundary was not reached or the ending event was not a valid sample.",
+      "description": "One duration between two of the session's boundaries. `ended_by` names the server event that ended it; `ns` is null when either boundary was not reached, the ending event was not a valid sample, or the input it starts at was sent more than `max_input_lag_ms` after it was due.",
       "properties": {
         "from": { "type": "string", "minLength": 1 },
         "to": { "type": "string", "minLength": 1 },
@@ -150,7 +207,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["count", "misses", "min_ns", "p50_ns", "p95_ns", "p99_ns", "max_ns"],
-      "description": "One measurement over the section's sessions. `misses` counts the sessions that have no sample for it; they are never dropped from the record.",
+      "description": "One measurement over the section's sessions. Only a session that completed and whose answers agree with what was sent gives a sample; `misses` counts every other session, and none is dropped from the record.",
       "properties": {
         "count": { "$ref": "#/definitions/Count" },
         "misses": { "$ref": "#/definitions/Count" },
@@ -182,8 +239,8 @@
     },
     "StopReason": {
       "type": ["string", "null"],
-      "enum": [null, "sequence_gap", "unexpected_event", "ready_mismatch", "input_outside_limits"],
-      "description": "`sequence_gap`: a server event out of sequence. `unexpected_event`: a server event the session's state does not allow. `ready_mismatch`: Ready names another generation, descriptor or input format than the Open. `input_outside_limits`: the input does not fit the limits or the whole input credit Ready reported, so it was not sent."
+      "enum": [null, "sequence_gap", "unexpected_event", "ready_mismatch", "credit_missing", "input_outside_limits"],
+      "description": "`sequence_gap`: a server event out of sequence. `unexpected_event`: a server event the session's state or mode does not allow. `credit_missing`: a Ready or an Accepted whose input credit has no byte limit, which is not read as unlimited. `ready_mismatch`: Ready names another generation, descriptor or input format than the Open. `input_outside_limits`: the input does not fit the limits or the whole input credit Ready reported, so it was not sent."
     },
     "GrpcStatus": {
       "type": ["string", "null"],
@@ -228,7 +285,7 @@
         "input": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["audio_sha256", "audio_bytes", "samples", "format", "frame_ms", "frames", "language_sha256"],
+          "required": ["audio_sha256", "audio_bytes", "samples", "format", "frame_ms", "frames", "language"],
           "description": "The audio every session of the section sends, in frames of `frame_ms` paced in real time; only the last frame may be shorter.",
           "properties": {
             "audio_sha256": { "$ref": "#/definitions/Digest", "description": "Digest of the sample bytes as sent, without a container header." },
@@ -237,7 +294,7 @@
             "format": { "$ref": "#/definitions/AudioFormat" },
             "frame_ms": { "type": "integer", "minimum": 1 },
             "frames": { "type": "integer", "minimum": 1 },
-            "language_sha256": { "$ref": "#/definitions/Digest", "description": "Digest of the language tag the Open named." }
+            "language": { "$ref": "#/definitions/ProtocolName" }
           }
         },
         "sessions": { "type": "array", "items": { "$ref": "#/definitions/SttSession" } },
@@ -266,12 +323,13 @@
         "boundaries": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["call_start", "ready", "first_audio_sent", "last_audio_sent", "finalize_sent", "first_partial", "endpoint", "final_transcript", "session_closed"],
-          "description": "When the client handed an event to the transport or read one from it. `call_start` is taken immediately before the call is started. `first_partial` is the first nonempty PartialTranscript, if any arrived.",
+          "required": ["call_start", "ready", "first_audio_sent", "last_audio_scheduled", "last_audio_sent", "finalize_sent", "first_partial", "endpoint", "final_transcript", "session_closed"],
+          "description": "When the client handed an event to the transport or read one from it. `call_start` is taken immediately before the call is started. `last_audio_scheduled` is the last frame's place in real time, counted from `first_audio_sent`; it is set with `last_audio_sent`, which is when that frame was sent. `first_partial` is the first PartialTranscript that holds more than whitespace, if any arrived.",
           "properties": {
             "call_start": { "$ref": "#/definitions/Ns" },
             "ready": { "$ref": "#/definitions/OptionalNs" },
             "first_audio_sent": { "$ref": "#/definitions/OptionalNs" },
+            "last_audio_scheduled": { "$ref": "#/definitions/OptionalNs" },
             "last_audio_sent": { "$ref": "#/definitions/OptionalNs" },
             "finalize_sent": { "$ref": "#/definitions/OptionalNs" },
             "first_partial": { "$ref": "#/definitions/OptionalNs" },
@@ -288,15 +346,18 @@
             "session_initialization": { "$ref": "#/definitions/Measurement" },
             "call_start_to_first_transcript": {
               "$ref": "#/definitions/Measurement",
-              "description": "Ends at the first nonempty partial transcript, or at the final transcript when no partial arrived; an empty final transcript is not a sample."
+              "description": "Ends at the first partial transcript that holds more than whitespace, or at the final transcript when none arrived; a final transcript of nothing but whitespace is not a sample."
             },
-            "last_audio_to_final_transcript": { "$ref": "#/definitions/Measurement" }
+            "last_audio_to_final_transcript": {
+              "$ref": "#/definitions/Measurement",
+              "description": "Starts at `last_audio_scheduled`, so a frame held back for input credit does not shorten it."
+            }
           }
         },
         "client": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["events_sent", "frames_sent", "samples_sent", "bytes_sent", "pings_sent", "credit_waits", "finalize_sequence", "max_pacing_lag_ns"],
+          "required": ["events_sent", "frames_sent", "samples_sent", "bytes_sent", "pings_sent", "credit_waits", "finalize_sequence", "max_pacing_lag_ns", "input_lag_ns"],
           "properties": {
             "events_sent": { "$ref": "#/definitions/Count" },
             "frames_sent": { "$ref": "#/definitions/Count" },
@@ -308,6 +369,10 @@
             "max_pacing_lag_ns": {
               "$ref": "#/definitions/OptionalNs",
               "description": "The longest a frame was sent after its place in real time, counted from the first frame."
+            },
+            "input_lag_ns": {
+              "$ref": "#/definitions/OptionalNs",
+              "description": "How long after `last_audio_scheduled` the last frame was sent."
             }
           }
         },
@@ -343,7 +408,7 @@
               "type": ["object", "null"],
               "additionalProperties": false,
               "required": ["finalize_sequence", "end_sample_offset", "segments", "text_bytes", "text_sha256"],
-              "description": "The FinalTranscript of the measured utterance, by size and digest.",
+              "description": "The FinalTranscript of the measured utterance, by size and digest. `text_bytes` counts the text without surrounding whitespace; the digest is of the text as received.",
               "properties": {
                 "finalize_sequence": { "$ref": "#/definitions/Count" },
                 "end_sample_offset": { "$ref": "#/definitions/Count" },
@@ -367,13 +432,13 @@
         "input": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["text_sha256", "text_bytes", "language_sha256", "voice_sha256"],
+          "required": ["text_sha256", "text_bytes", "language", "voice"],
           "description": "The one text segment every session of the section sends.",
           "properties": {
             "text_sha256": { "$ref": "#/definitions/Digest" },
             "text_bytes": { "type": "integer", "minimum": 1 },
-            "language_sha256": { "$ref": "#/definitions/Digest" },
-            "voice_sha256": { "$ref": "#/definitions/Digest", "description": "Digest of the voice name the Open named." }
+            "language": { "$ref": "#/definitions/ProtocolName" },
+            "voice": { "$ref": "#/definitions/ProtocolName" }
           }
         },
         "sessions": { "type": "array", "items": { "$ref": "#/definitions/TtsSession" } },
@@ -403,11 +468,12 @@
         "boundaries": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["call_start", "ready", "text_segment_sent", "first_audio_chunk", "segment_completed", "finalize_sent", "synthesis_completed", "session_closed"],
-          "description": "When the client handed an event to the transport or read one from it. `first_audio_chunk` is the first AudioChunk that holds whole samples in the format Ready reported.",
+          "required": ["call_start", "ready", "text_segment_scheduled", "text_segment_sent", "first_audio_chunk", "segment_completed", "finalize_sent", "synthesis_completed", "session_closed"],
+          "description": "When the client handed an event to the transport or read one from it. `text_segment_scheduled` is when the segment was due, before any wait for input credit; `text_segment_sent` is when it was sent. `first_audio_chunk` is the first AudioChunk that holds whole samples in the format Ready reported.",
           "properties": {
             "call_start": { "$ref": "#/definitions/Ns" },
             "ready": { "$ref": "#/definitions/OptionalNs" },
+            "text_segment_scheduled": { "$ref": "#/definitions/OptionalNs" },
             "text_segment_sent": { "$ref": "#/definitions/OptionalNs" },
             "first_audio_chunk": { "$ref": "#/definitions/OptionalNs" },
             "segment_completed": { "$ref": "#/definitions/OptionalNs" },
@@ -423,20 +489,27 @@
           "properties": {
             "session_initialization": { "$ref": "#/definitions/Measurement" },
             "call_start_to_first_audio": { "$ref": "#/definitions/Measurement" },
-            "segment_to_first_audio": { "$ref": "#/definitions/Measurement" },
+            "segment_to_first_audio": {
+              "$ref": "#/definitions/Measurement",
+              "description": "Starts at `text_segment_scheduled`, so a segment held back for input credit does not shorten it."
+            },
             "segment_to_completion": { "$ref": "#/definitions/Measurement" }
           }
         },
         "client": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["events_sent", "pings_sent", "credit_waits", "segment_id", "finalize_sequence"],
+          "required": ["events_sent", "pings_sent", "credit_waits", "segment_id", "finalize_sequence", "input_lag_ns"],
           "properties": {
             "events_sent": { "$ref": "#/definitions/Count" },
             "pings_sent": { "$ref": "#/definitions/Count" },
             "credit_waits": { "$ref": "#/definitions/Count", "description": "Whether the segment waited for an Accepted to return credit before it could be sent: 0 or 1." },
             "segment_id": { "$ref": "#/definitions/OptionalCount" },
-            "finalize_sequence": { "$ref": "#/definitions/OptionalCount" }
+            "finalize_sequence": { "$ref": "#/definitions/OptionalCount" },
+            "input_lag_ns": {
+              "$ref": "#/definitions/OptionalNs",
+              "description": "How long after `text_segment_scheduled` the segment was sent."
+            }
           }
         },
         "server": {
@@ -495,13 +568,35 @@
     "Gpu": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "reason", "scope", "interval_ms", "samples", "summary"],
-      "description": "Device-wide readings taken while the run was in progress, when the machine offers them. They describe the whole device, never one model or one session.",
+      "required": ["status", "reason", "scope", "machine", "interval_ms", "failed_queries", "devices", "samples", "summary"],
+      "description": "Device-wide readings of the measuring machine taken while the run was in progress, when it offers them. They describe the whole device, never one model or one session.",
       "properties": {
-        "status": { "type": "string", "enum": ["not_requested", "unavailable", "sampled"] },
+        "status": {
+          "type": "string",
+          "enum": ["not_requested", "unavailable", "sampled"],
+          "description": "`sampled` only when the sampling process was still running when the run ended."
+        },
         "reason": { "type": ["string", "null"], "minLength": 1 },
         "scope": { "type": "string", "const": "device_wide" },
+        "machine": {
+          "type": ["string", "null"],
+          "enum": [null, "serving", "client_only"],
+          "description": "Whose device the samples describe. `serving`: every target is a loopback address, so the measuring machine is the one that serves. `client_only`: a target is elsewhere, and the samples say nothing of the device that serves it. Null when there is no sample."
+        },
         "interval_ms": { "$ref": "#/definitions/OptionalCount" },
+        "failed_queries": { "$ref": "#/definitions/Count", "description": "Queries after the first that gave no reading." },
+        "devices": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["index", "name"],
+            "properties": {
+              "index": { "$ref": "#/definitions/Count" },
+              "name": { "$ref": "#/definitions/Text", "description": "The device's model name. No UUID or serial number." }
+            }
+          }
+        },
         "samples": {
           "type": "array",
           "items": {
