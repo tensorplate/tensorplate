@@ -544,11 +544,13 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   and a deploy of the same id that fails after staging leaves its own
   bundle there. Before a restart the registry therefore reads the staged
   manifest and compares its digest with the bundle digest the member was
-  started under. When they differ, or the manifest cannot be read, nothing
-  is started and the member is failed at once with a `load_failed` error
-  that names both digests. The manifest's digest covers each artifact's
-  digest; artifact bytes are not hashed again. Startup recovery starts the
-  recorded deployment from the same root without this check.
+  started under. When they differ, nothing is started and the member is
+  failed at once, without using a restart, with a `load_failed` error that
+  names both digests. A staged manifest that cannot be read counts as a
+  restart that could not be launched. The manifest's digest covers each
+  artifact's digest; artifact bytes are not hashed again. Startup recovery
+  and a rollback start the recorded deployment from the same root without
+  this check.
 - **Failure.** A member that stops with three restarts inside the last five
   minutes is failed: nothing is started for it until a deployment is
   promoted, by a deploy or a rollback. Status then reports
@@ -592,17 +594,30 @@ share the one 10-second stop deadline, and what is left is killed and
 reaped. From the flag on no launch begins. Requests are answered on threads
 that are not joined, so the registry also waits for a worker one of them
 was starting or stopping when the flag was set: that thread stops it,
-within the same deadline. When the registry's stop returns, no worker
+within a stop deadline counted from when it began to. When the registry's
+stop returns, no worker
 process is running and none can be started. The listener stops and the
 agent exits 0.
 
 A deploy or rollback in flight at that moment is not recorded as failed.
 Its caller is answered `unavailable`, if the answer is sent before the
 agent exits, and the transaction stays in the state file at the last phase
-it wrote, exactly as an agent that was killed leaves it; the next start's
-recovery resumes or quarantines it by that phase. A deploy or rollback
-that arrives after the flag is refused with `unavailable` before it writes
-anything.
+it wrote, exactly as an agent that was killed leaves it, and the next
+start's recovery treats it as it treats that:
+
+- Interrupted before its candidate was prepared, a deploy is run again
+  from its bundle path, and a rollback is run again. The caller that was
+  answered `unavailable` finds it completed.
+- Interrupted while its candidate was prepared or warming, the candidate
+  is quarantined and that start launches nothing: status is degraded with
+  the recovery's reason in `last_error`, and the deployment that was
+  serving comes back at the start after that. An agent killed during a
+  deploy behaved this way before it handled the signal.
+
+A failure the deploy met just before the stop began is not recorded
+either. A deploy or rollback that arrives after the flag is refused with
+`unavailable` before it writes anything; one that passes that check as
+the flag is set is left in flight like the others.
 
 The packaged systemd unit keeps the default control-group kill and
 `TimeoutStopSec=30`, which a test holds at twice the stop deadline or more.

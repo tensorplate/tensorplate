@@ -279,7 +279,8 @@ status reports the member as failed until then.
 
 Before a restart the registry compares the digest of the staged manifest
 with the bundle digest the member was started under; when they differ the
-member is failed at once and nothing is started.
+member is failed at once and nothing is started. A staged manifest that
+cannot be read counts as a restart that could not be launched.
 
 No restart starts while a deploy holds the member, from the moment its
 `prepare` begins until its candidate is promoted or fails, or its `warm`

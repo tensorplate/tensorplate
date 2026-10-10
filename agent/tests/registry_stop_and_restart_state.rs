@@ -60,6 +60,8 @@ struct Launcher {
     /// The next launch says it has started, then waits to be let finish.
     hold: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
     ready: Arc<Ready>,
+    /// Workers launched from now on never become ready.
+    never_ready: AtomicBool,
 }
 
 impl Launcher {
@@ -81,7 +83,8 @@ impl Launcher {
 
 impl ProcessLauncher for Launcher {
     fn launch(&self, spec: &LaunchSpec) -> AgentResult<Box<dyn MemberProcess>> {
-        *self.ready.0.lock().unwrap() = Some(spec.member.deployment_id.clone());
+        *self.ready.0.lock().unwrap() =
+            (!self.never_ready.load(Ordering::SeqCst)).then(|| spec.member.deployment_id.clone());
         let held = self.hold.lock().unwrap().take();
         if let Some((started, release)) = held {
             started.send(()).unwrap();
@@ -264,6 +267,83 @@ fn a_rollback_held_in_prepare_when_the_agent_stops_stays_in_flight() {
         state.active.map(|active| active.deployment_id).as_deref(),
         Some("tts")
     );
+    drop(agent);
+
+    // The next start completes the rollback, as it does after a kill; the
+    // caller was answered `unavailable` and may not expect it.
+    let next = start_agent(&h);
+    let summary = recovery::apply_startup(&next.coord).expect("recovery");
+
+    assert_eq!(summary.action, RecoveryAction::ResumePrepare);
+    let state = next.store.snapshot().expect("state");
+    assert_eq!(state.in_flight_transaction, None);
+    assert_eq!(
+        state.active.map(|active| active.deployment_id).as_deref(),
+        Some("stt")
+    );
+}
+
+/// Startup recovery quarantines a candidate interrupted in a worker-side
+/// phase and starts nothing in that pass, after a stop as after a kill: the
+/// deployment that was serving comes back at the start after that.
+#[test]
+fn a_deploy_stopped_while_it_warms_is_quarantined_by_the_next_start_which_serves_nothing() {
+    let h = Harness::new();
+    let agent = start_agent(&h);
+    deploy_as(&agent, "stt", &common::vision_bundle(h.td.path(), "stt")).expect("deploy");
+    let bundle = common::vision_bundle(h.td.path(), "tts");
+    agent.launcher.never_ready.store(true, Ordering::SeqCst);
+
+    let answer = std::thread::scope(|scope| {
+        let deploying = scope.spawn(|| deploy_as(&agent, "tts", &bundle));
+        let deadline = std::time::Instant::now() + HELD;
+        let warming = |agent: &Agent| {
+            let state = agent.store.snapshot().expect("state");
+            state
+                .in_flight_transaction
+                .is_some_and(|tx| tx.phase == DeployState::Prepared)
+        };
+        while !warming(&agent) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the deploy never warmed"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        agent.registry.shutdown();
+        deploying.join().unwrap()
+    });
+
+    let err = answer.expect_err("the deploy does not complete");
+    assert!(matches!(err, AgentError::Stopping), "{err}");
+    assert_eq!(agent.launcher.running(), 0);
+    let state = agent.store.snapshot().expect("state");
+    let tx = state.in_flight_transaction.expect("still in flight");
+    assert_eq!(tx.phase, DeployState::Prepared);
+    assert_eq!(tx.failure, None);
+    assert_eq!(state.last_error, None);
+    assert!(state.quarantined.is_empty());
+    drop(agent);
+
+    let next = start_agent(&h);
+    let summary = recovery::apply_startup(&next.coord).expect("recovery");
+
+    assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
+    assert_eq!(next.launcher.count(), 0);
+    let state = next.store.snapshot().expect("state");
+    assert_eq!(state.in_flight_transaction, None);
+    assert_eq!(state.quarantined.len(), 1);
+    assert_eq!(
+        state.active.map(|active| active.deployment_id).as_deref(),
+        Some("stt")
+    );
+    drop(next);
+
+    let after = start_agent(&h);
+    let summary = recovery::apply_startup(&after.coord).expect("recovery");
+
+    assert_eq!(summary.action, RecoveryAction::RestoreActive);
+    assert_eq!(after.launcher.running(), 1);
 }
 
 /// Stop the serving worker and step the registry until its successor serves.

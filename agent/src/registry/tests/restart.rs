@@ -753,15 +753,26 @@ fn no_launch_begins_once_shutdown_has_begun() {
     let f = fixture();
     f.prepare("stt").unwrap();
     let displaced = f.launcher.handle(1);
-    displaced.obeys_terminate.store(false, Ordering::SeqCst);
+    let (started, has_started) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *displaced.hold_terminate.lock().unwrap() = Some((started, released));
 
     std::thread::scope(|scope| {
-        // Past its first check, and held stopping the candidate it displaces.
+        let release = release;
+        // Past its first lock, and held stopping the candidate it displaces.
         let held = scope.spawn(|| f.prepare("stt"));
-        wait_for_terminate(&displaced);
-        f.registry.shutdown();
-        assert_eq!(displaced.calls(), ["terminate", "kill"]);
+        has_started
+            .recv_timeout(HELD_LAUNCH)
+            .expect("the displaced candidate is stopped");
+        let stopping = scope.spawn(|| f.registry.shutdown());
+        let deadline = Instant::now() + HELD_LAUNCH;
+        while !f.registry.stopping() {
+            assert!(Instant::now() < deadline, "shutdown never began");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        release.send(()).unwrap();
         assert!(matches!(held.join().unwrap(), Err(AgentError::Stopping)));
+        stopping.join().unwrap();
     });
 
     assert_eq!(f.launcher.count(), 1);
@@ -825,7 +836,9 @@ fn a_member_whose_staged_bundle_was_replaced_is_failed_instead_of_restarted() {
             if deployment_id == "stt"
                 && error.code == tensorplate_protocol::ErrorCode::LoadFailed
                 && !error.recoverable
-                && error.message.contains("not the recorded")),
+                && error.message.contains("is not restarted")
+                && error.message.contains(&candidate_staged_at("stt", &bundle_fixture("v0_1/x86_fixture_smoke")).bundle_digest)
+                && error.message.contains(&candidate_staged_at("stt", &bundle_fixture("v0_1/x86_cuda_smoke")).bundle_digest)),
         "{events:?}"
     );
     assert_eq!(
@@ -846,22 +859,35 @@ fn events_code(events: &[MemberEvent]) -> tensorplate_protocol::ErrorCode {
 }
 
 #[test]
-fn a_member_whose_staged_manifest_is_gone_is_failed_instead_of_restarted() {
+fn a_staged_manifest_that_cannot_be_read_counts_as_a_restart_that_could_not_be_launched() {
     let f = fixture();
     let staged = stage(&f, "v0_1/x86_fixture_smoke");
     serve_staged(&f, &staged);
-    std::fs::remove_file(std::path::Path::new(&staged).join("manifest.json")).unwrap();
+    let manifest = std::path::Path::new(&staged).join("manifest.json");
+    let kept = std::fs::read(&manifest).unwrap();
+    std::fs::remove_file(&manifest).unwrap();
     exit(&f.launcher.handle(1));
     f.registry.supervise();
 
     let events = step(&f, secs(1));
 
     assert!(
-        matches!(&events[..], [MemberEvent::Failed { .. }]),
+        matches!(&events[..], [
+            MemberEvent::LaunchFailed { deployment_id, .. },
+            MemberEvent::RestartDue { after, .. },
+        ] if deployment_id == "stt" && *after == secs(2)),
         "{events:?}"
     );
     assert_eq!(f.launcher.count(), 1);
     assert_eq!(f.next_generation.load(Ordering::SeqCst), 2);
+
+    std::fs::write(&manifest, kept).unwrap();
+    assert_eq!(
+        step(&f, secs(2)),
+        [MemberEvent::Restarted {
+            member: member("stt", 2)
+        }]
+    );
 }
 
 #[test]

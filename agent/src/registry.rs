@@ -702,8 +702,7 @@ impl MemberRegistry {
             let Ok(mut members) = self.members() else {
                 return;
             };
-            if members.stopping
-                || members.held_by_a_deploy()
+            if members.held_by_a_deploy()
                 || !matches!(members.restart, Restart::Due { due, .. } if now >= due)
             {
                 return;
@@ -715,18 +714,49 @@ impl MemberRegistry {
                 deployment_id: recipe.deployment_id.clone(),
                 port,
             };
+            // Read under the lock: one small file, and nothing can take the
+            // member between this check and what it decides.
+            match crate::bundle::staged_bundle_digest(Path::new(&recipe.staged_path)) {
+                Ok(staged)
+                    if crate::bundle::bundle_digests_equal(&staged, &recipe.bundle_digest) => {}
+                // A deploy of the same id that failed after staging left its
+                // own bundle in the staged root. Another attempt would read
+                // the same root, so the member is failed without one.
+                Ok(staged) => {
+                    let error = AgentError::BundleIntegrity {
+                        path: "manifest.json".into(),
+                        reason: format!(
+                            "`{}` is not restarted: the bundle staged at `{}` is `{staged}`, not the `{}` it was started from",
+                            recipe.deployment_id, recipe.staged_path, recipe.bundle_digest
+                        ),
+                    }
+                    .to_record();
+                    members.restart = Restart::Failed {
+                        deployment_id: recipe.deployment_id.clone(),
+                        error: error.clone(),
+                    };
+                    events.push(MemberEvent::Failed {
+                        deployment_id: recipe.deployment_id,
+                        error,
+                    });
+                    return;
+                }
+                // A staged manifest that cannot be read counts as a launch
+                // that failed, as it did when the launch itself read it.
+                Err(err) => {
+                    members.restarts.push_back(now);
+                    let error = err.to_record();
+                    events.push(MemberEvent::LaunchFailed {
+                        deployment_id: recipe.deployment_id.clone(),
+                        error: error.clone(),
+                    });
+                    events.extend(owe_restart(&mut members, recipe, port, error, now));
+                    return;
+                }
+            }
             (recipe, port)
         };
-        // A deploy of the same id that failed after staging left its own
-        // bundle in the staged root, which this member was not started from.
-        let staged = crate::bundle::ensure_staged_bundle(
-            Path::new(&recipe.staged_path),
-            &recipe.bundle_digest,
-        );
-        let launched = match staged {
-            Ok(()) => self.launch(&recipe, port).map_err(|err| (err, true)),
-            Err(err) => Err((err, false)),
-        };
+        let launched = self.launch(&recipe, port);
         let mut yielded = None;
         if let Ok(mut members) = self.members() {
             let in_hand = !members.stopping
@@ -759,7 +789,7 @@ impl MemberRegistry {
                     }
                     yielded = Some(member);
                 }
-                Err((err, true)) if in_hand => {
+                Err(err) if in_hand => {
                     members.restarts.push_back(now);
                     let error = err.to_record();
                     events.push(MemberEvent::LaunchFailed {
@@ -767,25 +797,6 @@ impl MemberRegistry {
                         error: error.clone(),
                     });
                     events.extend(owe_restart(&mut members, recipe, port, error, now));
-                }
-                // Another attempt would read the same staged root.
-                Err((err, false)) if in_hand => {
-                    let error = err.to_record();
-                    let error = ErrorRecord {
-                        message: format!(
-                            "`{}` is not restarted: {}",
-                            recipe.deployment_id, error.message
-                        ),
-                        ..error
-                    };
-                    members.restart = Restart::Failed {
-                        deployment_id: recipe.deployment_id.clone(),
-                        error: error.clone(),
-                    };
-                    events.push(MemberEvent::Failed {
-                        deployment_id: recipe.deployment_id,
-                        error,
-                    });
                 }
                 Err(_) => {}
             }
@@ -812,7 +823,7 @@ fn owe_restart(
         &members.restart,
         Restart::InHand { deployment_id, .. } if *deployment_id == recipe.deployment_id
     );
-    if members.stopping || !in_hand {
+    if !in_hand {
         return None;
     }
     while members
@@ -1021,9 +1032,11 @@ impl WorkerControl for MemberRegistry {
 
     fn shutdown(&self) {
         let (members, outside) = {
-            let Ok(mut members) = self.members() else {
-                return;
-            };
+            // A poisoned lock still guards the map of what has to be stopped.
+            let mut members = self
+                .inner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             members.stopping = true;
             members.serving = None;
             members.candidate = None;

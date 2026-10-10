@@ -30,6 +30,8 @@ struct Handle {
     contact: Mutex<ControlContact>,
     /// `startup_failure` says it has begun, then waits to be let finish.
     hold_failure: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    /// The same for `terminate`.
+    hold_terminate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
 }
 
 impl Handle {
@@ -60,6 +62,11 @@ impl MemberProcess for FakeProcess {
     }
     fn terminate(&mut self) {
         self.0.calls.lock().unwrap().push("terminate");
+        let held = self.0.hold_terminate.lock().unwrap().take();
+        if let Some((started, release)) = held {
+            started.send(()).unwrap();
+            release.recv().unwrap();
+        }
         if self.0.obeys_terminate.load(Ordering::SeqCst) {
             self.0.exited.store(true, Ordering::SeqCst);
         }
@@ -114,6 +121,7 @@ impl ProcessLauncher for FakeLauncher {
             obeys_terminate: AtomicBool::new(!self.stubborn.load(Ordering::SeqCst)),
             contact: Mutex::new(ControlContact::Reporting),
             hold_failure: Mutex::new(None),
+            hold_terminate: Mutex::new(None),
         });
         self.launched.lock().unwrap().push(handle.clone());
         Ok(Box::new(FakeProcess(handle)))
