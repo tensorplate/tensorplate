@@ -63,3 +63,21 @@ function(tp_uninstrumented_protobuf_test_properties variable)
       "ASAN_OPTIONS=string_append::detect_container_overflow=0" PARENT_SCOPE)
   endif()
 endfunction()
+
+# tp_uninstrumented_grpc_test_properties(<variable>)
+#
+# As tp_uninstrumented_protobuf_test_properties, for a test binary that also
+# runs gRPC calls. The dependency tree's gRPC, abseil and protobuf are not
+# built with the sanitizer, but their inline poisoning helpers resolve to the
+# copies this build instruments, so an unoptimized build poisons memory that
+# the uninstrumented code never unpoisons and reports use-after-poison in it.
+# allow_user_poisoning=0 turns the manual poisoning calls into no-ops for
+# these binaries only; the checks the compiler inserts stay on.
+function(tp_uninstrumented_grpc_test_properties variable)
+  set(${variable} "" PARENT_SCOPE)
+  if(TP_ENABLE_SANITIZERS)
+    set(${variable} ENVIRONMENT_MODIFICATION
+      "ASAN_OPTIONS=string_append::detect_container_overflow=0:allow_user_poisoning=0"
+      PARENT_SCOPE)
+  endif()
+endfunction()

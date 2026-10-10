@@ -85,7 +85,7 @@ if(TP_ENABLE_STREAMING_GRPC AND NOT TP_ENABLE_TSAN)
   target_compile_features(tp_test_stream_listener PRIVATE cxx_std_20)
   tp_apply_warnings(tp_test_stream_listener)
   tp_apply_sanitizers(tp_test_stream_listener)
-  tp_uninstrumented_protobuf_test_properties(_tp_stream_listener_test_properties)
+  tp_uninstrumented_grpc_test_properties(_tp_stream_listener_test_properties)
   gtest_discover_tests(tp_test_stream_listener
     PROPERTIES LABELS "T2" ${_tp_stream_listener_test_properties}
     DISCOVERY_MODE PRE_TEST)
