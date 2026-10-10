@@ -11,6 +11,7 @@ use tempfile::TempDir;
 use crate::supervision::FakeClock;
 use crate::worker::MemberEvent;
 
+mod ports;
 mod restart;
 
 const ACTIVE_PORT: u16 = 41_080;
@@ -163,8 +164,9 @@ struct Fixture {
 fn settings(dir: &std::path::Path) -> RegistrySettings {
     RegistrySettings {
         bind_host: "127.0.0.1".into(),
-        active_port: ACTIVE_PORT,
-        candidate_port: CANDIDATE_PORT,
+        ports: [ACTIVE_PORT, CANDIDATE_PORT]
+            .map(|http| MemberPorts { http, stream: None })
+            .to_vec(),
         config_dir: dir.join("worker-configs"),
         use_mock_session: true,
         status_poll_interval: Duration::from_millis(1),
@@ -176,19 +178,28 @@ fn settings(dir: &std::path::Path) -> RegistrySettings {
 }
 
 fn fixture() -> Fixture {
+    fixture_with(|settings| settings, |registry| registry)
+}
+
+fn fixture_with(
+    settings_of: impl FnOnce(RegistrySettings) -> RegistrySettings,
+    registry_of: impl FnOnce(MemberRegistry) -> MemberRegistry,
+) -> Fixture {
     let td = TempDir::new().unwrap();
     let launcher = Arc::new(FakeLauncher::default());
     let probe = Arc::new(FakeProbe::default());
     let next_generation = Arc::new(AtomicU64::new(1));
     let counter = next_generation.clone();
     let clock = Arc::new(FakeClock::new());
-    let registry = MemberRegistry::new(
-        settings(td.path()),
-        launcher.clone(),
-        probe.clone(),
-        Arc::new(move || Ok(counter.fetch_add(1, Ordering::SeqCst))),
-    )
-    .with_clock(clock.clone());
+    let registry = registry_of(
+        MemberRegistry::new(
+            settings_of(settings(td.path())),
+            launcher.clone(),
+            probe.clone(),
+            Arc::new(move || Ok(counter.fetch_add(1, Ordering::SeqCst))),
+        )
+        .with_clock(clock.clone()),
+    );
     Fixture {
         td,
         launcher,

@@ -14,7 +14,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
@@ -22,7 +22,7 @@ use tensorplate_protocol::agent_state::ErrorRecord;
 use tensorplate_protocol::worker_control::{CandidateRef, MemberRef};
 
 use crate::bundle::StagedManifest;
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, WorkerConfig};
 use crate::control_channel::{ContactState, ControlChannel};
 use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
@@ -127,6 +127,111 @@ pub trait HealthProbe: Send + Sync {
     fn ready_model(&self, port: u16, timeout: Duration) -> AgentResult<Option<String>>;
 }
 
+/// The loopback ports one member generation holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MemberPorts {
+    pub http: u16,
+    /// Held for the member's stream listener; none when the pool is the two
+    /// single ports of a configuration without a range.
+    pub stream: Option<u16>,
+}
+
+/// The ports the agent's configuration gives its workers: the pairs of
+/// `worker.serving_port_range`, or without one the two single ports.
+#[must_use]
+pub fn configured_ports(worker: &WorkerConfig) -> Vec<MemberPorts> {
+    match worker.serving_port_range {
+        Some(range) => range
+            .pairs()
+            .map(|(http, stream)| MemberPorts {
+                http,
+                stream: Some(stream),
+            })
+            .collect(),
+        None => [worker.serving_bind_port, worker.serving_candidate_bind_port]
+            .into_iter()
+            .map(|http| MemberPorts { http, stream: None })
+            .collect(),
+    }
+}
+
+/// Which of the configured ports are held.
+struct PortPool {
+    ports: Vec<MemberPorts>,
+    held: Mutex<Vec<bool>>,
+}
+
+impl PortPool {
+    fn new(ports: Vec<MemberPorts>) -> Arc<Self> {
+        Arc::new(Self {
+            held: Mutex::new(vec![false; ports.len()]),
+            ports,
+        })
+    }
+
+    /// The first ports nothing holds.
+    fn lease(self: &Arc<Self>) -> Option<Arc<PortLease>> {
+        let mut held = self.held.lock().unwrap_or_else(PoisonError::into_inner);
+        let index = held.iter().position(|held| !held)?;
+        held[index] = true;
+        Some(Arc::new(PortLease {
+            ports: self.ports[index],
+            index,
+            pool: self.clone(),
+        }))
+    }
+}
+
+/// Ports held for one member: by its generations, from each one's start
+/// until its process has been reaped, and by the restart owed to it. They
+/// go back to the pool when the last holder lets go.
+struct PortLease {
+    ports: MemberPorts,
+    index: usize,
+    pool: Arc<PortPool>,
+}
+
+impl Drop for PortLease {
+    fn drop(&mut self) {
+        let mut held = self
+            .pool
+            .held
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        held[self.index] = false;
+    }
+}
+
+/// A generation the registry starts by itself, in place of one that stopped.
+pub struct Restamp<'a> {
+    /// What the stopped generation was started from.
+    pub recipe: &'a CandidateRef,
+    /// The generation `recipe` was last stamped for, or last started as.
+    pub stopped_generation: u64,
+    pub generation: u64,
+}
+
+/// Called before a restart renders the new generation's config, so that
+/// whatever names the deployment's generation can be written for it.
+/// Returns what the new generation is started from, and restarted from
+/// after it; an error is a launch that failed.
+pub type RestartStamp = Arc<dyn Fn(&Restamp<'_>) -> AgentResult<CandidateRef> + Send + Sync>;
+
+/// A launch that failed, and what a restart stamp had written by then.
+struct FailedLaunch {
+    error: AgentError,
+    stamped: Option<Box<(u64, CandidateRef)>>,
+}
+
+impl From<AgentError> for FailedLaunch {
+    fn from(error: AgentError) -> Self {
+        Self {
+            error,
+            stamped: None,
+        }
+    }
+}
+
 /// Hands out the next deployment generation, durably and never twice.
 pub type GenerationSource = Arc<dyn Fn() -> AgentResult<u64> + Send + Sync>;
 
@@ -134,8 +239,8 @@ pub type GenerationSource = Arc<dyn Fn() -> AgentResult<u64> + Send + Sync>;
 #[derive(Clone, Debug)]
 pub struct RegistrySettings {
     pub bind_host: String,
-    pub active_port: u16,
-    pub candidate_port: u16,
+    /// The ports members are given, in the order they are handed out.
+    pub ports: Vec<MemberPorts>,
     pub config_dir: PathBuf,
     pub use_mock_session: bool,
     pub status_poll_interval: Duration,
@@ -149,7 +254,7 @@ pub struct RegistrySettings {
 
 struct Member {
     deployment_id: String,
-    port: u16,
+    ports: Arc<PortLease>,
     config_path: PathBuf,
     process: Box<dyn MemberProcess>,
     /// What this generation was started from, to start its successor.
@@ -202,13 +307,9 @@ enum Restart {
     #[default]
     Idle,
     /// The serving generation stopped; its successor starts once `due` passes.
-    Due {
-        recipe: CandidateRef,
-        port: u16,
-        due: Instant,
-    },
+    Due { owed: Owed, due: Instant },
     /// The supervision step is working on the member outside the lock.
-    InHand { deployment_id: String, port: u16 },
+    InHand { deployment_id: String },
     /// The successor holds the serving slot and has until `deadline` to be
     /// ready.
     Loading {
@@ -220,6 +321,15 @@ enum Restart {
         deployment_id: String,
         error: ErrorRecord,
     },
+}
+
+/// What the successor of a stopped generation is started from.
+struct Owed {
+    recipe: CandidateRef,
+    /// The stopped generation's ports, kept for its successor.
+    ports: Arc<PortLease>,
+    /// The generation `recipe` was last stamped for, or last started as.
+    stamped: u64,
 }
 
 /// Why the supervision step took the serving generation out of service.
@@ -247,6 +357,8 @@ pub struct MemberRegistry {
     probe: Arc<dyn HealthProbe>,
     generations: GenerationSource,
     clock: Arc<dyn MonotonicClock>,
+    ports: Arc<PortPool>,
+    restart_stamp: Option<RestartStamp>,
     inner: Mutex<Members>,
     /// Runs once, just before a restart reads the staged manifest.
     #[cfg(test)]
@@ -262,6 +374,8 @@ impl MemberRegistry {
         generations: GenerationSource,
     ) -> Self {
         Self {
+            ports: PortPool::new(settings.ports.clone()),
+            restart_stamp: None,
             settings,
             launcher,
             probe,
@@ -271,6 +385,13 @@ impl MemberRegistry {
             #[cfg(test)]
             before_staged_read: Mutex::new(None),
         }
+    }
+
+    /// Call `stamp` for every generation a restart starts.
+    #[must_use]
+    pub fn with_restart_stamp(mut self, stamp: RestartStamp) -> Self {
+        self.restart_stamp = Some(stamp);
+        self
     }
 
     /// Read restart delays, windows and deadlines from `clock`.
@@ -306,20 +427,9 @@ impl Members {
         self.preparing > 0 || (self.candidate.is_some() && !self.candidate_abandoned)
     }
 
-    /// The port of the serving member, or of the restart owed to it.
-    fn serving_port(&self) -> Option<u16> {
-        match &self.restart {
-            Restart::Due { port, .. } | Restart::InHand { port, .. } => Some(*port),
-            _ => self
-                .serving
-                .and_then(|generation| self.by_generation.get(&generation))
-                .map(|member| member.port),
-        }
-    }
-
     fn restart_names(&self, deployment_id: &str) -> bool {
         match &self.restart {
-            Restart::Due { recipe, .. } => recipe.deployment_id == deployment_id,
+            Restart::Due { owed, .. } => owed.recipe.deployment_id == deployment_id,
             Restart::InHand {
                 deployment_id: owed,
                 ..
@@ -338,7 +448,7 @@ impl Members {
         !self.stopping
             && matches!(
                 &self.restart,
-                Restart::InHand { deployment_id: owed, .. } if owed == deployment_id
+                Restart::InHand { deployment_id: owed } if owed == deployment_id
             )
     }
 
@@ -379,8 +489,7 @@ impl MemberRegistry {
             .ok_or_else(|| AgentError::Config("worker.serving_binary_path missing".into()))?;
         let settings = RegistrySettings {
             bind_host: agent.worker.serving_bind_host.clone(),
-            active_port: agent.worker.serving_bind_port,
-            candidate_port: agent.worker.serving_candidate_bind_port,
+            ports: configured_ports(&agent.worker),
             config_dir: agent
                 .worker
                 .serving_config_dir
@@ -410,27 +519,45 @@ impl MemberRegistry {
             .map_err(|e| AgentError::Internal(format!("member registry mutex poisoned: {e}")))
     }
 
-    /// The port a new candidate binds: the one the serving member, or the
-    /// restart owed to it, is not on.
-    fn candidate_port(&self, members: &Members) -> u16 {
-        match members.serving_port() {
-            Some(port) if port != self.settings.candidate_port => self.settings.candidate_port,
-            _ => self.settings.active_port,
+    /// Ports for a new candidate: the first nothing holds. A worker that is
+    /// still draining holds its ports, so this waits, until `timeout`, for
+    /// one to be reaped.
+    fn lease_ports(
+        &self,
+        candidate: &CandidateRef,
+        timeout: Duration,
+    ) -> AgentResult<Arc<PortLease>> {
+        let deadline = later(Instant::now(), timeout);
+        loop {
+            if let Some(lease) = self.ports.lease() {
+                return Ok(lease);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(AgentError::NoFreePort(format!(
+                    "`{}` was not started: each of the {} configured serving ports is held by a worker that is running or draining",
+                    candidate.deployment_id,
+                    self.ports.ports.len()
+                )));
+            }
+            std::thread::sleep(DRAIN_POLL.min(remaining));
         }
     }
 
-    /// Start the next generation of `recipe` on `port`. Refused once the
+    /// Start the next generation of `recipe` on `ports`. Refused once the
     /// registry is stopping; a launch that began before is waited for.
+    /// `restart_of` is the generation a restart replaces.
     fn launch(
         &self,
         recipe: &CandidateRef,
-        port: u16,
+        ports: &Arc<PortLease>,
         runner_profile: Option<&str>,
-    ) -> AgentResult<(u64, Member)> {
+        restart_of: Option<u64>,
+    ) -> Result<(u64, Member), FailedLaunch> {
         let outside = {
             let members = self.members()?;
             if members.stopping {
-                return Err(AgentError::Stopping);
+                return Err(AgentError::Stopping.into());
             }
             Outside::new(&members.outside)
         };
@@ -438,28 +565,53 @@ impl MemberRegistry {
         // A stop gives up waiting on a write that hangs; once the write
         // returns, nothing is started for it.
         if self.members()?.stopping {
-            return Err(AgentError::Stopping);
+            return Err(AgentError::Stopping.into());
         }
-        let spec = LaunchSpec {
-            member: MemberRef::new(recipe.deployment_id.clone(), generation),
-            config_path: self.render_config(recipe, generation, port, runner_profile)?,
+        let (recipe, stamped) = match (restart_of, &self.restart_stamp) {
+            (Some(stopped_generation), Some(stamp)) => {
+                let stamped = stamp(&Restamp {
+                    recipe,
+                    stopped_generation,
+                    generation,
+                })?;
+                if stamped.deployment_id != recipe.deployment_id {
+                    return Err(AgentError::Internal(format!(
+                        "the restart of `{}` was stamped as `{}`",
+                        recipe.deployment_id, stamped.deployment_id
+                    ))
+                    .into());
+                }
+                (stamped.clone(), Some(Box::new((generation, stamped))))
+            }
+            _ => (recipe.clone(), None),
         };
-        match self.launcher.launch(&spec) {
-            Ok(process) => Ok((
+        let rendered = self.render_config(&recipe, generation, ports.ports.http, runner_profile);
+        let launched = rendered.and_then(|config_path| {
+            let spec = LaunchSpec {
+                member: MemberRef::new(recipe.deployment_id.clone(), generation),
+                config_path,
+            };
+            self.launcher
+                .launch(&spec)
+                .map(|process| (spec.clone(), process))
+                .map_err(|err| {
+                    let _ = fs::remove_file(&spec.config_path);
+                    err
+                })
+        });
+        match launched {
+            Ok((spec, process)) => Ok((
                 generation,
                 Member {
                     deployment_id: spec.member.deployment_id,
-                    port,
+                    ports: ports.clone(),
                     config_path: spec.config_path,
                     process,
-                    recipe: recipe.clone(),
+                    recipe,
                     outside: Some(outside),
                 },
             )),
-            Err(err) => {
-                let _ = fs::remove_file(&spec.config_path);
-                Err(err)
-            }
+            Err(error) => Err(FailedLaunch { error, stamped }),
         }
     }
 
@@ -563,7 +715,7 @@ impl MemberRegistry {
             let exited = member.process.exited()?;
             let contact = member.process.control();
             if !exited && contact != ControlContact::Failed {
-                return Ok((member.port, contact));
+                return Ok((member.ports.ports.http, contact));
             }
             let Some((generation, member)) = members.take_candidate() else {
                 return Err(AgentError::WorkerNotReady);
@@ -633,7 +785,11 @@ impl MemberRegistry {
             match (cause, loading) {
                 (Some(cause), _) => (generation, Ok(cause)),
                 (None, Some((deadline, probe_at))) if now >= probe_at => {
-                    let probe = (member.port, member.deployment_id.clone(), contact);
+                    let probe = (
+                        member.ports.ports.http,
+                        member.deployment_id.clone(),
+                        contact,
+                    );
                     members.restart = Restart::Loading {
                         deadline,
                         probe_at: later(now, self.settings.status_poll_interval),
@@ -686,7 +842,6 @@ impl MemberRegistry {
             };
             members.restart = Restart::InHand {
                 deployment_id: member.deployment_id.clone(),
-                port: member.port,
             };
             member
         };
@@ -716,13 +871,12 @@ impl MemberRegistry {
             error: error.clone(),
         });
         if let Ok(mut members) = self.members() {
-            events.extend(owe_restart(
-                &mut members,
-                member.recipe,
-                member.port,
-                error,
-                now,
-            ));
+            let owed = Owed {
+                recipe: member.recipe.clone(),
+                ports: member.ports.clone(),
+                stamped: generation,
+            };
+            events.extend(owe_restart(&mut members, owed, error, now));
         }
     }
 
@@ -781,7 +935,7 @@ impl MemberRegistry {
     /// Start the successor a stopped generation is owed, once its wait is
     /// over and no deploy holds the member.
     fn start_owed_restart(&self, now: Instant, events: &mut Vec<MemberEvent>) {
-        let (recipe, port) = {
+        let mut owed = {
             let Ok(mut members) = self.members() else {
                 return;
             };
@@ -790,23 +944,40 @@ impl MemberRegistry {
             {
                 return;
             }
-            let Restart::Due { recipe, port, .. } = std::mem::take(&mut members.restart) else {
+            let Restart::Due { owed, .. } = std::mem::take(&mut members.restart) else {
                 return;
             };
             members.restart = Restart::InHand {
-                deployment_id: recipe.deployment_id.clone(),
-                port,
+                deployment_id: owed.recipe.deployment_id.clone(),
             };
-            (recipe, port)
+            owed
         };
-        let Some(staged) = self.staged_for_restart(&recipe, events) else {
+        let Some(staged) = self.staged_for_restart(&owed.recipe, events) else {
             return;
         };
-        let launched =
-            staged.and_then(|staged| self.launch(&recipe, port, staged.runner_profile.as_deref()));
+        let launched = staged.map_err(FailedLaunch::from).and_then(|staged| {
+            let profile = staged.runner_profile.as_deref();
+            self.launch(&owed.recipe, &owed.ports, profile, Some(owed.stamped))
+        });
+        // What the restart stamp wrote stands, whatever became of the launch.
+        match &launched {
+            Ok((generation, member)) => {
+                owed.stamped = *generation;
+                owed.recipe = member.recipe.clone();
+            }
+            Err(FailedLaunch {
+                stamped: Some(stamped),
+                ..
+            }) => {
+                owed.stamped = stamped.0;
+                owed.recipe = stamped.1.clone();
+            }
+            Err(_) => {}
+        }
+        let deployment_id = owed.recipe.deployment_id.clone();
         let mut yielded = None;
         if let Ok(mut members) = self.members() {
-            let in_hand = members.restart_in_hand(&recipe.deployment_id);
+            let in_hand = members.restart_in_hand(&deployment_id);
             match launched {
                 Ok((generation, member)) if in_hand && !members.held_by_a_deploy() => {
                     members.restarts.push_back(now);
@@ -817,29 +988,25 @@ impl MemberRegistry {
                         probe_at: now,
                     };
                     events.push(MemberEvent::Restarted {
-                        member: MemberRef::new(recipe.deployment_id, generation),
+                        member: MemberRef::new(deployment_id, generation),
                     });
                 }
                 // A deploy began, or the member was taken, while this
                 // generation was starting: it yields and is not counted.
                 Ok((_, member)) => {
                     if in_hand {
-                        members.restart = Restart::Due {
-                            recipe,
-                            port,
-                            due: now,
-                        };
+                        members.restart = Restart::Due { owed, due: now };
                     }
                     yielded = Some(member);
                 }
-                Err(err) if in_hand => {
+                Err(failed) if in_hand => {
                     members.restarts.push_back(now);
-                    let error = err.to_record();
+                    let error = failed.error.to_record();
                     events.push(MemberEvent::LaunchFailed {
-                        deployment_id: recipe.deployment_id.clone(),
+                        deployment_id,
                         error: error.clone(),
                     });
-                    events.extend(owe_restart(&mut members, recipe, port, error, now));
+                    events.extend(owe_restart(&mut members, owed, error, now));
                 }
                 Err(_) => {}
             }
@@ -857,14 +1024,13 @@ fn later(now: Instant, wait: Duration) -> Instant {
 /// the member was promoted over, unloaded or stopped meanwhile.
 fn owe_restart(
     members: &mut Members,
-    recipe: CandidateRef,
-    port: u16,
+    owed: Owed,
     error: ErrorRecord,
     now: Instant,
 ) -> Option<MemberEvent> {
     let in_hand = matches!(
         &members.restart,
-        Restart::InHand { deployment_id, .. } if *deployment_id == recipe.deployment_id
+        Restart::InHand { deployment_id } if *deployment_id == owed.recipe.deployment_id
     );
     if !in_hand {
         return None;
@@ -876,11 +1042,10 @@ fn owe_restart(
     {
         members.restarts.pop_front();
     }
-    let deployment_id = recipe.deployment_id.clone();
+    let deployment_id = owed.recipe.deployment_id.clone();
     if let Some(&after) = RESTART_DELAYS.get(members.restarts.len()) {
         members.restart = Restart::Due {
-            recipe,
-            port,
+            owed,
             due: later(now, after),
         };
         return Some(MemberEvent::RestartDue {
@@ -912,7 +1077,7 @@ impl WorkerControl for MemberRegistry {
         &self,
         _transaction_id: &str,
         candidate: &CandidateRef,
-        _timeout: Duration,
+        timeout: Duration,
     ) -> AgentResult<()> {
         if !is_valid_deployment_id(&candidate.deployment_id) {
             return Err(AgentError::Config(format!(
@@ -929,9 +1094,10 @@ impl WorkerControl for MemberRegistry {
         self.retire(displaced.map(|(_, member)| member).into_iter().collect());
 
         let staged = crate::bundle::staged_manifest(Path::new(&candidate.staged_path))?;
-        let port = self.candidate_port(&*self.members()?);
-        let (generation, member) =
-            self.launch(candidate, port, staged.runner_profile.as_deref())?;
+        let ports = self.lease_ports(candidate, timeout)?;
+        let (generation, member) = self
+            .launch(candidate, &ports, staged.runner_profile.as_deref(), None)
+            .map_err(|failed| failed.error)?;
         // The lock was released since the slot was emptied; whatever took it
         // in between is displaced as well, not forgotten.
         let (displaced, stopped) = {
@@ -1065,7 +1231,12 @@ impl WorkerControl for MemberRegistry {
     }
 
     fn active_serving_url(&self) -> AgentResult<Option<String>> {
-        self.serving(|member| format!("http://{}:{}/infer", self.settings.bind_host, member.port))
+        self.serving(|member| {
+            format!(
+                "http://{}:{}/infer",
+                self.settings.bind_host, member.ports.ports.http
+            )
+        })
     }
 
     fn supervise(&self) -> Vec<MemberEvent> {
