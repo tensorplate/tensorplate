@@ -562,7 +562,7 @@ fn manifest_rule_fixture_pairs_retain_typed_reasons() {
             }
         }
     }
-    assert_eq!(counts, [12, 18]);
+    assert_eq!(counts, [19, 19]);
 }
 
 fn known_bases() -> Vec<tensorplate_protocol::KnownBase> {
@@ -662,6 +662,7 @@ fn variant_lineage_fixtures_are_judged_against_the_known_bases() {
         [
             "bundle_r8_base_reference",
             "bundle_r8_variant_identity",
+            "bundle_r8_variant_support_level",
             "bundle_r8_variant_support_level"
         ]
     );
