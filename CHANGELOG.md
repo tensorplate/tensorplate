@@ -8,6 +8,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The synthetic session dispatch no longer lets a client's half-close
+  overtake audio the session manager had already accepted. With one frame
+  handed over and a second accepted but not yet handed over, it ended the
+  utterance at the first frame and started a second utterance when the
+  other frame arrived: one client utterance became two finals, the first
+  cut short. The half-close finalization now waits until no accepted
+  frame is still to be handed over, as the drain's completion already
+  did, and the interface states that rule. (V030-E04-F03-T02)
 
 - The C++ workflow's dependency cache is keyed on what vcpkg builds the
   packages with: the runner image's vcpkg checkout, the compiler binaries
@@ -109,6 +117,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The `SessionDispatch` contract states the rules its first version left
+  open, with no signature change: the output queue's consumer callback is
+  never unregistered, may run on two threads at once and may find nothing
+  to take; the session manager's sink runs inside the call that caused a
+  transition, before it returns; a binding reports input credit returned
+  only while the session is active or finalizing; an automatic endpoint
+  does not make a frame shorter than the smallest granted valid; a
+  Finalize that takes over an automatic endpoint's finalization is
+  completed once; and the task output variant will gain alternatives.
+  (V030-E04-F03-T02)
 
 - The draft stream session envelope
   (`protocol/proto/tensorplate/stream/v1/session.proto`) changes before any

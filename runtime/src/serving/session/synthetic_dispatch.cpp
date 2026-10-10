@@ -35,6 +35,13 @@ bool task_output(OutputKind kind) {
   return kind == OutputKind::Audio || kind == OutputKind::Partial || kind == OutputKind::Result;
 }
 
+/// Input the manager accepted that was not handed over yet, or is still
+/// being worked on, keeps its depth above zero.
+bool input_owed(const SessionManager& manager, std::uint64_t key) {
+  const auto status = manager.status(key);
+  return !status || status->input_queue_depth != 0;
+}
+
 Error wrong_input_kind() {
   return Error::make(Error::Code::Internal, "input of a kind the session does not take",
                      "wrong_input_kind");
@@ -215,10 +222,7 @@ void SyntheticSessionDispatch::complete_drain(SessionManager& manager, std::uint
   if (session.owed_finalize != 0 || session.undelivered != 0) {
     return;
   }
-  // Accepted input that was not handed over yet, or is still being worked
-  // on, keeps the manager's depth above zero.
-  const auto status = manager.status(key);
-  if (!status || status->input_queue_depth != 0) {
+  if (input_owed(manager, key)) {
     return;
   }
   // Nothing is accepted after a drain started, so nothing follows this.
@@ -302,6 +306,10 @@ bool SyntheticSessionDispatch::advance_audio(SessionManager& manager, std::uint6
     return false;
   }
   if (session.close_open_utterance && session.samples_accepted > session.utterance_start) {
+    // A frame accepted before the half-close belongs to this utterance.
+    if (input_owed(manager, key)) {
+      return false;
+    }
     hold_final(session, EndpointReason::HalfClose, 0);
     return true;
   }

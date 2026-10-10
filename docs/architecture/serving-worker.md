@@ -414,7 +414,12 @@ outside the queue's lock on the offering thread after an offer was
 queued, may stand for several items, and must not block or call the
 session manager, whose sink may be the one offering; if something is
 already unsent it also runs inside the registration, on the caller's
-thread. A producer of task output offers an item; when its budget has no
+thread. There is no unregistering it, and the queue outlives the stream,
+so the callback captures shared or weak state and never a stream object
+that may end first. Two producers may call it at the same time (the
+dispatch's thread and a sink that queues a lifecycle message), and a
+call may find nothing to take, because another call's `take` or a
+suppression got there first. A producer of task output offers an item; when its budget has no
 room the offer answers `full`, the producer keeps the item and pauses
 until output drains, so task output is never dropped while the session
 lives. Task output may fill the metadata budget only up to its last 1
@@ -660,7 +665,11 @@ a segment id is above every earlier one of the session; the dispatch
 carries the id unchanged and does not check it. A frame shorter than the
 smallest the terms grant is valid only as the last before a Finalize or
 a half-close, which the binding cannot know when it arrives: it accepts
-the frame and fails the session if more audio follows first. A frame
+the frame and fails the session if more audio follows first. An
+automatic endpoint between the short frame and the next audio does not
+make the short frame valid: the client cannot have known of it when it
+sent, and only its own Finalize or half-close ends an utterance on a
+short frame. A frame
 found invalid after it was accepted fails the session: the binding
 applies `fail` with the cause its own validation would have given before
 acceptance. That requests the session's cleanup, after which nothing is
@@ -678,7 +687,13 @@ and so may `on_transition` or `output_delivered` for the same session.
 `on_transition` arrives on whatever thread made the manager act: a
 transport thread, the manager's timer thread, the thread that drains the
 worker, or a dispatch thread inside its own report; it and
-`open_session` therefore only record. Hand-overs return nothing. A
+`open_session` therefore only record. The manager calls its sink inside
+the call that caused the transition and before that call returns: when
+`apply` or `accept_input` returns to a transport thread, the sink has
+already run for that client event on the same thread, so whatever the
+binding queues from the sink precedes whatever it does with the call's
+result. An event that changes nothing reaches no sink: a repeated
+Finalize, or input that a drain does not take. Hand-overs return nothing. A
 dispatch that cannot use one fails the session through the manager, and
 a call for a session that was never opened, whose cleanup was requested,
 or after `stop()`, is ignored: that is the whole error contract.
@@ -695,6 +710,25 @@ to the binding, the worker and the manager's timers. Because the
 manager's sink shows credit returns and completed finalizations in
 order, a binding takes every credit it reports from the sink, the
 unsolicited update included, and never from the status a call returned.
+Credit returns keep arriving for as long as the session holds its slot:
+also while it drains, after a cancel or a failure, and after its
+terminal outcome was queued, because the dispatch lets go of input as it
+cleans up. No client can use credit then, so a binding reports a credit
+return only while the transition's state is `active` or `finalizing`
+and drops every other one. In those two states there is no transition
+whose status a binding must hold back: each was taken in order, inside
+the serialized section.
+
+A client's Finalize that arrives while the finalization of an automatic
+endpoint is running takes that finalization over, and the manager counts
+the two as one. It does the same the other way round and between
+endpoints: an automatic endpoint applied while a finalization is running
+joins it, although the sink shows `start_finalize` again. The dispatch
+therefore applies exactly one `finalize_completed` for all of them; a
+second finds the session active again and fails it. The sink's order tells a dispatch which case it is in: a
+`start_finalize` it is shown after a completion it applied itself has
+come back through the sink starts a new finalization, and one it is
+shown before that was answered by the completion.
 
 **Hand-overs and drains.** Input and a client Finalize are handed over
 after the manager's call returns, outside its serialized section, so a
@@ -706,9 +740,14 @@ hands over everything the manager accepted while the session lives,
 whatever happened in between; a hand-over that never arrives leaves the
 drain to the session's finalize deadline. For audio input, a client's
 half-close finalizes the open utterance, if it holds audio, with an
-endpoint of its own reason, and a drain the worker starts completes only
-finalizations already asked: audio that was accepted and not finalized
-is not transcribed. For text input every accepted segment is synthesized
+endpoint of its own reason. That finalization waits, as the drain's
+completion does, until no frame the manager accepted is still to be
+handed over: a frame accepted before the half-close belongs to the
+utterance, so a dispatch that ended it at the half-close would cut the
+transcript short and start a second utterance with the frame that
+arrives later. A drain the worker starts completes only finalizations
+already asked: audio that was accepted and not finalized is not
+transcribed. For text input every accepted segment is synthesized
 and delivered in either drain.
 
 **Input.** Input belongs to the dispatch from the call that hands it
@@ -726,7 +765,8 @@ item of its output was delivered.
 values the binding encodes: an utterance's endpoint and then its one
 final transcript; a segment's audio chunks and then its completion; and
 the answer to a text Finalize, once every segment accepted before it was
-delivered. A chunk carries 20 ms of the session's audio format, the last
+delivered. `TaskOutput` will gain alternatives, a partial transcript
+first, so a binding's visitor over it has a default case. A chunk carries 20 ms of the session's audio format, the last
 of a segment possibly less. A result is charged its text plus a fixed
 number of budget units per message and per transcript segment. An offer
 answered `full` leaves the item with the dispatch, which produces nothing
