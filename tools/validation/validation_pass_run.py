@@ -23,6 +23,7 @@ import signal
 import subprocess
 import sys
 import time
+import wave
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -234,15 +235,32 @@ def client_count(option: str, items: list[str]) -> int:
     return int(text)
 
 
-def streaming_limit_s(items: list[str]) -> int:
-    """The streaming step's time limit: every wait of the client at its event timeout.
+def clip_seconds(items: list[str]) -> float:
+    """How long the utterance plays, from its WAV header; 0 where the client sends none.
 
-    Per endpoint named, one wait for the channel and SESSION_WAITS per session.
+    A file that cannot be read counts 0 too: the client refuses it before any session.
     """
+    path = option_value("--audio", items)
+    if not path or not claims("--stt-endpoint", items):
+        return 0.0
+    try:
+        with wave.open(path, "rb") as clip:
+            return clip.getnframes() / clip.getframerate()
+    except (OSError, EOFError, wave.Error, ZeroDivisionError):
+        return 0.0
+
+
+def streaming_limit_s(items: list[str]) -> int:
+    """The streaming step's time limit: the client's waits and its audio, plus a margin.
+
+    Per endpoint named, one wait for the channel and SESSION_WAITS per session, each
+    at the event timeout; and the utterance once per session, sent in real time.
+    """
+    iterations = client_count("--iterations", items)
     endpoints = sum(1 for option in STREAM_ENDPOINTS if claims(option, items))
-    waits = endpoints * (1 + client_count("--iterations", items) * SESSION_WAITS)
-    waited_s = math.ceil(waits * client_count("--event-timeout-ms", items) / 1000)
-    return STREAMING_MARGIN_S + waited_s
+    waits = endpoints * (1 + iterations * SESSION_WAITS)
+    waited_s = waits * client_count("--event-timeout-ms", items) / 1000
+    return STREAMING_MARGIN_S + math.ceil(waited_s + iterations * clip_seconds(items))
 
 
 def device_memory_bytes(text: str) -> int | None:
@@ -329,6 +347,8 @@ class Pass:
         )
         self.candidates = [Candidate(spec) for spec in args.candidate]
         self.staging = Path(args.staging_dir).resolve() if args.staging_dir else None
+        bundle = args.predecessor_bundle
+        self.predecessor = Path(bundle).resolve() if bundle else None
         if self.candidates and self.staging is None:
             raise index_mod.IndexLineError(
                 "a candidate needs --staging-dir: the recipe writes bundles there for the agent"
@@ -612,13 +632,15 @@ class Pass:
             )
         if self.staging is not None and self.hidden_from_agent(self.staging):
             raise StepFailed(f"--staging-dir {self.staging} is hidden from the agent's unit")
-        # The predecessor bundle is read in check_device, and only where a device
-        # answers: elsewhere the harness may be what stages it.
+        # By its path alone: the bundle is read in check_device, and only where a
+        # device answers, because elsewhere the harness may be what stages it.
+        if self.predecessor is not None and self.hidden_from_agent(self.predecessor):
+            raise StepFailed(
+                f"--predecessor-bundle {self.predecessor} is hidden from the agent's unit"
+            )
+        # Not the ballast interpreter: the family the pass installs later may hold it.
         if self.args.sampler and not Path(self.args.sampler).exists():
             raise StepFailed(f"--sampler {self.args.sampler} does not exist")
-        python = self.args.oom_ballast_python
-        if python and shutil.which(python) is None:
-            raise StepFailed(f"--oom-ballast-python {python} is not a program that can be run")
         self.check_device(step)
         # Last, so a refused pass has run nothing through sudo.
         if self.run(step, ["sudo", "-n", "true"], check=False).returncode != 0:
@@ -627,21 +649,21 @@ class Pass:
     def hidden_from_agent(self, path: Path) -> bool:
         return any(root == path or root in path.parents for root in self.hidden)
 
-    def device_memory(self, step: dict[str, Any]) -> tuple[int | None, str | None]:
-        """Device 0's memory in bytes, or None and why the machine did not say."""
+    def device_memory(self, step: dict[str, Any]) -> tuple[int | None, str | None, bool]:
+        """Device 0's memory in bytes, or None and why not; and whether nvidia-smi ran."""
         argv = [self.args.nvidia_smi, "--id=0", "--query-gpu=memory.total"]
         argv.append("--format=csv,noheader,nounits")
         program = Path(argv[0]).name
         try:
             done = self.run(step, argv, capture=True, check=False)
         except OSError as exc:
-            return None, f"`{program}` cannot be run ({exc.strerror})"
+            return None, f"`{program}` cannot be run ({exc.strerror})", False
         if done.returncode != 0:
-            return None, f"`{program}` exited {done.returncode}"
+            return None, f"`{program}` exited {done.returncode}", True
         total = device_memory_bytes(done.stdout)
         if total is None:
-            return None, f"`{program}` printed no single memory figure for device 0"
-        return total, None
+            return None, f"`{program}` printed no single memory figure for device 0", True
+        return total, None, True
 
     def size_ballast(self, subject: str, total: int | None, reason: str | None) -> dict[str, Any]:
         sized: dict[str, Any] = {
@@ -689,26 +711,31 @@ class Pass:
     def check_device(self, step: dict[str, Any]) -> None:
         """Size each candidate's ballast and hold the predecessor to the device windows."""
         windows = bool(self.candidates and self.args.sampler)
-        total, reason = None, "the pass has no candidate, so nothing needed it"
+        total, reason, ran = None, "the pass has no candidate, so nothing needed it", False
         if self.candidates:
-            total, reason = self.device_memory(step)
+            total, reason, ran = self.device_memory(step)
         self.device = {"bytes": total, "reason": reason}
         for candidate in self.candidates:
             self.ballast[candidate.subject] = self.size_ballast(candidate.subject, total, reason)
         if not windows:
             self.predecessor_check["reason"] = "the pass takes no memory window"
             return
+        if total is None and ran:
+            # A machine with no GPU has no nvidia-smi to run.
+            raise StepFailed(
+                f"the pass samples memory and {reason}: nvidia-smi runs, so this machine is "
+                "taken to have a GPU, and one that does not report device 0 cannot give the "
+                "device windows"
+            )
         if total is None:
             self.predecessor_check["reason"] = (
                 f"{reason}, so the pass cannot tell that this machine has a GPU"
             )
             return
         self.predecessor_check = {"applied": True, "reason": None}
-        bundle = self.args.predecessor_bundle
-        resolved = Path(bundle).resolve() if bundle else None
-        if resolved is not None and self.hidden_from_agent(resolved):
-            raise StepFailed(f"--predecessor-bundle {resolved} is hidden from the agent's unit")
-        problem = "none is named" if resolved is None else predecessor_problem(resolved)
+        problem = (
+            "none is named" if self.predecessor is None else predecessor_problem(self.predecessor)
+        )
         if problem:
             raise StepFailed(
                 "this machine has a GPU and the pass samples memory, so the predecessor_idle "
@@ -852,6 +879,10 @@ class Pass:
         for flag, value in optional.items():
             if value:
                 argv += [flag, str(value)]
+        # Checked here and not in preflight: the family installed since then may hold it.
+        python = args.oom_ballast_python
+        if self.ballast[candidate.subject]["bytes"] and shutil.which(python) is None:
+            raise StepFailed(f"--oom-ballast-python {python} is not a program that can be run")
         staging = self.staging / candidate.subject
         owner = [f"--owner={os.getuid()}", f"--group={os.getgid()}"]
         self.run(step, ["sudo", "install", "--directory", "--mode=0755", *owner, str(staging)])

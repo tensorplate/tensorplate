@@ -20,7 +20,6 @@ import hashlib
 import importlib.util
 import io
 import json
-import math
 import os
 import re
 import shutil
@@ -55,6 +54,7 @@ GPU_MIB = 20000
 GPU_BYTES = GPU_MIB * 1024 * 1024
 BUNDLES = ROOT / "test/models/bundles/v0_1"
 RUNNER_FINDINGS = ("runner_profiles", "runner_profile_dependencies", "runner_launch_environment")
+NO_NVIDIA_SMI = "no-nvidia-smi"
 # What the measurement client wrote against a closed port: no session in either mode.
 NO_SESSION_RECORD = ROOT / "test/validation/fixtures/slice_measurement_record_no_session.json"
 
@@ -256,10 +256,13 @@ class Machine:
         candidates: bool = True,
         staging: bool = True,
         interrupt: int | None = None,
-        gpu: str = "",
+        gpu: str | None = None,
         stream: dict | None = None,
     ) -> Result:
-        """`gpu` is what the fake nvidia-smi prints; `stream` the record the client "measures"."""
+        """`gpu` is what the fake nvidia-smi prints, None for a machine that has none.
+
+        `stream` is the record the client "measures".
+        """
         self.runs += 1
         out = self.tmp / f"pass-{self.runs}"
         scratch = {
@@ -280,7 +283,7 @@ class Machine:
             "FAKE_FAIL": str(scratch["fail"]),
             "FAKE_DOCTOR": str(scratch["doctor"]),
             "FAKE_PIDS": str(scratch["pids"]),
-            "FAKE_GPU": gpu,
+            "FAKE_GPU": gpu or "",
             "FAKE_STREAM_RECORD": str(scratch["stream"]),
             "FAKE_STREAM_CLIENT": str(self.tmp / "stream_client.py"),
             "FAKE_PYTHON": sys.executable,
@@ -303,6 +306,8 @@ class Machine:
             ]  # fmt: skip
         if candidates and staging:
             command += ["--staging-dir", str(self.tmp / f"staging-{self.runs}")]
+        if gpu is None:
+            command += ["--nvidia-smi", str(self.tmp / NO_NVIDIA_SMI)]
         if "--confirm" not in arguments:
             command += ["--confirm", "RESET-TENSORPLATE"]
         mid = None
@@ -450,10 +455,7 @@ def check_full_pass(machine: Machine) -> None:
     assert "--clips" not in kokoro and f"--staging-dir {result.staging / 'tts-kokoro'}" in kokoro
     assert "--oom-ballast-bytes 456 --oom-ballast-python /usr/bin/python3" in kokoro
     # No GPU answered: the figure is absent with the reason, and a byte count is used as given.
-    assert result.report["device_memory"] == {
-        "bytes": None,
-        "reason": "`nvidia-smi` printed no single memory figure for device 0",
-    }
+    assert result.report["device_memory"] == {"bytes": None, "reason": UNRUNNABLE}
     made = result.called(
         f"sudo install --directory --mode=0755 --owner={os.getuid()} --group={os.getgid()} "
     )
@@ -660,12 +662,21 @@ def check_preflight(machine: Machine) -> None:
     version.write_text("0.3.1\n", encoding="utf-8")
     refused("is not a directory", "--candidate", f"extra:extra:{machine.tmp / 'absent'}")
     refused("--sampler", "--sampler", str(machine.tmp / "absent"))
-    refused("is not a program that can be run", "--oom-ballast-python", str(machine.tmp / "absent"))
-    refused("is not a program that can be run", "--oom-ballast-python", str(machine.tmp / "clips"))
+    # A predecessor the agent's unit cannot read, whatever else the pass has: under a hidden
+    # root, or reached through a link that is not.
+    hidden = machine.tmp / "home/x86_cuda_smoke"
+    shutil.copytree(machine.cuda_predecessor, hidden)
+    link = machine.tmp / "linked_predecessor"
+    link.symlink_to(hidden)
+    for named in (hidden, link):
+        needle = f"--predecessor-bundle {hidden} is hidden from the agent's unit"
+        refused(needle, "--predecessor-bundle", str(named))
+    link.unlink()
+    shutil.rmtree(machine.tmp / "home")
     result = machine.run(fail={"sudo": 1})
     assert result.statuses("preflight", "lifecycle") == ["failed", "not_run"]
     assert "sudo would ask for a password" in result.steps["preflight"]["reason"]
-    assert [call for call in result.calls if not call.startswith("git")] == [PROBE, "sudo -n true"]
+    assert [call for call in result.calls if not call.startswith("git")] == ["sudo -n true"]
     assert machine.run(candidates=False, family="none").statuses("preflight") == ["ok"]
 
 
@@ -1037,6 +1048,7 @@ def check_names_match_their_sources() -> None:
 
 
 PROBE = "nvidia-smi --id=0 --query-gpu=memory.total --format=csv,noheader,nounits"
+UNRUNNABLE = f"`{NO_NVIDIA_SMI}` cannot be run (No such file or directory)"
 BALLAST_PYTHON = ("--oom-ballast-python", "/usr/bin/python3")
 SKIP_BALLAST = ("--oom-ballast", "stt-whisper=none", "--oom-ballast", "tts-kokoro=none")
 
@@ -1119,7 +1131,8 @@ def check_ballast_per_candidate(machine: Machine) -> None:
 
     # Where none answers, a candidate with no rule is not refused and the report says why.
     result = machine.run()
-    assert result.called("nvidia-smi") == [PROBE] and result.statuses("preflight") == ["ok"]
+    assert result.statuses("preflight") == ["ok"]
+    assert result.report["device_memory"] == {"bytes": None, "reason": UNRUNNABLE}
     unnamed = "no --oom-ballast names this candidate: its out-of-memory case will not run"
     for entry in result.report["oom_ballast"].values():
         assert entry == {"rule": None, "bytes": None, "headroom_bytes": None, "reason": unnamed}
@@ -1155,10 +1168,8 @@ def check_device_refusals(machine: Machine) -> None:
         refused_in_preflight(
             machine, "printed no single memory figure", *headroom, gpu=printed
         )  # fmt: skip
-    refused_in_preflight(machine, "`nvidia-smi` exited 9", *headroom, fail={"nvidia-smi": 9})
-    refused_in_preflight(
-        machine, "cannot be run (No such file or directory)", *headroom, "--nvidia-smi", str(machine.tmp / "absent")
-    )  # fmt: skip
+    refused_in_preflight(machine, "`nvidia-smi` exited 9", *headroom, fail={"nvidia-smi": 9}, gpu=gpu)  # fmt: skip
+    refused_in_preflight(machine, f"needs the device's memory, and {UNRUNNABLE}", *headroom)
     for rule, needle in ((f"headroom:{GPU_BYTES}", "leaves no ballast"), (f"bytes:{GPU_BYTES}", "does not fit")):  # fmt: skip
         refused_in_preflight(
             machine, needle, "--oom-ballast", f"stt-whisper={rule}", "--oom-ballast",
@@ -1180,47 +1191,63 @@ def check_device_refusals(machine: Machine) -> None:
         machine, "predecessor_idle", "--sampler", sync, "--predecessor-bundle", str(machine.bundles),
         *SKIP_BALLAST, gpu=gpu,
     )  # fmt: skip
-    # One the agent's unit cannot read is refused here, not at each qualification step: under a
-    # hidden root, or reached through a link that is not.
-    hidden = machine.tmp / "home/x86_cuda_smoke"
-    shutil.copytree(machine.cuda_predecessor, hidden)
-    link = machine.tmp / "linked_predecessor"
-    link.symlink_to(hidden)
-    for named in (hidden, link):
-        refused_in_preflight(
-            machine, f"--predecessor-bundle {hidden} is hidden from the agent's unit",
-            "--sampler", sync, "--predecessor-bundle", str(named), *SKIP_BALLAST, gpu=gpu,
-        )  # fmt: skip
-    link.unlink()
-    shutil.rmtree(machine.tmp / "home")
 
-    # Where the windows cannot exist, or are not taken, the predecessor is the operator's
-    # choice, and the report says why it was not checked.
-    unknown = "so the pass cannot tell that this machine has a GPU"
-    for options, why in (
-        ({"gpu": gpu, "sampler": False}, "the pass takes no memory window"),
-        ({"gpu": gpu, "sampler": True, "candidates": False}, "the pass takes no memory window"),
-        (
-            {"gpu": "", "sampler": True},
-            f"`nvidia-smi` printed no single memory figure for device 0, {unknown}",
-        ),
-        (
-            {"gpu": "N/A", "sampler": True},
-            f"`nvidia-smi` printed no single memory figure for device 0, {unknown}",
-        ),
-        (
-            {"gpu": gpu, "sampler": True, "fail": {"nvidia-smi": 9}},
-            f"`nvidia-smi` exited 9, {unknown}",
-        ),  # fmt: skip
+    # A machine with no nvidia-smi to run has no GPU the pass can tell of: the predecessor is
+    # the operator's choice, and the report says why it was not checked.
+    sampled_cpu = ("--sampler", sync, "--predecessor-bundle", cpu)
+    result = machine.run(*sampled_cpu)
+    assert result.statuses("preflight") == ["ok"], result.steps["preflight"]
+    assert result.report["predecessor_check"] == {
+        "applied": False,
+        "reason": f"{UNRUNNABLE}, so the pass cannot tell that this machine has a GPU",
+    }
+    # One whose nvidia-smi runs has a GPU: a pass that samples memory is refused when it
+    # fails, or gives no figure.
+    sampling = "the pass samples memory and `nvidia-smi`"
+    refused_in_preflight(machine, f"{sampling} exited 9", *sampled_cpu, fail={"nvidia-smi": 9}, gpu=gpu)  # fmt: skip
+    for printed in ("", "N/A"):
+        refused_in_preflight(
+            machine, f"{sampling} printed no single memory figure", *sampled_cpu, gpu=printed
+        )  # fmt: skip
+    # Where no window is taken, no answer of nvidia-smi stops the pass.
+    unsampled = "the pass takes no memory window"
+    for options in (
+        {"gpu": gpu, "fail": {"nvidia-smi": 9}},
+        {"gpu": ""},
+        {"gpu": gpu, "ballast": SKIP_BALLAST},
+        {"gpu": gpu, "ballast": ("--sampler", sync), "candidates": False},
     ):
-        arguments = ["--predecessor-bundle", cpu]
-        if options.pop("sampler"):
-            arguments += ["--sampler", sync]
-        if options.get("candidates", True) and options["gpu"] == gpu:
-            arguments += SKIP_BALLAST
+        arguments = ("--predecessor-bundle", cpu, *options.pop("ballast", ()))
         result = machine.run(*arguments, **options)
         assert result.statuses("preflight") == ["ok"], (options, result.steps["preflight"])
-        assert result.report["predecessor_check"] == {"applied": False, "reason": why}, options
+        assert result.report["predecessor_check"] == {"applied": False, "reason": unsampled}
+
+
+def check_the_ballast_interpreter_is_checked_where_it_is_used(machine: Machine) -> None:
+    """The speech runtime family's interpreter exists only once the pass has installed it."""
+    python = machine.tmp / "family/bin/python"
+    rules = (
+        "--oom-ballast", "stt-whisper=bytes:5000", "--oom-ballast", "tts-kokoro=none",
+        "--oom-ballast-python", str(python),
+    )  # fmt: skip
+    reason = f"--oom-ballast-python {python} is not a program that can be run"
+    for hook in ("", f"mkdir -p '{python.parent}' && : >'{python}'"):
+        result = machine.run(*rules, install_hook=hook)
+        shutil.rmtree(machine.tmp / "family", ignore_errors=True)
+        assert result.statuses("preflight", "cold-deploy:stt-whisper") == ["ok", "ok"], hook
+        step = result.steps["qualify:stt-whisper"]
+        assert (step["status"], step["reason"], step["exit_code"]) == ("failed", reason, None)
+        # Refused before the recipe ran; the candidate that takes no ballast is qualified.
+        recipe = result.called("candidate-qualify.py")
+        assert len(recipe) == 1 and "tts-kokoro-candidate" in recipe[0], recipe
+        assert not (result.staging / "stt-whisper").exists()
+    # Installed by the time the step runs, it is what the recipe is given.
+    installed = f"mkdir -p '{python.parent}' && ln -s /usr/bin/python3 '{python}'"
+    result = machine.run(*rules, install_hook=installed)
+    shutil.rmtree(machine.tmp / "family")
+    whisper, kokoro = result.called("candidate-qualify.py")
+    assert f"--oom-ballast-bytes 5000 --oom-ballast-python {python}" in whisper
+    assert result.steps["qualify:stt-whisper"]["exit_code"] == 2
 
 
 def write_json(path: Path, value: object) -> None:
@@ -1493,20 +1520,32 @@ def check_the_client_reads_the_arguments_the_pass_gives(machine: Machine) -> Non
 
 
 def check_streaming_limit(machine: Machine) -> None:
-    margin, waits = run_mod.STREAMING_MARGIN_S, run_mod.SESSION_WAITS
-    iterations, timeout_ms = (run_mod.CLIENT_DEFAULTS[o] for o in ("--iterations", "--event-timeout-ms"))  # fmt: skip
+    """Each wait at the event timeout, the audio in real time, and 300 s."""
     limit = run_mod.streaming_limit_s
-    both = ["--stt-endpoint=h:1", "--tts-endpoint=h:1"]
-    # One wait for each channel and a session's waits per iteration, each at the event timeout.
-    assert margin > 0 and waits > 0
-    assert limit(both) == margin + math.ceil(2 * (1 + iterations * waits) * timeout_ms / 1000)
-    assert limit([*both, "--iterations=20", "--event-timeout-ms=2000"]) == margin + 2 * (1 + 20 * waits) * 2  # fmt: skip
-    one = ["--tts-endpoint=h:1", "--iter=5", "--event-timeout-ms", "1500"]
-    assert limit(one) == margin + math.ceil((1 + 5 * waits) * 1.5)
-    assert limit([*both, "--iterations=20", "--event-timeout-ms=1000", "--iterations=2"]) == margin + 2 * (1 + 2 * waits)  # fmt: skip
+    stt, both = ["--stt-endpoint=h:1"], ["--stt-endpoint=h:1", "--tts-endpoint=h:1"]
+    short = f"--audio={machine.tmp / 'utterance.wav'}"
+    twenty_seconds = machine.tmp / "twenty-seconds.wav"
+    with wave.open(str(twenty_seconds), "wb") as clip:
+        clip.setparams((1, 2, 100, 0, "NONE", "not compressed"))
+        clip.writeframes(bytes(2 * 2000))
+    # Two channels and three sessions of four waits each, at 2 s: 52 s. A 0.2 s clip three
+    # times: 0.6 s.
+    assert limit([*both, short, "--iterations=3", "--event-timeout-ms=2000"]) == 353
+    # One channel and forty sessions at 1 s: 161 s. A 20 s clip forty times: 800 s.
+    paced = [*stt, f"--audio={twenty_seconds}", "--iterations=40", "--event-timeout-ms=1000"]
+    assert limit(paced) == 1261
+    # The client's defaults, one session at 30 s: ten waits.
+    assert limit(both) == 600
+    # Synthesis alone sends no audio, whatever clip is named: 21 waits at 1.5 s.
+    synthesis = ["--tts-endpoint=h:1", f"--audio={twenty_seconds}", "--iter=5"]
+    assert limit([*synthesis, "--event-timeout-ms", "1500"]) == 332
+    # A clip that cannot be read adds nothing: the client refuses it before any session.
+    for unreadable in ("absent.wav", "segment.txt", "clips"):
+        assert limit([*stt, f"--audio={machine.tmp / unreadable}"]) == 450, unreadable
+    assert limit([*both, "--iterations=20", "--event-timeout-ms=1000", "--iterations=2"]) == 318
     # The step runs under it, and `--step-timeout` replaces it.
     named = stream_arguments(machine, "--event-timeout-ms=2000")
-    assert built_pass(machine, *named).timeouts["streaming-latency"] == margin + 2 * (1 + 3 * waits) * 2  # fmt: skip
+    assert built_pass(machine, *named).timeouts["streaming-latency"] == 353
     replaced = built_pass(machine, *named, "--step-timeout", "streaming-latency=7")
     assert replaced.timeouts["streaming-latency"] == 7
     assert built_pass(machine).timeouts["lifecycle"] == run_mod.STEP_TIMEOUTS_S["lifecycle"]
@@ -1531,6 +1570,7 @@ def main() -> int:
         check_arguments(machine)
         check_ballast_per_candidate(machine)
         check_device_refusals(machine)
+        check_the_ballast_interpreter_is_checked_where_it_is_used(machine)
         check_predecessor_problem(machine)
         check_streaming(machine)
         check_the_client_reads_the_arguments_the_pass_gives(machine)

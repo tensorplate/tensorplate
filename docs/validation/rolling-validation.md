@@ -67,16 +67,27 @@ entry names the `cuda` device and one of the runner profiles `cuda_fixture`,
 `faster_whisper` or `kokoro`. `test/models/bundles/v0_1/x86_cuda_smoke` is the
 CUDA smoke fixture; copy it where the agent can read it, as the
 [cloud-row runbook](cloud-row-runbooks.md) does. Preflight refuses any other
-predecessor, and none, before anything runs. It also refuses one whose path,
-with its links resolved, lies under a directory the agent's unit cannot read
-(the staging directory's rule, below): the agent could not deploy it, and
-every qualification step would fail on it after the lifecycle and the family
-build. Without `--sampler` no window is taken, and where `nvidia-smi` reports
-no device 0 the pass cannot tell that the machine has one, so the predecessor
-is the operator's choice. That includes a machine whose `nvidia-smi` fails: the
-pass does not read the row id as proof of a device. `predecessor_check` in
-`pass-report.json` says whether the check was applied and, when it was not,
-why: no memory window is taken, or what `nvidia-smi` answered.
+predecessor, and none, before anything runs.
+
+Without `--sampler` no window is taken and the predecessor is the operator's
+choice. With it, what `nvidia-smi` does decides:
+
+| `nvidia-smi` | A pass that samples memory |
+| --- | --- |
+| reports device 0 | the predecessor is checked as above |
+| cannot be run at all | the machine is taken to have no GPU: the predecessor is the operator's choice |
+| runs, and exits non-zero or prints no single figure | refused in preflight: the machine has a GPU that does not report, and its device windows could not be trusted |
+
+`predecessor_check` in `pass-report.json` says whether the check was applied
+and, when it was not, why: no memory window is taken, or `nvidia-smi` cannot
+be run.
+
+Whatever else the pass has, preflight refuses a `--predecessor-bundle` whose
+path, with its links resolved, lies under a directory the agent's unit cannot
+read (the staging directory's rule, below): the agent could not deploy it,
+and every qualification step would fail on it after the lifecycle and the
+family build. That test is of the path alone, so the bundle need not exist
+yet.
 
 ### The out-of-memory ballast
 
@@ -103,8 +114,12 @@ another program) and evaluated in preflight, so a machine that reports no
 single figure for device 0 is refused there; so is a headroom that leaves no
 ballast and, where the machine reports a figure, a ballast that does not fit
 the device. A `bytes` or `headroom` rule needs `--oom-ballast-python`, the
-interpreter that holds the ballast: the pass refuses to start without it, and
-preflight refuses one that cannot be run.
+interpreter that holds the ballast, and the pass refuses to start without
+the option. The interpreter itself need not exist at preflight: it is usually
+the speech runtime family's, which the lifecycle harness purges and the pass
+installs again. Each `qualify` step whose candidate takes a ballast checks
+that it can be run before it runs the recipe, and is `failed` with that
+reason when it cannot.
 
 Without a ballast the recipe records the out-of-memory case as `not_run`, and
 a recipe result with a case that did not run is not `pass`. Where
@@ -143,7 +158,7 @@ command left none.
 
 | Step | What it runs | When it does not end `ok` |
 | --- | --- | --- |
-| `preflight` | Verifies every file the two sets' `SHA256SUMS` list; that the candidate set's manifest and the checkout are both at `--source-commit`, with no uncommitted change; that the agent's environment file names no interpreter yet; that the staging directory is not hidden from the agent; that the ballast interpreter can be run; where a device answers, that every candidate has a ballast rule, that each ballast fits the device, and that the predecessor is readable by the agent and can leave the sidecar on the device ([above](#the-predecessor)); that the pass is not run as root; and, last, that `sudo` does not ask for a password | Nothing else runs |
+| `preflight` | Verifies every file the two sets' `SHA256SUMS` list; that the candidate set's manifest and the checkout are both at `--source-commit`, with no uncommitted change; that the agent's environment file names no interpreter yet; that neither the staging directory nor a named predecessor is hidden from the agent; where a device answers, that every candidate has a ballast rule and that each ballast fits the device; where the pass samples memory, that `nvidia-smi` either reports device 0 or cannot be run, and where it reports one that the predecessor can leave the sidecar on the device ([above](#the-predecessor)); that the pass is not run as root; and, last, that `sudo` does not ask for a password | Nothing else runs |
 | `lifecycle` | [`ubuntu-l4-cloud-lifecycle.sh`](cloud-row-runbooks.md) on the candidate set, with the upgrade and rollback stages when `--baseline-assets-dir` is given | The pass goes on, and a report the harness wrote is still indexed |
 | `install` | The candidate set's own `install.sh`, then enables both services and waits for the agent to answer. A run with a baseline ends with the baseline installed, so this is an upgrade over it | No later step runs |
 | `speech-family` | With `--speech-family host-built` only: builds the speech runtime packages from a scratch clone of the checkout, as [the family's README](../../packaging/speech-runtime/README.md) describes, at the version of the candidate set's serving package, and installs them with `apt-get` | Doctor still runs; no candidate does |
@@ -151,7 +166,7 @@ command left none.
 | `doctor` | `tensorplate doctor --output json`, and reads whether the agent's environment file names an interpreter for the backend | Candidates still run |
 | `provision:<subject>` | `tensorplate bundle provision <bundle>` | That candidate's two other steps do not run |
 | `cold-deploy:<subject>` | `sync`, drops the page cache, then times one `tensorplate deploy` of the bundle | The candidate is still qualified |
-| `qualify:<subject>` | Creates the subject's staging directory, then [`candidate-qualify.py`](speech-candidate-recipes.md) on the provisioned bundle | The other candidates still run |
+| `qualify:<subject>` | Checks that the ballast interpreter can be run when the candidate takes a ballast, creates the subject's staging directory, then runs [`candidate-qualify.py`](speech-candidate-recipes.md) on the provisioned bundle | The other candidates still run |
 | `streaming-latency` | The [slice measurement client](slice-measurement.md) with the `--streaming-arg` arguments, when one names a stream endpoint; `not_run` otherwise | The pass goes on, and a record the client wrote is still indexed |
 | `index` | Derives a line for each subject that left a record, into `lines.jsonl` | A subject whose record is malformed has no line; the others keep theirs |
 
@@ -239,18 +254,24 @@ never became ready`; a mode that did answer keeps its figures beside it. A
 record that is `synthetic`, or that the check refuses, has no line, and the
 `index` step says so.
 
-The step's time limit is every wait of the client at its event timeout, plus
-300 seconds for the interpreter's start, the generated bindings and the GPU
-sampler: for each endpoint named, one wait for the channel and four per
-session (`Ready`, the segment's completion, the answer to `Finalize` and the
-call's end), each `--event-timeout-ms` long, times `--iterations`. The pass
-reads both options from `--streaming-arg` and assumes the client's defaults (1
-and 30,000) for one that is absent. The client's timeout starts again at each
-event a session needs, and an utterance is sent in real time, so a run can be
-longer than this without being stuck: `--step-timeout streaming-latency=SECONDS`
-replaces the derived limit. A client stopped at the limit leaves the record
-it saved last, which is `failed` and is indexed; one stopped before its first
-session was saved shows both modes as `not run`.
+The step's time limit is the sum of three parts. The first is every wait of
+the client at its event timeout: for each endpoint named, one wait for the
+channel and four per session (`Ready`, the segment's completion, the answer
+to `Finalize` and the call's end), each `--event-timeout-ms` long, times
+`--iterations`. The second is the audio, which is sent in real time: the
+length of the `--audio` clip, read from its WAV header, times `--iterations`,
+when a speech-to-text endpoint is named. The third is 300 seconds for the
+interpreter's start, the generated bindings and the GPU sampler. Forty
+iterations of a 20-second clip against one endpoint with a 1,000 ms event
+timeout give 161 + 800 + 300 = 1,261 seconds. The pass reads the options
+from `--streaming-arg` and assumes the client's defaults (1 and 30,000) for
+one that is absent; a clip it cannot read adds nothing, since the client
+refuses it before any session. The client's timeout starts again at each
+event a session needs, so a run can still be longer than this without being
+stuck: `--step-timeout streaming-latency=SECONDS` replaces the derived limit.
+A client stopped at the limit leaves the record it saved last, which is
+`failed` and is indexed; one stopped before its first session was saved
+shows both modes as `not run`.
 
 ### The speech runtime family
 
