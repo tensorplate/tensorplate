@@ -25,9 +25,13 @@ use tensorplate_agent::config::AgentConfig;
 use tensorplate_agent::coordinator::Coordinator;
 use tensorplate_agent::error::AgentError;
 use tensorplate_agent::platform_admission::PlatformAdmission;
+use tensorplate_agent::recovery;
 use tensorplate_platform::{AdmissionPosture, PlatformRegistry, SupportLevel};
+use tensorplate_protocol::agent_control::RecoveryAction;
+use tensorplate_protocol::agent_state::{TransactionKind, TransactionRecord};
 use tensorplate_protocol::backend_descriptor::{ComputeType, RunnerProfile};
 use tensorplate_protocol::bundle::parse_bundle;
+use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::{ErrorCode, ErrorRecord};
 
 const PRODUCTION_ROW: &str = "ubuntu2404-x86-l4-g2s8";
@@ -347,6 +351,62 @@ fn a_variant_resolves_only_against_a_bundle_deployed_on_a_row_the_machine_holds(
     let coord = Coordinator::new(config(&h), h.store.clone(), h.worker.clone());
     deploy(&coord, "base", &fixtures().join(BASE)).unwrap();
     assert_eq!(refusal(&coord, variant).message, no_level.message);
+}
+
+#[test]
+fn a_replayed_deploy_the_rules_refuse_is_quarantined_and_the_active_record_kept() {
+    let h = Harness::new();
+    let coord = agent(&h, PREVIEW_ROW, true);
+    deploy(&coord, "base", &fixtures().join(BASE)).unwrap();
+    let active = h.store.snapshot().unwrap().active.expect("active");
+    let bundle = fixtures().join("invalid_r9_unknown_row");
+    h.store
+        .update(|state| {
+            state.in_flight_transaction = Some(TransactionRecord {
+                transaction_id: "tx-interrupted".into(),
+                deployment_id: "interrupted".into(),
+                phase: DeployState::Received,
+                kind: TransactionKind::Deploy,
+                bundle_digest: None,
+                bundle_path: Some(bundle.to_string_lossy().into_owned()),
+                correlation_id: None,
+                started_monotonic_ns: Some(1),
+                last_transition_monotonic_ns: Some(1),
+                failure: None,
+            });
+            Ok(())
+        })
+        .unwrap();
+    let calls = h.worker.calls().unwrap().len();
+
+    let restarted = agent(&h, PREVIEW_ROW, true);
+    let plan = recovery::plan_with_worker(&h.store, h.worker.as_ref()).unwrap();
+    assert_eq!(plan.action, RecoveryAction::ResumeVerify);
+    let error = recovery::apply_startup(&restarted).expect_err("the replay is refused");
+    assert_eq!(
+        error.to_record().context.as_deref(),
+        Some("bundle_r9_hardware_row")
+    );
+
+    let snapshot = h.store.snapshot().unwrap();
+    assert_eq!(snapshot.active.as_ref(), Some(&active));
+    assert!(snapshot.in_flight_transaction.is_none());
+    assert!(snapshot.candidate.is_none());
+    let quarantined = snapshot.quarantined.last().expect("quarantined");
+    assert_eq!(quarantined.deployment_id, "interrupted");
+    assert_eq!(quarantined.phase, DeployState::Received);
+    assert_eq!(quarantined.error.code, ErrorCode::ConfigInvalid);
+    assert_eq!(
+        quarantined.error.context.as_deref(),
+        Some("bundle_r9_hardware_row")
+    );
+    assert!(!h.config.staging_dir.join("interrupted").exists());
+    assert_eq!(h.worker.calls().unwrap().len(), calls);
+
+    // Nothing is left to replay, so the next start goes through.
+    let plan = recovery::apply_startup(&restarted).expect("the next start");
+    assert_eq!(plan.action, RecoveryAction::NoOp);
+    assert_eq!(h.store.snapshot().unwrap().active, Some(active));
 }
 
 #[test]
