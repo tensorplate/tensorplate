@@ -63,6 +63,12 @@ on:
       # dependencies, from the checkout and cache this action prepares.
       - 'vcpkg.json'
       - '.github/actions/release-vcpkg/**'
+      # The slice measurement client generates its bindings from the stream
+      # schema, installs the SDK's pinned gRPC stack and replays the recorded
+      # stream frames, so a change to any of them must run its test.
+      - 'protocol/proto/**'
+      - 'sdk/python/constraints/**'
+      - 'test/contract/fixtures/stream/**'
   workflow_dispatch:
 
 permissions:
@@ -117,6 +123,7 @@ jobs:
             dh-exec \
             dpkg-dev \
             gnupg \
+            python3-venv \
             shellcheck
 
       # The lifecycle harness verifiers run in their own job below: they
@@ -207,6 +214,24 @@ jobs:
         env:
           CI: 'true'
         run: test/packaging/verify_arch_package_set.sh
+
+      # Runs the slice measurement client against a gRPC server built in the
+      # test from the same generated bindings. The gRPC stack is the SDK
+      # speech extra's hashed pins, with the generator of the pinned grpcio's
+      # number, in an environment of its own.
+      - name: Slice measurement client
+        shell: bash
+        env:
+          TP_SLICE_MEASURE_REQUIRE_PINS: '1'
+        run: |
+          set -Eeuo pipefail
+          venv="${RUNNER_TEMP}/slice-measure"
+          python3 -m venv "$venv"
+          "$venv/bin/pip" install --quiet --require-hashes -r sdk/python/constraints/speech.txt
+          # Unhashed: the pins file is compiled from the SDK's own extra, which has no generator.
+          grpcio="$(sed -n 's/^grpcio==\([^ ]*\).*/\1/p' sdk/python/constraints/speech.txt)"
+          "$venv/bin/pip" install --quiet "grpcio-tools==${grpcio}" jsonschema
+          "$venv/bin/python" test/validation/slice_measure_test.py
 
   speech-runtime-packages:
     name: speech runtime package family (stub wheelhouse)

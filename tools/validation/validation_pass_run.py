@@ -706,7 +706,7 @@ class Pass:
                 lambda step, c=candidate: self.qualify(c, step),
                 (provision,),
             )
-        self.not_run(STREAMING_LATENCY, "nothing measures streaming latency yet")
+        self.not_run(STREAMING_LATENCY, "a pass does not run the streaming measurement yet")
         self.step("index", self.index)
         self.write_report(finished=True)
         print(f"pass report: {self.out / 'pass-report.json'}")

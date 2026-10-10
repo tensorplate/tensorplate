@@ -25,6 +25,37 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A measurement client for the streaming path,
+  `tools/validation/slice_measure.py`. It runs paced speech-to-text sessions
+  and text-to-speech segments over the stream session envelope and takes a
+  timestamp on the caller's monotonic clock at each boundary a caller can
+  see: call start, `Ready`, first and last audio frame sent, `Finalize`
+  sent, the endpoint, the final transcript; the text segment sent, the first
+  audio chunk, the segment's completion, the answer to the text `Finalize`;
+  and `SessionClosed`. It speaks the envelope through Python bindings
+  generated from `session.proto` when it starts and does not use the SDK.
+  The record (`config/schemas/slice_measurement_record.json`) holds no
+  audio, text, transcript or address: it has counts, sizes, digests and
+  times, the language and voice the sessions named, the worker's release as
+  the operator stated it, and the measuring machine's platform. It names the
+  server event that ended each measurement, lists the seven serving stages
+  as not measured, and gives each measurement's nearest-rank percentiles
+  beside the raw values. The time to an answer is counted from when its
+  input was due (the last audio frame's place in real time, the text
+  segment before any wait for input credit); a session that sent that input
+  more than 100 ms late, or that did not complete with answers that agree
+  with what was sent, is a miss. GPU utilization and memory are sampled by
+  a separate process, by default only when every target is a loopback
+  address. The record is written before the first session and after each
+  one, and says how the run ended. `slice_measurement_record.py check`
+  recomputes every derived field and refuses a record that disagrees with
+  its own timestamps or counts, or that is marked `recorded` without the
+  tool's commit and the worker's release or build. A refused `Open` is read by its gRPC status code alone. A
+  target without a generation and descriptor digest is addressed by its
+  deployment alone. `docs/validation/slice-measurement.md` describes the
+  method. No serving worker answers the client yet; its test runs it against
+  a server built from the same generated code and, for the measurement
+  definitions, against a scripted one in virtual time. (V030-E06-F01-T04)
 - The Python sidecar acts on the `speech_jobs_v1` job and session messages.
   Its `ready_event` lists the capability, and a `load_model` that enables it
   is answered with the `job_classes` the loaded runner runs, or with
