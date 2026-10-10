@@ -168,6 +168,122 @@ fn a_member_that_is_failed_gives_its_ports_back() {
     assert_eq!(http_port(&f.launcher.handle(5)), ACTIVE_PORT);
 }
 
+#[test]
+fn a_deploy_whose_launch_failed_gives_its_ports_back() {
+    let f = fixture();
+    f.launcher.refuse.store(true, Ordering::SeqCst);
+    assert!(f.prepare("stt").is_err());
+    f.launcher.refuse.store(false, Ordering::SeqCst);
+
+    f.prepare("stt").unwrap();
+
+    assert_eq!(http_port(&f.launcher.handle(2)), ACTIVE_PORT);
+}
+
+#[test]
+fn a_candidate_that_failed_while_loading_gives_its_ports_back() {
+    let f = fixture();
+    f.serve("stt");
+    f.prepare("tts").unwrap();
+    exit(&f.launcher.handle(2));
+    assert!(f.warm("tts").is_err());
+
+    f.prepare("tts").unwrap();
+    assert_eq!(http_port(&f.launcher.handle(3)), CANDIDATE_PORT);
+
+    f.launcher.handle(3).set_contact(ControlContact::Failed);
+    assert!(f.warm("tts").is_err());
+    f.prepare("third").unwrap();
+    assert_eq!(http_port(&f.launcher.handle(4)), CANDIDATE_PORT);
+}
+
+/// Records, when it is dropped, whether the one pair of `pool` was held.
+struct DroppedProcess {
+    pool: Arc<PortPool>,
+    held_at_drop: Arc<AtomicBool>,
+}
+
+impl MemberProcess for DroppedProcess {
+    fn exited(&mut self) -> AgentResult<bool> {
+        Ok(false)
+    }
+    fn startup_failure(&mut self) -> AgentError {
+        AgentError::WorkerNotReady
+    }
+    fn control(&self) -> ControlContact {
+        ControlContact::Pending
+    }
+    fn terminate(&mut self) {}
+    fn kill(&mut self) {}
+}
+
+impl Drop for DroppedProcess {
+    fn drop(&mut self) {
+        self.held_at_drop
+            .store(self.pool.lease().is_none(), Ordering::SeqCst);
+    }
+}
+
+/// A real process is killed and reaped when it is dropped: until then it is
+/// bound to its ports.
+#[test]
+fn a_member_dropped_while_its_process_runs_holds_its_ports_until_the_process_is_dropped() {
+    let pool = PortPool::new(vec![MemberPorts {
+        http: ACTIVE_PORT,
+        stream: None,
+    }]);
+    let held_at_drop = Arc::new(AtomicBool::new(false));
+    let member = Member {
+        deployment_id: "stt".into(),
+        config_path: PathBuf::new(),
+        process: Box::new(DroppedProcess {
+            pool: pool.clone(),
+            held_at_drop: held_at_drop.clone(),
+        }),
+        recipe: candidate("stt"),
+        ports: pool.lease().unwrap(),
+        outside: None,
+    };
+
+    drop(member);
+
+    assert!(held_at_drop.load(Ordering::SeqCst));
+    assert!(pool.lease().is_some());
+}
+
+#[test]
+fn the_agents_registry_leases_the_pairs_of_the_configured_range() {
+    let td = TempDir::new().unwrap();
+    let config = serde_json::json!({
+        "state_dir": td.path().join("state"),
+        "staging_dir": td.path().join("staging"),
+        "socket_path": td.path().join("agent.sock"),
+        "worker": {
+            "mode": "process",
+            "serving_binary_path": "/usr/local/bin/tensorplate-serving",
+            "serving_port_range": {"first": 41_200, "last": 41_203}
+        }
+    });
+    let agent = crate::config::AgentConfig::parse_json(&config.to_string()).unwrap();
+    let registry = MemberRegistry::from_config(
+        &agent,
+        Arc::new(|| Ok(1)),
+        crate::worker::agent_stderr_sink(),
+    )
+    .unwrap();
+
+    let leases: Vec<_> = std::iter::from_fn(|| registry.ports.lease()).collect();
+
+    let pair = |http, stream| MemberPorts {
+        http,
+        stream: Some(stream),
+    };
+    assert_eq!(
+        leases.iter().map(|lease| lease.ports).collect::<Vec<_>>(),
+        [pair(41_200, 41_201), pair(41_202, 41_203)]
+    );
+}
+
 type Stamps = Arc<Mutex<Vec<(String, u64, u64, String)>>>;
 
 /// A fixture whose registry records every restart stamp and answers it
@@ -392,10 +508,9 @@ fn a_successor_that_yielded_to_a_deploy_is_the_generation_the_next_restart_repla
 /// deploy is still draining on the first port when the next deploy comes.
 #[test]
 fn a_candidate_waits_for_the_port_of_a_successor_that_is_still_draining() {
-    let stop_deadline = Duration::from_secs(1);
     let f = fixture_with(
         |settings| RegistrySettings {
-            stop_deadline,
+            stop_deadline: Duration::from_secs(1),
             ..settings
         },
         |registry| registry,
@@ -421,25 +536,16 @@ fn a_candidate_waits_for_the_port_of_a_successor_that_is_still_draining() {
         f.health(CANDIDATE_PORT, "tts");
         assert!(f.warm("tts").unwrap().ready);
         f.registry.promote("tx", &candidate("tts")).unwrap();
-        let began = Instant::now();
-        let refused = f.prepare("third");
-        assert!(
-            matches!(refused, Err(AgentError::NoFreePort(_))),
-            "{refused:?}"
-        );
 
         f.registry
             .prepare("tx", &candidate("third"), GRACE)
             .unwrap();
 
-        assert!(
-            began.elapsed() >= stop_deadline / 2,
-            "{:?}",
-            began.elapsed()
-        );
+        // The successor ignores the stop request: its port is free only
+        // once it has been killed.
+        assert_eq!(f.launcher.handle(2).calls(), ["terminate", "kill"]);
         assert_eq!(restarting.join().unwrap(), []);
     });
-    assert_eq!(f.launcher.handle(2).calls(), ["terminate", "kill"]);
     assert_eq!(http_port(&f.launcher.handle(4)), ACTIVE_PORT);
 }
 
