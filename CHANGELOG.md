@@ -25,6 +25,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Recorded on a `g2-standard-8` with one NVIDIA L4, against `v0.3.1-rc.2`:
+  two candidate qualification runs of Whisper large-v3-turbo through
+  faster-whisper and three of Kokoro-82M (voice `af_heart`), summarized in
+  `docs/validation/evidence/speech-candidate-whisper-l4-2026-10-08/SUMMARY.md`
+  and
+  `docs/validation/evidence/speech-candidate-kokoro-l4-2026-10-08/SUMMARY.md`.
+  Each summary gives the numbers, the method, the build, every negative
+  case's outcome per run, the settings that make the runs not a default
+  install, and the SHA-256 of each record, memory observation file and
+  log it is read from; those files are not in the repository. Both
+  Whisper runs and Kokoro runs 2 and 3 are `pass`: the deploys built to
+  fail while the runner loads, which returned `timeout` against
+  `v0.3.1-rc.1`, returned `unsupported` and `oom_error`, and the rollback
+  issued right after was accepted. Kokoro run 1 is `fail` and is
+  summarized as recorded: its out-of-memory case deployed successfully
+  under the 21,300,000,000-byte ballast the operator chose, where the
+  later runs held 21,700,000,000 bytes and the deploy was refused. The
+  runs still used host-built speech runtime packages and three interim
+  agent settings, because the candidate bundles name no runner profile.
+  Candidate records only; no support row's evidence changes.
+  `docs/validation/speech-candidate-recipes.md` describes both sets of
+  runs and how later runs are filed. (V030-E01-F02-T03)
+
 - The Python sidecar acts on the `speech_jobs_v1` job and session messages.
   Its `ready_event` lists the capability, and a `load_model` that enables it
   is answered with the `job_classes` the loaded runner runs, or with
