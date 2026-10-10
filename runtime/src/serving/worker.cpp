@@ -455,7 +455,6 @@ void ServingWorker::Impl::stop_stream_listener() noexcept {
     // Sessions drain inside the window that began when shutdown was asked.
     stream->stop(std::chrono::steady_clock::time_point{
         std::chrono::steady_clock::duration{stream_drain_deadline.load()}});
-    stream.reset();
   }
 #endif
 }

@@ -88,3 +88,20 @@ gtest_discover_tests(tp_test_unit
     LABELS "T1"
   DISCOVERY_MODE PRE_TEST
 )
+
+if(TP_ENABLE_STREAMING_GRPC)
+  # The stream listener's write path against a recording writer. It runs no
+  # gRPC call, so every sanitizer leg builds it; a binary of its own because
+  # it links the generated protobuf bindings.
+  add_executable(tp_test_stream_output stream_output_test.cpp)
+  target_include_directories(tp_test_stream_output PRIVATE ${CMAKE_SOURCE_DIR}/runtime/src)
+  target_link_libraries(tp_test_stream_output
+    PRIVATE tp::runtime tp::stream_proto gRPC::grpc++ GTest::gtest_main)
+  target_compile_features(tp_test_stream_output PRIVATE cxx_std_20)
+  tp_apply_warnings(tp_test_stream_output)
+  tp_apply_sanitizers(tp_test_stream_output)
+  tp_uninstrumented_protobuf_test_properties(_tp_stream_output_test_properties)
+  gtest_discover_tests(tp_test_stream_output
+    PROPERTIES LABELS "T1" ${_tp_stream_output_test_properties}
+    DISCOVERY_MODE PRE_TEST)
+endif()

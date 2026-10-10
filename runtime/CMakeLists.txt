@@ -126,7 +126,8 @@ if(TP_ENABLE_STREAMING_GRPC)
   # The stream listener: the only code that references gRPC.
   target_sources(tp_runtime PRIVATE
     src/serving/stream/stream_listener.cpp
-    src/serving/stream/stream_mapping.cpp)
+    src/serving/stream/stream_mapping.cpp
+    src/serving/stream/stream_output.cpp)
   target_link_libraries(tp_runtime PRIVATE tp::stream_proto gRPC::grpc++)
 endif()
 

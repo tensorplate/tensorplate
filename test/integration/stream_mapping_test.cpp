@@ -102,4 +102,82 @@ TEST(StreamMapping, RefusalStatusCodesFollowTheContractTable) {
   }
 }
 
+TEST(StreamMapping, ASessionEndsItsCallWithTheStatusOfItsCause) {
+  // The stream's error mapping, then the class of the reason's error code.
+  const std::map<std::string, grpc::StatusCode> expected{
+      {"CONFIG_INVALID", grpc::StatusCode::INVALID_ARGUMENT},
+      {"BUNDLE_SCHEMA_INVALID", grpc::StatusCode::INVALID_ARGUMENT},
+      {"BUNDLE_INTEGRITY_FAILED", grpc::StatusCode::INVALID_ARGUMENT},
+      {"EMPTY_INPUT", grpc::StatusCode::INVALID_ARGUMENT},
+      {"INVALID_EVENT", grpc::StatusCode::INVALID_ARGUMENT},
+      {"SHAPE_MISMATCH", grpc::StatusCode::INVALID_ARGUMENT},
+      {"UNSUPPORTED_RUNTIME", grpc::StatusCode::FAILED_PRECONDITION},
+      {"UNSUPPORTED_HARDWARE", grpc::StatusCode::FAILED_PRECONDITION},
+      {"BACKEND_UNSUPPORTED_CAPABILITY", grpc::StatusCode::FAILED_PRECONDITION},
+      {"PERMISSION_DENIED", grpc::StatusCode::FAILED_PRECONDITION},
+      {"TARGET_UNRESOLVED", grpc::StatusCode::FAILED_PRECONDITION},
+      {"TARGET_MISMATCH", grpc::StatusCode::FAILED_PRECONDITION},
+      {"STALE_GENERATION", grpc::StatusCode::FAILED_PRECONDITION},
+      {"ILLEGAL_TRANSITION", grpc::StatusCode::FAILED_PRECONDITION},
+      {"SESSION_COUNT_LIMIT", grpc::StatusCode::RESOURCE_EXHAUSTED},
+      {"INPUT_CREDIT_EXCEEDED", grpc::StatusCode::RESOURCE_EXHAUSTED},
+      {"SLOW_CONSUMER", grpc::StatusCode::RESOURCE_EXHAUSTED},
+      {"OOM", grpc::StatusCode::RESOURCE_EXHAUSTED},
+      {"TIMEOUT", grpc::StatusCode::DEADLINE_EXCEEDED},
+      {"DEADLINE_MISSED", grpc::StatusCode::DEADLINE_EXCEEDED},
+      {"IDLE_TIMEOUT", grpc::StatusCode::DEADLINE_EXCEEDED},
+      {"HEARTBEAT_TIMEOUT", grpc::StatusCode::DEADLINE_EXCEEDED},
+      {"MAX_DURATION", grpc::StatusCode::DEADLINE_EXCEEDED},
+      {"FINALIZE_TIMEOUT", grpc::StatusCode::DEADLINE_EXCEEDED},
+      {"ADMISSION_CLOSED", grpc::StatusCode::UNAVAILABLE},
+      {"WORKER_SHUTDOWN", grpc::StatusCode::UNAVAILABLE},
+      {"DEPLOYMENT_RETIRED", grpc::StatusCode::UNAVAILABLE},
+      {"WORKER_NOT_READY", grpc::StatusCode::UNAVAILABLE},
+      {"WORKER_EXIT", grpc::StatusCode::UNAVAILABLE},
+      {"WORKER_CRASH_LOOP", grpc::StatusCode::UNAVAILABLE},
+      {"NO_HEARTBEAT", grpc::StatusCode::UNAVAILABLE},
+      {"BACKEND_UNAVAILABLE", grpc::StatusCode::UNAVAILABLE},
+      {"BACKEND_RESET", grpc::StatusCode::UNAVAILABLE},
+      {"SIDECAR_PROCESS_EXIT", grpc::StatusCode::UNAVAILABLE},
+      {"SIDECAR_STARTUP_FAILED", grpc::StatusCode::UNAVAILABLE},
+      {"CLIENT_CANCELLED", grpc::StatusCode::CANCELLED},
+      {"SIDECAR_MALFORMED_RESPONSE", grpc::StatusCode::INTERNAL},
+      {"INTERNAL", grpc::StatusCode::INTERNAL},
+  };
+  const auto* reasons = wire::FailureReason_descriptor();
+  for (int index = 1; index < reasons->value_count(); ++index) {
+    const auto* value = reasons->value(index);
+    const std::string name =
+        std::string{value->name()}.substr(std::string{"FAILURE_REASON_"}.size());
+    SCOPED_TRACE(name);
+    const auto row = expected.find(name);
+    ASSERT_NE(row, expected.end()) << "a reason with no status in this table";
+    wire::SessionClosed closed;
+    closed.set_state(wire::SESSION_STATE_FAILED);
+    *closed.mutable_cause() =
+        stream::end_cause(static_cast<wire::FailureReason>(value->number()), "");
+    const auto status = stream::session_end_status(closed);
+    EXPECT_EQ(status.error_code(), row->second);
+    EXPECT_NE(status.error_message().find(value->name()), std::string::npos);
+  }
+  EXPECT_EQ(expected.size(), static_cast<std::size_t>(reasons->value_count() - 1));
+}
+
+TEST(StreamMapping, OnlyASessionClosedWithoutACauseEndsItsCallOk) {
+  wire::SessionClosed closed;
+  closed.set_state(wire::SESSION_STATE_CLOSED);
+  EXPECT_TRUE(stream::session_end_status(closed).ok());
+  closed.set_state(wire::SESSION_STATE_FAILED);
+  EXPECT_EQ(stream::session_end_status(closed).error_code(), grpc::StatusCode::INTERNAL);
+  closed.set_state(wire::SESSION_STATE_CLOSED);
+  *closed.mutable_cause() = stream::end_cause(wire::FAILURE_REASON_WORKER_SHUTDOWN, "");
+  EXPECT_EQ(stream::session_end_status(closed).error_code(), grpc::StatusCode::UNAVAILABLE);
+}
+
+TEST(StreamMapping, LocalhostIsTheIpv4LoopbackAndIpv6IsBracketed) {
+  EXPECT_EQ(stream::listen_address("localhost", 7001), "127.0.0.1:7001");
+  EXPECT_EQ(stream::listen_address("127.0.0.1", 0), "127.0.0.1:0");
+  EXPECT_EQ(stream::listen_address("::1", 7001), "[::1]:7001");
+}
+
 }  // namespace

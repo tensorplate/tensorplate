@@ -57,7 +57,8 @@ class StreamListener {
   /// the manager. Safe to repeat.
   void stop(std::chrono::steady_clock::time_point deadline) noexcept;
 
-  /// Sessions holding a slot.
+  /// Sessions holding a slot; after stop(), those that still held one when it
+  /// released the manager.
   [[nodiscard]] std::size_t live_sessions() const noexcept;
 
   struct Impl;

@@ -40,13 +40,25 @@ struct ServedTarget {
 [[nodiscard]] wire::EndCause end_cause(wire::FailureReason reason, std::string_view detail);
 [[nodiscard]] wire::EndCause end_cause(const Error& error);
 
-/// The gRPC status code for a call ended by `reason`.
+/// The gRPC status code for a call ended by `reason`: the stream's error
+/// mapping, and for a reason it does not name, the class of the error code the
+/// taxonomy pairs with it.
 [[nodiscard]] grpc::StatusCode status_code(wire::FailureReason reason) noexcept;
+
+/// The status that ends a call whose session closed: OK when it closed without
+/// a cause, else the status code of the cause's reason, and never OK for a
+/// failed session. The typed outcome is the SessionClosed the client has
+/// already read.
+[[nodiscard]] grpc::Status session_end_status(const wire::SessionClosed& closed);
 
 /// The status that ends a call whose Open was refused. How the status carries
 /// the OpenRefused is not decided yet: until then it carries the code and a
 /// message, and no detail.
 [[nodiscard]] grpc::Status refused_open_status(const wire::OpenRefused& refused);
+
+/// The address the listener binds for a loopback `host`. "localhost" is the
+/// IPv4 loopback, as for the HTTP bind: it is never resolved.
+[[nodiscard]] std::string listen_address(std::string_view host, std::uint16_t port);
 
 [[nodiscard]] wire::SessionState wire_state(LogicalSessionState state) noexcept;
 [[nodiscard]] wire::AudioFormat wire_format(const StreamAudioFormat& format);

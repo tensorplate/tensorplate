@@ -19,6 +19,7 @@
 #include "serving/session/session_manager.hpp"
 #include "serving/session/timers.hpp"
 #include "serving/stream/stream_mapping.hpp"
+#include "serving/stream/stream_output.hpp"
 
 namespace tensorplate::serving {
 namespace {
@@ -34,6 +35,9 @@ constexpr std::uint64_t kUnversionedBinding = 1;
 constexpr std::uint64_t kPongReplaceKey = 1;
 constexpr int kMaxReceiveMessageBytes = 64 * 1024;
 
+using stream::CallOutput;
+using stream::WireEvent;
+
 bool host_is_loopback(std::string_view host) noexcept {
   return host == "127.0.0.1" || host == "::1" || host == "localhost";
 }
@@ -42,12 +46,6 @@ std::uint32_t whole_ms(std::chrono::nanoseconds duration) noexcept {
   const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
   return static_cast<std::uint32_t>(std::clamp<std::int64_t>(ms, 0, UINT32_MAX));
 }
-
-/// A server event queued without its sequence, which the stream assigns.
-struct WireEvent final : OutputBody {
-  explicit WireEvent(ServerEvent event_in) : event(std::move(event_in)) {}
-  ServerEvent event;
-};
 
 OutputItem wire_item(ServerEvent event, OutputKind kind, std::uint64_t replace_key = 0) {
   const auto bytes = std::max<std::uint64_t>(1, event.ByteSizeLong());
@@ -61,31 +59,17 @@ wire::Usage usage(const LogicalSessionUsage& from) {
   return out;
 }
 
-class SessionCall;
-
-/// What a call's reactor, the manager's sink and the output queue's consumer
-/// share. It outlives the reactor: `reactor` is cleared when the call is done,
-/// and the consumer then finds nothing to write.
+/// What a call's reactor and the manager's sink share about its session.
 struct CallState {
   std::mutex mu;
-  SessionCall* reactor = nullptr;
-  std::shared_ptr<BoundedOutputQueue> output;
   std::optional<std::uint64_t> key;
   std::string session_id;
   SessionTerms terms;
   std::uint32_t waiting_segment_limit = 0;
   std::uint64_t last_accepted_sequence = 0;
-  bool writing = false;
-  OutputKind writing_kind = OutputKind::Control;
-  std::uint64_t writing_sequence = 0;
-  ServerEvent buffer;
-  std::optional<grpc::Status> finish_wanted;
-  bool finished = false;
-
-  /// Starts the next write if none is in flight.
-  void pump();
-  /// Finishes the call once no write is in flight. The first status wins.
-  void finish(grpc::Status status);
+  bool cancelled = false;
+  /// Outlives the reactor, which it stops calling once the call is done.
+  std::shared_ptr<CallOutput> out;
 };
 
 }  // namespace
@@ -100,6 +84,7 @@ struct StreamListener::Impl final : wire::SessionService::CallbackService {
 
   void on_transition(const ManagedSessionTransition& transition);
   void close_admission() noexcept;
+  [[nodiscard]] bool admitting() const;
 
   StreamListenerOptions options;
   SessionDispatch* dispatch;
@@ -114,6 +99,8 @@ struct StreamListener::Impl final : wire::SessionService::CallbackService {
   /// Serializes stop(); held through its wait.
   std::mutex lifecycle_mu;
   bool stopped = false;
+  /// Sessions that still held a slot when stop() released the manager.
+  std::size_t held_at_stop = 0;
   /// Guards `manager` against its reset and `admission_stopped`; held briefly.
   mutable std::mutex manager_mu;
   bool admission_stopped = false;
@@ -122,11 +109,12 @@ struct StreamListener::Impl final : wire::SessionService::CallbackService {
 namespace {
 
 /// One Session call: one logical session.
-class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEvent> {
+class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEvent>,
+                          public stream::CallWriter {
  public:
   explicit SessionCall(StreamListener::Impl& listener)
       : listener_(listener), state_(std::make_shared<CallState>()) {
-    state_->reactor = this;
+    state_->out = std::make_shared<CallOutput>(*this, listener.clock);
     StartRead(&in_);
   }
 
@@ -140,54 +128,28 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
     }
   }
 
-  void OnWriteDone(bool ok) override {
-    OutputKind kind = OutputKind::Control;
-    std::uint64_t sequence = 0;
-    std::shared_ptr<BoundedOutputQueue> output;
-    std::optional<std::uint64_t> key;
-    std::optional<grpc::Status> finish_wanted;
-    {
-      const std::lock_guard guard(state_->mu);
-      state_->writing = false;
-      kind = state_->writing_kind;
-      sequence = state_->writing_sequence;
-      output = state_->output;
-      key = state_->key;
-      finish_wanted = state_->finish_wanted;
-    }
-    if (!ok) {
-      state_->finish(grpc::Status::CANCELLED);
-      return;
-    }
-    if (output && output->delivered(sequence, listener_.clock.now()) && key &&
-        listener_.dispatch != nullptr) {
-      listener_.dispatch->output_delivered(*key, kind);
-    }
-    if (kind == OutputKind::Terminal) {
-      state_->finish(grpc::Status::OK);
-    } else if (finish_wanted) {
-      state_->finish(*finish_wanted);
-    } else {
-      state_->pump();
-    }
-  }
+  void OnWriteDone(bool ok) override { state_->out->write_done(ok); }
 
   void OnCancel() override {
-    if (const auto key = session_key()) {
-      (void)listener_.manager->apply(
-          *key, LogicalSessionEvent::Abort,
-          Error::make(Error::Code::Cancelled, "the call was cancelled", "client_cancelled"));
+    std::optional<std::uint64_t> key;
+    {
+      const std::lock_guard guard(state_->mu);
+      state_->cancelled = true;
+      key = state_->key;
     }
-    state_->finish(grpc::Status::CANCELLED);
+    if (key) {
+      abort(*key);
+    }
+    state_->out->finish(grpc::Status::CANCELLED);
   }
 
   void OnDone() override {
-    {
-      const std::lock_guard guard(state_->mu);
-      state_->reactor = nullptr;
-    }
+    state_->out->detach();
     delete this;
   }
+
+  void start_write(const ServerEvent& event) override { StartWrite(&event); }
+  void finish(const grpc::Status& status) override { Finish(status); }
 
  private:
   [[nodiscard]] std::optional<std::uint64_t> session_key() const {
@@ -252,6 +214,10 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
       refuse(request.error());
       return false;
     }
+    if (!listener_.admitting()) {
+      refuse(Error::make(Error::Code::NotReady, "session admission is closed", "admission_closed"));
+      return false;
+    }
     SessionDispatch* dispatch = listener_.dispatch;
     if (dispatch == nullptr) {
       refuse(Error::make(Error::Code::Unsupported, "the deployment declares no stream mode",
@@ -286,13 +252,45 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
                                                   }
                                                   return dispatch->open_session(key, *terms);
                                                 });
-    if (!opened && !session_key()) {
+    // A refusal no transition reported leaves no session and sends no event.
+    if (!opened && !state_->out->bound()) {
+      forget_session();
       refuse(opened.error());
       return false;
     }
     expected_sequence_ = 2;
+    std::optional<std::uint64_t> cancelled_key;
+    {
+      const std::lock_guard guard(state_->mu);
+      if (state_->cancelled) {
+        cancelled_key = state_->key;
+      }
+    }
+    // The call was cancelled before its session had a key to abort.
+    if (cancelled_key) {
+      abort(*cancelled_key);
+    }
     // A failed initialization was admitted: its terminal event ends the call.
     return opened.has_value();
+  }
+
+  void forget_session() {
+    std::optional<std::uint64_t> key;
+    {
+      const std::lock_guard guard(state_->mu);
+      key = std::exchange(state_->key, std::nullopt);
+      state_->session_id.clear();
+    }
+    if (key) {
+      const std::lock_guard guard(listener_.calls_mu);
+      listener_.calls.erase(*key);
+    }
+  }
+
+  void abort(std::uint64_t key) const {
+    (void)listener_.manager->apply(
+        key, LogicalSessionEvent::Abort,
+        Error::make(Error::Code::Cancelled, "the call was cancelled", "client_cancelled"));
   }
 
   void half_closed() {
@@ -312,7 +310,7 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
     wire::OpenRefused refused;
     *refused.mutable_cause() = stream::end_cause(cause);
     refused.set_admission(wire::ADMISSION_NOT_ADMITTED);
-    state_->finish(stream::refused_open_status(refused));
+    state_->out->finish(stream::refused_open_status(refused));
   }
 
   [[nodiscard]] std::string session_id() const {
@@ -325,60 +323,6 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
   ClientEvent in_;
   std::uint64_t expected_sequence_ = 1;
 };
-
-void CallState::pump() {
-  SessionCall* writer = nullptr;
-  std::optional<grpc::Status> unsendable;
-  {
-    const std::lock_guard guard(mu);
-    if (reactor == nullptr || writing || finished || finish_wanted || !output) {
-      return;
-    }
-    auto next = output->take();
-    if (!next) {
-      return;
-    }
-    writer = reactor;
-    auto* body = dynamic_cast<WireEvent*>(next->item.body.get());
-    if (body == nullptr) {
-      unsendable = grpc::Status(grpc::StatusCode::INTERNAL, "output this server cannot send");
-      finish_wanted = unsendable;
-      finished = true;
-    } else {
-      buffer = std::move(body->event);
-      buffer.set_sequence(next->sequence);
-      writing = true;
-      writing_kind = next->item.kind;
-      writing_sequence = next->sequence;
-    }
-  }
-  if (unsendable) {
-    writer->Finish(*unsendable);
-  } else {
-    writer->StartWrite(&buffer);
-  }
-}
-
-void CallState::finish(grpc::Status status) {
-  SessionCall* writer = nullptr;
-  grpc::Status final_status;
-  {
-    const std::lock_guard guard(mu);
-    if (finished || reactor == nullptr) {
-      return;
-    }
-    if (!finish_wanted) {
-      finish_wanted = std::move(status);
-    }
-    if (writing) {
-      return;
-    }
-    finished = true;
-    writer = reactor;
-    final_status = *finish_wanted;
-  }
-  writer->Finish(std::move(final_status));
-}
 
 }  // namespace
 
@@ -404,15 +348,20 @@ void StreamListener::Impl::on_transition(const ManagedSessionTransition& transit
     }
   }
   const auto& output = transition.output;
-  bool first = false;
+  const bool first = !state->out->bound();
+  if (first) {
+    state->out->bind(output, [target = dispatch, key = transition.session_key](OutputKind kind) {
+      if (target != nullptr) {
+        target->output_delivered(key, kind);
+      }
+    });
+  }
   std::string session_id;
   SessionTerms terms;
   std::uint32_t waiting_segment_limit = 0;
   std::uint64_t last_accepted_sequence = 0;
   {
     const std::lock_guard guard(state->mu);
-    first = state->output == nullptr;
-    state->output = output;
     session_id = state->session_id;
     terms = state->terms;
     waiting_segment_limit = state->waiting_segment_limit;
@@ -485,6 +434,7 @@ void StreamListener::Impl::on_transition(const ManagedSessionTransition& transit
           closed.set_admission(wire::ADMISSION_ADMITTED);
           closed.set_last_accepted_sequence(last_accepted_sequence);
           closed.mutable_totals();
+          state->out->set_end_status(stream::session_end_status(closed));
           offer(std::move(event), OutputKind::Terminal);
           break;
         }
@@ -494,7 +444,7 @@ void StreamListener::Impl::on_transition(const ManagedSessionTransition& transit
     });
   }
   if (first) {
-    (void)output->set_consumer([weak = std::weak_ptr<CallState>(state)] {
+    (void)output->set_consumer([weak = std::weak_ptr<CallOutput>(state->out)] {
       if (const auto shared = weak.lock()) {
         shared->pump();
       }
@@ -513,6 +463,11 @@ void StreamListener::Impl::close_admission() noexcept {
         Error::make(Error::Code::Unavailable, "the worker is shutting down", "worker_shutdown"));
   } catch (...) {  // NOLINT(bugprone-empty-catch): shutdown continues without the drain.
   }
+}
+
+bool StreamListener::Impl::admitting() const {
+  const std::lock_guard guard(manager_mu);
+  return !admission_stopped;
 }
 
 StreamListener::StreamListener(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -541,9 +496,7 @@ Result<std::unique_ptr<StreamListener>> StreamListener::start(StreamListenerOpti
   if (dispatch != nullptr) {
     dispatch->attach(*raw->manager);
   }
-  const std::string address =
-      (raw->options.host == "::1" ? std::string{"[::1]"} : raw->options.host) + ":" +
-      std::to_string(raw->options.port);
+  const std::string address = stream::listen_address(raw->options.host, raw->options.port);
   int selected = 0;
   grpc::ServerBuilder builder;
   builder.AddListeningPort(address, grpc::InsecureServerCredentials(), &selected);
@@ -592,12 +545,13 @@ void StreamListener::stop(std::chrono::steady_clock::time_point deadline) noexce
   }
   impl_->server.reset();
   const std::lock_guard guard(impl_->manager_mu);
+  impl_->held_at_stop = impl_->manager->held_slots();
   impl_->manager.reset();
 }
 
 std::size_t StreamListener::live_sessions() const noexcept {
   const std::lock_guard lock(impl_->manager_mu);
-  return impl_->manager ? impl_->manager->held_slots() : 0;
+  return impl_->manager ? impl_->manager->held_slots() : impl_->held_at_stop;
 }
 
 }  // namespace tensorplate::serving

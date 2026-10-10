@@ -194,7 +194,50 @@ grpc::StatusCode status_code(wire::FailureReason reason) noexcept {
     default:
       break;
   }
+  switch (taxonomy_code(reason)) {
+    case wire::ERROR_CODE_CONFIG_INVALID:
+    case wire::ERROR_CODE_SHAPE_MISMATCH:
+      return grpc::StatusCode::INVALID_ARGUMENT;
+    case wire::ERROR_CODE_UNSUPPORTED:
+      return grpc::StatusCode::FAILED_PRECONDITION;
+    case wire::ERROR_CODE_OOM_ERROR:
+    case wire::ERROR_CODE_RESOURCE_EXHAUSTED:
+      return grpc::StatusCode::RESOURCE_EXHAUSTED;
+    case wire::ERROR_CODE_TIMEOUT:
+      return grpc::StatusCode::DEADLINE_EXCEEDED;
+    case wire::ERROR_CODE_LOAD_FAILED:
+    case wire::ERROR_CODE_NOT_READY:
+    case wire::ERROR_CODE_UNAVAILABLE:
+      return grpc::StatusCode::UNAVAILABLE;
+    case wire::ERROR_CODE_CANCELLED:
+      return grpc::StatusCode::CANCELLED;
+    default:
+      break;
+  }
   return grpc::StatusCode::INTERNAL;
+}
+
+grpc::Status session_end_status(const wire::SessionClosed& closed) {
+  if (!closed.has_cause()) {
+    if (closed.state() == wire::SESSION_STATE_FAILED) {
+      return {grpc::StatusCode::INTERNAL, "session failed without a cause"};
+    }
+    return grpc::Status::OK;
+  }
+  const auto reason = closed.cause().reason();
+  return {status_code(reason), "session ended: " + wire::FailureReason_Name(reason)};
+}
+
+std::string listen_address(std::string_view host, std::uint16_t port) {
+  std::string address;
+  if (host == "localhost") {
+    address = "127.0.0.1";
+  } else if (host == "::1") {
+    address = "[::1]";
+  } else {
+    address = host;
+  }
+  return address + ":" + std::to_string(port);
 }
 
 grpc::Status refused_open_status(const wire::OpenRefused& refused) {

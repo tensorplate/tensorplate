@@ -4,20 +4,27 @@
 
 #include "serving/stream/stream_listener.hpp"
 
+#include <arpa/inet.h>
 #include <grpcpp/grpcpp.h>
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -68,14 +75,151 @@ std::size_t thread_count() {
   return count;
 }
 
+/// Whether a TCP connection to `port` on the loopback of `family` is accepted.
+bool accepts(int family, std::uint16_t port) {
+  const int fd = ::socket(family, SOCK_STREAM, 0);
+  if (fd < 0) {
+    return false;
+  }
+  int connected = -1;
+  if (family == AF_INET) {
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(port);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): POSIX socket address.
+    connected = ::connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
+  } else {
+    sockaddr_in6 address{};
+    address.sin6_family = AF_INET6;
+    address.sin6_addr = in6addr_loopback;
+    address.sin6_port = htons(port);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): POSIX socket address.
+    connected = ::connect(fd, reinterpret_cast<const sockaddr*>(&address), sizeof(address));
+  }
+  ::close(fd);
+  return connected == 0;
+}
+
+/// Polls until `done` or five seconds.
+bool eventually(const std::function<bool()>& done) {
+  const auto deadline = std::chrono::steady_clock::now() + 5s;
+  while (!done()) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
+    }
+    std::this_thread::sleep_for(5ms);
+  }
+  return true;
+}
+
+/// What a dispatch was shown, for tests that ask how a session ended.
+class Seen {
+ public:
+  void transition(const tensorplate::serving::ManagedSessionTransition& transition) {
+    const std::lock_guard guard(mu_);
+    if (transition.event == tensorplate::serving::LogicalSessionEvent::Abort) {
+      ++aborts_;
+    }
+  }
+  void delivery() {
+    const std::lock_guard guard(mu_);
+    ++deliveries_;
+  }
+  [[nodiscard]] int aborts() const {
+    const std::lock_guard guard(mu_);
+    return aborts_;
+  }
+  [[nodiscard]] int deliveries() const {
+    const std::lock_guard guard(mu_);
+    return deliveries_;
+  }
+
+ private:
+  mutable std::mutex mu_;
+  int aborts_ = 0;
+  int deliveries_ = 0;
+};
+
+/// The synthetic dispatch, with an initialization that can fail and a
+/// negotiation that can be held.
+class SteeredDispatch final : public tensorplate::serving::SessionDispatch {
+ public:
+  explicit SteeredDispatch(const tensorplate::SchedulerClock& clock) : inner_(clock) {}
+
+  void attach(tensorplate::serving::SessionManager& manager) override { inner_.attach(manager); }
+  void stop() noexcept override { inner_.stop(); }
+  [[nodiscard]] tensorplate::Result<tensorplate::serving::SessionTerms> negotiate(
+      const tensorplate::serving::SessionRequest& request) const override {
+    std::unique_lock lock(mu_);
+    negotiating_ = true;
+    cv_.notify_all();
+    cv_.wait(lock, [&] { return !hold_; });
+    lock.unlock();
+    return inner_.negotiate(request);
+  }
+  [[nodiscard]] tensorplate::Result<void> open_session(
+      std::uint64_t key, const tensorplate::serving::SessionTerms& terms) override {
+    if (fail_initialization) {
+      return tensorplate::unexpected(tensorplate::Error::make(tensorplate::Error::Code::Unavailable,
+                                                              "no backend", "backend_unavailable"));
+    }
+    return inner_.open_session(key, terms);
+  }
+  void on_transition(const tensorplate::serving::ManagedSessionTransition& t) override {
+    seen.transition(t);
+    inner_.on_transition(t);
+  }
+  void audio(std::uint64_t key, std::span<const std::byte> frame) override {
+    inner_.audio(key, frame);
+  }
+  void text_segment(std::uint64_t key, std::uint64_t id, std::string text) override {
+    inner_.text_segment(key, id, std::move(text));
+  }
+  void finalize(std::uint64_t key, std::uint64_t sequence) override {
+    inner_.finalize(key, sequence);
+  }
+  void output_delivered(std::uint64_t key, tensorplate::serving::OutputKind kind) override {
+    seen.delivery();
+    inner_.output_delivered(key, kind);
+  }
+
+  void hold_negotiation() {
+    const std::lock_guard guard(mu_);
+    hold_ = true;
+  }
+  void wait_until_negotiating() {
+    std::unique_lock lock(mu_);
+    cv_.wait(lock, [&] { return negotiating_; });
+  }
+  void release_negotiation() {
+    {
+      const std::lock_guard guard(mu_);
+      hold_ = false;
+    }
+    cv_.notify_all();
+  }
+
+  std::atomic<bool> fail_initialization{false};
+  Seen seen;
+
+ private:
+  StreamTestDispatch inner_;
+  mutable std::mutex mu_;
+  mutable std::condition_variable cv_;
+  mutable bool negotiating_ = false;
+  bool hold_ = false;
+};
+
 /// A listener with the synthetic dispatch behind it, or none.
 class Served {
  public:
-  explicit Served(bool with_dispatch = true) {
+  explicit Served(bool with_dispatch = true, const std::string& host = "127.0.0.1") {
     if (with_dispatch) {
-      dispatch_ = std::make_unique<StreamTestDispatch>(clock_);
+      dispatch_ = std::make_unique<SteeredDispatch>(clock_);
     }
     StreamListenerOptions options;
+    options.host = host;
     options.deployment_id = kDeployment;
     options.limits = tensorplate::serving::SessionLimits::create(60s, 10s, 30s, 60min, 1).value();
     listener_ = StreamListener::start(std::move(options), dispatch_.get(), clock_).value();
@@ -107,16 +251,17 @@ class Served {
     }
   };
 
-  Client connect() {
+  Client connect(std::chrono::milliseconds deadline = 20s) {
     Client client;
-    client.context->set_deadline(std::chrono::system_clock::now() + 20s);
+    client.context->set_deadline(std::chrono::system_clock::now() + deadline);
     client.call = stub_->Session(client.context.get());
     return client;
   }
 
   /// A client whose Open was answered by Ready.
-  Client ready(wire::SessionMode mode, wire::Ready* ready_out = nullptr) {
-    auto client = connect();
+  Client ready(wire::SessionMode mode, wire::Ready* ready_out = nullptr,
+               std::chrono::milliseconds deadline = 20s) {
+    auto client = connect(deadline);
     EXPECT_TRUE(client.call->Write(open_event(mode)));
     const auto ready = client.read();
     EXPECT_TRUE(ready && ready->has_ready());
@@ -140,14 +285,21 @@ class Served {
   }
 
   StreamListener& listener() { return *listener_; }
+  SteeredDispatch& dispatch() { return *dispatch_; }
 
  private:
   SystemSchedulerClock clock_;
-  std::unique_ptr<StreamTestDispatch> dispatch_;
+  std::unique_ptr<SteeredDispatch> dispatch_;
   std::unique_ptr<StreamListener> listener_;
   std::shared_ptr<grpc::Channel> channel_;
   std::unique_ptr<wire::SessionService::Stub> stub_;
 };
+
+/// The status of a call whose session has sent its last event.
+grpc::Status end_of(Served::Client& client) {
+  EXPECT_FALSE(client.read().has_value()) << "SessionClosed is the last event";
+  return client.call->Finish();
+}
 
 void expect_closed(const std::optional<wire::ServerEvent>& event, wire::SessionState state,
                    wire::FailureReason reason) {
@@ -235,6 +387,8 @@ TEST(StreamListener, PingIsAnsweredByPongInSequence) {
     EXPECT_TRUE(pong->has_pong());
     EXPECT_EQ(pong->sequence(), expected);
   }
+  // Ready and three Pongs: the dispatch hears of each delivery.
+  EXPECT_TRUE(eventually([&] { return served.dispatch().seen.deliveries() == 4; }));
 }
 
 TEST(StreamListener, HalfCloseClosesTheSessionWithoutCause) {
@@ -265,7 +419,10 @@ TEST(StreamListener, EventsNotServedYetFailTheSessionAsUnsupported) {
     ASSERT_NO_FATAL_FAILURE(expect_closed(closed, wire::SESSION_STATE_FAILED,
                                           wire::FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY));
     EXPECT_EQ(closed->session_closed().cause().code(), wire::ERROR_CODE_UNSUPPORTED);
-    EXPECT_TRUE(client.call->Finish().ok());
+    const auto status = end_of(client);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    EXPECT_NE(status.error_message().find("FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY"),
+              std::string::npos);
   }
 }
 
@@ -284,7 +441,102 @@ TEST(StreamListener, EventsOutOfSequenceOrForAnotherSessionFailIt) {
     ASSERT_TRUE(client.send(ping));
     ASSERT_NO_FATAL_FAILURE(expect_closed(client.read(), wire::SESSION_STATE_FAILED,
                                           wire::FAILURE_REASON_INVALID_EVENT));
+    EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
   }
+}
+
+TEST(StreamListener, ASecondOpenFailsTheSession) {
+  Served served;
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  ASSERT_TRUE(client.send(open_event(wire::SESSION_MODE_STT_STREAMING)));
+  ASSERT_NO_FATAL_FAILURE(
+      expect_closed(client.read(), wire::SESSION_STATE_FAILED, wire::FAILURE_REASON_INVALID_EVENT));
+  EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+}
+
+TEST(StreamListener, OnlyACancelMayOmitTheSessionId) {
+  {
+    Served served;
+    auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+    client.session_id.clear();
+    wire::ClientEvent cancel;
+    cancel.mutable_cancel();
+    ASSERT_TRUE(client.send(cancel));
+    // Accepted as this session's event; Cancel itself is not served yet.
+    ASSERT_NO_FATAL_FAILURE(expect_closed(client.read(), wire::SESSION_STATE_FAILED,
+                                          wire::FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY));
+  }
+  Served served;
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  client.session_id.clear();
+  wire::ClientEvent ping;
+  ping.mutable_ping();
+  ASSERT_TRUE(client.send(ping));
+  ASSERT_NO_FATAL_FAILURE(
+      expect_closed(client.read(), wire::SESSION_STATE_FAILED, wire::FAILURE_REASON_INVALID_EVENT));
+}
+
+TEST(StreamListener, AnEventWithNoKnownBodyFailsTheSession) {
+  for (const bool unknown_field : {false, true}) {
+    SCOPED_TRACE(unknown_field ? "a body this server does not know" : "no body");
+    Served served;
+    auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+    wire::ClientEvent event;
+    if (unknown_field) {
+      event.GetReflection()->MutableUnknownFields(&event)->AddLengthDelimited(99, "later");
+    }
+    ASSERT_TRUE(client.send(event));
+    ASSERT_NO_FATAL_FAILURE(expect_closed(client.read(), wire::SESSION_STATE_FAILED,
+                                          wire::FAILURE_REASON_INVALID_EVENT));
+    EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  }
+}
+
+TEST(StreamListener, AHalfCloseBeforeOpenIsRefused) {
+  Served served;
+  auto client = served.connect();
+  ASSERT_TRUE(client.call->WritesDone());
+  EXPECT_FALSE(client.read().has_value());
+  const auto status = client.call->Finish();
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_NE(status.error_message().find("FAILURE_REASON_INVALID_EVENT"), std::string::npos);
+  EXPECT_EQ(served.listener().live_sessions(), 0U);
+}
+
+TEST(StreamListener, ACancelThatRacesOpenLeavesNoSession) {
+  Served served;
+  served.dispatch().hold_negotiation();
+  auto client = served.connect();
+  ASSERT_TRUE(client.call->Write(open_event(wire::SESSION_MODE_STT_STREAMING)));
+  served.dispatch().wait_until_negotiating();
+  client.context->TryCancel();
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
+  // Long enough for the server to have seen the cancellation before it admits.
+  std::this_thread::sleep_for(300ms);
+  served.dispatch().release_negotiation();
+  EXPECT_TRUE(eventually([&] { return served.dispatch().seen.aborts() == 1; }))
+      << "the session admitted behind the cancel was not aborted";
+  EXPECT_TRUE(eventually([&] { return served.listener().live_sessions() == 0; }));
+  // The slot is free again.
+  auto next = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  EXPECT_FALSE(next.session_id.empty());
+}
+
+TEST(StreamListener, AFailedInitializationSendsSessionClosedAloneAndItsStatus) {
+  Served served;
+  served.dispatch().fail_initialization = true;
+  auto client = served.connect();
+  ASSERT_TRUE(client.call->Write(open_event(wire::SESSION_MODE_STT_STREAMING)));
+  const auto closed = client.read();
+  ASSERT_NO_FATAL_FAILURE(
+      expect_closed(closed, wire::SESSION_STATE_FAILED, wire::FAILURE_REASON_BACKEND_UNAVAILABLE));
+  EXPECT_EQ(closed->sequence(), 1U);
+  const auto status = end_of(client);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+  EXPECT_NE(status.error_message().find("session ended: FAILURE_REASON_BACKEND_UNAVAILABLE"),
+            std::string::npos)
+      << status.error_message();
+  EXPECT_TRUE(eventually([&] { return served.listener().live_sessions() == 0; }));
 }
 
 TEST(StreamListener, RefusedOpensEndTheCallWithTheirStatus) {
@@ -368,14 +620,16 @@ TEST(StreamListener, StopDrainsALiveSessionThenRefusesAndCloses) {
   served.listener().stop_admission();
   ASSERT_NO_FATAL_FAILURE(expect_closed(client.read(), wire::SESSION_STATE_CLOSED,
                                         wire::FAILURE_REASON_WORKER_SHUTDOWN));
-  EXPECT_TRUE(client.call->Finish().ok());
+  const auto status = end_of(client);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+  EXPECT_NE(status.error_message().find("FAILURE_REASON_WORKER_SHUTDOWN"), std::string::npos);
   const auto refused = served.refused(open_event(wire::SESSION_MODE_STT_STREAMING));
   EXPECT_EQ(refused.error_code(), grpc::StatusCode::UNAVAILABLE);
   EXPECT_NE(refused.error_message().find("FAILURE_REASON_ADMISSION_CLOSED"), std::string::npos);
   const auto began = std::chrono::steady_clock::now();
   served.listener().stop(began + 5s);
   EXPECT_LT(std::chrono::steady_clock::now() - began, 5s) << "nothing was left to wait for";
-  EXPECT_EQ(served.listener().live_sessions(), 0U);
+  EXPECT_EQ(served.listener().live_sessions(), 0U) << "the drained session gave its slot back";
 }
 
 /// A dispatch that grants speech-to-text and never finishes a drain or
@@ -399,13 +653,57 @@ class HoldingDispatch final : public tensorplate::serving::SessionDispatch {
       std::uint64_t /*session_key*/, const tensorplate::serving::SessionTerms& /*terms*/) override {
     return {};
   }
-  void on_transition(const tensorplate::serving::ManagedSessionTransition& /*t*/) override {}
+  void on_transition(const tensorplate::serving::ManagedSessionTransition& t) override {
+    seen.transition(t);
+  }
   void audio(std::uint64_t /*key*/, std::span<const std::byte> /*frame*/) override {}
   void text_segment(std::uint64_t /*key*/, std::uint64_t /*id*/, std::string /*text*/) override {}
   void finalize(std::uint64_t /*key*/, std::uint64_t /*sequence*/) override {}
   void output_delivered(std::uint64_t /*key*/, tensorplate::serving::OutputKind /*kind*/) override {
   }
+
+  Seen seen;
 };
+
+/// A listener behind the holding dispatch, with one session that is ready.
+struct HeldSession {
+  explicit HeldSession(std::chrono::milliseconds deadline = 20s) {
+    StreamListenerOptions options;
+    options.deployment_id = kDeployment;
+    listener = StreamListener::start(options, &dispatch, clock).value();
+    stub = wire::SessionService::NewStub(grpc::CreateChannel(
+        "127.0.0.1:" + std::to_string(listener->bound_port()), grpc::InsecureChannelCredentials()));
+    context.set_deadline(std::chrono::system_clock::now() + deadline);
+    call = stub->Session(&context);
+    EXPECT_TRUE(call->Write(open_event(wire::SESSION_MODE_STT_STREAMING)));
+    wire::ServerEvent event;
+    EXPECT_TRUE(call->Read(&event));
+    EXPECT_TRUE(event.has_ready());
+  }
+
+  SystemSchedulerClock clock;
+  HoldingDispatch dispatch;
+  std::unique_ptr<StreamListener> listener;
+  std::unique_ptr<wire::SessionService::Stub> stub;
+  grpc::ClientContext context;
+  std::unique_ptr<Call> call;
+};
+
+// The session cannot end by draining here, so only the cancel path ends it.
+TEST(StreamListener, AClientCancelAbortsItsLiveSession) {
+  HeldSession held;
+  held.context.TryCancel();
+  EXPECT_EQ(held.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
+  EXPECT_TRUE(eventually([&] { return held.dispatch.seen.aborts() == 1; }));
+}
+
+TEST(StreamListener, AClientDeadlineAbortsItsLiveSession) {
+  HeldSession held{500ms};
+  wire::ServerEvent event;
+  EXPECT_FALSE(held.call->Read(&event));
+  EXPECT_EQ(held.call->Finish().error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+  EXPECT_TRUE(eventually([&] { return held.dispatch.seen.aborts() == 1; }));
+}
 
 TEST(StreamListener, StopAtTheDeadlineCancelsACallWhoseSessionNeverDrains) {
   SystemSchedulerClock clock;
@@ -428,7 +726,8 @@ TEST(StreamListener, StopAtTheDeadlineCancelsACallWhoseSessionNeverDrains) {
   const auto took = std::chrono::steady_clock::now() - began;
   EXPECT_GE(took, 300ms) << "the session never drained, so stop waited for the deadline";
   EXPECT_LT(took, 10s);
-  EXPECT_EQ(listener->live_sessions(), 0U);
+  // Its call was cancelled, and the dispatch never confirmed the release.
+  EXPECT_EQ(listener->live_sessions(), 1U);
   while (call->Read(&event)) {
     EXPECT_FALSE(event.has_ready());
   }
@@ -462,45 +761,117 @@ TEST(StreamListener, BindsLoopbackOnlyAndOwnsItsPort) {
   EXPECT_EQ(taken.error().code, tensorplate::Error::Code::Unavailable);
 }
 
-std::uint16_t free_port() {
-  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-  sockaddr_in address{};
-  address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  socklen_t length = sizeof(address);
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): POSIX socket address.
-  auto* raw = reinterpret_cast<sockaddr*>(&address);
-  EXPECT_EQ(::bind(fd, raw, sizeof(address)), 0);
-  EXPECT_EQ(::getsockname(fd, raw, &length), 0);
-  ::close(fd);
-  return ntohs(address.sin_port);
+TEST(StreamListener, LocalhostBindsTheIpv4LoopbackOnly) {
+  Served served{false, "localhost"};
+  const auto port = served.listener().bound_port();
+  EXPECT_TRUE(accepts(AF_INET, port));
+  EXPECT_FALSE(accepts(AF_INET6, port)) << "localhost was resolved, not mapped";
 }
 
+/// A worker with the stream listener on an ephemeral port, read back from the
+/// line the worker logs when it binds.
+struct StreamingWorker {
+  explicit StreamingWorker(std::chrono::milliseconds drain_window = 5s) {
+    tensorplate::ServingConfig config;
+    config.deployment.endpoint = kDeployment;
+    config.streaming.enabled = true;
+    config.shutdown.drain_deadline = drain_window;
+    auto created = tensorplate::ServingWorker::create(config);
+    EXPECT_TRUE(created.has_value());
+    worker = std::move(created).value();
+    ::testing::internal::CaptureStderr();
+    const auto started = worker->start();
+    std::istringstream log{::testing::internal::GetCapturedStderr()};
+    EXPECT_TRUE(started.has_value());
+    for (std::string line; std::getline(log, line);) {
+      const auto entry = nlohmann::json::parse(line, nullptr, false);
+      if (entry.is_object() && entry.value("message", "") == "stream listener bound") {
+        port = entry.at("fields").at("port").get<std::uint16_t>();
+        serves_sessions = entry.at("fields").at("serves_sessions").get<bool>();
+      }
+    }
+    stub = wire::SessionService::NewStub(grpc::CreateChannel("127.0.0.1:" + std::to_string(port),
+                                                             grpc::InsecureChannelCredentials()));
+  }
+
+  /// The status of a call that sends `open` and closes.
+  [[nodiscard]] grpc::Status open(const wire::ClientEvent& event) const {
+    grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + 10s);
+    auto call = stub->Session(&context);
+    call->Write(event);
+    call->WritesDone();
+    wire::ServerEvent reply;
+    EXPECT_FALSE(call->Read(&reply));
+    return call->Finish();
+  }
+
+  std::unique_ptr<tensorplate::ServingWorker> worker;
+  std::uint16_t port = 0;
+  bool serves_sessions = true;
+  std::unique_ptr<wire::SessionService::Stub> stub;
+};
+
 TEST(StreamListener, TheWorkerServesNoStreamModeYetAndStopsCleanly) {
-  tensorplate::ServingConfig config;
-  config.enable_stderr_logs = false;
-  config.deployment.endpoint = kDeployment;
-  config.streaming.enabled = true;
-  config.streaming.port = free_port();
-  auto worker = tensorplate::ServingWorker::create(config);
-  ASSERT_TRUE(worker.has_value()) << worker.error().message;
-  ASSERT_TRUE((*worker)->start().has_value());
-  const auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(config.streaming.port),
-                                           grpc::InsecureChannelCredentials());
-  const auto stub = wire::SessionService::NewStub(channel);
-  grpc::ClientContext context;
-  context.set_deadline(std::chrono::system_clock::now() + 10s);
-  auto call = stub->Session(&context);
-  call->Write(open_event(wire::SESSION_MODE_STT_STREAMING));
-  call->WritesDone();
-  wire::ServerEvent event;
-  EXPECT_FALSE(call->Read(&event));
-  const auto status = call->Finish();
+  StreamingWorker served;
+  ASSERT_NE(served.port, 0) << "the worker logs the port it bound";
+  EXPECT_FALSE(served.serves_sessions);
+  const auto status = served.open(open_event(wire::SESSION_MODE_STT_STREAMING));
   EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
   EXPECT_NE(status.error_message().find("FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY"),
             std::string::npos);
-  (*worker)->shutdown("test");
-  EXPECT_EQ((*worker)->stop(), tensorplate::ServingExitCode::Ok);
+  served.worker->shutdown("test");
+  EXPECT_EQ(served.worker->stop(), tensorplate::ServingExitCode::Ok);
+}
+
+TEST(StreamListener, TheWorkerClosesStreamAdmissionAtShutdownAndTheListenerAtStop) {
+  StreamingWorker served;
+  ASSERT_NE(served.port, 0);
+  served.worker->shutdown("test");
+  // Still listening, and saying why it takes no session.
+  const auto refused = served.open(open_event(wire::SESSION_MODE_STT_STREAMING));
+  EXPECT_EQ(refused.error_code(), grpc::StatusCode::UNAVAILABLE);
+  EXPECT_NE(refused.error_message().find("FAILURE_REASON_ADMISSION_CLOSED"), std::string::npos)
+      << refused.error_message();
+  EXPECT_EQ(served.worker->stop(), tensorplate::ServingExitCode::Ok);
+  EXPECT_FALSE(accepts(AF_INET, served.port));
+  EXPECT_EQ(served.worker->stop(), tensorplate::ServingExitCode::Ok) << "stop is safe to repeat";
+}
+
+TEST(StreamListener, TheWorkerDrainsStreamsInsideTheWindowThatBeganAtShutdown) {
+  StreamingWorker served{2s};
+  ASSERT_NE(served.port, 0);
+  // A call that has sent nothing keeps the server open until the window ends.
+  grpc::ClientContext context;
+  context.set_deadline(std::chrono::system_clock::now() + 20s);
+  auto call = served.stub->Session(&context);
+  // Long enough for the server to have the call before it stops accepting.
+  std::this_thread::sleep_for(300ms);
+  const auto asked = std::chrono::steady_clock::now();
+  served.worker->shutdown("test");
+  std::this_thread::sleep_for(1200ms);
+  EXPECT_EQ(served.worker->stop(), tensorplate::ServingExitCode::Ok);
+  const auto took = std::chrono::steady_clock::now() - asked;
+  EXPECT_GE(took, 1900ms) << "the open call was given the window";
+  EXPECT_LT(took, 2800ms) << "the window was counted from shutdown, not from stop";
+  const auto code = call->Finish().error_code();
+  EXPECT_TRUE(code == grpc::StatusCode::UNAVAILABLE || code == grpc::StatusCode::CANCELLED) << code;
+}
+
+TEST(StreamListener, ShutdownFromAnotherThreadWhileTheWorkerServes) {
+  for (int round = 0; round < 20; ++round) {
+    tensorplate::ServingConfig config;
+    config.enable_stderr_logs = false;
+    config.deployment.endpoint = kDeployment;
+    config.streaming.enabled = true;
+    auto worker = tensorplate::ServingWorker::create(config).value();
+    ASSERT_TRUE(worker->start().has_value());
+    auto exit_code = tensorplate::ServingExitCode::Internal;
+    std::thread serving([&] { exit_code = worker->serve_forever(); });
+    worker->shutdown("test");
+    serving.join();
+    EXPECT_EQ(exit_code, tensorplate::ServingExitCode::Ok);
+  }
 }
 
 }  // namespace
