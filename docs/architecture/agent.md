@@ -589,7 +589,11 @@ to a member that stopped, whose successor starts on the same ports. A new
 candidate is given the first ports nothing holds. When none is free its
 `prepare` waits, up to `worker.prepare_timeout_ms`, for a draining worker to
 be reaped, and then fails with `resource_exhausted`. A failed or unloaded
-member gives its ports back.
+member gives its ports back. The agent does not check that a port it
+leases is free on the host: when another process listens on one, the worker
+given it does not start, so every deploy onto it fails with the worker's
+startup error, and a restart, which keeps its ports, fails until its three
+restarts are used up and the member is failed.
 
 The pool is `worker.serving_port_range` when the configuration has one:
 pairs taken in order from `first`, an HTTP port and the port after it, kept

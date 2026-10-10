@@ -115,7 +115,9 @@ pub trait WorkerControl: Send + Sync {
     ///
     /// Returns [`AgentError::WorkerControl`] for adapter/IPC failures and
     /// [`AgentError::WorkerTimeout`] when the prepare path exceeds its
-    /// configured budget.
+    /// configured budget. The member registry spends `timeout` only on
+    /// waiting for a free port, and returns [`AgentError::NoFreePort`] when
+    /// none was freed within it.
     fn prepare(
         &self,
         transaction_id: &str,
