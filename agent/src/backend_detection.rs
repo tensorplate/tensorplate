@@ -12,3 +12,7 @@ pub use tensorplate_protocol::backend_probe::{
     probe_backend, probe_python_pytorch, BackendProbeReport, BackendProbeState, ProbeOptions,
     RunnerProfileProbe, ServingState,
 };
+
+/// Backends with no descriptor on disk. The agent never probes them, and
+/// none can declare a runner profile.
+pub const BACKENDS_WITHOUT_DESCRIPTOR: [&str; 4] = ["mock", "vitis_ai", "tensorrt", "libtorch"];

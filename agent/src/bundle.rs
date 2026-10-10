@@ -31,21 +31,49 @@
 //
 // No backend is selected heuristically; bundles are rejected with typed
 // errors when their declared backend is unknown or unavailable.
+//
+// A format 0.2 manifest is also judged against what the agent knows and
+// the manifest cannot: the bundles it has deployed, the platform rows it
+// loaded and the runner profiles it probed (`DeployFacts`).
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
+use tensorplate_protocol::agent_state::AgentState;
 use tensorplate_protocol::bundle::{
     evaluate_compatibility, parse_bundle, parse_bundle_with, BackendCapabilityView, BackendProfile,
     BundleDescriptor, CompatibilityViolation, DeviceContext, ParseError, ParseOptions,
+    MANIFEST_FILENAME,
 };
-use tensorplate_protocol::bundle_manifest::BundleManifest;
+use tensorplate_protocol::bundle_manifest::{BundleManifest, BundleManifestError};
+use tensorplate_protocol::bundle_profile::{
+    BundleProfile, BundleProfileError, BundleRuleCode, KnownBase, SupportLevel,
+    PROFILE_FORMAT_VERSION,
+};
+use tensorplate_protocol::resident_set::MemberState;
 
-use tensorplate_platform::PlatformReason;
+use tensorplate_platform::{PlatformReason, PlatformRegistry};
 
-use crate::backend_detection::{BackendProbeReport, BackendProbeState, ServingState};
+use crate::backend_detection::{
+    BackendProbeReport, BackendProbeState, ServingState, BACKENDS_WITHOUT_DESCRIPTOR,
+};
 use crate::config::{AgentConfig, BackendCapability};
 use crate::error::{AgentError, AgentResult};
+use crate::platform_admission::PlatformAdmission;
+
+/// What the agent knows about its target when it judges a deploy. An
+/// absent fact is one this agent does not hold, and the rule that needs it
+/// is judged without it: no known base, or no row to compare.
+#[derive(Clone, Copy, Debug)]
+pub struct DeployFacts<'a> {
+    /// Probe reports for the backends that have a descriptor.
+    pub probes: &'a BTreeMap<String, BackendProbeReport>,
+    pub registry: Option<&'a PlatformRegistry>,
+    pub admission: Option<&'a PlatformAdmission>,
+    /// The durable state, for the bundles recorded as deployed.
+    pub state: Option<&'a AgentState>,
+}
 
 /// Verified bundle: a manifest, the bundle's content-addressed digest, and
 /// the absolute root path it was verified at.
@@ -161,6 +189,39 @@ pub fn verify_with_probes(
     config: &AgentConfig,
     probes: &BTreeMap<String, BackendProbeReport>,
 ) -> AgentResult<VerifiedBundle> {
+    let facts = DeployFacts {
+        probes,
+        registry: None,
+        admission: None,
+        state: None,
+    };
+    verify_before_staging(bundle_path, config, &facts)
+}
+
+/// [`verify_with_probes`] with every fact the agent holds: the one
+/// validation path a deploy takes before anything is staged.
+///
+/// # Errors
+///
+/// In addition to the variants returned by [`verify_with_probes`], returns
+/// [`AgentError::BundleManifest`] carrying the rule code when a format 0.2
+/// manifest
+///
+/// - declares a variant whose base is not a bundle this agent has deployed
+///   on a row it holds, or which asks for more support than that row gives
+///   (judged before the parser, which then refuses every variant as
+///   reserved);
+/// - names a `hardware_compatibility` row the registry does not have, or
+///   asks for `production` on a row that is not Production;
+/// - names a runner profile under a backend that declares none, or a
+///   compute type the installed profile does not list.
+pub fn verify_before_staging(
+    bundle_path: &Path,
+    config: &AgentConfig,
+    facts: &DeployFacts<'_>,
+) -> AgentResult<VerifiedBundle> {
+    check_declared_lineage(bundle_path, facts)?;
+    let probes = facts.probes;
     let descriptor = parse_bundle(bundle_path).map_err(parse_error_to_agent_error)?;
     let device = device_context_from_config(config)?;
     let result = evaluate_compatibility(&descriptor, &device);
@@ -173,6 +234,7 @@ pub fn verify_with_probes(
             return Err(violation_to_agent_error(v));
         }
     }
+    check_hardware_rows(&descriptor.manifest, facts.registry)?;
     // packaging: refuse the deploy *before* staging if the bundle's
     // declared backend has a non-Runnable probe report. The cache is
     // populated at agent startup so this check is O(1) at deploy time;
@@ -180,12 +242,20 @@ pub fn verify_with_probes(
     // pass-through — they were either not requested at startup or the
     // operator is managing them out-of-band.
     let backend_hint = descriptor.manifest.backend_hint.as_str();
+    let profile = descriptor.manifest.profile.as_ref();
+    let runner_profile = profile.and_then(|profile| profile.runner_profile.as_deref());
+    if let Some(runner) = runner_profile {
+        if BACKENDS_WITHOUT_DESCRIPTOR.contains(&backend_hint) {
+            return Err(rule_refusal(
+                BundleRuleCode::RunnerSelector,
+                "runner_profile",
+                format!(
+                    "`{runner}` cannot be served by backend `{backend_hint}`, which declares no runner profiles"
+                ),
+            ));
+        }
+    }
     if let Some(report) = probes.get(backend_hint) {
-        let runner_profile = descriptor
-            .manifest
-            .profile
-            .as_ref()
-            .and_then(|profile| profile.runner_profile.as_deref());
         let serving = report.serving_state(runner_profile);
         let reason = match serving {
             ServingState::Probed(BackendProbeState::Runnable) => None,
@@ -202,8 +272,153 @@ pub fn verify_with_probes(
                 platform_reason: PlatformReason::for_serving_state(serving),
             });
         }
+        let installed = report
+            .runner_profiles
+            .iter()
+            .map(|probe| &probe.profile)
+            .find(|installed| Some(installed.id.as_str()) == runner_profile);
+        if let (Some(installed), Some(compute_type)) =
+            (installed, profile.and_then(|profile| profile.compute_type))
+        {
+            if !installed.compute_types.contains(&compute_type) {
+                return Err(rule_refusal(
+                    BundleRuleCode::RunnerComputeType,
+                    "compute_type",
+                    format!(
+                        "the installed runner profile `{}` does not list this compute type",
+                        installed.id
+                    ),
+                ));
+            }
+        }
     }
     Ok(descriptor.into())
+}
+
+fn rule_refusal(code: BundleRuleCode, field: &str, reason: String) -> AgentError {
+    profile_refusal(BundleProfileError::Rule {
+        code,
+        field: field.to_owned(),
+        reason,
+    })
+}
+
+fn profile_refusal(error: BundleProfileError) -> AgentError {
+    AgentError::BundleManifest(BundleManifestError::from(error).into())
+}
+
+/// Judge a variant declaration against the bases this agent knows, before
+/// the parser refuses every variant as reserved. A manifest this cannot
+/// read or decode is left to the parser, which reports why.
+fn check_declared_lineage(bundle_path: &Path, facts: &DeployFacts<'_>) -> AgentResult<()> {
+    let Ok(raw) = fs::read_to_string(bundle_path.join(MANIFEST_FILENAME)) else {
+        return Ok(());
+    };
+    let format_0_2 = serde_json::from_str::<serde_json::Value>(&raw).is_ok_and(|manifest| {
+        manifest.get("format_version").and_then(|v| v.as_str()) == Some(PROFILE_FORMAT_VERSION)
+    });
+    if !format_0_2 {
+        return Ok(());
+    }
+    let Ok(profile) = BundleProfile::from_manifest_text(&raw) else {
+        return Ok(());
+    };
+    profile
+        .check_lineage(&known_bases(facts))
+        .map_err(profile_refusal)
+}
+
+/// The bundles this agent serves, each at the level of the row the machine
+/// holds. Empty on a machine that holds no row. No variant can be deployed,
+/// so no base has one recorded.
+fn known_bases(facts: &DeployFacts<'_>) -> Vec<KnownBase> {
+    let level = facts
+        .admission
+        .zip(facts.registry)
+        .and_then(|(admission, registry)| admission.held_row(registry))
+        .and_then(|row| match row.support_level() {
+            tensorplate_platform::SupportLevel::Production => Some(SupportLevel::Production),
+            tensorplate_platform::SupportLevel::Preview => Some(SupportLevel::Preview),
+            tensorplate_platform::SupportLevel::Experimental => Some(SupportLevel::Experimental),
+            tensorplate_platform::SupportLevel::Planned => None,
+        });
+    let (Some(level), Some(state)) = (level, facts.state) else {
+        return Vec::new();
+    };
+    let active = state.active.iter().map(|record| {
+        (
+            &record.bundle_name,
+            &record.bundle_version,
+            &record.bundle_digest,
+        )
+    });
+    let members = state
+        .resident_set
+        .iter()
+        .flat_map(|set| &set.members)
+        .filter(|member| member.state == MemberState::Serving)
+        .map(|member| {
+            (
+                &member.bundle_name,
+                &member.bundle_version,
+                &member.bundle_digest,
+            )
+        });
+    let mut bases: Vec<KnownBase> = Vec::new();
+    for (name, version, digest) in active.chain(members) {
+        let base = KnownBase {
+            name: name.clone(),
+            version: version.clone(),
+            manifest_digest: digest.clone(),
+            support_level: level,
+            variants: Vec::new(),
+        };
+        if !bases.contains(&base) {
+            bases.push(base);
+        }
+    }
+    bases
+}
+
+/// Every row a manifest names must be one the registry has, and a
+/// manifest asks for `production` only on rows that are Production.
+/// Whether a Production row's evidence covers this bundle is not judged
+/// here.
+fn check_hardware_rows(
+    manifest: &BundleManifest,
+    registry: Option<&PlatformRegistry>,
+) -> AgentResult<()> {
+    let (Some(profile), Some(registry)) = (manifest.profile.as_ref(), registry) else {
+        return Ok(());
+    };
+    let mut rows = Vec::with_capacity(profile.hardware_compatibility.len());
+    for id in &profile.hardware_compatibility {
+        let Some(row) = registry.row(id) else {
+            return Err(rule_refusal(
+                BundleRuleCode::HardwareRow,
+                "hardware_compatibility",
+                format!("`{id}` is not a platform support row of this installation"),
+            ));
+        };
+        rows.push(row);
+    }
+    if profile.support_level != Some(SupportLevel::Production) {
+        return Ok(());
+    }
+    for row in rows {
+        if row.support_level() != tensorplate_platform::SupportLevel::Production {
+            return Err(rule_refusal(
+                BundleRuleCode::SupportClaim,
+                "support_level",
+                format!(
+                    "asks for `production` on row `{}`, which is {}",
+                    row.row_id(),
+                    row.support_level().as_str()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Render a probe state into a short single-line reason suitable for
@@ -907,6 +1122,131 @@ mod tests {
             ))
             .1,
             Some(PlatformReason::AcceleratorRuntimeUnavailable)
+        );
+    }
+
+    #[test]
+    fn a_declared_compute_type_must_be_one_the_installed_profile_lists() {
+        use super::verify_with_probes;
+        use crate::backend_detection::{BackendProbeReport, BackendProbeState, RunnerProfileProbe};
+        use std::collections::BTreeMap;
+        use tensorplate_protocol::backend_descriptor::{ComputeType, RunnerProfile};
+
+        let td = TempDir::new().expect("td");
+        let mut cfg = config(td.path().join("s"), td.path().join("st"));
+        cfg.available_backends.push("python_pytorch".into());
+        cfg.runtime_version = Some("0.3.1".into());
+        // The TTS fixture declares `float32`.
+        let verdict = |compute_types: &[ComputeType]| {
+            let report = BackendProbeReport {
+                backend_name: "python_pytorch".into(),
+                descriptor_path: PathBuf::from("backend.json"),
+                state: BackendProbeState::Runnable,
+                install_hint: None,
+                runner_profiles: vec![RunnerProfileProbe {
+                    profile: RunnerProfile {
+                        id: "kokoro".into(),
+                        interpreter: "/opt/env/bin/python".into(),
+                        environment_root: "/opt/env".into(),
+                        library_search_paths: Vec::new(),
+                        packages: vec!["speech-runtime".into()],
+                        compute_types: compute_types.to_vec(),
+                    },
+                    state: BackendProbeState::Runnable,
+                    observed: None,
+                }],
+            };
+            let probes = BTreeMap::from([("python_pytorch".to_string(), report)]);
+            let bundle = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../test/models/bundles/v0_2/speech_tts_streaming");
+            verify_with_probes(&bundle, &cfg, &probes).map(|_| ())
+        };
+
+        verdict(&[ComputeType::Float16, ComputeType::Float32]).expect("listed");
+        let record = verdict(&[ComputeType::Float16, ComputeType::Int8Float32])
+            .expect_err("not listed")
+            .to_record();
+        assert_eq!(record.context.as_deref(), Some("bundle_r6_compute_type"));
+        assert!(record.message.contains("`kokoro`"), "{}", record.message);
+    }
+
+    #[test]
+    fn known_bases_are_the_serving_bundles_at_the_level_of_the_held_row() {
+        use super::{known_bases, DeployFacts};
+        use crate::platform_admission::PlatformAdmission;
+        use std::collections::{BTreeMap, BTreeSet};
+        use tensorplate_platform::{AdmissionPosture, PlatformRegistry};
+        use tensorplate_protocol::agent_state::decode_agent_state;
+        use tensorplate_protocol::bundle_profile::SupportLevel;
+        use tensorplate_protocol::resident_set::MemberState;
+
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let registry = PlatformRegistry::load(&repo.join("config/platform")).expect("registry");
+        let fixture = repo.join("protocol/rust/tests/fixtures/agent_state_0_2_two_member_set.json");
+        let mut state =
+            decode_agent_state(&fs::read_to_string(fixture).expect("fixture")).expect("state");
+        let probes = BTreeMap::new();
+        let admitted = |row: &str, validated| PlatformAdmission::Supported {
+            row_id: row.into(),
+            capability: None,
+            installed_packages: BTreeSet::new(),
+            posture: AdmissionPosture::TechnicalPrerequisites,
+            posture_from: "row",
+            validated,
+            memory_telemetry: None,
+            signal_telemetry: None,
+        };
+        let names = |admission: Option<&PlatformAdmission>,
+                     state: &tensorplate_protocol::agent_state::AgentState| {
+            let facts = DeployFacts {
+                probes: &probes,
+                registry: Some(&registry),
+                admission,
+                state: Some(state),
+            };
+            known_bases(&facts)
+                .into_iter()
+                .map(|base| {
+                    assert!(base.variants.is_empty());
+                    (base.name, base.version, base.support_level)
+                })
+                .collect::<Vec<_>>()
+        };
+        let member =
+            |name: &str, version: &str, level| (name.to_owned(), version.to_owned(), level);
+
+        let production = admitted("ubuntu2404-x86-l4-g2s8", true);
+        assert_eq!(
+            names(Some(&production), &state),
+            [
+                member("speech-stt-bundle", "1.0.0", SupportLevel::Production),
+                member("speech-tts-bundle", "1.0.1", SupportLevel::Production),
+            ]
+        );
+        let preview = admitted("ubuntu2404-x86-l4-g2s24", true);
+        assert_eq!(names(Some(&preview), &state)[0].2, SupportLevel::Preview);
+
+        // A planned row, a machine its row's evidence does not cover, a
+        // refused machine and a row the registry lost hold no level.
+        for admission in [
+            admitted("jetson-agx-orin-32gb", true),
+            admitted("ubuntu2404-x86-l4-g2s8", false),
+            admitted("ubuntu2404-x86-l4-unlisted", true),
+            PlatformAdmission::detection_failed("no probe"),
+        ] {
+            assert!(names(Some(&admission), &state).is_empty(), "{admission:?}");
+        }
+        assert!(names(None, &state).is_empty());
+
+        let set = state.resident_set.as_mut().expect("set");
+        set.members[0].state = MemberState::Quarantined;
+        set.members[1].bundle_name = "repeated".into();
+        let mut repeat = set.members[1].clone();
+        repeat.deployment_id = "speech-tts-again".into();
+        set.members.push(repeat);
+        assert_eq!(
+            names(Some(&production), &state),
+            [member("repeated", "1.0.1", SupportLevel::Production)]
         );
     }
 

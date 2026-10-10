@@ -26,7 +26,9 @@ use std::time::{Duration, Instant};
 use std::collections::{BTreeMap, BTreeSet};
 
 use tensorplate_agent::{
-    backend_detection::{probe_backend, BackendProbeReport, ProbeOptions},
+    backend_detection::{
+        probe_backend, BackendProbeReport, ProbeOptions, BACKENDS_WITHOUT_DESCRIPTOR,
+    },
     config::AgentConfig,
     coordinator::Coordinator,
     platform_admission::{ObservedStack, PlatformAdmission},
@@ -146,10 +148,7 @@ fn probe_available_backends(
         // have no on-disk descriptor in v0.1.0. Skipping them keeps
         // the probe map's invariant simple: an entry is present iff
         // the agent has a typed opinion about runnability.
-        if matches!(
-            backend.as_str(),
-            "mock" | "vitis_ai" | "tensorrt" | "libtorch"
-        ) {
+        if BACKENDS_WITHOUT_DESCRIPTOR.contains(&backend.as_str()) {
             continue;
         }
         let descriptor_path = descriptor_dir.join(backend).join("backend.json");
