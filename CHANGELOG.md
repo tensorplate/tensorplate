@@ -50,7 +50,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   one, and says how the run ended. `slice_measurement_record.py check`
   recomputes every derived field and refuses a record that disagrees with
   its own timestamps or counts, or that is marked `recorded` without the
-  tool's commit. A refused `Open` is read by its gRPC status code alone. A
+  tool's commit and the worker's release or build. A refused `Open` is read by its gRPC status code alone. A
   target without a generation and descriptor digest is addressed by its
   deployment alone. `docs/validation/slice-measurement.md` describes the
   method. No serving worker answers the client yet; its test runs it against
