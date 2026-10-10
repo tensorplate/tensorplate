@@ -4,12 +4,12 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "documentNamespace": "https://spdx.org/spdxdocs/vcpkg-cmake-x64-linux-2025-08-07-00000000-0000-4000-8000-00000000000a",
-  "name": "vcpkg-cmake:x64-linux@2025-08-07 d90a2d27eaf2ef65d07ea4b5e5aae3a11ab0c7949572adee491fa968ff7f6fcd",
+  "name": "vcpkg-cmake:x64-linux@2025-08-07 21718b282285da6f5df4a6642124439a0c0ab99d6bdd543b45eede71944e3c22",
   "creationInfo": {
     "creators": [
-      "Tool: vcpkg-2026-07-27-98d7cb0cf1f4686a3e43aa5672b6230c1d56bce8"
+      "Tool: vcpkg-2026-09-26-51bf87ca6e9bf3e622d84ff323bd202ab1ca0c0b"
     ],
-    "created": "2026-10-07T16:16:43Z"
+    "created": "2026-10-10T12:38:44Z"
   },
   "relationships": [
     {
@@ -49,7 +49,7 @@
     {
       "name": "vcpkg-cmake:x64-linux",
       "SPDXID": "SPDXRef-binary",
-      "versionInfo": "d90a2d27eaf2ef65d07ea4b5e5aae3a11ab0c7949572adee491fa968ff7f6fcd",
+      "versionInfo": "21718b282285da6f5df4a6642124439a0c0ab99d6bdd543b45eede71944e3c22",
       "downloadLocation": "NONE",
       "licenseConcluded": "MIT",
       "licenseDeclared": "NOASSERTION",

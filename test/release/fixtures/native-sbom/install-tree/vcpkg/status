@@ -2,14 +2,14 @@ Package: vcpkg-cmake-config
 Version: 2026-07-21
 Architecture: x64-linux
 Multi-Arch: same
-Abi: 8d466dac6b00c57578b0ff3ca895ecf856411cf3d05467153e76fd13d21e24fd
+Abi: f560b332d5be7b89e36f700d3e53c248e0fb264101d79e5b7d5081d407cea6c2
 Status: install ok installed
 
 Package: vcpkg-cmake
 Version: 2025-08-07
 Architecture: x64-linux
 Multi-Arch: same
-Abi: d90a2d27eaf2ef65d07ea4b5e5aae3a11ab0c7949572adee491fa968ff7f6fcd
+Abi: 21718b282285da6f5df4a6642124439a0c0ab99d6bdd543b45eede71944e3c22
 Status: install ok installed
 
 Package: gtest
@@ -17,7 +17,7 @@ Version: 1.18.0
 Depends: vcpkg-cmake, vcpkg-cmake-config
 Architecture: x64-linux
 Multi-Arch: same
-Abi: e3d6c1445a1d928354355ef73c67c56e4764f510b6e318b2d0be2fbc291d15a6
+Abi: 5d0870d5b109d1bef109937d6b38879ca49a9d7455c05b6f641ae7da8c75f645
 Description: Google Testing and Mocking Framework
 Status: install ok installed
 
@@ -27,7 +27,7 @@ Port-Version: 2
 Depends: vcpkg-cmake, vcpkg-cmake-config
 Architecture: x64-linux
 Multi-Arch: same
-Abi: 9bc8fa0526d003a50511eeaf77fb077620b6bf4e5fb85f012a2f099eec90f6b1
+Abi: 063f4bbecfc60c0660393020cf9c18a54cf36c31a542dbf438d31328dadb966a
 Description: JSON for Modern C++
 Status: install ok installed
 
@@ -37,7 +37,7 @@ Port-Version: 2
 Depends: vcpkg-cmake, vcpkg-cmake-config
 Architecture: x64-linux
 Multi-Arch: same
-Abi: 02f9cea216dd9e528fc4d571d56a4919440b126833221dda44a220b8366a4d9e
+Abi: 23f02fa0e0511724625d3caba79545af5829f81fe453db1a4c9b2be6d86e22be
 Description: A compression library
 Status: install ok installed
 
@@ -47,7 +47,7 @@ Port-Version: 3
 Depends: vcpkg-cmake, vcpkg-cmake-config
 Architecture: x64-linux
 Multi-Arch: same
-Abi: 65103c9867a0256a6c72a2b31e20cd49215e2a838b6415f14e3bc124192ae7ec
+Abi: 70fa515f354cc411d451ed9f52ef99a24afb34f1c71d73fe4871a8187ff9fab6
 Description: Abseil is an open-source collection of C++ library code designed to augment the C++ standard library. The Abseil library code is collected from Google's own C++ code base, has been extensively tested and used in production, and is the same code we depend on in our daily coding lives.
     In some cases, Abseil provides pieces missing from the C++ standard; in others, Abseil provides alternatives to the standard for special needs we've found through usage in the Google code base. We denote those cases clearly within the library code we provide you.
     Abseil is not meant to be a competitor to the standard library; we've just found that many of these utilities serve a purpose within our code base, and we now want to provide those resources to the C++ community as a whole.
@@ -58,7 +58,7 @@ Version: 6.33.4
 Depends: abseil, vcpkg-cmake, vcpkg-cmake-config
 Architecture: x64-linux
 Multi-Arch: same
-Abi: 3cb9293ed2c10dbf11a7aff2251f5d6a2733dc0f14f82e521f75fce1aec292e2
+Abi: 85d43addcec607a828e29097c079e9dd2b0c6f96db94f86eed48c42680c3ec2c
 Description: Fast UTF-8 validation with Range algorithm (NEON+SSE4+AVX2)
 Status: install ok installed
 
@@ -67,7 +67,7 @@ Version: 2025-11-05
 Depends: abseil, vcpkg-cmake, vcpkg-cmake-config
 Architecture: x64-linux
 Multi-Arch: same
-Abi: c2b4a009d8a95faeb084eb4d9b370d14e6e11f7c943a400eff4ca4e40b958c89
+Abi: d47060cf14c56d5091d606ec3b7927b79b4edba65c10f91a55104891ca86f789
 Description: RE2 is a fast, safe, thread-friendly alternative to backtracking regular expression engines like those used in PCRE, Perl, and Python. It is a C++ library.
 Status: install ok installed
 
@@ -77,7 +77,7 @@ Port-Version: 2
 Depends: abseil, utf8-range, vcpkg-cmake, vcpkg-cmake-config
 Architecture: x64-linux
 Multi-Arch: same
-Abi: e5cbf5d8f76211a56ac628403559273b8ff17a054de1f846ed0f62e15f77ea2e
+Abi: ee7622aa466a4f37c9b1ce82c29cd8f3133b4fa4b9f7408e25db11a56349daee
 Description: Google's language-neutral, platform-neutral, extensible mechanism for serializing structured data.
 Status: install ok installed
 
@@ -93,16 +93,15 @@ Version: 2025-05-29
 Depends: vcpkg-cmake
 Architecture: x64-linux
 Multi-Arch: same
-Abi: 4dc29079865129c1996799e5d84de3696f69b340f98bf4c80fef04fbf162dd8c
+Abi: 0a72b5d6f75997181cf51f1cdcb1a1225c339b06f997d937b458f1d999698a5b
 Status: install ok installed
 
 Package: openssl
-Version: 3.6.4
-Port-Version: 1
+Version: 3.6.5
 Depends: vcpkg-cmake, vcpkg-cmake-config, vcpkg-cmake-get-vars
 Architecture: x64-linux
 Multi-Arch: same
-Abi: b4b5fc755be192cf5010ae5ca6de5235e2c63b1aff32ea538f6cf31bf18a8f4c
+Abi: 0170f3d1d2c2d4dda113d327c24a4639a7fedf1a743ec6d23ec7b5c69f658327
 Description: OpenSSL is an open source project that provides a robust, commercial-grade, and full-featured toolkit for the Transport Layer Security (TLS) and Secure Sockets Layer (SSL) protocols. It is also a general-purpose cryptography library.
 Status: install ok installed
 
@@ -111,7 +110,7 @@ Version: 1.34.8
 Depends: vcpkg-cmake, vcpkg-cmake-config
 Architecture: x64-linux
 Multi-Arch: same
-Abi: 2fb294fb262e3df1cfd837b1aa6e776fc746e1ab663be321b20e7d0a8163a31a
+Abi: dfc21543c6e9f20e8803d9ba9c5736c80386198aed6cb3fc05a190500c925fc6
 Description: A C library for asynchronous DNS requests
 Status: install ok installed
 
@@ -120,7 +119,7 @@ Version: 1.81.1
 Depends: abseil, c-ares, openssl, protobuf, re2, utf8-range, vcpkg-cmake, vcpkg-cmake-config, zlib
 Architecture: x64-linux
 Multi-Arch: same
-Abi: 71f9f1746935362803ebbfdeca27c32e0b78f8c0d09ca79a461c46551496c46a
+Abi: f528f0db878346a842efeae04c3e14a17b0f2da54211506bda4450d0f1cd4a69
 Description: gRPC is a modern, open source, high-performance remote procedure call (RPC) framework that can run anywhere. gRPC enables client and server applications to communicate transparently, and simplifies the building of connected systems.
 Status: install ok installed
 

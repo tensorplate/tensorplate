@@ -27,8 +27,10 @@ privately; it reaches the worker through CMake's static-library link closure.
 Until the stream listener is implemented, the linker can discard unused
 transport objects; this build is not a transport-footprint measurement.
 
-The baseline resolves gRPC 1.81.1, protobuf 6.33.4 (port revision 2), OpenSSL
-3.6.4 (port revision 1), GoogleTest 1.18.0 and nlohmann-json 3.12.0 (port
+The baseline resolves the streaming closure to gRPC 1.81.1, protobuf 6.33.4
+(port revision 2), OpenSSL 3.6.5, abseil 20260107.1 (port revision 3),
+c-ares 1.34.8, re2 2025-11-05, utf8-range 6.33.4 and zlib 1.3.2 (port
+revision 2), beside GoogleTest 1.18.0 and nlohmann-json 3.12.0 (port
 revision 2). The gRPC port supplies its host code generator and host protobuf
 from that same baseline. Configure requires `protobuf::protoc` and
 `gRPC::grpc_cpp_plugin` to be imported from the vcpkg install tree, and a
@@ -37,7 +39,16 @@ with them into the build tree (target `tp::stream_proto`, see
 [`protocol/README.md`](../../protocol/README.md#streaming-session-envelope)).
 Generated files are never committed.
 Source: the ports and triplets at the
-[pinned vcpkg revision](https://github.com/microsoft/vcpkg/tree/f907dc21e0e8699955b002d0fe7673de5db55fab).
+[pinned vcpkg revision](https://github.com/microsoft/vcpkg/tree/e182cb4dd2df2ab02f66a1aabd5f35bbdc9522c7).
+
+Hosted C++ tests build with the runner image's own vcpkg checkout. vcpkg
+does not fetch a baseline that checkout lacks, and it looks every port
+version the baseline names up in the checkout's `versions/` files, so the
+baseline must be a commit the image's checkout already contains. This one
+is contained in the checkout of the `ubuntu-22.04` image 20261004.315.1 and
+not in that of the image before it. Release builds, the CPU-only smoke and
+the supply-chain native leg check vcpkg out at the baseline themselves and
+do not depend on the image.
 
 For a build with no streaming dependencies, omit `VCPKG_MANIFEST_FEATURES`
 and set `-DTP_ENABLE_STREAMING_GRPC=OFF`. Worker config `streaming.enabled`
