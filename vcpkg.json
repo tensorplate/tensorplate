@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "tensorplate",
   "version-string": "0.3.1",
-  "builtin-baseline": "f907dc21e0e8699955b002d0fe7673de5db55fab",
+  "builtin-baseline": "e182cb4dd2df2ab02f66a1aabd5f35bbdc9522c7",
   "description": "TensorPlate inference platform.",
   "homepage": "https://github.com/tensorplate/tensorplate",
   "license": "Apache-2.0",

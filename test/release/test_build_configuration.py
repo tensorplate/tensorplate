@@ -4962,7 +4962,11 @@ class NativeClosureScanTests(unittest.TestCase):
 
     def test_the_workflow_cannot_ignore_an_advisory_once_its_code_is_linked(self):
         from test_native_code_absence import build_fixture
-        for port in ("openssl", "zlib"):
+        entries = json.loads((REPO_ROOT / "tools/release/vulnerability-dispositions.json").read_text())["dispositions"]
+        ports = sorted({e["package"] for e in entries if e.get("requires_absent")})
+        if not ports:
+            self.skipTest("no live disposition rests on absent code")
+        for port in ports:
             with self.subTest(port=port):
                 build_fixture(self.root / "temp", included_port=port)
                 result = self.run_named("grype, with the recorded dispositions",
