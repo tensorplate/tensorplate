@@ -59,6 +59,13 @@ wire::Usage usage(const LogicalSessionUsage& from) {
   return out;
 }
 
+CallOutput::Delivered delivered_to(SessionDispatch* dispatch, std::uint64_t key) {
+  if (dispatch == nullptr) {
+    return {};
+  }
+  return [dispatch, key](OutputKind kind) { dispatch->output_delivered(key, kind); };
+}
+
 /// What a call's reactor and the manager's sink share about its session.
 struct CallState {
   std::mutex mu;
@@ -266,9 +273,11 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
         cancelled_key = state_->key;
       }
     }
-    // The call was cancelled before its session had a key to abort.
+    // The call was cancelled before its session had a key to abort; it is
+    // finished, so nothing more is read.
     if (cancelled_key) {
       abort(*cancelled_key);
+      return false;
     }
     // A failed initialization was admitted: its terminal event ends the call.
     return opened.has_value();
@@ -349,13 +358,6 @@ void StreamListener::Impl::on_transition(const ManagedSessionTransition& transit
   }
   const auto& output = transition.output;
   const bool first = !state->out->bound();
-  if (first) {
-    state->out->bind(output, [target = dispatch, key = transition.session_key](OutputKind kind) {
-      if (target != nullptr) {
-        target->output_delivered(key, kind);
-      }
-    });
-  }
   std::string session_id;
   SessionTerms terms;
   std::uint32_t waiting_segment_limit = 0;
@@ -444,6 +446,7 @@ void StreamListener::Impl::on_transition(const ManagedSessionTransition& transit
     });
   }
   if (first) {
+    state->out->bind(output, delivered_to(dispatch, transition.session_key));
     (void)output->set_consumer([weak = std::weak_ptr<CallOutput>(state->out)] {
       if (const auto shared = weak.lock()) {
         shared->pump();

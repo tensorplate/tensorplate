@@ -56,8 +56,9 @@ struct ServedTarget {
 /// message, and no detail.
 [[nodiscard]] grpc::Status refused_open_status(const wire::OpenRefused& refused);
 
-/// The address the listener binds for a loopback `host`. "localhost" is the
-/// IPv4 loopback, as for the HTTP bind: it is never resolved.
+/// The address the listener binds for `host`. "localhost" is the IPv4
+/// loopback, as for the HTTP bind: it is never resolved. An IPv6 literal is
+/// bracketed.
 [[nodiscard]] std::string listen_address(std::string_view host, std::uint16_t port);
 
 [[nodiscard]] wire::SessionState wire_state(LogicalSessionState state) noexcept;

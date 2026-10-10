@@ -698,7 +698,7 @@ TEST(StreamListener, AClientCancelAbortsItsLiveSession) {
 }
 
 TEST(StreamListener, AClientDeadlineAbortsItsLiveSession) {
-  HeldSession held{500ms};
+  HeldSession held{2s};
   wire::ServerEvent event;
   EXPECT_FALSE(held.call->Read(&event));
   EXPECT_EQ(held.call->Finish().error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
@@ -762,6 +762,15 @@ TEST(StreamListener, BindsLoopbackOnlyAndOwnsItsPort) {
 }
 
 TEST(StreamListener, LocalhostBindsTheIpv4LoopbackOnly) {
+  // Without an IPv6 loopback nothing here could tell a resolved bind apart.
+  SystemSchedulerClock clock;
+  StreamListenerOptions ipv6;
+  ipv6.host = "::1";
+  ipv6.deployment_id = kDeployment;
+  const auto on_ipv6 = StreamListener::start(ipv6, nullptr, clock);
+  if (!on_ipv6.has_value() || !accepts(AF_INET6, (*on_ipv6)->bound_port())) {
+    GTEST_SKIP() << "this host has no IPv6 loopback";
+  }
   Served served{false, "localhost"};
   const auto port = served.listener().bound_port();
   EXPECT_TRUE(accepts(AF_INET, port));
@@ -849,11 +858,12 @@ TEST(StreamListener, TheWorkerDrainsStreamsInsideTheWindowThatBeganAtShutdown) {
   std::this_thread::sleep_for(300ms);
   const auto asked = std::chrono::steady_clock::now();
   served.worker->shutdown("test");
-  std::this_thread::sleep_for(1200ms);
+  std::this_thread::sleep_for(1500ms);
   EXPECT_EQ(served.worker->stop(), tensorplate::ServingExitCode::Ok);
   const auto took = std::chrono::steady_clock::now() - asked;
   EXPECT_GE(took, 1900ms) << "the open call was given the window";
-  EXPECT_LT(took, 2800ms) << "the window was counted from shutdown, not from stop";
+  // A window counted from stop() would end 3.5 s after the shutdown.
+  EXPECT_LT(took, 3200ms) << "the window was counted from shutdown, not from stop";
   const auto code = call->Finish().error_code();
   EXPECT_TRUE(code == grpc::StatusCode::UNAVAILABLE || code == grpc::StatusCode::CANCELLED) << code;
 }

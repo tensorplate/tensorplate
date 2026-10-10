@@ -433,8 +433,8 @@ dependency. What the entry states without a check is that the affected
 `gz_write`, is defined only in that member (read in zlib 1.3.2's sources),
 and that the arm64 worker links the same members. Review is due by
 2026-11-18, and the entry is revisited when a fixed release exists, when the
-zlib version changes or when `gzwrite.c.o` is linked. The report and the identifier controls are uploaded even when
-the scan fails.
+zlib version changes or when `gzwrite.c.o` is linked. The report and the
+identifier controls are uploaded even when the scan fails.
 
 Both release jobs use `native-release-record.py` to produce a worker SBOM
 and a cache-provenance JSON record. The record binds the source commit,

@@ -232,8 +232,8 @@ std::string listen_address(std::string_view host, std::uint16_t port) {
   std::string address;
   if (host == "localhost") {
     address = "127.0.0.1";
-  } else if (host == "::1") {
-    address = "[::1]";
+  } else if (host.find(':') != std::string_view::npos) {
+    address = "[" + std::string{host} + "]";
   } else {
     address = host;
   }

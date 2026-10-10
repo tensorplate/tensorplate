@@ -178,6 +178,7 @@ TEST(StreamMapping, LocalhostIsTheIpv4LoopbackAndIpv6IsBracketed) {
   EXPECT_EQ(stream::listen_address("localhost", 7001), "127.0.0.1:7001");
   EXPECT_EQ(stream::listen_address("127.0.0.1", 0), "127.0.0.1:0");
   EXPECT_EQ(stream::listen_address("::1", 7001), "[::1]:7001");
+  EXPECT_EQ(stream::listen_address("2001:db8::7", 7001), "[2001:db8::7]:7001");
 }
 
 }  // namespace

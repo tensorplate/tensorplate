@@ -153,7 +153,7 @@ TEST(StreamOutput, WritesInSequenceWithOneWriteInFlight) {
   EXPECT_TRUE(path.writer.codes().empty());
 }
 
-TEST(StreamOutput, NoWriteStartsBetweenAWriteEndingAndItsConfirmation) {
+TEST(StreamOutput, AnOfferMadeWhileAWriteIsAnsweredStartsNoWriteBeforeItsConfirmation) {
   Path path;
   path.offer(OutputKind::Control);
   std::size_t written_inside = 0;
@@ -175,12 +175,15 @@ TEST(StreamOutput, NoWriteStartsBeforeADeliveryWasTold) {
   Path path;
   path.offer(OutputKind::Control);
   std::size_t written_inside = 0;
+  std::uint64_t charged_when_told = 1;
   path.next_told = [&] {
+    charged_when_told = path.queue->metadata_usage().used();
     path.offer(OutputKind::Control);
     written_inside = path.writer.sequences().size();
   };
   path.out->write_done(true);
-  EXPECT_EQ(written_inside, 1U);
+  EXPECT_EQ(charged_when_told, 0U) << "the delivery was told before the queue confirmed it";
+  EXPECT_EQ(written_inside, 1U) << "the second write began before the first was told";
   EXPECT_EQ(path.writer.sequences(), (Sequences{1, 2}));
 }
 
@@ -247,8 +250,9 @@ TEST(StreamOutput, ABodyTheStreamDidNotQueueEndsTheCallAsInternal) {
   EXPECT_TRUE(path.writer.sequences().empty());
 }
 
-TEST(StreamOutput, ProducersAndATransportThreadKeepEveryOrder) {
+TEST(StreamOutput, ProducersAndTransportThreadsKeepEveryOrder) {
   constexpr int kProducers = 4;
+  constexpr int kTransports = 3;
   constexpr int kEach = 250;
   Path path;
   std::mutex transport_mu;
@@ -262,21 +266,25 @@ TEST(StreamOutput, ProducersAndATransportThreadKeepEveryOrder) {
     }
     transport_cv.notify_one();
   };
-  // Answers each write from a thread that started none of them.
-  std::thread transport([&] {
-    int answered = 0;
-    std::unique_lock lock(transport_mu);
-    for (;;) {
-      transport_cv.wait(lock, [&] { return done || started > answered; });
-      if (started == answered) {
-        return;
+  // Each write is answered by whichever of these threads takes it, so two
+  // answers overlap whenever a write starts before the last one was settled.
+  int answered = 0;
+  std::vector<std::thread> transports;
+  for (int transport = 0; transport < kTransports; ++transport) {
+    transports.emplace_back([&] {
+      std::unique_lock lock(transport_mu);
+      for (;;) {
+        transport_cv.wait(lock, [&] { return done || started > answered; });
+        if (started == answered) {
+          return;
+        }
+        ++answered;
+        lock.unlock();
+        path.out->write_done(true);
+        lock.lock();
       }
-      ++answered;
-      lock.unlock();
-      path.out->write_done(true);
-      lock.lock();
-    }
-  });
+    });
+  }
   std::vector<std::thread> producers;
   for (int producer = 0; producer < kProducers; ++producer) {
     producers.emplace_back([&path, producer] {
@@ -302,8 +310,10 @@ TEST(StreamOutput, ProducersAndATransportThreadKeepEveryOrder) {
     const std::lock_guard guard(transport_mu);
     done = true;
   }
-  transport_cv.notify_one();
-  transport.join();
+  transport_cv.notify_all();
+  for (auto& transport : transports) {
+    transport.join();
+  }
 
   EXPECT_EQ(path.writer.codes(), (Codes{grpc::StatusCode::DEADLINE_EXCEEDED}));
   ASSERT_EQ(path.writer.written.size(), total);

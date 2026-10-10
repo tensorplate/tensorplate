@@ -123,7 +123,9 @@ runs speech jobs is wired in.
   takes the class of the error code the failure-reason taxonomy pairs it
   with, and anything else is `INTERNAL`. A session drained by shutdown is
   therefore `SESSION_STATE_CLOSED` with cause `worker_shutdown` and status
-  `UNAVAILABLE`.
+  `UNAVAILABLE`. The status follows the cause and not the state because a
+  session ended through the cancel path (a client `Cancel`, a timeout, a
+  slow consumer) is also `SESSION_STATE_CLOSED`.
 - **Not enforced yet.** A call that never sends `Open` is not bounded: it
   stays open until the client ends it, and at shutdown it holds the gRPC
   server for the whole drain window. The open handshake timeout, the limit on
@@ -147,8 +149,8 @@ runs speech jobs is wired in.
   stops the dispatch and destroys the manager, and then runs the HTTP drain
   below, which waits only for what is left of the same window. The stopped
   listener stays in place until the worker is destroyed, so a `shutdown()`
-  on another thread never finds it gone. The control channel and the signal pipe are unchanged and still
-  end with the worker.
+  on another thread never finds it gone. The control channel and the signal
+  pipe are unchanged and still end with the worker.
 
 The `ServingWorker::create(config)` factory builds, in this order:
 

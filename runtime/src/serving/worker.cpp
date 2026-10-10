@@ -115,6 +115,9 @@ struct ServingWorker::Impl {
   std::mutex stop_mutex;
   ServingExitCode exit_code = ServingExitCode::Ok;
 #if TP_ENABLE_STREAMING_GRPC
+  /// Guards `stream` against a shutdown() that runs while start() sets it.
+  /// Once set it stays until the worker is destroyed.
+  std::mutex stream_mutex;
   std::unique_ptr<serving::StreamListener> stream;
   /// When the drain that began at shutdown ends, for streams and HTTP alike.
   std::atomic<std::chrono::steady_clock::rep> stream_drain_deadline{0};
@@ -127,6 +130,12 @@ struct ServingWorker::Impl {
   Result<void> build();
   Result<void> start_listener();
   Result<void> start_stream_listener();
+#if TP_ENABLE_STREAMING_GRPC
+  [[nodiscard]] serving::StreamListener* stream_listener() noexcept {
+    const std::lock_guard guard(stream_mutex);
+    return stream.get();
+  }
+#endif
   void stop_stream_admission() noexcept;
   void stop_stream_listener() noexcept;
   // Dispatcher / evictor only call into the owned `unique_ptr` members, so
@@ -426,10 +435,13 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
                 {"message", listener.error().message}});
     return unexpected(listener.error());
   }
-  stream = std::move(listener).value();
-  log_stderr(
-      config, "info", "stream listener bound",
-      {{"host", config.bind.host}, {"port", stream->bound_port()}, {"serves_sessions", false}});
+  const auto port = (*listener)->bound_port();
+  {
+    const std::lock_guard guard(stream_mutex);
+    stream = std::move(listener).value();
+  }
+  log_stderr(config, "info", "stream listener bound",
+             {{"host", config.bind.host}, {"port", port}, {"serves_sessions", false}});
 #endif
   return Result<void>{};
 }
@@ -437,12 +449,12 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
 // NOLINTNEXTLINE(readability-convert-member-functions-to-static): members with the feature only.
 void ServingWorker::Impl::stop_stream_admission() noexcept {
 #if TP_ENABLE_STREAMING_GRPC
-  if (stream) {
+  if (auto* listener = stream_listener(); listener != nullptr) {
     auto expected = std::chrono::steady_clock::rep{0};
     const auto deadline = std::chrono::steady_clock::now() + config.shutdown.drain_deadline;
     (void)stream_drain_deadline.compare_exchange_strong(expected,
                                                         deadline.time_since_epoch().count());
-    stream->stop_admission();
+    listener->stop_admission();
   }
 #endif
 }
@@ -450,10 +462,10 @@ void ServingWorker::Impl::stop_stream_admission() noexcept {
 // NOLINTNEXTLINE(readability-convert-member-functions-to-static): members with the feature only.
 void ServingWorker::Impl::stop_stream_listener() noexcept {
 #if TP_ENABLE_STREAMING_GRPC
-  if (stream) {
+  if (auto* listener = stream_listener(); listener != nullptr) {
     stop_stream_admission();
     // Sessions drain inside the window that began when shutdown was asked.
-    stream->stop(std::chrono::steady_clock::time_point{
+    listener->stop(std::chrono::steady_clock::time_point{
         std::chrono::steady_clock::duration{stream_drain_deadline.load()}});
   }
 #endif
