@@ -519,7 +519,7 @@ fn manifest_rule_fixture_pairs_retain_typed_reasons() {
     let validator = options
         .compile(&read(&repo.join("protocol/schemas/bundle_manifest.json")))
         .unwrap();
-    let mut counts = [0, 0];
+    let (mut parser_accepts, mut parser_refuses) = (0, 0);
     for entry in std::fs::read_dir(rules_root()).unwrap() {
         let path = entry.unwrap().path();
         if !path.join("expected.json").is_file() {
@@ -536,7 +536,7 @@ fn manifest_rule_fixture_pairs_retain_typed_reasons() {
                     path.display()
                 );
                 parse_bundle(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-                counts[0] += 1;
+                parser_accepts += 1;
             }
             Some(code) => {
                 // The schema accepts every committed variant declaration;
@@ -558,11 +558,12 @@ fn manifest_rule_fixture_pairs_retain_typed_reasons() {
                     ),
                     e => panic!("{}: expected {code}, got {e}", path.display()),
                 }
-                counts[1] += 1;
+                parser_refuses += 1;
             }
         }
     }
-    assert_eq!(counts, [19, 19]);
+    // Fixture directories, not pairs.
+    assert_eq!((parser_accepts, parser_refuses), (19, 19));
 }
 
 fn known_bases() -> Vec<tensorplate_protocol::KnownBase> {
