@@ -28,7 +28,7 @@ use tensorplate_agent::platform_admission::PlatformAdmission;
 use tensorplate_platform::{AdmissionPosture, PlatformRegistry, SupportLevel};
 use tensorplate_protocol::backend_descriptor::{ComputeType, RunnerProfile};
 use tensorplate_protocol::bundle::parse_bundle;
-use tensorplate_protocol::ErrorCode;
+use tensorplate_protocol::{ErrorCode, ErrorRecord};
 
 const PRODUCTION_ROW: &str = "ubuntu2404-x86-l4-g2s8";
 const PREVIEW_ROW: &str = "ubuntu2404-x86-l4-g2s24";
@@ -290,10 +290,14 @@ fn the_parser_accepts_what_only_the_target_can_refuse() {
     }
 }
 
-fn refusal_code(coord: &Coordinator, fixture: &str) -> String {
+fn refusal(coord: &Coordinator, fixture: &str) -> ErrorRecord {
     deploy(coord, "refused", &fixtures().join(fixture))
         .expect_err(fixture)
         .to_record()
+}
+
+fn refusal_code(coord: &Coordinator, fixture: &str) -> String {
+    refusal(coord, fixture)
         .context
         .unwrap_or_else(|| panic!("{fixture}: no code"))
 }
@@ -305,7 +309,13 @@ fn a_variant_resolves_only_against_a_bundle_deployed_on_a_row_the_machine_holds(
     // Nothing deployed: the base is not known.
     let h = Harness::new();
     let coord = agent(&h, PREVIEW_ROW, true);
-    assert_eq!(refusal_code(&coord, variant), "bundle_r8_base_reference");
+    let unknown = refusal(&coord, variant);
+    assert_eq!(unknown.context.as_deref(), Some("bundle_r8_base_reference"));
+    assert!(
+        unknown.message.contains("no known base bundle"),
+        "{}",
+        unknown.message
+    );
     deploy(&coord, "base", &fixtures().join(BASE)).unwrap();
     assert_eq!(refusal_code(&coord, variant), "bundle_r8_reserved_variant");
 
@@ -314,13 +324,29 @@ fn a_variant_resolves_only_against_a_bundle_deployed_on_a_row_the_machine_holds(
     let h = Harness::new();
     let coord = agent(&h, PREVIEW_ROW, false);
     deploy(&coord, "base", &fixtures().join(BASE)).unwrap();
-    assert_eq!(refusal_code(&coord, variant), "bundle_r8_base_reference");
+    let no_level = refusal(&coord, variant);
+    assert_eq!(
+        no_level.context.as_deref(),
+        Some("bundle_r8_base_reference")
+    );
+    assert!(
+        no_level.message.contains("is deployed") && no_level.message.contains("no support level"),
+        "{}",
+        no_level.message
+    );
+    assert!(!no_level.message.contains("no known base bundle"));
+    // With no level held, a base that is not deployed is still unknown.
+    let not_deployed = refusal(&coord, "invalid_r8_unresolved_base").message;
+    assert!(
+        not_deployed.contains("no known base bundle"),
+        "{not_deployed}"
+    );
 
     // No platform facts at all.
     let h = Harness::new();
     let coord = Coordinator::new(config(&h), h.store.clone(), h.worker.clone());
     deploy(&coord, "base", &fixtures().join(BASE)).unwrap();
-    assert_eq!(refusal_code(&coord, variant), "bundle_r8_base_reference");
+    assert_eq!(refusal(&coord, variant).message, no_level.message);
 }
 
 #[test]

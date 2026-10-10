@@ -209,7 +209,9 @@ refused as `bundle_r8_reserved_variant`. A manifest the agent cannot read or
 decode at that point is left to the parser, which reports why. A machine
 holds a row when it was admitted on it and the row's evidence covers it: a
 machine admitted on technical prerequisites, or an agent with no registry,
-knows no base. `bundle_r8_variant_identity` cannot come from a deploy yet:
+knows no base, and where the declared base is deployed there the refusal
+says the target holds no support level, not that the base is unknown.
+`bundle_r8_variant_identity` cannot come from a deploy yet:
 no variant deploys, so none is recorded on a base.
 
 The row and claim checks need a loaded registry. A production agent that

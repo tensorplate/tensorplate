@@ -42,9 +42,9 @@ use std::path::{Path, PathBuf};
 
 use tensorplate_protocol::agent_state::AgentState;
 use tensorplate_protocol::bundle::{
-    evaluate_compatibility, parse_bundle, parse_bundle_with, BackendCapabilityView, BackendProfile,
-    BundleDescriptor, CompatibilityViolation, DeviceContext, ParseError, ParseOptions,
-    MANIFEST_FILENAME,
+    digests_equal, evaluate_compatibility, parse_bundle, parse_bundle_with, BackendCapabilityView,
+    BackendProfile, BundleDescriptor, CompatibilityViolation, DeviceContext, ParseError,
+    ParseOptions, MANIFEST_FILENAME,
 };
 use tensorplate_protocol::bundle_manifest::{BundleManifest, BundleManifestError};
 use tensorplate_protocol::bundle_profile::{
@@ -328,16 +328,35 @@ fn check_declared_lineage(bundle_path: &Path, facts: &DeployFacts<'_>) -> AgentR
     let Ok(profile) = BundleProfile::from_manifest_text(&raw) else {
         return Ok(());
     };
+    let level = held_level(facts);
+    if let (None, Some(lineage)) = (level, &profile.lineage) {
+        let base = &lineage.base;
+        let served = served_bundles(facts).any(|(name, version, digest)| {
+            *name == base.name
+                && *version == base.version
+                && digests_equal(digest, &base.manifest_digest)
+        });
+        if served {
+            return Err(rule_refusal(
+                BundleRuleCode::BaseReference,
+                "base_model_ref",
+                format!(
+                    "`{}` version `{}` is deployed, but this target holds no support level under which a base can be counted",
+                    base.name, base.version
+                ),
+            ));
+        }
+    }
     profile
         .check_lineage(&known_bases(facts))
         .map_err(profile_refusal)
 }
 
-/// The bundles this agent serves, each at the level of the row the machine
-/// holds. Empty on a machine that holds no row. No variant can be deployed,
-/// so no base has one recorded.
-fn known_bases(facts: &DeployFacts<'_>) -> Vec<KnownBase> {
-    let level = facts
+/// The support level of the row the machine holds. `None` without an
+/// admission or a registry, on technical prerequisites alone, and on a
+/// Planned row.
+fn held_level(facts: &DeployFacts<'_>) -> Option<SupportLevel> {
+    facts
         .admission
         .zip(facts.registry)
         .and_then(|(admission, registry)| admission.held_row(registry))
@@ -346,20 +365,27 @@ fn known_bases(facts: &DeployFacts<'_>) -> Vec<KnownBase> {
             tensorplate_platform::SupportLevel::Preview => Some(SupportLevel::Preview),
             tensorplate_platform::SupportLevel::Experimental => Some(SupportLevel::Experimental),
             tensorplate_platform::SupportLevel::Planned => None,
-        });
-    let (Some(level), Some(state)) = (level, facts.state) else {
-        return Vec::new();
-    };
-    let active = state.active.iter().map(|record| {
-        (
-            &record.bundle_name,
-            &record.bundle_version,
-            &record.bundle_digest,
-        )
+        })
+}
+
+/// Name, version and bundle digest of the active deployment and of each
+/// serving member of the resident set.
+fn served_bundles<'a>(
+    facts: &DeployFacts<'a>,
+) -> impl Iterator<Item = (&'a String, &'a String, &'a String)> {
+    let active = facts.state.into_iter().flat_map(|state| {
+        state.active.iter().map(|record| {
+            (
+                &record.bundle_name,
+                &record.bundle_version,
+                &record.bundle_digest,
+            )
+        })
     });
-    let members = state
-        .resident_set
-        .iter()
+    let members = facts
+        .state
+        .into_iter()
+        .flat_map(|state| &state.resident_set)
         .flat_map(|set| &set.members)
         .filter(|member| member.state == MemberState::Serving)
         .map(|member| {
@@ -369,8 +395,18 @@ fn known_bases(facts: &DeployFacts<'_>) -> Vec<KnownBase> {
                 &member.bundle_digest,
             )
         });
+    active.chain(members)
+}
+
+/// The bundles this agent serves, each at the level of the row the machine
+/// holds. Empty on a machine that holds no row. No variant can be deployed,
+/// so no base has one recorded.
+fn known_bases(facts: &DeployFacts<'_>) -> Vec<KnownBase> {
+    let Some(level) = held_level(facts) else {
+        return Vec::new();
+    };
     let mut bases: Vec<KnownBase> = Vec::new();
-    for (name, version, digest) in active.chain(members) {
+    for (name, version, digest) in served_bundles(facts) {
         let base = KnownBase {
             name: name.clone(),
             version: version.clone(),
