@@ -573,6 +573,32 @@ TEST(SessionDispatch, HalfCloseDoesNotOvertakeAnAcceptedFinalize) {
   EXPECT_FALSE(binding.output(key)->take().has_value());
 }
 
+TEST(SessionDispatch, HalfCloseDoesNotOvertakeAnAcceptedFrame) {
+  Binding binding;
+  const auto key = binding.open(audio_request());
+  binding.audio(key);
+  const auto accepted = binding.manager->accept_input(key, kFrameBytes);
+  ASSERT_TRUE(accepted.has_value());
+  ASSERT_TRUE(accepted->effects.contains(Effect::AcceptInput));
+  ASSERT_TRUE(binding.manager->apply(key, Event::HalfClose).has_value());
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Draining);
+  EXPECT_EQ(binding.output(key)->last_sequence(), 0U);
+  EXPECT_EQ(binding.output(key)->metadata_usage().used(), 0U);
+
+  const std::vector<std::byte> frame(kFrameBytes);
+  binding.dispatch.audio(key, frame);
+  const auto transcript = binding.read_final(key, EndpointReason::HalfClose);
+  ASSERT_TRUE(transcript.has_value());
+  EXPECT_EQ(transcript->utterance_id, 1U);
+  EXPECT_EQ(transcript->end_sample_offset, 640U);
+  ASSERT_EQ(transcript->segments.size(), 1U);
+  EXPECT_EQ(transcript->segments.front().start_us, 0U);
+  EXPECT_EQ(transcript->segments.front().end_us, 40'000U);
+  EXPECT_TRUE(binding.ends_as(key, State::Closed));
+  EXPECT_FALSE(binding.output(key)->take().has_value());
+}
+
 TEST(SessionDispatch, DrainWaitsForATextFinalizeTheManagerAccepted) {
   Binding binding;
   const auto key = binding.open(text_request());
