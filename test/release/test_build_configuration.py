@@ -5217,5 +5217,14 @@ class SourceInstallStreamingTests(unittest.TestCase):
         self.assertIn("error: VCPKG_ROOT must name a vcpkg checkout", result.stderr)
 
 
+class ReleaseDriverSuiteTests(unittest.TestCase):
+    def test_the_suite_does_not_pipe_a_cargo_run_into_head_in_a_command_substitution(self) -> None:
+        # Under pipefail, head closing the pipe or cargo failing ends the
+        # suite with no message.
+        text = (REPO_ROOT / "test/release/run.sh").read_text()
+        piped = re.findall(r"\$\([^()]*\bcargo run\b[^()]*\|\s*head\b[^()]*\)", text)
+        self.assertEqual(piped, [], "capture the whole output, then take its first line")
+
+
 if __name__ == "__main__":
     unittest.main()

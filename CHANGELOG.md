@@ -8,6 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The release driver checks (`test/release/run.sh`) no longer pipe `cargo run`
+  into `head` when they check what a candidate build reports as its version.
+  Under `pipefail` that pipe turned any cargo failure into an exit with no
+  message. The checks now capture the whole output and report the exit
+  status and stderr of a failing command.
+
 - The synthetic session dispatch no longer lets a client's half-close
   overtake audio the session manager had already accepted. With one frame
   handed over and a second accepted but not yet handed over, it ended the

@@ -1056,10 +1056,21 @@ PYAMD
       grep -q 'TP_RELEASE_VERSION' "$site" || {
         echo "FAIL: $site does not honour the release-version override" >&2; exit 1; }
     done
-    out="$(TP_RELEASE_VERSION=0.2.1-rc.1 cargo run -q -p tensorplate-cli --bin tensorplate -- --version 2>/dev/null | head -1)"
+    # Runs the command to completion, names its status and stderr if it fails,
+    # and prints the first line of its stdout.
+    first_output_line() {
+      local output status=0 errors="$tmp/first-output-line.err"
+      output="$("$@" 2>"$errors")" || status=$?
+      if ((status != 0)); then
+        echo "FAIL: '$*' exited $status: $(cat "$errors")" >&2
+        return 1
+      fi
+      printf '%s\n' "${output%%$'\n'*}"
+    }
+    out="$(TP_RELEASE_VERSION=0.2.1-rc.1 first_output_line cargo run -q -p tensorplate-cli --bin tensorplate -- --version)"
     [[ "$out" == *"0.2.1-rc.1"* ]] || {
       echo "FAIL: a candidate build reports '$out'; it must name the candidate" >&2; exit 1; }
-    plain="$(cargo run -q -p tensorplate-cli --bin tensorplate -- --version 2>/dev/null | head -1)"
+    plain="$(first_output_line cargo run -q -p tensorplate-cli --bin tensorplate -- --version)"
     [[ "$plain" != *"-rc."* ]] || {
       echo "FAIL: a build with no override leaked a candidate version: '$plain'" >&2; exit 1; }
     echo "candidate binaries report their own version (built and executed)"
