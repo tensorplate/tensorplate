@@ -49,13 +49,73 @@ bundle-format lines, `streaming-grpc on` or `streaming-grpc off`, from the
 same CMake option the runtime's config check is compiled with.
 
 `streaming.enabled` in the worker config defaults to false. A true value in
-a feature-OFF build returns `unsupported` before runtime construction. Null,
-non-boolean values and unknown keys in `streaming` return `config_invalid`.
-Disabled configs serialize without the optional block, preserving the existing
-agent-rendered config shape. This is dependency, config and binding
-preparation only: a feature-ON build also generates the C++ bindings of the
-draft stream session envelope, which nothing in the worker uses, and the
-worker does not yet create a gRPC listener, even in a feature-ON build.
+a feature-OFF build returns `unsupported` before runtime construction, and so
+does a true value in a worker with `deployment.generation`: `Ready` would have
+to name the descriptor that generation serves, which the worker is not given.
+With `streaming.enabled`, `deployment.endpoint` must be a deployment id (1 to
+128 of letters, digits, `.`, `_` and `-`). `streaming.port` (0 to 65535, 0 for
+an ephemeral port) is the stream listener's port; its host is `bind.host`, so
+the HTTP bind's loopback rule covers it. Null, non-boolean or out-of-range
+values and unknown keys in `streaming` return `config_invalid`. A config with
+neither field set serializes without the optional block, preserving the
+existing agent-rendered config shape; the agent renders no `streaming` block,
+so a worker with streaming enabled is started by hand from a config. A
+feature-OFF build compiles no stream listener and links no gRPC code.
+
+### Stream listener
+
+In a feature-ON build with `streaming.enabled`, `start()` opens the gRPC
+`SessionService` of the draft stream schema
+(`protocol/proto/tensorplate/stream/v1/session.proto`) on
+`bind.host`:`streaming.port`, after the HTTP listener, and logs the bound port
+as `stream listener bound`. The listener (`runtime/src/serving/stream/`, all
+internal) owns a `SessionManager` that admits one session at a time with the
+protocol's default timers, and drives the [session
+dispatch](#session-dispatch) it is given. **The worker gives it none yet**: no
+speech dispatch is built, so every `Open` is refused with
+`backend_unsupported_capability`, and the log line says `serves_sessions:
+false`. A streaming worker does not serve sessions until the dispatch that
+runs speech jobs is wired in.
+
+- **API and threads.** The listener uses gRPC's callback API: no thread per
+  call. gRPC's own threads run each call's reactions, which apply one client
+  event to the manager and never wait on a job, plus the manager's timer
+  thread. A feature-ON test on a 12-core machine counted 15 threads added by
+  starting a listener; gRPC sizes its pool by the machine's cores.
+  Each call's queue consumer captures shared state, never the call, and
+  starts the next write when none is in flight; a write that completes marks
+  the item delivered and tells the dispatch.
+- **Target.** The worker serves no generation and no descriptor digest, so an
+  `Open` must name the worker's `deployment.endpoint` with generation zero and
+  an empty digest; `Ready` names neither. A selector is refused as
+  `target_unresolved`, another deployment or any digest as `target_mismatch`,
+  any generation as `stale_generation`. Internally the manager binds sessions
+  to a fixed non-zero generation that never reaches the wire, because the
+  session layer refuses generation zero.
+- **What it serves.** `Open`, `Ready`, `Ping` (answered by `Pong`) and
+  `SessionClosed`, and a half-close, which drains and closes the session.
+  Every other client event fails the session with
+  `backend_unsupported_capability`; a body the schema does not define, an
+  event out of sequence or naming another session, with `invalid_event`.
+  `Ready` reports the deployment's limits and the session's initial credit; a
+  text session's waiting-segment usage is zero then, since it has accepted
+  nothing.
+- **Refusals.** A refused `Open` creates no session: the call ends with no
+  event and a status whose code follows the reason (`invalid_event` is
+  `INVALID_ARGUMENT`; unsupported, target and generation reasons are
+  `FAILED_PRECONDITION`; `session_count_limit` is `RESOURCE_EXHAUSTED`;
+  `admission_closed` is `UNAVAILABLE`) and whose message names the reason.
+  How the status will carry the `OpenRefused` detail is not decided; one
+  function builds the status, and it attaches no detail yet.
+- **Shutdown order.** `shutdown()` stops admission and drains every live
+  session with `worker_shutdown`, so later `Open`s are refused with
+  `admission_closed`. `stop()` stops the HTTP listener, then waits for the
+  stream sessions to close until `shutdown.drain_deadline` after the
+  shutdown was asked, then shuts the gRPC server down with what is left of
+  that window (a call still open is cancelled, which aborts its session),
+  stops the dispatch and destroys the manager, and then runs the HTTP drain
+  below. The control channel and the signal pipe are unchanged and still
+  end with the worker.
 
 The `ServingWorker::create(config)` factory builds, in this order:
 
@@ -269,7 +329,8 @@ Draining → Stopped):
 1. Composition root flips the controller to `Stopping`. The router
    and pipeline refuse new admission with `not_ready` / 503; the
    HTTP server keeps serving in-flight responses.
-2. The composition root stops the HTTP listener.
+2. The composition root stops the HTTP listener, then the stream listener
+   as described under [Stream listener](#stream-listener).
 3. If `shutdown.cancel_queued_immediately` is true, `InferScheduler::shutdown`
    cancels every queued request and releases their input buffers.
 4. The composition root waits up to `shutdown.drain_deadline` for
@@ -506,10 +567,10 @@ and the finalize deadline still apply. A dedicated timer thread finds due sessio
 injected monotonic `SchedulerClock`, independent of the serving
 worker's existing request evictor. Unit tests advance
 `FakeSchedulerClock` without sleeping. The current HTTP composition
-root does not instantiate `SessionManager`; the streaming transport
-binding will supply its effect sink, choose each session's budgets and
-drive its output queue, with a [session dispatch](#session-dispatch)
-beside it for the task work.
+root does not instantiate `SessionManager`; the [stream
+listener](#stream-listener) does, supplies its effect sink, chooses each
+session's budgets and drives its output queue, with a [session
+dispatch](#session-dispatch) beside it for the task work.
 
 States: `opening`, `active`, `finalizing`, `draining`,
 `cancel_requested`, and the terminal `closed` and `failed`. Events come

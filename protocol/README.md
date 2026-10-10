@@ -165,7 +165,10 @@ What the draft now fixes:
   deployment id or digest that is not the served one. The request metadata names
   `tensorplate-model` and `tensorplate-model-version` are reserved for the
   selector; the proxy that resolves a selector compares them with it, and
-  the server does not read them.
+  the server does not read them. A worker started without a deployment
+  generation is addressed by its deployment alone (generation zero, an empty
+  digest); its `Ready` names neither, and it refuses any generation as stale
+  and any digest as a mismatch.
 - **Bounds.** Sequences, generations and 64-bit ids stop at 2^53 - 1. A client value
   that disagrees with what earlier events determine fails the session.
 - **Totals and recovery.** `SessionClosed` carries the session's totals.

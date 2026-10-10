@@ -70,7 +70,12 @@ The `speech` extra declares what the streaming speech transport needs:
 `grpcio>=1.81.1,<2` and `protobuf>=6.33.5,<7`. The streaming client is not
 in the package yet; today the extra fixes the dependency range and the
 failure mode, and the wheel carries the
-[stream schema's modules](#stream-schema-modules). `import tensorplate`
+[stream schema's modules](#stream-schema-modules). On the server side, a
+feature-ON serving worker with `streaming.enabled` opens a loopback gRPC
+stream listener, but it refuses every `Open` until the worker runs speech
+jobs (see
+[serving-worker.md](../architecture/serving-worker.md#stream-listener)).
+`import tensorplate`
 never imports `tensorplate.speech`, `tensorplate.stream`, grpc or protobuf,
 so the unary client keeps no third-party dependency. Importing
 `tensorplate.speech` or `tensorplate.stream` without the extra raises
