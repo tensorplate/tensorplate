@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -33,9 +34,8 @@ using Bytes = std::vector<std::byte>;
 
 constexpr StreamAudioFormat kPcm16k{StreamAudioEncoding::PcmS16Le, 16'000, 1};
 constexpr StreamAudioFormat kPcm24k{StreamAudioEncoding::PcmS16Le, 24'000, 1};
-/// 20 ms and 320 ms of kPcm16k, the shortest and the longest frame.
+/// 20 ms of kPcm16k, the synthetic dispatch's shortest frame.
 constexpr std::size_t kFrameBytes = 640;
-constexpr std::size_t kLongFrameBytes = 10'240;
 
 /// The synthetic dispatch, as the cases know it.
 class SyntheticUnderTest final : public DispatchUnderTest {
@@ -95,15 +95,61 @@ std::string text_of(std::size_t bytes) {
   return text;
 }
 
-std::size_t chunk_bytes(const SessionTerms& terms) {
-  return terms.audio_format.bytes_per_second() *
-         static_cast<std::uint64_t>(kAudioChunkDuration.count()) / 1000;
+std::size_t audio_bytes(const SessionTerms& terms, std::chrono::milliseconds duration) {
+  return terms.audio_format.bytes_per_second() * static_cast<std::uint64_t>(duration.count()) /
+         1000;
 }
 
-/// The bytes of the longest utterance the session's terms grant.
-std::size_t longest_utterance_bytes(const SessionTerms& terms) {
-  return terms.audio_format.bytes_per_second() *
-         static_cast<std::uint64_t>(terms.max_utterance.count()) / 1000;
+std::size_t chunk_bytes(const SessionTerms& terms) {
+  return audio_bytes(terms, kAudioChunkDuration);
+}
+
+/// What an audio session's terms grant, in bytes.
+struct AudioSizes {
+  std::size_t sample = 0;
+  std::size_t shortest_frame = 0;
+  std::size_t longest_frame = 0;
+  std::size_t longest_utterance = 0;
+  /// A frame shorter than the shortest granted.
+  std::size_t short_frame = 0;
+};
+
+AudioSizes sizes_of(Binding& binding, std::uint64_t key) {
+  const auto terms = binding.terms(key);
+  AudioSizes sizes;
+  sizes.sample = terms.audio_format.bytes_per_sample();
+  sizes.shortest_frame = audio_bytes(terms, terms.min_frame);
+  sizes.longest_frame = audio_bytes(terms, terms.max_frame);
+  sizes.longest_utterance = audio_bytes(terms, terms.max_utterance);
+  sizes.short_frame = sizes.shortest_frame / 2 / sizes.sample * sizes.sample;
+  return sizes;
+}
+
+/// Text whose speech is more than the session's PCM budget holds at once.
+std::string overflowing_text(Binding& binding, std::uint64_t key) {
+  const auto terms = binding.terms(key);
+  const std::size_t budget = binding.output(key)->pcm_usage().limit() + chunk_bytes(terms);
+  std::size_t bytes = 16;
+  while (bytes < terms.max_segment_text_bytes &&
+         binding.under_test->speech(text_of(bytes)).size() <= budget) {
+    bytes *= 2;
+  }
+  return text_of(std::min<std::size_t>(bytes, terms.max_segment_text_bytes));
+}
+
+/// The first transition at or after `from` that `matches`; the size if none.
+template <typename Matches>
+std::size_t first_from(const std::vector<ManagedSessionTransition>& seen, std::size_t from,
+                       Matches&& matches) {
+  const auto found = std::find_if(
+      seen.begin() + static_cast<std::ptrdiff_t>(std::min(from, seen.size())), seen.end(), matches);
+  return static_cast<std::size_t>(found - seen.begin());
+}
+
+bool shown(Binding& binding, std::uint64_t key, Event event) {
+  const auto seen = binding.transitions(key);
+  return first_from(seen, 0, [&](const auto& moved) { return moved.event == event; }) !=
+         seen.size();
 }
 
 /// Whether `calls` return while the dispatch is held. If they do not,
@@ -124,17 +170,23 @@ bool returns_promptly(Calls&& calls, Unblock&& unblock) {
   return prompt;
 }
 
-enum class Takeover : std::uint8_t { BeforeTheJobEnds, AfterTheJobEnds, Racing };
+enum class Takeover : std::uint8_t {
+  BeforeTheJobEnds,
+  AfterTheJobEnds,
+  AsTheFinalizeIsApplied,
+  Racing
+};
 
 /// An utterance the duration limit ended is held as a job, and a client's
-/// Finalize is handed over before that job ends, after it, or racing it.
-void finalize_takes_over(DispatchFactory factory, Takeover order, int round) {
-  Binding binding(factory);
+/// Finalize meets that job's end in each order a binding can produce.
+void finalize_takes_over(const DispatchCase& dispatch, Takeover order, int round) {
+  Binding binding(dispatch);
   const auto key = binding.open_audio();
-  const std::size_t longest = longest_utterance_bytes(binding.terms(key));
-  const Bytes audio = patterned_bytes(longest + kFrameBytes, 5);
+  const AudioSizes sizes = sizes_of(binding, key);
+  const std::size_t longest = sizes.longest_utterance;
+  const Bytes audio = patterned_bytes(longest + sizes.shortest_frame, 5);
   binding.under_test->hold_jobs();
-  ASSERT_TRUE(binding.audio_paced(key, audio, kLongFrameBytes));
+  ASSERT_TRUE(binding.audio_in_long_frames(key, audio));
   ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Finalizing; }));
   ASSERT_TRUE(binding.settle());
 
@@ -146,6 +198,12 @@ void finalize_takes_over(DispatchFactory factory, Takeover order, int round) {
     ASSERT_TRUE(binding.manager->apply(key, Event::Finalize).has_value());
     ASSERT_TRUE(binding.settle());
     binding.under_test->release_jobs();
+  } else if (order == Takeover::AsTheFinalizeIsApplied) {
+    // Released inside the manager call that applies the Finalize: the job's
+    // report cannot be applied before the Finalize, and the dispatch may
+    // begin it before it has recorded the Finalize.
+    binding.before_next(key, Event::Finalize, [&] { binding.under_test->release_jobs(); });
+    binding.finalize(key, 7);
   } else {
     std::thread releaser([&] { binding.under_test->release_jobs(); });
     std::this_thread::sleep_for(std::chrono::microseconds{round * 20});
@@ -155,12 +213,14 @@ void finalize_takes_over(DispatchFactory factory, Takeover order, int round) {
   ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0,
                                                std::span{audio}.first(longest), 0));
   if (order == Takeover::AfterTheJobEnds) {
-    // The one completion is the client's Finalize's, which is still owed.
+    // The completion is not reported while the Finalize the dispatch has
+    // recorded is still to be handed over.
     ASSERT_TRUE(binding.settle());
     ASSERT_EQ(binding.live_state(key), State::Finalizing);
     binding.dispatch().finalize(key, 7);
   }
-  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2, longest / 2,
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2,
+                                               longest / sizes.sample,
                                                std::span{audio}.subspan(longest), 7));
   ASSERT_TRUE(binding.settle());
   ASSERT_EQ(binding.live_state(key), State::Active);
@@ -169,9 +229,11 @@ void finalize_takes_over(DispatchFactory factory, Takeover order, int round) {
 TEST_P(SessionDispatchContract, AudioThenFinalizeYieldsOneFinalPerUtterance) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  const Bytes first = patterned_bytes(3 * kFrameBytes, 1);
+  const AudioSizes sizes = sizes_of(binding, key);
+  const Bytes first = patterned_bytes(3 * sizes.shortest_frame, 1);
   for (std::size_t frame = 0; frame < 3; ++frame) {
-    binding.audio(key, std::span{first}.subspan(frame * kFrameBytes, kFrameBytes));
+    binding.audio(key,
+                  std::span{first}.subspan(frame * sizes.shortest_frame, sizes.shortest_frame));
   }
   binding.finalize(key, 9);
   ASSERT_NO_FATAL_FAILURE(
@@ -179,11 +241,11 @@ TEST_P(SessionDispatchContract, AudioThenFinalizeYieldsOneFinalPerUtterance) {
   EXPECT_EQ(binding.live_state(key), State::Active);
   EXPECT_EQ(binding.manager->status(key).value().input_credit_bytes.used(), 0U);
 
-  const Bytes second = patterned_bytes(kFrameBytes, 2);
+  const Bytes second = patterned_bytes(sizes.shortest_frame, 2);
   binding.audio(key, second);
   binding.finalize(key, 12);
-  ASSERT_NO_FATAL_FAILURE(
-      binding.expect_final(key, EndpointReason::ClientFinalize, 2, 960, second, 12));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2,
+                                               first.size() / sizes.sample, second, 12));
   ASSERT_TRUE(binding.settle());
   EXPECT_FALSE(binding.output(key)->take().has_value());
 }
@@ -198,7 +260,7 @@ TEST_P(SessionDispatchContract, FinalizationIsReportedBeforeItsAnswerIsOffered) 
       SessionBudgets::kOutputMetadataBytes - SessionBudgets::kOutputControlReserveBytes, 0,
       std::make_unique<OutputBody>()};
   ASSERT_EQ(queue->offer(unread, binding.clock.now()).value(), OutputOffer::Queued);
-  const Bytes frame = patterned_bytes(kFrameBytes, 1);
+  const Bytes frame = patterned_bytes(sizes_of(binding, key).shortest_frame, 1);
   binding.audio(key, frame);
   binding.finalize(key, 6);
   ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Active; }));
@@ -217,17 +279,19 @@ TEST_P(SessionDispatchContract, FinalizationIsReportedBeforeItsAnswerIsOffered) 
 TEST_P(SessionDispatchContract, SegmentIntervalFollowsTheUtteranceSamples) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  // 321 samples end at 20,062.5 us.
-  const Bytes first = patterned_bytes(642, 1);
+  const AudioSizes sizes = sizes_of(binding, key);
+  // One sample more than a frame of whole milliseconds: at the usual rates
+  // the utterance does not end on a whole microsecond.
+  const Bytes first = patterned_bytes(sizes.shortest_frame + sizes.sample, 1);
   binding.audio(key, first);
   binding.finalize(key, 1);
   ASSERT_NO_FATAL_FAILURE(
       binding.expect_final(key, EndpointReason::ClientFinalize, 1, 0, first, 1));
-  const Bytes second = patterned_bytes(kFrameBytes, 2);
+  const Bytes second = patterned_bytes(sizes.shortest_frame, 2);
   binding.audio(key, second);
   binding.finalize(key, 2);
-  ASSERT_NO_FATAL_FAILURE(
-      binding.expect_final(key, EndpointReason::ClientFinalize, 2, 321, second, 2));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2,
+                                               first.size() / sizes.sample, second, 2));
 }
 
 TEST_P(SessionDispatchContract, FinalizeWithoutAudioYieldsFinalWithoutSegments) {
@@ -277,7 +341,7 @@ TEST_P(SessionDispatchContract, SegmentKeepsItsSlotUntilItsOutputWasDelivered) {
 TEST_P(SessionDispatchContract, OutputWaitsForRoomAndNothingIsLost) {
   Binding binding(GetParam());
   const auto key = binding.open_text();
-  const std::string longer = text_of(1'000);
+  const std::string longer = overflowing_text(binding, key);
   const std::size_t chunk = chunk_bytes(binding.terms(key));
   // More speech than the PCM budget holds.
   ASSERT_GT(binding.under_test->speech(longer).size(),
@@ -299,8 +363,9 @@ TEST_P(SessionDispatchContract, OutputWaitsForRoomAndNothingIsLost) {
 TEST_P(SessionDispatchContract, TextFinalizeIsAnsweredOnceAcceptedSegmentsWereDelivered) {
   Binding binding(GetParam());
   const auto key = binding.open_text();
-  const std::uint64_t short_samples = binding.under_test->speech("hi").size() / 2;
-  const std::uint64_t long_samples = binding.under_test->speech("hello world").size() / 2;
+  const std::size_t sample = binding.terms(key).audio_format.bytes_per_sample();
+  const std::uint64_t short_samples = binding.under_test->speech("hi").size() / sample;
+  const std::uint64_t long_samples = binding.under_test->speech("hello world").size() / sample;
   binding.text(key, 1, "hi");
   binding.text(key, 2, "hello world");
   binding.finalize(key, 4);
@@ -330,42 +395,55 @@ TEST_P(SessionDispatchContract, TextFinalizeIsAnsweredOnceAcceptedSegmentsWereDe
 // return has to arrive there after the acceptance it follows.
 TEST_P(SessionDispatchContract, CreditReturnsAndCompletedFinalizationsReachTheSinkInOrder) {
   Binding binding(GetParam());
+  const auto no_event = [](const auto& moved) { return !moved.event.has_value(); };
   const auto audio_key = binding.open_audio();
-  binding.audio(audio_key, patterned_bytes(kFrameBytes, 1));
-  ASSERT_TRUE(binding.eventually([&] { return binding.transitions(audio_key).size() == 3; }));
-  ASSERT_TRUE(binding.settle());
-  auto seen = binding.transitions(audio_key);
-  ASSERT_EQ(seen.size(), 3U);
-  EXPECT_EQ(seen.at(1).event, Event::Data);
-  EXPECT_EQ(seen.at(1).status.input_credit_bytes.used(), kFrameBytes);
-  EXPECT_FALSE(seen.at(2).event.has_value());
-  EXPECT_EQ(seen.at(2).status.input_credit_bytes.used(), 0U);
+  const std::size_t frame_bytes = sizes_of(binding, audio_key).shortest_frame;
+  binding.audio(audio_key, patterned_bytes(frame_bytes, 1));
+  const auto returned_after_data = [&] {
+    const auto seen = binding.transitions(audio_key);
+    const std::size_t data =
+        first_from(seen, 0, [](const auto& moved) { return moved.event == Event::Data; });
+    if (data == seen.size() || seen[data].status.input_credit_bytes.used() != frame_bytes) {
+      return false;
+    }
+    return first_from(seen, data + 1, [&](const auto& moved) {
+             return no_event(moved) && moved.status.input_credit_bytes.used() == 0;
+           }) != seen.size();
+  };
+  ASSERT_TRUE(binding.eventually(returned_after_data));
 
   const auto text_key = binding.open_text();
   binding.text(text_key, 1, "hi");
+  const auto started = [&](const auto& moved) {
+    return no_event(moved) && moved.status.input_queue_depth == 1 &&
+           moved.status.input_credit_bytes.used() == 0;
+  };
   // The segment has started before the Finalize is applied.
-  ASSERT_TRUE(binding.eventually([&] { return binding.transitions(text_key).size() == 3; }));
+  ASSERT_TRUE(binding.eventually([&] {
+    const auto seen = binding.transitions(text_key);
+    return first_from(seen, 0, started) != seen.size();
+  }));
   binding.finalize(text_key, 3);
   ASSERT_NO_FATAL_FAILURE(binding.expect_segment(text_key, 1, "hi"));
   ASSERT_TRUE(binding.read_as<SynthesisCompletedOutput>(text_key).has_value());
-  seen = binding.transitions(text_key);
-  // Ready, the segment, its start, the Finalize, the segment finishing and
-  // the finalization completing.
-  ASSERT_EQ(seen.size(), 6U);
-  EXPECT_FALSE(seen.at(2).event.has_value());
-  EXPECT_EQ(seen.at(2).status.input_queue_depth, 1U);
-  EXPECT_EQ(seen.at(2).status.input_credit_bytes.used(), 0U);
-  EXPECT_EQ(seen.at(3).event, Event::Finalize);
-  EXPECT_FALSE(seen.at(4).event.has_value());
-  EXPECT_EQ(seen.at(4).status.input_queue_depth, 0U);
-  EXPECT_EQ(seen.at(5).event, Event::FinalizeCompleted);
-  EXPECT_EQ(seen.at(5).state, State::Active);
+  const auto seen = binding.transitions(text_key);
+  // The segment's start, the Finalize, the segment finishing and the
+  // finalization completing, in that order.
+  std::size_t at = first_from(seen, 0, started);
+  at = first_from(seen, at + 1, [](const auto& moved) { return moved.event == Event::Finalize; });
+  at = first_from(seen, at + 1, [&](const auto& moved) {
+    return no_event(moved) && moved.status.input_queue_depth == 0;
+  });
+  at = first_from(seen, at + 1, [](const auto& moved) {
+    return moved.event == Event::FinalizeCompleted && moved.state == State::Active;
+  });
+  EXPECT_LT(at, seen.size());
 }
 
 TEST_P(SessionDispatchContract, CreditReturnedOnceInputStoppedIsNotReported) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  const Bytes frame = patterned_bytes(kFrameBytes, 1);
+  const Bytes frame = patterned_bytes(sizes_of(binding, key).shortest_frame, 1);
   const auto accepted = binding.manager->accept_input(key, frame.size());
   ASSERT_TRUE(accepted.has_value());
   ASSERT_TRUE(accepted->effects.contains(Effect::AcceptInput));
@@ -374,22 +452,26 @@ TEST_P(SessionDispatchContract, CreditReturnedOnceInputStoppedIsNotReported) {
   const auto shown = binding.transitions(key).size();
 
   binding.dispatch().audio(key, frame);
-  ASSERT_TRUE(binding.eventually([&] { return binding.transitions(key).size() > shown; }));
-  const auto returned = binding.transitions(key).at(shown);
-  EXPECT_FALSE(returned.event.has_value());
-  EXPECT_EQ(returned.state, State::Draining);
-  EXPECT_EQ(returned.status.input_credit_bytes.used(), 0U);
+  const auto credit_returned = [](const auto& moved) {
+    return !moved.event.has_value() && moved.status.input_credit_bytes.used() == 0;
+  };
+  ASSERT_TRUE(binding.eventually([&] {
+    const auto seen = binding.transitions(key);
+    return first_from(seen, shown, credit_returned) != seen.size();
+  }));
+  const auto seen = binding.transitions(key);
+  EXPECT_EQ(seen.at(first_from(seen, shown, credit_returned)).state, State::Draining);
   EXPECT_EQ(binding.credit_reports(key), reports);
 }
 
 TEST_P(SessionDispatchContract, HalfCloseFinalizesTheOpenUtteranceThenCloses) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  const Bytes frame = patterned_bytes(kFrameBytes, 1);
+  const Bytes frame = patterned_bytes(sizes_of(binding, key).shortest_frame, 1);
   binding.audio(key, frame);
   ASSERT_TRUE(binding.half_close(key));
   // Input that races a drain is not taken, so it is not handed over.
-  binding.audio(key, patterned_bytes(kFrameBytes, 2));
+  binding.audio(key, patterned_bytes(frame.size(), 2));
   ASSERT_TRUE(
       binding.eventually([&] { return binding.output(key)->metadata_usage().used() != 0; }));
   ASSERT_TRUE(binding.settle());
@@ -403,7 +485,7 @@ TEST_P(SessionDispatchContract, HalfCloseFinalizesTheOpenUtteranceThenCloses) {
 TEST_P(SessionDispatchContract, HalfCloseWithNothingOpenClosesWithoutOutput) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  const Bytes frame = patterned_bytes(kFrameBytes, 1);
+  const Bytes frame = patterned_bytes(sizes_of(binding, key).shortest_frame, 1);
   binding.audio(key, frame);
   binding.finalize(key, 3);
   ASSERT_NO_FATAL_FAILURE(
@@ -429,7 +511,7 @@ TEST_P(SessionDispatchContract, HalfCloseCompletesAcceptedSegmentsThenCloses) {
 TEST_P(SessionDispatchContract, WorkerDrainLeavesTheOpenUtteranceUntranscribed) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  binding.audio(key, patterned_bytes(kFrameBytes, 1));
+  binding.audio(key, patterned_bytes(sizes_of(binding, key).shortest_frame, 1));
   ASSERT_TRUE(binding.manager->apply(key, Event::Drain, worker_shutdown()).has_value());
   EXPECT_TRUE(binding.ends_as(key, State::Closed));
   EXPECT_FALSE(binding.output(key)->take().has_value());
@@ -440,7 +522,7 @@ TEST_P(SessionDispatchContract, WorkerDrainLeavesTheOpenUtteranceUntranscribed) 
 TEST_P(SessionDispatchContract, DrainWaitsForAFinalizeTheManagerAccepted) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  const Bytes frame = patterned_bytes(kFrameBytes, 1);
+  const Bytes frame = patterned_bytes(sizes_of(binding, key).shortest_frame, 1);
   binding.audio(key, frame);
   ASSERT_TRUE(binding.manager->apply(key, Event::Finalize).has_value());
   ASSERT_TRUE(binding.manager->apply(key, Event::Drain, worker_shutdown()).has_value());
@@ -458,7 +540,7 @@ TEST_P(SessionDispatchContract, DrainWaitsForAFinalizeTheManagerAccepted) {
 TEST_P(SessionDispatchContract, HalfCloseDoesNotOvertakeAnAcceptedFinalize) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  const Bytes frame = patterned_bytes(kFrameBytes, 1);
+  const Bytes frame = patterned_bytes(sizes_of(binding, key).shortest_frame, 1);
   binding.audio(key, frame);
   ASSERT_TRUE(binding.manager->apply(key, Event::Finalize).has_value());
   ASSERT_TRUE(binding.half_close(key));
@@ -475,9 +557,10 @@ TEST_P(SessionDispatchContract, HalfCloseDoesNotOvertakeAnAcceptedFinalize) {
 TEST_P(SessionDispatchContract, HalfCloseDoesNotOvertakeAnAcceptedFrame) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  const Bytes audio = patterned_bytes(2 * kFrameBytes, 1);
-  binding.audio(key, std::span{audio}.first(kFrameBytes));
-  const auto accepted = binding.manager->accept_input(key, kFrameBytes);
+  const std::size_t frame_bytes = sizes_of(binding, key).shortest_frame;
+  const Bytes audio = patterned_bytes(2 * frame_bytes, 1);
+  binding.audio(key, std::span{audio}.first(frame_bytes));
+  const auto accepted = binding.manager->accept_input(key, frame_bytes);
   ASSERT_TRUE(accepted.has_value());
   ASSERT_TRUE(accepted->effects.contains(Effect::AcceptInput));
   ASSERT_TRUE(binding.half_close(key));
@@ -486,7 +569,7 @@ TEST_P(SessionDispatchContract, HalfCloseDoesNotOvertakeAnAcceptedFrame) {
   EXPECT_EQ(binding.output(key)->last_sequence(), 0U);
   EXPECT_EQ(binding.output(key)->metadata_usage().used(), 0U);
 
-  binding.dispatch().audio(key, std::span{audio}.subspan(kFrameBytes));
+  binding.dispatch().audio(key, std::span{audio}.subspan(frame_bytes));
   ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::HalfClose, 1, 0, audio, 0));
   EXPECT_TRUE(binding.ends_as(key, State::Closed));
   EXPECT_FALSE(binding.output(key)->take().has_value());
@@ -528,19 +611,90 @@ TEST_P(SessionDispatchContract, DrainWaitsForInputTheManagerAccepted) {
 TEST_P(SessionDispatchContract, TheLongestUtteranceIsEndedByAnAutomaticEndpoint) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  const std::size_t longest = longest_utterance_bytes(binding.terms(key));
-  // The last frame straddles the limit: what is over starts the next one.
-  const std::size_t over = kLongFrameBytes - longest % kLongFrameBytes;
-  const Bytes audio = patterned_bytes(longest + over, 3);
-  ASSERT_TRUE(binding.audio_paced(key, audio, kLongFrameBytes));
+  const AudioSizes sizes = sizes_of(binding, key);
+  const std::size_t longest = sizes.longest_utterance;
+  // Whole frames, one of which straddles the limit: what is over starts the
+  // next utterance. A first frame of the shortest moves the frame boundaries
+  // off the limit where they would meet it.
+  const std::size_t lead = longest % sizes.longest_frame == 0 ? sizes.shortest_frame : 0;
+  ASSERT_NE((longest - lead) % sizes.longest_frame, 0U);
+  const std::size_t whole = ((longest - lead) / sizes.longest_frame + 1) * sizes.longest_frame;
+  const Bytes audio = patterned_bytes(lead + whole, 3);
+  if (lead != 0) {
+    binding.audio(key, std::span{audio}.first(lead));
+  }
+  ASSERT_TRUE(binding.audio_paced(key, std::span{audio}.subspan(lead), sizes.longest_frame));
   ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0,
                                                std::span{audio}.first(longest), 0));
   EXPECT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Active; }));
 
   binding.finalize(key, 4);
-  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2, longest / 2,
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2,
+                                               longest / sizes.sample,
                                                std::span{audio}.subspan(longest), 4));
   EXPECT_EQ(binding.live_state(key), State::Active);
+}
+
+// The finalization an automatic endpoint starts is the dispatch's own: no
+// hand-over follows it, so a drain must not wait for one.
+TEST_P(SessionDispatchContract, AnAutomaticEndpointOwesNoHandOver) {
+  Binding binding(GetParam());
+  const auto key = binding.open_audio();
+  const Bytes audio = patterned_bytes(sizes_of(binding, key).longest_utterance, 3);
+  ASSERT_TRUE(binding.audio_in_long_frames(key, audio));
+  ASSERT_TRUE(binding.eventually([&] { return shown(binding, key, Event::AutomaticEndpoint); }));
+  ASSERT_TRUE(binding.manager->apply(key, Event::Drain, worker_shutdown()).has_value());
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0, audio, 0));
+  EXPECT_TRUE(binding.ends_as(key, State::Closed));
+  EXPECT_FALSE(binding.output(key)->take().has_value());
+}
+
+// An automatic endpoint raised while the finalization of an earlier one is
+// running joins it: the two utterances are completed by one report.
+TEST_P(SessionDispatchContract, AnEndpointDuringAnEndpointsFinalizationJoinsIt) {
+  Binding binding(GetParam());
+  const auto key = binding.open_audio();
+  const AudioSizes sizes = sizes_of(binding, key);
+  const std::size_t longest = sizes.longest_utterance;
+  const Bytes audio = patterned_bytes(2 * longest, 6);
+  binding.under_test->hold_jobs();
+  ASSERT_TRUE(binding.audio_in_long_frames(key, audio));
+  ASSERT_TRUE(binding.eventually([&] {
+    const auto seen = binding.transitions(key);
+    return std::count_if(seen.begin(), seen.end(), [](const auto& moved) {
+             return moved.event == Event::AutomaticEndpoint;
+           }) >= 2;
+  }));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Finalizing);
+
+  binding.under_test->release_jobs();
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0,
+                                               std::span{audio}.first(longest), 0));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 2,
+                                               longest / sizes.sample,
+                                               std::span{audio}.subspan(longest), 0));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Active);
+  EXPECT_FALSE(binding.output(key)->take().has_value());
+}
+
+// The last frame of the longest utterance and the client's Finalize are
+// worked on in either order: the endpoint joins the Finalize's finalization
+// or the Finalize takes the endpoint's over.
+TEST_P(SessionDispatchContract, AFinalizeRightAfterTheLongestUtteranceIsCompletedOnce) {
+  Binding binding(GetParam());
+  const auto key = binding.open_audio();
+  const AudioSizes sizes = sizes_of(binding, key);
+  const Bytes audio = patterned_bytes(sizes.longest_utterance, 8);
+  ASSERT_TRUE(binding.audio_in_long_frames(key, audio));
+  binding.finalize(key, 7);
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0, audio, 0));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2,
+                                               audio.size() / sizes.sample, {}, 7));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Active);
+  EXPECT_FALSE(binding.output(key)->take().has_value());
 }
 
 // The manager counts a Finalize that arrives during an automatic endpoint's
@@ -552,6 +706,13 @@ TEST_P(SessionDispatchContract, AFinalizeHandedOverDuringAnEndpointsJobIsComplet
 
 TEST_P(SessionDispatchContract, AFinalizeHandedOverAfterAnEndpointsJobIsCompletedOnce) {
   ASSERT_NO_FATAL_FAILURE(finalize_takes_over(GetParam(), Takeover::AfterTheJobEnds, 0));
+}
+
+// The job ends inside the manager call that applies the Finalize. The
+// synthetic dispatch then reports before it has recorded the Finalize;
+// another dispatch may take either order.
+TEST_P(SessionDispatchContract, AFinalizeAppliedAsAnEndpointsJobEndsIsCompletedOnce) {
+  ASSERT_NO_FATAL_FAILURE(finalize_takes_over(GetParam(), Takeover::AsTheFinalizeIsApplied, 0));
 }
 
 TEST_P(SessionDispatchContract, AFinalizeRacingAnEndpointsJobIsCompletedOnce) {
@@ -566,7 +727,9 @@ TEST_P(SessionDispatchContract, AFinalizeRacingAnEndpointsJobIsCompletedOnce) {
 TEST_P(SessionDispatchContract, AudioAfterAShortFrameFailsDespiteAnAutomaticEndpoint) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  const Bytes short_frame = patterned_bytes(kFrameBytes / 2, 1);
+  const AudioSizes sizes = sizes_of(binding, key);
+  ASSERT_NE(sizes.short_frame, 0U);
+  const Bytes short_frame = patterned_bytes(sizes.short_frame, 1);
   binding.audio(key, short_frame);
   binding.finalize(key, 1);
   ASSERT_NO_FATAL_FAILURE(
@@ -574,18 +737,31 @@ TEST_P(SessionDispatchContract, AudioAfterAShortFrameFailsDespiteAnAutomaticEndp
   EXPECT_EQ(binding.live_state(key), State::Active);
 
   // A short frame completes the longest utterance, which the dispatch ends.
-  const std::size_t longest = longest_utterance_bytes(binding.terms(key));
+  const std::size_t longest = sizes.longest_utterance;
   const Bytes audio = patterned_bytes(longest, 3);
   ASSERT_TRUE(
-      binding.audio_paced(key, std::span{audio}.first(longest - kFrameBytes / 2), kLongFrameBytes));
-  ASSERT_TRUE(binding.audio_paced(key, std::span{audio}.subspan(longest - kFrameBytes / 2),
-                                  kFrameBytes / 2));
+      binding.audio_in_long_frames(key, std::span{audio}.first(longest - sizes.short_frame)));
+  ASSERT_TRUE(binding.audio_paced(key, std::span{audio}.subspan(longest - sizes.short_frame),
+                                  sizes.short_frame));
   ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 2,
-                                               short_frame.size() / 2, audio, 0));
-  binding.audio(key, patterned_bytes(kFrameBytes, 4));
+                                               short_frame.size() / sizes.sample, audio, 0));
+  binding.audio(key, patterned_bytes(sizes.shortest_frame, 4));
   ASSERT_TRUE(binding.ends_as(key, State::Failed));
   EXPECT_EQ(binding.manager->tombstone(key)->reason, "short_frame_not_last");
   EXPECT_EQ(binding.manager->held_slots(), 0U);
+}
+
+TEST_P(SessionDispatchContract, AShortFrameIsValidBeforeAHalfClose) {
+  Binding binding(GetParam());
+  const auto key = binding.open_audio();
+  const AudioSizes sizes = sizes_of(binding, key);
+  ASSERT_NE(sizes.short_frame, 0U);
+  const Bytes audio = patterned_bytes(sizes.shortest_frame + sizes.short_frame, 1);
+  binding.audio(key, std::span{audio}.first(sizes.shortest_frame));
+  binding.audio(key, std::span{audio}.subspan(sizes.shortest_frame));
+  ASSERT_TRUE(binding.half_close(key));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::HalfClose, 1, 0, audio, 0));
+  EXPECT_TRUE(binding.ends_as(key, State::Closed));
 }
 
 // A Finalize repeated while one is running changes nothing, so the binding
@@ -593,7 +769,7 @@ TEST_P(SessionDispatchContract, AudioAfterAShortFrameFailsDespiteAnAutomaticEndp
 TEST_P(SessionDispatchContract, ARepeatedFinalizeIsNotHandedOver) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  const Bytes frame = patterned_bytes(kFrameBytes, 1);
+  const Bytes frame = patterned_bytes(sizes_of(binding, key).shortest_frame, 1);
   binding.under_test->hold_jobs();
   binding.audio(key, frame);
   binding.finalize(key, 1);
@@ -610,7 +786,7 @@ TEST_P(SessionDispatchContract, ARepeatedFinalizeIsNotHandedOver) {
 TEST_P(SessionDispatchContract, CancelIsReleasedAndTheSessionForgotten) {
   Binding binding(GetParam());
   const auto key = binding.open_text();
-  binding.text(key, 1, text_of(1'000));
+  binding.text(key, 1, overflowing_text(binding, key));
   ASSERT_TRUE(binding.eventually([&] { return binding.held_sessions() == 1; }));
   ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
   EXPECT_TRUE(binding.ends_as(key, State::Closed));
@@ -625,13 +801,58 @@ TEST_P(SessionDispatchContract, CancelIsReleasedAndTheSessionForgotten) {
   EXPECT_FALSE(binding.output(key)->take().has_value());
 }
 
+TEST_P(SessionDispatchContract, CallsForASessionNeverOpenedAreIgnored) {
+  Binding binding(GetParam());
+  const auto opened = binding.open_audio();
+  const std::uint64_t unknown = opened + 100;
+  binding.dispatch().audio(unknown, patterned_bytes(sizes_of(binding, opened).shortest_frame, 1));
+  binding.dispatch().text_segment(unknown, 1, "hi");
+  binding.dispatch().finalize(unknown, 3);
+  binding.dispatch().output_delivered(unknown, OutputKind::Result);
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.held_sessions(), 1U);
+  EXPECT_EQ(binding.manager->held_slots(), 1U);
+  // The session that was opened is not disturbed.
+  binding.finalize(opened, 2);
+  ASSERT_NO_FATAL_FAILURE(
+      binding.expect_final(opened, EndpointReason::ClientFinalize, 1, 0, {}, 2));
+}
+
+// The binding's lifecycle messages and the dispatch's output enter one queue
+// from two threads, each waking the stream's writer.
+TEST_P(SessionDispatchContract, LifecycleMessagesAndTaskOutputShareTheQueue) {
+  Binding binding(GetParam());
+  const auto key = binding.open_text();
+  const std::string text = overflowing_text(binding, key);
+  const std::size_t chunk = chunk_bytes(binding.terms(key));
+  constexpr std::uint64_t kMessages = 64;
+  binding.text(key, 1, text);
+  // The dispatch holds a chunk the queue had no room for, so each read below
+  // makes it offer while the other thread offers too.
+  ASSERT_TRUE(
+      binding.eventually([&] { return binding.output(key)->pcm_usage().available() < chunk; }));
+  bool queued = true;
+  std::thread lifecycle([&] {
+    for (std::uint64_t message = 0; message < kMessages; ++message) {
+      queued = queued && binding.lifecycle(key, 16);
+      std::this_thread::yield();
+    }
+  });
+  ASSERT_NO_FATAL_FAILURE(binding.expect_segment(key, 1, text));
+  lifecycle.join();
+  ASSERT_TRUE(queued);
+  // What is left is lifecycle only, and a wake-up that finds nothing ends it.
+  EXPECT_FALSE(binding.read(key, 50ms).has_value());
+  EXPECT_EQ(binding.lifecycle_read(key), kMessages);
+}
+
 TEST_P(SessionDispatchContract, CancelWithAJobHeldIsReleasedOnceTheJobEnds) {
   Binding binding(GetParam());
   const auto text_key = binding.open_text();
   const auto audio_key = binding.open_audio();
   binding.under_test->hold_jobs();
   binding.text(text_key, 1, "hello world");
-  binding.audio(audio_key, patterned_bytes(kFrameBytes, 1));
+  binding.audio(audio_key, patterned_bytes(sizes_of(binding, audio_key).shortest_frame, 1));
   binding.finalize(audio_key, 2);
   ASSERT_TRUE(binding.settle());
   ASSERT_TRUE(binding.manager->apply(text_key, Event::Cancel).has_value());
@@ -652,7 +873,7 @@ TEST_P(SessionDispatchContract, CallsReturnWhileAJobIsHeld) {
   Binding binding(GetParam());
   const auto text_key = binding.open_text();
   const auto audio_key = binding.open_audio();
-  const Bytes frame = patterned_bytes(kFrameBytes, 1);
+  const Bytes frame = patterned_bytes(sizes_of(binding, audio_key).shortest_frame, 1);
   binding.under_test->hold_jobs();
   binding.text(text_key, 1, "hello");
   ASSERT_TRUE(binding.settle());
@@ -685,7 +906,7 @@ TEST_P(SessionDispatchContract, CallsReturnWhileAJobIsHeld) {
 TEST_P(SessionDispatchContract, ATimeoutFromTheTimerThreadIsCleanedUp) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  binding.audio(key, patterned_bytes(kFrameBytes, 1));
+  binding.audio(key, patterned_bytes(sizes_of(binding, key).shortest_frame, 1));
   ASSERT_TRUE(binding.eventually([&] { return binding.held_sessions() == 1; }));
   // No client is heard and no call is made: only the timer acts.
   binding.clock.advance(SessionLimits::defaults().idle_timeout() + 1s);
@@ -700,7 +921,7 @@ TEST_P(SessionDispatchContract, ATimeoutFromTheTimerThreadIsCleanedUp) {
 TEST_P(SessionDispatchContract, AHandOverThatNeverArrivesEndsByTheFinalizeDeadline) {
   Binding binding(GetParam());
   const auto key = binding.open_audio();
-  binding.audio(key, patterned_bytes(kFrameBytes, 1));
+  binding.audio(key, patterned_bytes(sizes_of(binding, key).shortest_frame, 1));
   const auto accepted = binding.manager->apply(key, Event::Finalize);
   ASSERT_TRUE(accepted.has_value());
   ASSERT_TRUE(accepted->effects.contains(Effect::StartFinalize));
@@ -722,7 +943,7 @@ TEST_P(SessionDispatchContract, AFailedSessionWithOutputHeldIsReleased) {
   Binding binding(GetParam());
   const auto key = binding.open_text();
   const std::size_t chunk = chunk_bytes(binding.terms(key));
-  binding.text(key, 1, text_of(1'000));
+  binding.text(key, 1, overflowing_text(binding, key));
   // The queue is full and the dispatch keeps what it could not offer.
   ASSERT_TRUE(
       binding.eventually([&] { return binding.output(key)->pcm_usage().available() < chunk; }));
@@ -759,10 +980,11 @@ TEST_P(SessionDispatchContract, CleanupIsAcknowledgedForASessionThatNeverOpenedH
 TEST_P(SessionDispatchContract, InputOfTheWrongKindFailsTheSession) {
   Binding binding(GetParam());
   const auto text_key = binding.open_text();
-  binding.dispatch().audio(text_key, patterned_bytes(kFrameBytes, 1));
+  const auto audio_key = binding.open_audio();
+  binding.dispatch().audio(text_key,
+                           patterned_bytes(sizes_of(binding, audio_key).shortest_frame, 1));
   EXPECT_TRUE(binding.ends_as(text_key, State::Failed));
 
-  const auto audio_key = binding.open_audio();
   binding.dispatch().text_segment(audio_key, 1, "hi");
   EXPECT_TRUE(binding.ends_as(audio_key, State::Failed));
 }
@@ -778,7 +1000,7 @@ TEST_P(SessionDispatchContract, StopEndsReportsAndCallsAfterItAreIgnored) {
   binding.dispatch().stop();
 
   // No thread is left to report or offer, and every call still returns.
-  binding.audio(audio_key, patterned_bytes(kFrameBytes, 1));
+  binding.audio(audio_key, patterned_bytes(sizes_of(binding, audio_key).shortest_frame, 1));
   binding.finalize(audio_key, 1);
   binding.text(text_key, 1, "hi");
   binding.dispatch().output_delivered(text_key, OutputKind::Audio);
@@ -797,7 +1019,7 @@ TEST_P(SessionDispatchContract, CancelRacingDeliveryAlwaysReleases) {
   for (int round = 0; round < 40; ++round) {
     Binding binding(GetParam());
     const auto key = binding.open_text();
-    binding.text(key, 1, text_of(1'000));
+    binding.text(key, 1, overflowing_text(binding, key));
     std::thread reader([&] {
       for (int reads = 0; reads < 20 + round * 4; ++reads) {
         if (!binding.read(key, 50ms)) {
@@ -816,7 +1038,9 @@ TEST_P(SessionDispatchContract, CancelRacingDeliveryAlwaysReleases) {
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(Synthetic, SessionDispatchContract, ::testing::Values(&synthetic));
+INSTANTIATE_TEST_SUITE_P(Synthetic, SessionDispatchContract,
+                         ::testing::Values(DispatchCase{"synthetic", &synthetic}),
+                         SessionDispatchContract::name_of);
 
 TEST(SyntheticSessionDispatch, NegotiateGrantsTermsOrRefusesBeforeAdmission) {
   Binding binding(&synthetic);
@@ -949,10 +1173,10 @@ TEST(SyntheticSessionDispatch, ACompletionAppliedBeforeAFinalizeWasShownAnswersI
   Binding binding(&synthetic);
   Fake& fake = fake_of(binding);
   const auto key = binding.open_audio();
-  const std::size_t longest = longest_utterance_bytes(binding.terms(key));
+  const std::size_t longest = sizes_of(binding, key).longest_utterance;
   const Bytes audio = patterned_bytes(longest + kFrameBytes, 5);
   fake.pause(Fake::Gate::InJob);
-  ASSERT_TRUE(binding.audio_paced(key, std::span{audio}.first(longest), kLongFrameBytes));
+  ASSERT_TRUE(binding.audio_in_long_frames(key, std::span{audio}.first(longest)));
   ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Finalizing; }));
   ASSERT_TRUE(binding.settle());
 
@@ -974,14 +1198,141 @@ TEST(SyntheticSessionDispatch, ACompletionAppliedBeforeAFinalizeWasShownAnswersI
   EXPECT_EQ(binding.live_state(key), State::Active);
 }
 
-// Only a client's Finalize is handed over: the finalization an automatic
-// endpoint starts must not keep a drain waiting for one.
-TEST(SyntheticSessionDispatch, AnAutomaticEndpointOwesNoHandOver) {
+// The binding's hook runs before the dispatch is shown the transition: a job
+// released from it is reported before the Finalize is recorded, so the
+// session is active again although the Finalize was not handed over.
+TEST(SyntheticSessionDispatch, AJobReleasedFromTheSinkHookIsReportedBeforeTheFinalizeIsRecorded) {
   Binding binding(&synthetic);
   const auto key = binding.open_audio();
-  ASSERT_TRUE(binding.manager->apply(key, Event::AutomaticEndpoint).has_value());
-  ASSERT_TRUE(binding.manager->apply(key, Event::Drain, worker_shutdown()).has_value());
-  EXPECT_TRUE(binding.ends_as(key, State::Closed));
+  const AudioSizes sizes = sizes_of(binding, key);
+  const Bytes audio = patterned_bytes(sizes.longest_utterance, 5);
+  binding.under_test->hold_jobs();
+  ASSERT_TRUE(binding.audio_in_long_frames(key, audio));
+  ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Finalizing; }));
+  ASSERT_TRUE(binding.settle());
+
+  binding.before_next(key, Event::Finalize, [&] { binding.under_test->release_jobs(); });
+  ASSERT_TRUE(binding.manager->apply(key, Event::Finalize).has_value());
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0, audio, 0));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Active);
+
+  binding.dispatch().finalize(key, 7);
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2,
+                                               audio.size() / sizes.sample, {}, 7));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Active);
+}
+
+// The last frame of the longest utterance is worked on after the manager
+// applied the client's Finalize, so the endpoint it raises joins that
+// finalization.
+TEST(SyntheticSessionDispatch, AnEndpointRaisedDuringAFinalizesFinalizationJoinsIt) {
+  Binding binding(&synthetic);
+  Fake& fake = fake_of(binding);
+  const auto key = binding.open_audio();
+  const AudioSizes sizes = sizes_of(binding, key);
+  const Bytes audio = patterned_bytes(sizes.longest_utterance, 9);
+  const std::size_t head = audio.size() - kFrameBytes;
+  ASSERT_TRUE(binding.audio_in_long_frames(key, std::span{audio}.first(head)));
+  ASSERT_TRUE(binding.settle());
+  fake.pause(Fake::Gate::BeforeWork);
+  binding.audio(key, std::span{audio}.subspan(head));
+  binding.finalize(key, 7);
+  EXPECT_FALSE(shown(binding, key, Event::AutomaticEndpoint));
+  fake.resume();
+
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0, audio, 0));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2,
+                                               audio.size() / sizes.sample, {}, 7));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Active);
+  const auto seen = binding.transitions(key);
+  const std::size_t asked =
+      first_from(seen, 0, [](const auto& moved) { return moved.event == Event::Finalize; });
+  const std::size_t joined = first_from(
+      seen, asked + 1, [](const auto& moved) { return moved.event == Event::AutomaticEndpoint; });
+  ASSERT_LT(joined, seen.size());
+  EXPECT_EQ(seen[joined].state, State::Finalizing);
+}
+
+// What the binding's own pacing leaves for a last frame must not be a short
+// frame in the middle of the audio.
+TEST(SyntheticSessionDispatch, LongFramesEndOnAFrameTheTermsGrant) {
+  Binding binding(&synthetic);
+  const auto key = binding.open_audio();
+  const AudioSizes sizes = sizes_of(binding, key);
+  const Bytes audio = patterned_bytes(2 * sizes.longest_frame + sizes.short_frame, 1);
+  const Bytes more = patterned_bytes(kFrameBytes, 2);
+  ASSERT_TRUE(binding.audio_in_long_frames(key, audio));
+  binding.audio(key, more);
+  binding.finalize(key, 1);
+  Bytes all = audio;
+  all.insert(all.end(), more.begin(), more.end());
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 1, 0, all, 1));
+}
+
+TEST(SyntheticSessionDispatch, InputOfTheWrongKindIsRefusedAsSuch) {
+  Binding binding(&synthetic);
+  const auto text_key = binding.open_text();
+  binding.dispatch().audio(text_key, patterned_bytes(kFrameBytes, 1));
+  ASSERT_TRUE(binding.ends_as(text_key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(text_key)->reason, "wrong_input_kind");
+
+  const auto audio_key = binding.open_audio();
+  binding.dispatch().text_segment(audio_key, 1, "hi");
+  ASSERT_TRUE(binding.ends_as(audio_key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(audio_key)->reason, "wrong_input_kind");
+}
+
+// wait_idle() is what gives a negative assertion after settle() its meaning:
+// a command taken off the queue and still being handled is not idle.
+TEST(SyntheticSessionDispatch, ACommandBeingHandledIsNotIdle) {
+  Binding binding(&synthetic);
+  Fake& fake = fake_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes frame = patterned_bytes(kFrameBytes, 1);
+  ASSERT_TRUE(binding.settle());
+  const auto accepted = binding.manager->accept_input(key, frame.size());
+  ASSERT_TRUE(accepted.has_value());
+  ASSERT_TRUE(accepted->effects.contains(Effect::AcceptInput));
+  ASSERT_TRUE(binding.settle());
+
+  // The initialize hook holds the manager's serialized section, which the
+  // frame's credit return waits for.
+  const auto terms = fake.negotiate(binding.under_test->text_request()).value();
+  bool idle_inside = true;
+  const auto opened = binding.manager->open(Binding::kGeneration, budgets_for(terms).value(),
+                                            [&](std::uint64_t other) {
+                                              fake.audio(key, frame);
+                                              idle_inside = fake.wait_idle(50ms);
+                                              return fake.open_session(other, terms);
+                                            });
+  ASSERT_TRUE(opened.has_value());
+  EXPECT_FALSE(idle_inside);
+  EXPECT_TRUE(fake.wait_idle(Binding::kPatience));
+  EXPECT_EQ(binding.manager->status(key).value().input_credit_bytes.used(), 0U);
+}
+
+TEST(SyntheticSessionDispatch, StopWakesAWaitForIdle) {
+  Binding binding(&synthetic);
+  Fake& fake = fake_of(binding);
+  const auto key = binding.open_audio();
+  ASSERT_TRUE(binding.settle());
+  fake.pause(Fake::Gate::BeforeWork);
+  binding.audio(key, patterned_bytes(kFrameBytes, 1));
+  ASSERT_FALSE(fake.wait_idle(50ms));
+
+  std::promise<bool> idle;
+  auto woken = idle.get_future();
+  std::thread waiter([&] { idle.set_value(fake.wait_idle(2 * Binding::kPatience)); });
+  // The waiter is, as far as a test can tell, asleep on the parked command.
+  std::this_thread::sleep_for(50ms);
+  fake.stop();
+  const bool prompt = woken.wait_for(Binding::kPatience) == std::future_status::ready;
+  waiter.join();
+  ASSERT_TRUE(prompt);
+  EXPECT_TRUE(woken.get());
 }
 
 TEST(SyntheticSessionDispatch, ResumeKeepsTheOrderOfWhatWasHeld) {

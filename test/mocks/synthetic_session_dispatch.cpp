@@ -109,6 +109,7 @@ void SyntheticSessionDispatch::stop() noexcept {
     commands_.clear();
   }
   cv_.notify_all();
+  idle_cv_.notify_all();
   std::call_once(joined_, [this] { worker_.join(); });
 }
 

@@ -11,10 +11,12 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <ostream>
 #include <span>
 #include <string>
 #include <string_view>
@@ -55,10 +57,21 @@ class DispatchUnderTest {
   /// From now until release_jobs(), a job that has started does not
   /// complete.
   virtual void hold_jobs() = 0;
+  /// Returns without waiting on the manager: a case calls it from the sink.
   virtual void release_jobs() = 0;
 };
 
 using DispatchFactory = std::unique_ptr<DispatchUnderTest> (*)(const SchedulerClock&);
+
+/// One dispatch the contract suite runs against, named in its test names.
+struct DispatchCase {
+  const char* name;
+  DispatchFactory make;
+};
+
+inline void PrintTo(const DispatchCase& dispatch, std::ostream* out) {
+  *out << dispatch.name;
+}
 
 /// `bytes` of input that differ from one `seed` to the next.
 [[nodiscard]] inline std::vector<std::byte> patterned_bytes(std::size_t bytes, unsigned seed) {
@@ -81,6 +94,7 @@ class ReferenceBinding {
   static constexpr std::uint64_t kGeneration = 5;
   static constexpr std::chrono::seconds kPatience{5};
 
+  explicit ReferenceBinding(const DispatchCase& dispatch) : ReferenceBinding(dispatch.make) {}
   explicit ReferenceBinding(DispatchFactory factory)
       : under_test(factory(clock)),
         manager(
@@ -159,6 +173,32 @@ class ReferenceBinding {
     return true;
   }
 
+  /// audio_paced() in the longest frames granted. What would be left for a
+  /// last frame shorter than the shortest goes into the first instead.
+  [[nodiscard]] bool audio_in_long_frames(std::uint64_t key,
+                                          std::span<const std::byte> audio_bytes) {
+    const auto granted = terms(key);
+    const auto bytes_of = [&](std::chrono::milliseconds duration) {
+      return static_cast<std::size_t>(granted.audio_format.bytes_per_second() *
+                                      static_cast<std::uint64_t>(duration.count()) / 1000);
+    };
+    const std::size_t shortest = bytes_of(granted.min_frame);
+    const std::size_t longest = bytes_of(granted.max_frame);
+    // Moving bytes to the first frame must not make the last one short.
+    if (longest < 2 * shortest || longest == 0) {
+      return false;
+    }
+    const std::size_t left = audio_bytes.size() % longest;
+    if (left != 0 && left < shortest && audio_bytes.size() > longest) {
+      const std::size_t first = left + shortest;
+      if (!audio_paced(key, audio_bytes.first(first), first)) {
+        return false;
+      }
+      audio_bytes = audio_bytes.subspan(first);
+    }
+    return audio_paced(key, audio_bytes, longest);
+  }
+
   void text(std::uint64_t key, std::uint64_t segment_id, std::string text) {
     const auto accepted = manager->accept_input(key, text.size());
     if (accepted && accepted->effects.contains(Effect::AcceptInput)) {
@@ -177,6 +217,16 @@ class ReferenceBinding {
   [[nodiscard]] bool half_close(std::uint64_t key) {
     ends_utterance(key);
     return manager->apply(key, Event::HalfClose).has_value();
+  }
+
+  /// Runs `hook` once, in the sink call of the next transition `event`
+  /// causes for `key`, before the dispatch is shown it. The manager's
+  /// serialized section is held there: `hook` must not call the manager.
+  void before_next(std::uint64_t key, Event event, std::function<void()> hook) {
+    const std::lock_guard guard(mu);
+    hooked_key = key;
+    hooked_event = event;
+    sink_hook = std::move(hook);
   }
 
   std::shared_ptr<serving::BoundedOutputQueue> output(std::uint64_t key) {
@@ -201,29 +251,56 @@ class ReferenceBinding {
     return streams[key].credit_reports;
   }
 
+  /// Queues a lifecycle message of `bytes`, as a binding does from its sink.
+  /// False if the queue never has room for it.
+  [[nodiscard]] bool lifecycle(std::uint64_t key, std::uint64_t bytes) {
+    const auto queue = output(key);
+    serving::OutputItem item{serving::OutputKind::Control, bytes, 0,
+                             std::make_unique<serving::OutputBody>()};
+    return eventually([&] {
+      const auto offered = queue->offer(item, clock.now());
+      return offered && *offered == serving::OutputOffer::Queued;
+    });
+  }
+
+  /// Lifecycle messages read() delivered for `key` on its way to task output.
+  std::uint64_t lifecycle_read(std::uint64_t key) {
+    const std::lock_guard guard(mu);
+    return streams[key].lifecycle_read;
+  }
+
   /// The next task output the peer reads, confirmed delivered; none if the
-  /// stream stays silent for `patience`.
+  /// stream stays silent for `patience`. One reader a session, as a stream
+  /// has one writer.
   std::optional<serving::TaskOutput> read(std::uint64_t key,
                                           std::chrono::milliseconds patience = kPatience) {
     const auto queue = output(key);
-    std::optional<serving::SequencedOutput> message;
-    const bool taken = eventually(
-        [&] {
-          message = queue->take();
-          return message.has_value();
-        },
-        patience);
-    if (!taken) {
-      return std::nullopt;
+    for (;;) {
+      std::optional<serving::SequencedOutput> message;
+      const bool taken = eventually(
+          [&] {
+            message = queue->take();
+            return message.has_value();
+          },
+          patience);
+      if (!taken) {
+        return std::nullopt;
+      }
+      EXPECT_TRUE(queue->delivered(message->sequence, clock.now()));
+      dispatch().output_delivered(key, message->item.kind);
+      wake->changed();
+      if (message->item.kind == serving::OutputKind::Control) {
+        const std::lock_guard guard(mu);
+        ++streams[key].lifecycle_read;
+        continue;
+      }
+      auto* body = dynamic_cast<serving::TaskOutputBody*>(message->item.body.get());
+      if (body == nullptr) {
+        ADD_FAILURE() << "an item that is not task output";
+        return std::nullopt;
+      }
+      return std::move(body->output);
     }
-    EXPECT_TRUE(queue->delivered(message->sequence, clock.now()));
-    dispatch().output_delivered(key, message->item.kind);
-    auto* body = dynamic_cast<serving::TaskOutputBody*>(message->item.body.get());
-    if (body == nullptr) {
-      ADD_FAILURE() << "an item that is not task output";
-      return std::nullopt;
-    }
-    return std::move(body->output);
   }
 
   template <typename Output>
@@ -352,10 +429,21 @@ class ReferenceBinding {
     /// The credit last reported to the peer.
     serving::LogicalSessionUsage credit;
     std::uint64_t credit_reports = 0;
+    std::uint64_t lifecycle_read = 0;
     bool short_frame_sent = false;
   };
 
   void sink(const serving::ManagedSessionTransition& transition) {
+    std::function<void()> hook;
+    {
+      const std::lock_guard guard(mu);
+      if (sink_hook && transition.session_key == hooked_key && transition.event == hooked_event) {
+        hook = std::exchange(sink_hook, nullptr);
+      }
+    }
+    if (hook) {
+      hook();
+    }
     dispatch().on_transition(transition);
     bool first = false;
     {
@@ -384,6 +472,9 @@ class ReferenceBinding {
   std::shared_ptr<Wake> wake = std::make_shared<Wake>();
   std::mutex mu;
   std::map<std::uint64_t, Stream> streams;
+  std::uint64_t hooked_key = 0;
+  std::optional<Event> hooked_event;
+  std::function<void()> sink_hook;
 
  public:
   FakeSchedulerClock clock;
@@ -394,5 +485,11 @@ class ReferenceBinding {
 
 /// The cases every SessionDispatch passes. A test binary instantiates the
 /// suite once per dispatch it builds.
-class SessionDispatchContract : public ::testing::TestWithParam<DispatchFactory> {};
+class SessionDispatchContract : public ::testing::TestWithParam<DispatchCase> {
+ public:
+  /// The name generator an instantiation passes.
+  static std::string name_of(const ::testing::TestParamInfo<DispatchCase>& info) {
+    return info.param.name;
+  }
+};
 }  // namespace tensorplate::testing
