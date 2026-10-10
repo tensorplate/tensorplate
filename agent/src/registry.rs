@@ -8,7 +8,7 @@
 //! The deploy coordinator and startup recovery reach it through
 //! [`WorkerControl`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
+use tensorplate_protocol::agent_state::ErrorRecord;
 use tensorplate_protocol::worker_control::{CandidateRef, MemberRef};
 
 use crate::config::AgentConfig;
@@ -25,7 +26,7 @@ use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
 use crate::supervision::{MonotonicClock, SystemMonotonicClock};
 use crate::worker::{
-    forward_stderr, get_health_json, send_sigterm, spawn_with_control, startup_error,
+    forward_stderr, get_health_json, send_sigterm, spawn_with_control, startup_error, MemberEvent,
     WorkerControl, WorkerReadiness, WorkerStderr, WorkerStderrSink,
 };
 
@@ -78,7 +79,7 @@ pub trait MemberProcess: Send {
     /// Returns [`AgentError::Io`] when the process cannot be inspected.
     fn exited(&mut self) -> AgentResult<bool>;
 
-    /// Why a process that exited while loading did so.
+    /// Why a process that exited did so.
     fn startup_failure(&mut self) -> AgentError;
 
     fn control(&self) -> ControlContact;
@@ -136,6 +137,8 @@ struct Member {
     port: u16,
     config_path: PathBuf,
     process: Box<dyn MemberProcess>,
+    /// What this generation was started from, to start its successor.
+    recipe: CandidateRef,
 }
 
 #[derive(Default)]
@@ -143,6 +146,63 @@ struct Members {
     by_generation: BTreeMap<u64, Member>,
     serving: Option<u64>,
     candidate: Option<u64>,
+    /// The candidate's deploy gave up on it; it is not promoted any more.
+    candidate_abandoned: bool,
+    /// Calls to `prepare` that have not returned.
+    preparing: usize,
+    restart: Restart,
+    /// When each restart inside [`RESTART_WINDOW`] was made, oldest first.
+    restarts: VecDeque<Instant>,
+    stopping: bool,
+}
+
+/// What the registry owes the deployment that was serving.
+#[derive(Default)]
+enum Restart {
+    /// Nothing: the serving member, if any, was promoted or came back.
+    #[default]
+    Idle,
+    /// The serving generation stopped; its successor starts once `due` passes.
+    Due {
+        recipe: CandidateRef,
+        port: u16,
+        due: Instant,
+    },
+    /// The supervision step is working on the member outside the lock.
+    InHand { deployment_id: String, port: u16 },
+    /// The successor holds the serving slot and has until `deadline` to be
+    /// ready.
+    Loading {
+        deadline: Instant,
+        probe_at: Instant,
+    },
+    /// Restarts are used up; nothing is started until a promotion.
+    Failed {
+        deployment_id: String,
+        error: ErrorRecord,
+    },
+}
+
+/// Why the supervision step took the serving generation out of service.
+enum Cause {
+    Exited,
+    ContactLost,
+    NotReady,
+}
+
+/// Counts one running `prepare` until it is dropped.
+struct Preparing<'a>(&'a MemberRegistry);
+
+impl Drop for Preparing<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut members) = self.0.inner.lock() {
+            members.preparing = members.preparing.saturating_sub(1);
+        }
+    }
+}
+
+fn stopping() -> AgentError {
+    AgentError::WorkerControl("the agent is stopping; no serving worker is started".into())
 }
 
 /// The one owner of every serving worker process the agent starts.
@@ -184,7 +244,46 @@ impl MemberRegistry {
 impl Members {
     fn take_candidate(&mut self) -> Option<(u64, Member)> {
         let generation = self.candidate.take()?;
+        self.candidate_abandoned = false;
         Some((generation, self.by_generation.remove(&generation)?))
+    }
+
+    /// Whether a deploy holds the member: it is preparing a candidate, or
+    /// has one it may still promote. No restart starts meanwhile, so a
+    /// promoted generation is never older than the one it replaces.
+    fn held_by_a_deploy(&self) -> bool {
+        self.preparing > 0 || (self.candidate.is_some() && !self.candidate_abandoned)
+    }
+
+    /// The port of the serving member, or of the restart owed to it.
+    fn serving_port(&self) -> Option<u16> {
+        match &self.restart {
+            Restart::Due { port, .. } | Restart::InHand { port, .. } => Some(*port),
+            _ => self
+                .serving
+                .and_then(|generation| self.by_generation.get(&generation))
+                .map(|member| member.port),
+        }
+    }
+
+    fn restart_names(&self, deployment_id: &str) -> bool {
+        match &self.restart {
+            Restart::Due { recipe, .. } => recipe.deployment_id == deployment_id,
+            Restart::InHand {
+                deployment_id: owed,
+                ..
+            }
+            | Restart::Failed {
+                deployment_id: owed,
+                ..
+            } => owed == deployment_id,
+            Restart::Idle | Restart::Loading { .. } => false,
+        }
+    }
+
+    fn forget_restart(&mut self) {
+        self.restart = Restart::Idle;
+        self.restarts.clear();
     }
 
     fn take_serving(&mut self) -> Option<Member> {
@@ -249,14 +348,37 @@ impl MemberRegistry {
             .map_err(|e| AgentError::Internal(format!("member registry mutex poisoned: {e}")))
     }
 
-    /// The port a new candidate binds: the one the serving member is not on.
+    /// The port a new candidate binds: the one the serving member, or the
+    /// restart owed to it, is not on.
     fn candidate_port(&self, members: &Members) -> u16 {
-        let serving = members
-            .serving
-            .and_then(|generation| members.by_generation.get(&generation));
-        match serving.map(|member| member.port) {
+        match members.serving_port() {
             Some(port) if port != self.settings.candidate_port => self.settings.candidate_port,
             _ => self.settings.active_port,
+        }
+    }
+
+    /// Start the next generation of `recipe` on `port`.
+    fn launch(&self, recipe: &CandidateRef, port: u16) -> AgentResult<(u64, Member)> {
+        let generation = (self.generations)()?;
+        let spec = LaunchSpec {
+            member: MemberRef::new(recipe.deployment_id.clone(), generation),
+            config_path: self.render_config(recipe, generation, port)?,
+        };
+        match self.launcher.launch(&spec) {
+            Ok(process) => Ok((
+                generation,
+                Member {
+                    deployment_id: spec.member.deployment_id,
+                    port,
+                    config_path: spec.config_path,
+                    process,
+                    recipe: recipe.clone(),
+                },
+            )),
+            Err(err) => {
+                let _ = fs::remove_file(&spec.config_path);
+                Err(err)
+            }
         }
     }
 
@@ -343,6 +465,9 @@ impl MemberRegistry {
     fn candidate_progress(&self, candidate: &CandidateRef) -> AgentResult<(u16, ControlContact)> {
         let (generation, mut member, exited) = {
             let mut members = self.members()?;
+            if members.stopping {
+                return Err(stopping());
+            }
             let Some(member) = members
                 .candidate
                 .and_then(|generation| members.by_generation.get_mut(&generation))
@@ -378,24 +503,288 @@ impl MemberRegistry {
         )))
     }
 
-    /// Read the serving member, after forgetting one whose process exited.
+    /// Read the serving member while it runs and is ready. One that stopped
+    /// is left for the supervision step.
     fn serving<T>(&self, read: impl FnOnce(&Member) -> T) -> AgentResult<Option<T>> {
         let mut members = self.members()?;
+        if !matches!(members.restart, Restart::Idle) {
+            return Ok(None);
+        }
         let Some(generation) = members.serving else {
             return Ok(None);
         };
-        let exited = match members.by_generation.get_mut(&generation) {
-            Some(member) => member.process.exited()?,
-            None => true,
+        let Some(member) = members.by_generation.get_mut(&generation) else {
+            return Ok(None);
         };
-        if exited {
-            if let Some(member) = members.take_serving() {
-                let _ = fs::remove_file(member.config_path);
-            }
+        if member.process.exited()? {
             return Ok(None);
         }
-        Ok(members.by_generation.get(&generation).map(read))
+        Ok(Some(read(member)))
     }
+
+    fn abandon_candidate(&self, candidate: &CandidateRef) {
+        if let Ok(mut members) = self.members() {
+            if members.names(members.candidate, &candidate.deployment_id) {
+                members.candidate_abandoned = true;
+            }
+        }
+    }
+
+    /// Take a serving generation that stopped out of service and decide
+    /// what follows it; report a restarted one that became ready.
+    fn watch_serving(&self, now: Instant, events: &mut Vec<MemberEvent>) {
+        let (generation, cause) = {
+            let Ok(mut members) = self.members() else {
+                return;
+            };
+            if members.stopping {
+                return;
+            }
+            let loading = match members.restart {
+                Restart::Idle => None,
+                Restart::Loading { deadline, probe_at } => Some((deadline, probe_at)),
+                Restart::Due { .. } | Restart::InHand { .. } | Restart::Failed { .. } => return,
+            };
+            let Some(generation) = members.serving else {
+                return;
+            };
+            let Some(member) = members.by_generation.get_mut(&generation) else {
+                return;
+            };
+            let contact = member.process.control();
+            let cause = if matches!(member.process.exited(), Ok(true)) {
+                Some(Cause::Exited)
+            } else if contact == ControlContact::Failed {
+                Some(Cause::ContactLost)
+            } else if loading.is_some_and(|(deadline, _)| now >= deadline) {
+                Some(Cause::NotReady)
+            } else {
+                None
+            };
+            match (cause, loading) {
+                (Some(cause), _) => (generation, Ok(cause)),
+                (None, Some((deadline, probe_at))) if now >= probe_at => {
+                    let probe = (member.port, member.deployment_id.clone(), contact);
+                    members.restart = Restart::Loading {
+                        deadline,
+                        probe_at: later(now, self.settings.status_poll_interval),
+                    };
+                    (generation, Err(probe))
+                }
+                _ => return,
+            }
+        };
+        match cause {
+            Ok(cause) => self.take_out_of_service(generation, &cause, now, events),
+            Err((port, deployment_id, contact)) => {
+                let ready = contact == ControlContact::Reporting
+                    && matches!(
+                        self.probe.ready_model(port, self.settings.status_poll_interval),
+                        Ok(Some(model)) if model == deployment_id
+                    );
+                let Ok(mut members) = self.members() else {
+                    return;
+                };
+                if ready
+                    && members.serving == Some(generation)
+                    && matches!(members.restart, Restart::Loading { .. })
+                {
+                    members.restart = Restart::Idle;
+                    events.push(MemberEvent::Serving {
+                        member: MemberRef::new(deployment_id, generation),
+                    });
+                }
+            }
+        }
+    }
+
+    fn take_out_of_service(
+        &self,
+        generation: u64,
+        cause: &Cause,
+        now: Instant,
+        events: &mut Vec<MemberEvent>,
+    ) {
+        let mut member = {
+            let Ok(mut members) = self.members() else {
+                return;
+            };
+            if members.stopping || members.serving != Some(generation) {
+                return;
+            }
+            let Some(member) = members.take_serving() else {
+                return;
+            };
+            members.restart = Restart::InHand {
+                deployment_id: member.deployment_id.clone(),
+                port: member.port,
+            };
+            member
+        };
+        let name = format!(
+            "serving worker `{}` generation {generation}",
+            member.deployment_id
+        );
+        let error = match cause {
+            Cause::Exited => member.process.startup_failure(),
+            // A worker that answers no poll would not hear a request to drain.
+            Cause::ContactLost => {
+                member.process.kill();
+                AgentError::WorkerControl(format!("{name} lost its control channel"))
+            }
+            Cause::NotReady => {
+                member.process.kill();
+                AgentError::WorkerControl(format!(
+                    "{name} was restarted and was not ready within {} ms",
+                    self.settings.restart_warm_timeout.as_millis()
+                ))
+            }
+        }
+        .to_record();
+        let _ = fs::remove_file(&member.config_path);
+        events.push(MemberEvent::Stopped {
+            member: MemberRef::new(member.deployment_id.clone(), generation),
+            error: error.clone(),
+        });
+        if let Ok(mut members) = self.members() {
+            events.extend(owe_restart(
+                &mut members,
+                member.recipe,
+                member.port,
+                error,
+                now,
+            ));
+        }
+    }
+
+    /// Start the successor a stopped generation is owed, once its wait is
+    /// over and no deploy holds the member.
+    fn start_owed_restart(&self, now: Instant, events: &mut Vec<MemberEvent>) {
+        let (recipe, port) = {
+            let Ok(mut members) = self.members() else {
+                return;
+            };
+            if members.stopping
+                || members.held_by_a_deploy()
+                || !matches!(members.restart, Restart::Due { due, .. } if now >= due)
+            {
+                return;
+            }
+            let Restart::Due { recipe, port, .. } = std::mem::take(&mut members.restart) else {
+                return;
+            };
+            members.restart = Restart::InHand {
+                deployment_id: recipe.deployment_id.clone(),
+                port,
+            };
+            (recipe, port)
+        };
+        let launched = self.launch(&recipe, port);
+        let mut yielded = None;
+        if let Ok(mut members) = self.members() {
+            let in_hand = !members.stopping
+                && matches!(
+                    &members.restart,
+                    Restart::InHand { deployment_id, .. } if *deployment_id == recipe.deployment_id
+                );
+            match launched {
+                Ok((generation, member)) if in_hand && !members.held_by_a_deploy() => {
+                    members.restarts.push_back(now);
+                    members.by_generation.insert(generation, member);
+                    members.serving = Some(generation);
+                    members.restart = Restart::Loading {
+                        deadline: later(now, self.settings.restart_warm_timeout),
+                        probe_at: now,
+                    };
+                    events.push(MemberEvent::Restarted {
+                        member: MemberRef::new(recipe.deployment_id, generation),
+                    });
+                }
+                // A deploy began, or the member was taken, while this
+                // generation was starting: it yields and is not counted.
+                Ok((_, member)) => {
+                    if in_hand {
+                        members.restart = Restart::Due {
+                            recipe,
+                            port,
+                            due: now,
+                        };
+                    }
+                    yielded = Some(member);
+                }
+                Err(err) if in_hand => {
+                    members.restarts.push_back(now);
+                    let error = err.to_record();
+                    events.push(MemberEvent::LaunchFailed {
+                        deployment_id: recipe.deployment_id.clone(),
+                        error: error.clone(),
+                    });
+                    events.extend(owe_restart(&mut members, recipe, port, error, now));
+                }
+                Err(_) => {}
+            }
+        }
+        self.retire(yielded.into_iter().collect());
+    }
+}
+
+fn later(now: Instant, wait: Duration) -> Instant {
+    now.checked_add(wait).unwrap_or(now)
+}
+
+/// Schedule the successor of a generation that stopped, or fail the member
+/// when its restarts inside the window are used up. Nothing is owed once
+/// the member was promoted over, unloaded or stopped meanwhile.
+fn owe_restart(
+    members: &mut Members,
+    recipe: CandidateRef,
+    port: u16,
+    error: ErrorRecord,
+    now: Instant,
+) -> Option<MemberEvent> {
+    let in_hand = matches!(
+        &members.restart,
+        Restart::InHand { deployment_id, .. } if *deployment_id == recipe.deployment_id
+    );
+    if members.stopping || !in_hand {
+        return None;
+    }
+    while members
+        .restarts
+        .front()
+        .is_some_and(|made| now.saturating_duration_since(*made) >= RESTART_WINDOW)
+    {
+        members.restarts.pop_front();
+    }
+    let deployment_id = recipe.deployment_id.clone();
+    if let Some(&after) = RESTART_DELAYS.get(members.restarts.len()) {
+        members.restart = Restart::Due {
+            recipe,
+            port,
+            due: later(now, after),
+        };
+        return Some(MemberEvent::RestartDue {
+            deployment_id,
+            after,
+        });
+    }
+    let error = ErrorRecord {
+        message: format!(
+            "`{deployment_id}` is not restarted: its {} restarts inside {} s are used up; it last stopped with: {}",
+            RESTART_DELAYS.len(),
+            RESTART_WINDOW.as_secs(),
+            error.message
+        ),
+        ..error
+    };
+    members.restart = Restart::Failed {
+        deployment_id: deployment_id.clone(),
+        error: error.clone(),
+    };
+    Some(MemberEvent::Failed {
+        deployment_id,
+        error,
+    })
 }
 
 impl WorkerControl for MemberRegistry {
@@ -411,38 +800,36 @@ impl WorkerControl for MemberRegistry {
                 candidate.deployment_id
             )));
         }
-        let displaced = self.members()?.take_candidate();
-        self.retire(displaced.map(|(_, member)| member).into_iter().collect());
-
-        let generation = (self.generations)()?;
-        let port = self.candidate_port(&*self.members()?);
-        let spec = LaunchSpec {
-            member: MemberRef::new(candidate.deployment_id.clone(), generation),
-            config_path: self.render_config(candidate, generation, port)?,
-        };
-        let process = match self.launcher.launch(&spec) {
-            Ok(process) => process,
-            Err(err) => {
-                let _ = fs::remove_file(&spec.config_path);
-                return Err(err);
-            }
-        };
-        let member = Member {
-            deployment_id: spec.member.deployment_id,
-            port,
-            config_path: spec.config_path,
-            process,
-        };
-        // The lock was released since the slot was emptied; whatever took it
-        // in between is displaced as well, not forgotten.
         let displaced = {
             let mut members = self.members()?;
-            let displaced = members.take_candidate();
-            members.by_generation.insert(generation, member);
-            members.candidate = Some(generation);
-            displaced
+            if members.stopping {
+                return Err(stopping());
+            }
+            members.preparing += 1;
+            members.take_candidate()
         };
+        let _preparing = Preparing(self);
         self.retire(displaced.map(|(_, member)| member).into_iter().collect());
+
+        let port = self.candidate_port(&*self.members()?);
+        let (generation, member) = self.launch(candidate, port)?;
+        // The lock was released since the slot was emptied; whatever took it
+        // in between is displaced as well, not forgotten.
+        let (displaced, stopped) = {
+            let mut members = self.members()?;
+            if members.stopping {
+                (Some(member), true)
+            } else {
+                let displaced = members.take_candidate();
+                members.by_generation.insert(generation, member);
+                members.candidate = Some(generation);
+                (displaced.map(|(_, member)| member), false)
+            }
+        };
+        self.retire(displaced.into_iter().collect());
+        if stopped {
+            return Err(stopping());
+        }
         Ok(())
     }
 
@@ -463,6 +850,7 @@ impl WorkerControl for MemberRegistry {
             let (port, contact) = self.candidate_progress(candidate)?;
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                self.abandon_candidate(candidate);
                 return last_error.map_or_else(|| Ok(readiness(false)), Err);
             }
             match self.probe.ready_model(port, remaining) {
@@ -491,6 +879,9 @@ impl WorkerControl for MemberRegistry {
     fn promote(&self, _transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
         let retired = {
             let mut members = self.members()?;
+            if members.candidate_abandoned {
+                return Err(AgentError::WorkerNotReady);
+            }
             let Some((generation, mut prepared)) = members.take_candidate() else {
                 return Err(AgentError::WorkerNotReady);
             };
@@ -516,6 +907,7 @@ impl WorkerControl for MemberRegistry {
             let old = members.take_serving();
             members.by_generation.insert(generation, prepared);
             members.serving = Some(generation);
+            members.forget_restart();
             old
         };
         self.retire(retired.into_iter().collect());
@@ -531,6 +923,9 @@ impl WorkerControl for MemberRegistry {
             if members.names(members.candidate, deployment_id) {
                 stopped.extend(members.take_candidate().map(|(_, member)| member));
             }
+            if members.restart_names(deployment_id) {
+                members.forget_restart();
+            }
         }
         self.retire(stopped);
     }
@@ -541,6 +936,35 @@ impl WorkerControl for MemberRegistry {
 
     fn active_serving_url(&self) -> AgentResult<Option<String>> {
         self.serving(|member| format!("http://{}:{}/infer", self.settings.bind_host, member.port))
+    }
+
+    fn supervise(&self) -> Vec<MemberEvent> {
+        let mut events = Vec::new();
+        let now = self.clock.now();
+        self.watch_serving(now, &mut events);
+        self.start_owed_restart(now, &mut events);
+        events
+    }
+
+    fn member_failure(&self) -> Option<ErrorRecord> {
+        match &self.members().ok()?.restart {
+            Restart::Failed { error, .. } => Some(error.clone()),
+            _ => None,
+        }
+    }
+
+    fn shutdown(&self) {
+        let members = {
+            let Ok(mut members) = self.members() else {
+                return;
+            };
+            members.stopping = true;
+            members.forget_restart();
+            members.serving = None;
+            members.candidate = None;
+            std::mem::take(&mut members.by_generation)
+        };
+        self.retire(members.into_values().collect());
     }
 }
 

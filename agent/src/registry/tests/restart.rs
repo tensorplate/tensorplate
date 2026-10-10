@@ -155,7 +155,11 @@ fn a_member_that_stops_with_three_restarts_in_five_minutes_is_failed_and_not_sta
         matches!(&events[..], [
             MemberEvent::Stopped { member: stopped, error },
             MemberEvent::Failed { deployment_id, error: reported },
-        ] if *stopped == member("stt", 4) && deployment_id == "stt" && reported == error),
+        ] if *stopped == member("stt", 4)
+            && deployment_id == "stt"
+            && reported.code == error.code
+            && reported.message.contains("3 restarts inside 300 s")
+            && reported.message.ends_with(&error.message)),
         "{events:?}"
     );
     for _ in 0..12 {
@@ -410,7 +414,7 @@ fn a_successor_started_as_a_deploy_began_is_stopped_and_owed_again() {
     assert!(f.launcher.handle(3).calls().is_empty());
     // The deploy holds the member now, so the restart stays owed.
     assert_eq!(step(&f, secs(60)), []);
-    assert_eq!(f.launcher.count(), 2);
+    assert_eq!(f.launcher.count(), 3);
 }
 
 #[test]
