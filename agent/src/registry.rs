@@ -21,6 +21,7 @@ use tensorplate_protocol::agent_control::is_valid_deployment_id;
 use tensorplate_protocol::agent_state::ErrorRecord;
 use tensorplate_protocol::worker_control::{CandidateRef, MemberRef};
 
+use crate::bundle::StagedManifest;
 use crate::config::AgentConfig;
 use crate::control_channel::{ContactState, ControlChannel};
 use crate::error::{AgentError, AgentResult};
@@ -28,7 +29,7 @@ use crate::state::StateStore;
 use crate::supervision::{MonotonicClock, SystemMonotonicClock};
 use crate::worker::{
     forward_stderr, get_health_json, send_sigterm, spawn_with_control, startup_error, MemberEvent,
-    WorkerControl, WorkerReadiness, WorkerStderr, WorkerStderrSink,
+    WorkerControl, WorkerReadiness, WorkerStderr, WorkerStderrSink, STDERR_DRAIN_WAIT,
 };
 
 /// The drain a worker is told to give its sessions once it is asked to stop.
@@ -39,6 +40,17 @@ pub const WORKER_DRAIN: Duration = Duration::from_secs(5);
 pub const STOP_DEADLINE: Duration = Duration::from_secs(10);
 
 const _: () = assert!(WORKER_DRAIN.as_millis() < STOP_DEADLINE.as_millis());
+
+/// How long past the stop deadline a stop waits for a launch that had
+/// begun on another thread to end and be stopped by that thread.
+pub const LAUNCH_GRACE: Duration = Duration::from_secs(2);
+
+/// The longest the agent takes to stop its workers once it is told to stop:
+/// a supervision step that was stopping a successor and reading its last
+/// stderr, then the registry's stop.
+pub const AGENT_STOP_BOUND: Duration = Duration::from_secs(
+    2 * STOP_DEADLINE.as_secs() + STDERR_DRAIN_WAIT.as_secs() + LAUNCH_GRACE.as_secs(),
+);
 
 const DRAIN_POLL: Duration = Duration::from_millis(10);
 
@@ -129,6 +141,8 @@ pub struct RegistrySettings {
     pub status_poll_interval: Duration,
     pub worker_drain: Duration,
     pub stop_deadline: Duration,
+    /// See [`LAUNCH_GRACE`].
+    pub launch_grace: Duration,
     /// How long a restarted generation is given to become ready.
     pub restart_warm_timeout: Duration,
 }
@@ -234,6 +248,9 @@ pub struct MemberRegistry {
     generations: GenerationSource,
     clock: Arc<dyn MonotonicClock>,
     inner: Mutex<Members>,
+    /// Runs once, just before a restart reads the staged manifest.
+    #[cfg(test)]
+    before_staged_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl MemberRegistry {
@@ -251,6 +268,8 @@ impl MemberRegistry {
             generations,
             clock: Arc::new(SystemMonotonicClock),
             inner: Mutex::new(Members::default()),
+            #[cfg(test)]
+            before_staged_read: Mutex::new(None),
         }
     }
 
@@ -313,6 +332,16 @@ impl Members {
         }
     }
 
+    /// Whether the supervision step still holds the restart of
+    /// `deployment_id` it took, and no stop has begun.
+    fn restart_in_hand(&self, deployment_id: &str) -> bool {
+        !self.stopping
+            && matches!(
+                &self.restart,
+                Restart::InHand { deployment_id: owed, .. } if owed == deployment_id
+            )
+    }
+
     fn forget_restart(&mut self) {
         self.restart = Restart::Idle;
         self.restarts.clear();
@@ -361,6 +390,7 @@ impl MemberRegistry {
             status_poll_interval: Duration::from_millis(agent.worker.status_poll_interval_ms),
             worker_drain: WORKER_DRAIN,
             stop_deadline: STOP_DEADLINE,
+            launch_grace: LAUNCH_GRACE,
             restart_warm_timeout: Duration::from_millis(agent.worker.warm_timeout_ms),
         };
         remove_stale_configs(&settings.config_dir);
@@ -391,7 +421,12 @@ impl MemberRegistry {
 
     /// Start the next generation of `recipe` on `port`. Refused once the
     /// registry is stopping; a launch that began before is waited for.
-    fn launch(&self, recipe: &CandidateRef, port: u16) -> AgentResult<(u64, Member)> {
+    fn launch(
+        &self,
+        recipe: &CandidateRef,
+        port: u16,
+        runner_profile: Option<&str>,
+    ) -> AgentResult<(u64, Member)> {
         let outside = {
             let members = self.members()?;
             if members.stopping {
@@ -400,9 +435,14 @@ impl MemberRegistry {
             Outside::new(&members.outside)
         };
         let generation = (self.generations)()?;
+        // A stop gives up waiting on a write that hangs; once the write
+        // returns, nothing is started for it.
+        if self.members()?.stopping {
+            return Err(AgentError::Stopping);
+        }
         let spec = LaunchSpec {
             member: MemberRef::new(recipe.deployment_id.clone(), generation),
-            config_path: self.render_config(recipe, generation, port)?,
+            config_path: self.render_config(recipe, generation, port, runner_profile)?,
         };
         match self.launcher.launch(&spec) {
             Ok(process) => Ok((
@@ -428,6 +468,7 @@ impl MemberRegistry {
         candidate: &CandidateRef,
         generation: u64,
         port: u16,
+        runner_profile: Option<&str>,
     ) -> AgentResult<PathBuf> {
         fs::create_dir_all(&self.settings.config_dir)?;
         let path = self.settings.config_dir.join(format!(
@@ -471,9 +512,7 @@ impl MemberRegistry {
                 }
             }
         });
-        if let Some(profile) =
-            crate::bundle::staged_runner_profile(Path::new(&candidate.staged_path))?
-        {
+        if let Some(profile) = runner_profile {
             config["deployment"]["model"]["runner_profile"] = profile.into();
         }
         fs::write(&path, serde_json::to_vec_pretty(&config)?)?;
@@ -561,14 +600,6 @@ impl MemberRegistry {
             return Ok(None);
         }
         Ok(Some(read(member)))
-    }
-
-    fn abandon_candidate(&self, candidate: &CandidateRef) {
-        if let Ok(mut members) = self.members() {
-            if members.names(members.candidate, &candidate.deployment_id) {
-                members.candidate_abandoned = true;
-            }
-        }
     }
 
     /// Take a serving generation that stopped out of service and decide
@@ -695,6 +726,58 @@ impl MemberRegistry {
         }
     }
 
+    /// Read the staged manifest the restart of `recipe`, which is in hand,
+    /// is rendered from. `None` when the bundle staged there is no longer
+    /// the member's: the member is failed and nothing is started.
+    fn staged_for_restart(
+        &self,
+        recipe: &CandidateRef,
+        events: &mut Vec<MemberEvent>,
+    ) -> Option<AgentResult<StagedManifest>> {
+        #[cfg(test)]
+        if let Some(hook) = self
+            .before_staged_read
+            .lock()
+            .ok()
+            .and_then(|mut h| h.take())
+        {
+            hook();
+        }
+        // Read outside the lock: the restart in hand keeps the member. A
+        // manifest that cannot be read counts as a launch that failed.
+        let staged = match crate::bundle::staged_manifest(Path::new(&recipe.staged_path)) {
+            Ok(staged) => staged,
+            Err(err) => return Some(Err(err)),
+        };
+        if crate::bundle::bundle_digests_equal(&staged.bundle_digest, &recipe.bundle_digest) {
+            return Some(Ok(staged));
+        }
+        // A deploy of the same id that failed after staging left its own
+        // bundle in the staged root. Another attempt would read the same
+        // root, so the member is failed without one.
+        let error = AgentError::BundleIntegrity {
+            path: "manifest.json".into(),
+            reason: format!(
+                "`{}` is not restarted: the bundle staged at `{}` is `{}`, not the `{}` it was started from",
+                recipe.deployment_id, recipe.staged_path, staged.bundle_digest, recipe.bundle_digest
+            ),
+        }
+        .to_record();
+        if let Ok(mut members) = self.members() {
+            if members.restart_in_hand(&recipe.deployment_id) {
+                members.restart = Restart::Failed {
+                    deployment_id: recipe.deployment_id.clone(),
+                    error: error.clone(),
+                };
+                events.push(MemberEvent::Failed {
+                    deployment_id: recipe.deployment_id.clone(),
+                    error,
+                });
+            }
+        }
+        None
+    }
+
     /// Start the successor a stopped generation is owed, once its wait is
     /// over and no deploy holds the member.
     fn start_owed_restart(&self, now: Instant, events: &mut Vec<MemberEvent>) {
@@ -714,56 +797,16 @@ impl MemberRegistry {
                 deployment_id: recipe.deployment_id.clone(),
                 port,
             };
-            // Read under the lock: one small file, and nothing can take the
-            // member between this check and what it decides.
-            match crate::bundle::staged_bundle_digest(Path::new(&recipe.staged_path)) {
-                Ok(staged)
-                    if crate::bundle::bundle_digests_equal(&staged, &recipe.bundle_digest) => {}
-                // A deploy of the same id that failed after staging left its
-                // own bundle in the staged root. Another attempt would read
-                // the same root, so the member is failed without one.
-                Ok(staged) => {
-                    let error = AgentError::BundleIntegrity {
-                        path: "manifest.json".into(),
-                        reason: format!(
-                            "`{}` is not restarted: the bundle staged at `{}` is `{staged}`, not the `{}` it was started from",
-                            recipe.deployment_id, recipe.staged_path, recipe.bundle_digest
-                        ),
-                    }
-                    .to_record();
-                    members.restart = Restart::Failed {
-                        deployment_id: recipe.deployment_id.clone(),
-                        error: error.clone(),
-                    };
-                    events.push(MemberEvent::Failed {
-                        deployment_id: recipe.deployment_id,
-                        error,
-                    });
-                    return;
-                }
-                // A staged manifest that cannot be read counts as a launch
-                // that failed, as it did when the launch itself read it.
-                Err(err) => {
-                    members.restarts.push_back(now);
-                    let error = err.to_record();
-                    events.push(MemberEvent::LaunchFailed {
-                        deployment_id: recipe.deployment_id.clone(),
-                        error: error.clone(),
-                    });
-                    events.extend(owe_restart(&mut members, recipe, port, error, now));
-                    return;
-                }
-            }
             (recipe, port)
         };
-        let launched = self.launch(&recipe, port);
+        let Some(staged) = self.staged_for_restart(&recipe, events) else {
+            return;
+        };
+        let launched =
+            staged.and_then(|staged| self.launch(&recipe, port, staged.runner_profile.as_deref()));
         let mut yielded = None;
         if let Ok(mut members) = self.members() {
-            let in_hand = !members.stopping
-                && matches!(
-                    &members.restart,
-                    Restart::InHand { deployment_id, .. } if *deployment_id == recipe.deployment_id
-                );
+            let in_hand = members.restart_in_hand(&recipe.deployment_id);
             match launched {
                 Ok((generation, member)) if in_hand && !members.held_by_a_deploy() => {
                     members.restarts.push_back(now);
@@ -885,8 +928,10 @@ impl WorkerControl for MemberRegistry {
         let _preparing = Preparing(self);
         self.retire(displaced.map(|(_, member)| member).into_iter().collect());
 
+        let staged = crate::bundle::staged_manifest(Path::new(&candidate.staged_path))?;
         let port = self.candidate_port(&*self.members()?);
-        let (generation, member) = self.launch(candidate, port)?;
+        let (generation, member) =
+            self.launch(candidate, port, staged.runner_profile.as_deref())?;
         // The lock was released since the slot was emptied; whatever took it
         // in between is displaced as well, not forgotten.
         let (displaced, stopped) = {
@@ -924,7 +969,7 @@ impl WorkerControl for MemberRegistry {
             let (port, contact) = self.candidate_progress(candidate)?;
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                self.abandon_candidate(candidate);
+                self.abandon(candidate);
                 return last_error.map_or_else(|| Ok(readiness(false)), Err);
             }
             match self.probe.ready_model(port, remaining) {
@@ -991,6 +1036,14 @@ impl WorkerControl for MemberRegistry {
         Ok(())
     }
 
+    fn abandon(&self, candidate: &CandidateRef) {
+        if let Ok(mut members) = self.members() {
+            if members.names(members.candidate, &candidate.deployment_id) {
+                members.candidate_abandoned = true;
+            }
+        }
+    }
+
     fn unload(&self, deployment_id: &str) {
         let mut stopped = Vec::new();
         if let Ok(mut members) = self.members() {
@@ -1031,6 +1084,7 @@ impl WorkerControl for MemberRegistry {
     }
 
     fn shutdown(&self) {
+        let give_up = Instant::now() + self.settings.stop_deadline + self.settings.launch_grace;
         let (members, outside) = {
             // A poisoned lock still guards the map of what has to be stopped.
             let mut members = self
@@ -1048,13 +1102,27 @@ impl WorkerControl for MemberRegistry {
         self.retire(members.into_values().collect());
         // What another thread was starting or stopping when the flag was
         // set: it ends stopped, by that thread, within the stop deadline.
-        while outside.load(Ordering::SeqCst) > 0 {
+        // A launch held in its generation write outlasts the wait, and
+        // starts nothing when the write returns.
+        loop {
+            let left = outside.load(Ordering::SeqCst);
+            if left == 0 {
+                break;
+            }
+            if Instant::now() >= give_up {
+                eprintln!(
+                    "member registry stop: {left} worker launch or stop on another thread had not ended after {} ms; not waited for",
+                    (self.settings.stop_deadline + self.settings.launch_grace).as_millis()
+                );
+                break;
+            }
             std::thread::sleep(DRAIN_POLL);
         }
     }
 
     fn stopping(&self) -> bool {
-        self.members().map_or(true, |members| members.stopping)
+        // A poisoned lock is not a stop; it is reported by what locks next.
+        self.members().is_ok_and(|members| members.stopping)
     }
 }
 

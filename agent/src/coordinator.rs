@@ -353,6 +353,7 @@ impl Coordinator {
                 err,
             );
         }
+        let mut prepared = Prepared::new(self.worker.as_ref(), &candidate_ref);
         self.advance(
             &transaction_id,
             DeployState::CapacityChecked,
@@ -407,6 +408,7 @@ impl Coordinator {
             });
             return self.fail(&transaction_id, deployment_id, DeployState::Warmed, err);
         }
+        prepared.promoted = true;
         self.advance(&transaction_id, DeployState::Warmed, DeployState::Promoted)?;
         let monotonic_ns = now_monotonic_ns();
         self.store.promote_candidate(monotonic_ns)?;
@@ -539,6 +541,7 @@ impl Coordinator {
         {
             return self.fail_rollback(&transaction_id, &prev.deployment_id, err);
         }
+        let mut prepared = Prepared::new(self.worker.as_ref(), &candidate_ref);
         self.advance(
             &transaction_id,
             DeployState::CapacityChecked,
@@ -577,6 +580,7 @@ impl Coordinator {
         if let Err(err) = self.worker.promote(&transaction_id, &candidate_ref) {
             return self.fail_rollback(&transaction_id, &prev.deployment_id, err);
         }
+        prepared.promoted = true;
         self.advance(&transaction_id, DeployState::Warmed, DeployState::Promoted)?;
         let monotonic_ns = now_monotonic_ns();
         self.store.swap_active_with_previous(monotonic_ns)?;
@@ -855,6 +859,32 @@ impl Coordinator {
         };
         let _ = sup.set_desired_active(Some(desired));
         let _ = sup.recover_after_operator_action();
+    }
+}
+
+/// A candidate the worker control prepared. Unless it is promoted, it is
+/// abandoned when the transaction returns, whichever way it returns.
+struct Prepared<'a> {
+    worker: &'a dyn WorkerControl,
+    candidate: &'a CandidateRef,
+    promoted: bool,
+}
+
+impl<'a> Prepared<'a> {
+    fn new(worker: &'a dyn WorkerControl, candidate: &'a CandidateRef) -> Self {
+        Self {
+            worker,
+            candidate,
+            promoted: false,
+        }
+    }
+}
+
+impl Drop for Prepared<'_> {
+    fn drop(&mut self) {
+        if !self.promoted {
+            self.worker.abandon(self.candidate);
+        }
     }
 }
 

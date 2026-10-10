@@ -809,6 +809,20 @@ impl Drop for StartedAgent {
     }
 }
 
+/// Start the agent binary on `config`, its stderr going to `log`.
+fn start_agent_binary(config: &AgentConfig, dir: &Path, log: &Path) -> std::process::Child {
+    std::process::Command::new(env!("CARGO_BIN_EXE_tensorplate-agent"))
+        .arg("--config-json")
+        .arg(serde_json::to_string(config).expect("config"))
+        // Without a platform registry the start does not depend on the host.
+        .env("TP_PLATFORM_REGISTRY_DIR", dir.join("no-registry"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(log).expect("log"))
+        .spawn()
+        .expect("start the agent")
+}
+
 fn status_over(socket: &Path) -> ControlResponse {
     let mut stream = std::os::unix::net::UnixStream::connect(socket).expect("connect");
     stream
@@ -867,18 +881,8 @@ fn a_signalled_agent_restarts_a_killed_worker_then_drains_it_and_exits_0(
     let worker_config = configs.join("serving-good-a-3.json");
     config.worker.serving_config_dir = Some(configs.clone());
     let log = td.path().join("agent.stderr");
-    let agent = std::process::Command::new(env!("CARGO_BIN_EXE_tensorplate-agent"))
-        .arg("--config-json")
-        .arg(serde_json::to_string(&config).expect("config"))
-        // Without a platform registry the start does not depend on the host.
-        .env("TP_PLATFORM_REGISTRY_DIR", td.path().join("no-registry"))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::fs::File::create(&log).expect("log"))
-        .spawn()
-        .expect("start the agent");
     let mut started = StartedAgent {
-        agent,
+        agent: start_agent_binary(&config, td.path(), &log),
         worker_config: Some(restored_config.clone()),
     };
     let stderr = || std::fs::read_to_string(&log).unwrap_or_default();
@@ -923,4 +927,45 @@ fn a_signalled_agent_restarts_a_killed_worker_then_drains_it_and_exits_0(
     started.worker_config = None;
     // Written by the worker on SIGTERM; a kill would leave none.
     assert!(configs.join("good-a.terminated").is_file());
+}
+
+/// The handlers are in place before the agent says it is listening: a
+/// signal sent as soon as that line is written stops the agent, where an
+/// agent without them would be killed by it.
+#[test]
+fn an_agent_signalled_as_soon_as_it_says_it_is_listening_stops_and_exits_0() {
+    use rustix::process::{kill_process, Pid, Signal};
+
+    let h = ProcessHarness::build_with(
+        pid_recording_worker(),
+        unused_port(),
+        unused_port(),
+        WARM_TIMEOUT,
+        None,
+    );
+    let config = h.coord.config().clone();
+    let ProcessHarness { td, store, coord } = h;
+    drop((coord, store));
+    let log = td.path().join("agent.stderr");
+    let mut started = StartedAgent {
+        agent: start_agent_binary(&config, td.path(), &log),
+        worker_config: None,
+    };
+    let stderr = || std::fs::read_to_string(&log).unwrap_or_default();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !stderr().contains("tensorplate-agent listening on ") {
+        assert!(Instant::now() < deadline, "never listening: {}", stderr());
+        std::thread::yield_now();
+    }
+
+    kill_process(Pid::from_child(&started.agent), Signal::Term).expect("signal the agent");
+
+    let mut exit = None;
+    wait_for(Duration::from_secs(15), stderr, || {
+        exit = started.agent.try_wait().expect("wait");
+        exit.is_some()
+    });
+    let stderr = stderr();
+    assert_eq!(exit.and_then(|status| status.code()), Some(0), "{stderr}");
+    assert!(stderr.ends_with("tensorplate-agent stopped\n"), "{stderr}");
 }

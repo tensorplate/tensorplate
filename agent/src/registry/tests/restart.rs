@@ -898,3 +898,160 @@ fn a_member_whose_staged_bundle_is_unchanged_is_restarted_from_it() {
 
     assert_eq!(crash_and_recover(&f, 1), secs(1));
 }
+
+#[test]
+fn a_candidate_its_transaction_abandoned_no_longer_keeps_the_restart_waiting() {
+    let f = fixture();
+    let old = f.serve("stt");
+    f.prepare("tts").unwrap();
+    exit(&old);
+    f.registry.supervise();
+    assert_eq!(step(&f, secs(60)), []);
+
+    // Another deployment's transaction does not release it.
+    f.registry.abandon(&candidate("stt"));
+    assert_eq!(step(&f, Duration::ZERO), []);
+    f.registry.abandon(&candidate("tts"));
+
+    assert_eq!(
+        step(&f, Duration::ZERO),
+        [MemberEvent::Restarted {
+            member: member("stt", 3)
+        }]
+    );
+    assert!(matches!(
+        f.registry.promote("tx", &candidate("tts")),
+        Err(AgentError::WorkerNotReady)
+    ));
+}
+
+#[test]
+fn a_poisoned_lock_is_not_read_as_a_stop() {
+    let f = fixture();
+    f.serve("stt");
+    let poisoned = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _members = f.registry.inner.lock().unwrap();
+                panic!("poison the registry's lock");
+            })
+            .join()
+    });
+    assert!(poisoned.is_err());
+
+    assert!(!f.registry.stopping());
+    // The poison is reported by what needs the lock.
+    assert!(matches!(f.prepare("tts"), Err(AgentError::Internal(_))));
+    f.registry.shutdown();
+    assert!(f.registry.inner.is_poisoned());
+    assert_eq!(f.launcher.handle(1).calls(), ["terminate"]);
+}
+
+/// The staged manifest is read with the registry unlocked, and what was
+/// decided meanwhile stands: a member unloaded during the read is not
+/// failed for the bundle the read found.
+#[test]
+fn a_member_unloaded_while_its_staged_manifest_was_read_is_not_failed() {
+    let f = fixture();
+    let staged = stage(&f, "v0_1/x86_fixture_smoke");
+    serve_staged(&f, &staged);
+    stage(&f, "v0_1/x86_cuda_smoke");
+    exit(&f.launcher.handle(1));
+    f.registry.supervise();
+    f.clock.advance(secs(1));
+    let (reading, is_reading) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    *f.registry.before_staged_read.lock().unwrap() = Some(Box::new(move || {
+        reading.send(()).unwrap();
+        let _ = released.recv();
+    }));
+
+    let events = std::thread::scope(|scope| {
+        let release = release;
+        let restart = scope.spawn(|| f.registry.supervise());
+        is_reading
+            .recv_timeout(HELD_LAUNCH)
+            .expect("the manifest read begins");
+        let (done, is_done) = mpsc::channel();
+        let unloading = &f;
+        scope.spawn(move || {
+            unloading.registry.unload("stt");
+            done.send(()).unwrap();
+        });
+        let unlocked = is_done.recv_timeout(HELD_LAUNCH);
+        release.send(()).unwrap();
+        unlocked.expect("the registry is locked while the manifest is read");
+        restart.join().unwrap()
+    });
+
+    assert_eq!(events, []);
+    assert_eq!(f.registry.member_failure(), None);
+    assert_eq!(step(&f, secs(600)), []);
+    assert_eq!(f.launcher.count(), 1);
+}
+
+#[test]
+fn shutdown_gives_up_on_a_launch_held_in_its_generation_write_and_that_launch_starts_nothing() {
+    let td = TempDir::new().unwrap();
+    let launcher = Arc::new(FakeLauncher::default());
+    let (started, has_started) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let held = Mutex::new((started, released));
+    let registry = MemberRegistry::new(
+        RegistrySettings {
+            launch_grace: DRAIN,
+            ..settings(td.path())
+        },
+        launcher.clone(),
+        Arc::new(FakeProbe::default()),
+        Arc::new(move || {
+            let held = held.lock().unwrap();
+            held.0.send(()).unwrap();
+            let _ = held.1.recv();
+            Ok(1)
+        }),
+    );
+
+    std::thread::scope(|scope| {
+        let release = release;
+        let preparing = scope.spawn(|| registry.prepare("tx", &candidate("stt"), WARM));
+        has_started
+            .recv_timeout(HELD_LAUNCH)
+            .expect("the generation write begins");
+
+        let (done, is_done) = mpsc::channel();
+        let stopping = &registry;
+        scope.spawn(move || {
+            let began = Instant::now();
+            stopping.shutdown();
+            done.send(began.elapsed()).unwrap();
+        });
+        let waited = is_done.recv_timeout(GRACE);
+        release.send(()).unwrap();
+
+        let waited = waited.expect("shutdown waits without a bound");
+        assert!(waited >= DRAIN * 2, "{waited:?}");
+        assert!(matches!(
+            preparing.join().unwrap(),
+            Err(AgentError::Stopping)
+        ));
+    });
+    assert_eq!(launcher.count(), 0);
+}
+
+#[test]
+fn a_restarted_generation_is_rendered_with_the_runner_profile_of_its_staged_bundle() {
+    let f = fixture();
+    let staged = stage(&f, "v0_2/speech_stt_streaming");
+    serve_staged(&f, &staged);
+    exit(&f.launcher.handle(1));
+    f.registry.supervise();
+
+    step(&f, secs(1));
+
+    let restarted = f.launcher.handle(2);
+    assert_eq!(
+        restarted.config["deployment"]["model"]["runner_profile"],
+        "faster_whisper"
+    );
+}

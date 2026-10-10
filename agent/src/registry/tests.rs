@@ -19,6 +19,8 @@ const DRAIN: Duration = Duration::from_millis(60);
 const WARM: Duration = Duration::from_millis(40);
 /// On the fake clock: no test waits it out in real time.
 const RESTART_WARM: Duration = Duration::from_secs(30);
+/// Longer than any launch a test holds.
+const GRACE: Duration = Duration::from_secs(10);
 
 /// What a test sees and steers of one launched process.
 struct Handle {
@@ -168,6 +170,7 @@ fn settings(dir: &std::path::Path) -> RegistrySettings {
         status_poll_interval: Duration::from_millis(1),
         worker_drain: DRAIN / 2,
         stop_deadline: DRAIN,
+        launch_grace: GRACE,
         restart_warm_timeout: RESTART_WARM,
     }
 }
@@ -688,7 +691,9 @@ fn the_worker_is_told_a_drain_that_ends_before_the_registry_would_kill_it() {
     let registry = agents_registry(&td, &td.path().join("worker-configs"));
     assert_eq!(registry.settings.worker_drain, WORKER_DRAIN);
     assert_eq!(registry.settings.stop_deadline, STOP_DEADLINE);
-    let rendered = registry.render_config(&candidate("stt"), 1, 18080).unwrap();
+    let rendered = registry
+        .render_config(&candidate("stt"), 1, 18080, None)
+        .unwrap();
     let rendered: serde_json::Value =
         serde_json::from_slice(&std::fs::read(rendered).unwrap()).unwrap();
     let drain_ms = rendered["shutdown"]["drain_deadline_ms"].as_u64().unwrap();

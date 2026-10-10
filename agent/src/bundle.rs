@@ -133,36 +133,31 @@ pub(crate) fn model_artifact_relative_path(bundle_path: &Path) -> AgentResult<St
         .ok_or_else(|| AgentError::BundleManifest("manifest missing model artifact".into()))
 }
 
-/// The runner profile the staged bundle at `bundle_path` selects, if its
-/// manifest names one. Reads the manifest only: the artifacts were verified
-/// when the bundle was staged.
+/// What the registry reads from a staged bundle's manifest, in one parse.
+pub(crate) struct StagedManifest {
+    /// The bundle's digest, which is its manifest's: it covers every
+    /// artifact's digest.
+    pub(crate) bundle_digest: String,
+    pub(crate) runner_profile: Option<String>,
+}
+
+/// Read the manifest of the bundle staged at `staged_path`. The manifest
+/// only: the artifacts were verified when the bundle was staged.
 ///
 /// # Errors
 ///
 /// Returns [`AgentError::BundleMissing`] when the staged directory is gone,
 /// and [`AgentError::BundleManifest`] when the manifest is missing,
 /// malformed, or does not validate.
-pub(crate) fn staged_runner_profile(bundle_path: &Path) -> AgentResult<Option<String>> {
-    let options = ParseOptions {
-        verify_artifact_digests: false,
-    };
-    let descriptor = parse_bundle_with(bundle_path, options).map_err(parse_error_to_agent_error)?;
-    Ok(descriptor.manifest.profile.and_then(|p| p.runner_profile))
-}
-
-/// The digest of the bundle staged at `staged_path`, which is its
-/// manifest's. Reads the manifest only: that digest covers every artifact's
-/// digest, and artifacts are verified before they are staged.
-///
-/// # Errors
-///
-/// As [`staged_runner_profile`].
-pub(crate) fn staged_bundle_digest(staged_path: &Path) -> AgentResult<String> {
+pub(crate) fn staged_manifest(staged_path: &Path) -> AgentResult<StagedManifest> {
     let options = ParseOptions {
         verify_artifact_digests: false,
     };
     let staged = parse_bundle_with(staged_path, options).map_err(parse_error_to_agent_error)?;
-    Ok(staged.manifest_digest)
+    Ok(StagedManifest {
+        bundle_digest: staged.manifest_digest,
+        runner_profile: staged.manifest.profile.and_then(|p| p.runner_profile),
+    })
 }
 
 /// Verify the bundle at `bundle_path` against the agent config.

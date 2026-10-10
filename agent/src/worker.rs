@@ -143,6 +143,11 @@ pub trait WorkerControl: Send + Sync {
     /// Returns [`AgentError::WorkerControl`] for adapter/IPC failures.
     fn promote(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()>;
 
+    /// The transaction that prepared `candidate` ended without promoting
+    /// it: the candidate no longer keeps the serving member from being
+    /// restarted.
+    fn abandon(&self, _candidate: &CandidateRef) {}
+
     /// Unload `deployment_id` (the previous active) from the worker.
     /// Best-effort: a failure here is logged but never replaces the
     /// current active deployment.
@@ -179,7 +184,8 @@ pub trait WorkerControl: Send + Sync {
     }
 
     /// Stop every worker and start no other. When this returns no worker
-    /// process is running and none can be started.
+    /// process is running and none can be started, unless the wait for
+    /// another thread's launch or stop was given up, which is logged.
     fn shutdown(&self) {}
 
     /// Whether [`Self::shutdown`] has begun.
@@ -256,7 +262,7 @@ pub type WorkerStderrSink = Arc<dyn Fn(&[u8]) + Send + Sync>;
 const MAX_STDERR_LINE_BYTES: u64 = 16 * 1024;
 
 /// How long an exited candidate's stderr is given to finish arriving.
-const STDERR_DRAIN_WAIT: Duration = Duration::from_secs(1);
+pub(crate) const STDERR_DRAIN_WAIT: Duration = Duration::from_secs(1);
 
 /// The `message` of the record a serving worker ends its stderr with when
 /// it cannot start; `serving_worker/src/main.cpp` writes it.

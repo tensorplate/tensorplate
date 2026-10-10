@@ -201,18 +201,16 @@ fn unit_stop_timeout() -> std::time::Duration {
 }
 
 /// The service manager kills the control group when the unit's stop timeout
-/// ends. The agent needs the registry's stop deadline to stop its workers
-/// itself, and is left as long again to finish what it was answering.
+/// ends, so the timeout has to outlast the longest stop the agent makes.
 #[cfg(unix)]
 #[test]
-fn the_unit_waits_twice_the_stop_deadline_before_it_kills_the_agent() {
-    use tensorplate_agent::registry::{STOP_DEADLINE, WORKER_DRAIN};
+fn the_unit_waits_out_the_agents_longest_stop_before_it_kills_the_agent() {
+    use tensorplate_agent::registry::AGENT_STOP_BOUND;
 
     let unit = unit_stop_timeout();
 
     assert!(
-        unit >= STOP_DEADLINE * 2,
-        "TimeoutStopSec {unit:?} leaves the agent less than twice its {STOP_DEADLINE:?} stop deadline"
+        unit > AGENT_STOP_BOUND,
+        "TimeoutStopSec {unit:?} is not above the {AGENT_STOP_BOUND:?} the agent may take to stop its workers"
     );
-    assert!(WORKER_DRAIN < STOP_DEADLINE);
 }

@@ -14,6 +14,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use common::Harness;
+use tensorplate_agent::control::dispatch;
 use tensorplate_agent::coordinator::Coordinator;
 use tensorplate_agent::error::{AgentError, AgentResult};
 use tensorplate_agent::recovery;
@@ -24,7 +25,10 @@ use tensorplate_agent::registry::{
 use tensorplate_agent::state::StateStore;
 use tensorplate_agent::supervision::FakeClock;
 use tensorplate_agent::worker::{MemberEvent, WorkerControl};
-use tensorplate_protocol::agent_control::{AgentRunState, RecoveryAction};
+use tensorplate_protocol::agent_control::{
+    AgentRunState, ControlRequest, ControlResponse, DeployRequest, RecoveryAction, ResponseStatus,
+    RollbackRequest,
+};
 use tensorplate_protocol::agent_state::TransactionKind;
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::ErrorCode;
@@ -79,6 +83,10 @@ impl Launcher {
         let launched = self.launched.lock().unwrap();
         launched.last().unwrap().store(true, Ordering::SeqCst);
     }
+    fn exit_first(&self) {
+        let launched = self.launched.lock().unwrap();
+        launched.first().unwrap().store(true, Ordering::SeqCst);
+    }
 }
 
 impl ProcessLauncher for Launcher {
@@ -113,7 +121,7 @@ struct Agent {
     launcher: Arc<Launcher>,
     clock: Arc<FakeClock>,
     registry: Arc<MemberRegistry>,
-    coord: Coordinator,
+    coord: Arc<Coordinator>,
 }
 
 fn start_agent(h: &Harness) -> Agent {
@@ -129,6 +137,7 @@ fn start_agent(h: &Harness) -> Agent {
         status_poll_interval: Duration::from_millis(1),
         worker_drain: Duration::from_millis(30),
         stop_deadline: Duration::from_millis(60),
+        launch_grace: HELD,
         restart_warm_timeout: Duration::from_secs(30),
     };
     let registry = Arc::new(
@@ -140,7 +149,11 @@ fn start_agent(h: &Harness) -> Agent {
         )
         .with_clock(clock.clone()),
     );
-    let coord = Coordinator::new(h.config.clone(), store.clone(), registry.clone());
+    let coord = Arc::new(Coordinator::new(
+        h.config.clone(),
+        store.clone(),
+        registry.clone(),
+    ));
     Agent {
         store,
         launcher,
@@ -412,4 +425,145 @@ fn a_failed_member_is_reported_from_memory_and_the_next_agent_start_serves_it_ag
         ),
         "{events:?}"
     );
+}
+
+fn deploy_request(id: &str, bundle: &Path) -> ControlRequest {
+    ControlRequest::deploy(
+        None,
+        DeployRequest {
+            bundle_path: bundle.display().to_string(),
+            deployment_id: id.into(),
+            ..DeployRequest::default()
+        },
+    )
+}
+
+/// What a caller is sent while the agent stops: `error` with the code
+/// `unavailable`. The `unavailable` status is the refusal of an operation
+/// that cannot apply, which carries `unsupported` and is not retried.
+fn assert_answered_stopping(answer: &ControlResponse) {
+    let sent = serde_json::to_value(answer).expect("encode");
+    assert_eq!(sent["status"], "error", "{sent}");
+    assert_eq!(sent["error"]["code"], "unavailable", "{sent}");
+    assert_eq!(sent["error"]["message"], "the agent is stopping", "{sent}");
+    assert_eq!(answer.status, ResponseStatus::Error);
+    assert_eq!(answer.transaction_id, None);
+}
+
+#[test]
+fn a_caller_is_answered_error_with_the_code_unavailable_while_the_agent_stops() {
+    let h = Harness::new();
+    let agent = start_agent(&h);
+    deploy_as(&agent, "stt", &common::vision_bundle(h.td.path(), "stt")).expect("deploy");
+    deploy_as(&agent, "tts", &common::vision_bundle(h.td.path(), "tts")).expect("deploy");
+    let bundle = common::vision_bundle(h.td.path(), "third");
+
+    let interrupted = stop_during(&agent, || {
+        dispatch(&agent.coord, deploy_request("third", &bundle))
+    });
+
+    assert_answered_stopping(&interrupted.expect("an answer"));
+    let in_flight = agent.store.snapshot().expect("state").in_flight_transaction;
+    let in_flight = in_flight.expect("left in flight").transaction_id;
+    for request in [
+        deploy_request("third", &bundle),
+        ControlRequest::rollback(None, RollbackRequest::default()),
+    ] {
+        let refused = dispatch(&agent.coord, request).expect("an answer");
+        assert_answered_stopping(&refused);
+    }
+    let state = agent.store.snapshot().expect("state");
+    assert_eq!(
+        state.in_flight_transaction.map(|tx| tx.transaction_id),
+        Some(in_flight)
+    );
+    assert!(state.quarantined.is_empty());
+}
+
+/// Make every state write fail before it renames anything, until the
+/// returned guard is dropped.
+struct FailedWrites(Vec<std::path::PathBuf>);
+
+fn fail_state_writes(h: &Harness) -> FailedWrites {
+    let temps = ["state.json.tmp", "state.json.bak.tmp"].map(|name| h.config.state_dir.join(name));
+    for temp in &temps {
+        std::fs::create_dir(temp).expect("occupy the temp file's name");
+    }
+    FailedWrites(temps.to_vec())
+}
+
+impl Drop for FailedWrites {
+    fn drop(&mut self) {
+        for temp in &self.0 {
+            let _ = std::fs::remove_dir(temp);
+        }
+    }
+}
+
+/// Run `request`, whose candidate is prepared and whose next state write
+/// then fails; the serving worker has exited by the time it returns.
+fn fail_the_write_after_prepare<T: Send>(
+    h: &Harness,
+    agent: &Agent,
+    request: impl FnOnce() -> AgentResult<T> + Send,
+) -> AgentResult<T> {
+    let (has_started, release) = hold_next_launch(agent);
+    std::thread::scope(|scope| {
+        let release = release;
+        let requesting = scope.spawn(request);
+        has_started.recv_timeout(HELD).expect("the launch starts");
+        let failing = fail_state_writes(h);
+        agent.launcher.exit_first();
+        release.send(()).unwrap();
+        let answer = requesting.join().unwrap();
+        drop(failing);
+        answer
+    })
+}
+
+fn assert_the_serving_member_is_restarted(agent: &Agent, launches: usize) {
+    let events = agent.registry.supervise();
+    let Some(MemberEvent::RestartDue { after, .. }) = events.last() else {
+        panic!("no restart is owed: {events:?}");
+    };
+    agent.clock.advance(*after);
+    let events = agent.registry.supervise();
+    assert!(
+        matches!(&events[..], [MemberEvent::Restarted { .. }]),
+        "the prepared candidate still holds the member: {events:?}"
+    );
+    assert_eq!(agent.launcher.count(), launches);
+}
+
+#[test]
+fn a_deploy_that_returns_through_a_failed_state_write_releases_the_member_it_prepared_for() {
+    let h = Harness::new();
+    let agent = start_agent(&h);
+    deploy_as(&agent, "stt", &common::vision_bundle(h.td.path(), "stt")).expect("deploy");
+    let bundle = common::vision_bundle(h.td.path(), "tts");
+
+    let answer = fail_the_write_after_prepare(&h, &agent, || deploy_as(&agent, "tts", &bundle));
+
+    let err = answer.expect_err("the state write failed");
+    assert!(matches!(err, AgentError::Io(_)), "{err}");
+    let state = agent.store.snapshot().expect("state");
+    let tx = state.in_flight_transaction.expect("still in flight");
+    assert_eq!(tx.phase, DeployState::CapacityChecked);
+    assert_the_serving_member_is_restarted(&agent, 3);
+}
+
+#[test]
+fn a_rollback_that_returns_through_a_failed_state_write_releases_the_member_it_prepared_for() {
+    let h = Harness::new();
+    let agent = start_agent(&h);
+    deploy_as(&agent, "stt", &common::vision_bundle(h.td.path(), "stt")).expect("deploy");
+    deploy_as(&agent, "tts", &common::vision_bundle(h.td.path(), "tts")).expect("deploy");
+    // The worker serving `tts` is the one that exits.
+    agent.launcher.launched.lock().unwrap().remove(0);
+
+    let answer = fail_the_write_after_prepare(&h, &agent, || agent.coord.rollback(None));
+
+    let err = answer.expect_err("the state write failed");
+    assert!(matches!(err, AgentError::Io(_)), "{err}");
+    assert_the_serving_member_is_restarted(&agent, 3);
 }
