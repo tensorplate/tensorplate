@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+#include <gtest/gtest-spi.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -1270,6 +1271,27 @@ TEST(SyntheticSessionDispatch, LongFramesEndOnAFrameTheTermsGrant) {
   Bytes all = audio;
   all.insert(all.end(), more.begin(), more.end());
   ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 1, 0, all, 1));
+}
+
+// EXPECT_NONFATAL_FAILURE takes a statement that names no local.
+Binding* stray_binding = nullptr;
+std::uint64_t stray_key = 0;
+void read_the_stray_item() {
+  (void)stray_binding->read(stray_key, 50ms);
+}
+
+// A control item the binding did not queue itself is not passed over.
+TEST(SyntheticSessionDispatch, ReadFailsOnAControlItemTheBindingDidNotQueue) {
+  Binding binding(&synthetic);
+  const auto key = binding.open_text();
+  ASSERT_TRUE(binding.lifecycle(key, 16));
+  OutputItem stray{OutputKind::Control, 16, 0, std::make_unique<OutputBody>()};
+  ASSERT_EQ(binding.output(key)->offer(stray, binding.clock.now()).value(), OutputOffer::Queued);
+  stray_binding = &binding;
+  stray_key = key;
+  EXPECT_NONFATAL_FAILURE(read_the_stray_item(), "an item that is not task output");
+  stray_binding = nullptr;
+  EXPECT_EQ(binding.lifecycle_read(key), 1U);
 }
 
 TEST(SyntheticSessionDispatch, InputOfTheWrongKindIsRefusedAsSuch) {

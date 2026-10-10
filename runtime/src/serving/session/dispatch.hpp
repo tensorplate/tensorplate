@@ -272,9 +272,9 @@ class SessionDispatch {
   /// endpoint applied while a finalization runs joins it: the manager counts
   /// one finalization, so exactly one `finalize_completed` is applied for
   /// all of them, and a second fails the session. A joined Finalize is still
-  /// answered by the final that carries `client_sequence`, and the completion
-  /// is not reported while a Finalize the dispatch has recorded from the sink
-  /// is still to be handed over.
+  /// answered by the final that carries `client_sequence`, and a dispatch
+  /// does not begin the report of the completion while a Finalize it has
+  /// recorded from the sink is still to be handed over.
   virtual void finalize(std::uint64_t session_key, std::uint64_t client_sequence) = 0;
 
   /// The transport delivered an item of `kind`, task output or not: call it

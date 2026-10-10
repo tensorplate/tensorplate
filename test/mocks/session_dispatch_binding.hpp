@@ -58,6 +58,8 @@ class DispatchUnderTest {
   /// complete.
   virtual void hold_jobs() = 0;
   /// Returns without waiting on the manager: a case calls it from the sink.
+  /// Whether a job released there is reported before the dispatch records
+  /// the transition is the dispatch's own: it pins that in cases of its own.
   virtual void release_jobs() = 0;
 };
 
@@ -257,10 +259,20 @@ class ReferenceBinding {
     const auto queue = output(key);
     serving::OutputItem item{serving::OutputKind::Control, bytes, 0,
                              std::make_unique<serving::OutputBody>()};
-    return eventually([&] {
+    {
+      // Counted first: read() may take the message as soon as it is queued.
+      const std::lock_guard guard(mu);
+      ++streams[key].lifecycle_queued;
+    }
+    const bool queued = eventually([&] {
       const auto offered = queue->offer(item, clock.now());
       return offered && *offered == serving::OutputOffer::Queued;
     });
+    if (!queued) {
+      const std::lock_guard guard(mu);
+      --streams[key].lifecycle_queued;
+    }
+    return queued;
   }
 
   /// Lifecycle messages read() delivered for `key` on its way to task output.
@@ -289,9 +301,15 @@ class ReferenceBinding {
       EXPECT_TRUE(queue->delivered(message->sequence, clock.now()));
       dispatch().output_delivered(key, message->item.kind);
       wake->changed();
+      bool lifecycle_message = false;
       if (message->item.kind == serving::OutputKind::Control) {
         const std::lock_guard guard(mu);
-        ++streams[key].lifecycle_read;
+        Stream& stream = streams[key];
+        // Only what lifecycle() queued is the binding's own.
+        lifecycle_message = stream.lifecycle_read < stream.lifecycle_queued;
+        stream.lifecycle_read += lifecycle_message ? 1 : 0;
+      }
+      if (lifecycle_message) {
         continue;
       }
       auto* body = dynamic_cast<serving::TaskOutputBody*>(message->item.body.get());
@@ -429,6 +447,7 @@ class ReferenceBinding {
     /// The credit last reported to the peer.
     serving::LogicalSessionUsage credit;
     std::uint64_t credit_reports = 0;
+    std::uint64_t lifecycle_queued = 0;
     std::uint64_t lifecycle_read = 0;
     bool short_frame_sent = false;
   };
