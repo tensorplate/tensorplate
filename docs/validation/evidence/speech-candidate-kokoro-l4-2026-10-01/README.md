@@ -16,7 +16,8 @@ built to fail while the runner loads, `tensorplate deploy` reported
 the agent answered. Nothing recorded attributes that to the model or its
 runner; it is described under
 [What the runs found](#what-the-runs-found). The
-candidate is to be run again once it is fixed.
+candidate was run again on 2026-10-08, with it fixed:
+[summary](../speech-candidate-kokoro-l4-2026-10-08/SUMMARY.md).
 
 The filed files carry no host, account or cloud identifier, so nothing
 needed the [evidence README](../v0.2.1/README.md)'s synthetic forms: they
