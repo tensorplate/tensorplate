@@ -391,15 +391,28 @@ ports do not establish controlled coverage or a clean security result. CPE
 matching is limited to published scanner data and is not a source audit.
 
 `check-native-code-absence.py` checks the freshly built ELF worker and its
-GNU linker map against the requested ports' installed archive inventories.
-The native job requires gRPC, OpenSSL and zlib code to be absent. An extracted
-object from those archives, a shared-library dependency, or missing or
-inconsistent proof fails the job. A disposition with `requires_absent: true`
-re-runs this check before it can become a scanner ignore rule and when the
-report is judged. Linking the transport later therefore invalidates this
-ground until the advisories are fixed or reviewed on another ground. The
-verified absence result prints in the job log; `worker.map` is uploaded with
-the report so its recorded digest can be checked.
+GNU linker map against installed vcpkg archive inventories, at one of two
+granularities. `--port PORT` requires the whole port to be absent: any object
+extracted from its archives or a shared-library dependency on it fails.
+`--member PORT:MEMBER` requires only the named archive member to be absent:
+the port's archive holding that member must be loaded by the link, the member
+must not be extracted from that port's archive (matched on the archive the map
+names, so a same-named object in another archive does not count), and the port
+must not be a shared-library dependency. A member that no installed archive
+of the port contains is an error, so a misspelled name cannot pass. Missing
+or inconsistent proof fails either check. The JSON report lists the verified
+`absent_ports` and `absent_members`.
+
+The serving worker links gRPC, OpenSSL and zlib's compression objects, so the
+native job checks members rather than ports: today `--member
+zlib:gzwrite.c.o`. A disposition with `requires_absent: true` (whole port) or
+`requires_absent_members` (named objects) re-runs the check before it can
+become a scanner ignore rule and when the report is judged; it is honoured
+only when the check lists its port, or every one of its members, as absent.
+Linking the affected object later therefore invalidates the ground until the
+advisory is fixed or reviewed on another ground. The verified absence result
+prints in the job log; `worker.map` is uploaded with the report so its
+recorded digest can be checked.
 
 The first scan (2026-10-07, Grype 0.120.1) reported 19 matches: 13 OpenSSL,
 three gRPC-Go, two zlib and one nlohmann-json. Match-detail review found the
@@ -410,8 +423,14 @@ its upstream fix is in
 with no fixed release listed by that database. The OpenSSL matches listed
 3.6.5 as fixed; the vcpkg baseline now resolves OpenSSL 3.6.5 and their
 thirteen dispositions are removed. The zlib disposition is the one native
-entry left: it relies on the executable absence check, with review due by
-2026-11-18. The report and the identifier controls are uploaded even when
+entry left. Since the worker links gRPC, it extracts zlib's deflate and
+inflate objects (`adler32`, `crc32`, `deflate`, `inffast`, `inflate`,
+`inftrees`, `trees`, `zutil`) but no `gz*` object, `compress`, `uncompr` or
+`infback`. The affected `gzwrite` code, with the file-local `gz_vacate`,
+`gz_comp`, `gz_init` and `gz_write`, is defined only in `gzwrite.c.o`, so the
+entry rests on `requires_absent_members: ["gzwrite.c.o"]`, verified at object
+granularity on every native job run, with review due by 2026-11-18. It is
+revisited when a fixed release exists or when any `gz*` object is linked. The report and the identifier controls are uploaded even when
 the scan fails.
 
 Both release jobs use `native-release-record.py` to produce a worker SBOM

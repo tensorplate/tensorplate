@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Check that a freshly linked ELF worker extracted no objects from named ports."""
+"""Check that a freshly linked ELF worker extracted no objects from named ports or members."""
 
 from __future__ import annotations
 
@@ -17,6 +17,24 @@ def digest(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def archive_members(path: pathlib.Path) -> set[str]:
+    """The member names GNU ar lists for one regular archive."""
+    listing = subprocess.run(["ar", "t", str(path)], check=True, text=True, capture_output=True).stdout
+    return {line for line in listing.splitlines() if line}
+
+
+def parse_members(specs: list[str]) -> dict[str, list[str]]:
+    """Turn PORT:MEMBER arguments into {port: [member, ...]}, or raise ValueError."""
+    members: dict[str, set[str]] = {}
+    for spec in specs:
+        # Without a colon the member is empty, which the pattern refuses.
+        port, _, member = spec.partition(":")
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._+-]*", member):
+            raise ValueError(f"invalid member, expected PORT:MEMBER: {spec}")
+        members.setdefault(port, set()).add(member)
+    return {port: sorted(names) for port, names in members.items()}
+
+
 def verify_absence(
     worker: pathlib.Path,
     link_map: pathlib.Path,
@@ -24,16 +42,26 @@ def verify_absence(
     triplet: str,
     ports: list[str],
     build_dir: pathlib.Path | None = None,
+    members: dict[str, list[str]] | None = None,
 ) -> dict:
-    """Validate the worker, GNU ld map and installed inventories, or raise ValueError."""
+    """Validate the worker, GNU ld map and installed inventories, or raise ValueError.
+
+    Every port in `ports` must contribute no object and no shared library.
+    Every port in `members` must have its named archive members installed,
+    an archive holding them loaded by the link, none of them extracted, and
+    no shared library.
+    """
+    members = {port: sorted(set(names)) for port, names in (members or {}).items()}
     try:
         worker = worker.resolve(strict=True)
         link_map = link_map.resolve(strict=True)
         install_root = install_root.resolve(strict=True)
         build_dir = (build_dir or link_map.parent).resolve(strict=True)
         text = link_map.read_text()
-        if not ports or not re.fullmatch(r"[a-z0-9-]+", triplet):
-            raise ValueError("nonempty ports and a valid triplet are required")
+        if not (ports or members) or not re.fullmatch(r"[a-z0-9-]+", triplet):
+            raise ValueError("at least one port or member and a valid triplet are required")
+        if any(not names for names in members.values()):
+            raise ValueError("every member port needs at least one member")
         if worker.read_bytes()[:4] != b"\x7fELF":
             raise ValueError("worker is not ELF")
         if abs(worker.stat().st_mtime - link_map.stat().st_mtime) > 60:
@@ -60,11 +88,16 @@ def verify_absence(
             raise ValueError("GNU ld map .text does not match the worker's ELF section")
         loads = {(build_dir / item).resolve() for item in
                  re.findall(r"^LOAD (.+)$", text, re.MULTILINE)}
-        member_inputs = re.findall(r"([^\s()]+)\([^()\n]+\)", text)
-        members = {pathlib.Path(item).name for item in member_inputs}
-        member_paths = {(build_dir / item).resolve() for item in member_inputs}
+        # Every archive(member) the map names, as (archive as written, member).
+        # The lookbehind only skips starts inside a token, where no match can
+        # begin, so a large map is not scanned quadratically.
+        member_inputs = set(re.findall(r"(?<![^\s()])([^\s()]+)\(([^()\n]+)\)", text))
+        written = {archive: (build_dir / archive).resolve() for archive, _ in member_inputs}
+        archive_names = {pathlib.Path(archive).name for archive in written}
+        archive_paths = set(written.values())
         needed = re.findall(r"\(NEEDED\).*Shared library: \[([^\]]+)\]", elf)
-        for port in sorted(set(ports)):
+
+        def installed_archives(port: str) -> set[pathlib.Path]:
             if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", port):
                 raise ValueError(f"invalid port: {port}")
             inventories = list((install_root / "vcpkg/info").glob(f"{port}_*_{triplet}.list"))
@@ -88,23 +121,51 @@ def verify_absence(
                 raise ValueError(f"{port}: inventory lists no installed archives")
             if not loads.intersection(archives):
                 raise ValueError(f"{port}: map never loads an installed archive")
-            names = {path.name for path in archives}
-            included = sorted(names.intersection(members)
-                              | {path.name for path in archives.intersection(member_paths)})
-            if included:
-                raise ValueError(f"{port}: worker extracted archive members from {', '.join(included)}")
+            return archives
+
+        def refuse_shared(port: str, archives: set[pathlib.Path]) -> None:
             stems = {path.name[:-2] for path in archives}
             shared = {name for name in needed if name.split(".so")[0] in stems}
             shared.update(path.name for path in loads
                           if ".so" in path.name and path.name.split(".so")[0] in stems)
             if shared:
                 raise ValueError(f"{port}: worker loads shared libraries: {', '.join(sorted(shared))}")
+
+        def from_port(archive: str, archives: set[pathlib.Path]) -> bool:
+            # The archive the map names, by resolved path or by the port's archive file name.
+            return (written[archive] in archives
+                    or pathlib.Path(archive).name in {path.name for path in archives})
+
+        for port in sorted(set(ports)):
+            archives = installed_archives(port)
+            names = {path.name for path in archives}
+            included = sorted(names.intersection(archive_names)
+                              | {path.name for path in archives.intersection(archive_paths)})
+            if included:
+                raise ValueError(f"{port}: worker extracted archive members from {', '.join(included)}")
+            refuse_shared(port, archives)
+        for port in sorted(members):
+            archives = installed_archives(port)
+            contents = {path: archive_members(path) for path in archives}
+            for member in members[port]:
+                holders = {path for path, names in contents.items() if member in names}
+                if not holders:
+                    raise ValueError(f"{port}: no installed archive contains member {member}")
+                if not loads.intersection(holders):
+                    raise ValueError(f"{port}: map never loads the archive holding {member}")
+            extracted = sorted({f"{pathlib.Path(archive).name}({member})"
+                                for archive, member in member_inputs
+                                if member in members[port] and from_port(archive, archives)})
+            if extracted:
+                raise ValueError(f"{port}: worker extracted {', '.join(extracted)}")
+            refuse_shared(port, archives)
         return {
             "schema_version": 1,
             "worker_sha256": digest(worker),
             "link_map_sha256": digest(link_map),
             "triplet": triplet,
             "absent_ports": sorted(set(ports)),
+            "absent_members": members,
         }
     except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
         raise ValueError(f"cannot verify native code absence: {exc}") from exc
@@ -116,13 +177,20 @@ def main() -> int:
     parser.add_argument("--link-map", type=pathlib.Path, required=True)
     parser.add_argument("--install-root", type=pathlib.Path, required=True)
     parser.add_argument("--triplet", required=True)
-    parser.add_argument("--port", action="append", required=True, dest="ports")
+    parser.add_argument("--port", action="append", default=[], dest="ports",
+                        help="a port that must contribute no object and no shared library")
+    parser.add_argument("--member", action="append", default=[], dest="members",
+                        metavar="PORT:MEMBER",
+                        help="an archive member of PORT that the worker must not extract")
     parser.add_argument("--build-dir", type=pathlib.Path)
     parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
+    if not args.ports and not args.members:
+        parser.error("pass at least one --port or --member")
     try:
         report = verify_absence(args.worker, args.link_map, args.install_root,
-                                args.triplet, args.ports, args.build_dir)
+                                args.triplet, args.ports, args.build_dir,
+                                members=parse_members(args.members))
         serialized = json.dumps(report, indent=2, sort_keys=True) + "\n"
         if args.output:
             args.output.write_text(serialized)

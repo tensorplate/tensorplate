@@ -26,6 +26,13 @@ assert SPEC and SPEC.loader
 guard = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(guard)
 PORTS = {"grpc": "libgrpc.a", "openssl": "libcrypto.a", "zlib": "libz.a"}
+# Further named members each port's archive holds beside <port>.o. grpc's
+# shares a name with zlib's, so a member is told apart by its archive.
+MEMBERS = {"grpc": ("gzwrite.c.o",), "zlib": ("gzwrite.c.o", "deflate.c.o")}
+
+
+def member_function(port: str, member: str) -> str:
+    return f"tp_control_{port}_{member.split('.')[0]}"
 
 
 def native_toolchain_gap() -> str | None:
@@ -71,9 +78,12 @@ def require_native_toolchain() -> None:
 def build_fixture(
     root: pathlib.Path, included_port: str | None = None, shared_port: str | None = None,
     thin_port: str | None = None, inventory_symlink_port: str | None = None,
-    linked_alias_port: str | None = None,
+    linked_alias_port: str | None = None, extracted_members: tuple[str, ...] = (),
 ) -> pathlib.Path:
-    """Compile synthetic ports and record real ELF/link-map output below root/native."""
+    """Compile synthetic ports and record real ELF/link-map output below root/native.
+
+    `extracted_members` names PORT:MEMBER archive members the worker calls into.
+    """
     native = root / "native"
     native.mkdir(parents=True, exist_ok=True)
     worker = native / "serving_worker/tensorplate-serving"
@@ -89,9 +99,16 @@ def build_fixture(
         source.write_text(f"int tp_control_{port}(void) {{ return 17; }}\n")
         obj = native / f"{port}.o"
         subprocess.run(["cc", "-fPIC", "-c", str(source), "-o", str(obj)], check=True)
+        objects = [str(obj)]
+        for member in MEMBERS.get(port, ()):
+            (native / port).mkdir(exist_ok=True)
+            source = native / port / f"{member}.c"
+            source.write_text(f"int {member_function(port, member)}(void) {{ return 19; }}\n")
+            objects.append(str(native / port / member))
+            subprocess.run(["cc", "-fPIC", "-c", str(source), "-o", objects[-1]], check=True)
         archive = libraries / name
         archive.unlink(missing_ok=True)
-        subprocess.run(["ar", "rcsT" if port == thin_port else "rcs", str(archive), str(obj)], check=True)
+        subprocess.run(["ar", "rcsT" if port == thin_port else "rcs", str(archive), *objects], check=True)
         (info / f"{port}_1.0_x64-linux.list").write_text(f"x64-linux/lib/{name}\n")
         if port == inventory_symlink_port:
             regular = archive.with_name(name.replace(".a", "-real.a"))
@@ -109,6 +126,10 @@ def build_fixture(
     if included_port:
         declaration = f"int tp_control_{included_port}(void);\n"
         expression = f"tp_control_{included_port}()"
+    for spec in extracted_members:
+        function = member_function(*spec.split(":"))
+        declaration += f"int {function}(void);\n"
+        expression += f" + {function}()"
     main.write_text(f"{declaration}int main(void) {{ return {expression}; }}\n")
     command = ["cc", "-fuse-ld=bfd", str(main), *archives]
     if shared_port:
@@ -137,9 +158,104 @@ class NativeCodeAbsenceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def verify(self, ports: list[str] | None = None) -> dict:
-        return guard.verify_absence(self.worker, self.link_map, self.installed,
-                                    "x64-linux", ports or list(PORTS))
+    def verify(self, ports: list[str] | None = None, members: dict[str, list[str]] | None = None) -> dict:
+        return guard.verify_absence(self.worker, self.link_map, self.installed, "x64-linux",
+                                    list(PORTS) if ports is None else ports, members=members)
+
+    def run_cli(self, *extra: str) -> tuple[int, str, str]:
+        arguments = ["check-native-code-absence.py", "--worker", str(self.worker),
+                     "--link-map", str(self.link_map), "--install-root", str(self.installed),
+                     "--triplet", "x64-linux", *extra]
+        printed, errors = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", arguments), contextlib.redirect_stdout(printed), \
+                contextlib.redirect_stderr(errors):
+            try:
+                status = guard.main()
+            except SystemExit as exc:
+                status = exc.code
+        return status, printed.getvalue(), errors.getvalue()
+
+    def test_unextracted_member_is_absent_while_its_neighbours_are_linked(self) -> None:
+        build_fixture(self.root, included_port="zlib", extracted_members=("zlib:deflate.c.o",))
+        report = self.verify([], {"zlib": ["gzwrite.c.o"]})
+        self.assertEqual((report["absent_ports"], report["absent_members"]), ([], {"zlib": ["gzwrite.c.o"]}))
+        with self.assertRaisesRegex(ValueError, "zlib: worker extracted archive members from libz.a"):
+            self.verify(["zlib"])
+
+    def test_extracted_member_is_rejected(self) -> None:
+        build_fixture(self.root, extracted_members=("zlib:gzwrite.c.o",))
+        with self.assertRaisesRegex(ValueError, r"zlib: worker extracted libz\.a\(gzwrite\.c\.o\)"):
+            self.verify([], {"zlib": ["gzwrite.c.o"]})
+        build_fixture(self.root, extracted_members=("zlib:deflate.c.o",))
+        with self.assertRaisesRegex(ValueError, r"zlib: worker extracted libz\.a\(deflate\.c\.o\)$"):
+            self.verify([], {"zlib": ["deflate.c.o", "gzwrite.c.o"]})
+
+    def test_same_member_name_from_another_ports_archive_is_not_this_port(self) -> None:
+        build_fixture(self.root, extracted_members=("grpc:gzwrite.c.o",))
+        self.assertEqual(self.verify([], {"zlib": ["gzwrite.c.o"]})["absent_members"], {"zlib": ["gzwrite.c.o"]})
+        with self.assertRaisesRegex(ValueError, r"grpc: worker extracted libgrpc\.a\(gzwrite\.c\.o\)"):
+            self.verify([], {"grpc": ["gzwrite.c.o"]})
+
+    def test_member_the_archive_does_not_contain_is_rejected(self) -> None:
+        for member in ("gzwrit.c.o", "gzwrite.c", "grpc.o"):
+            with self.subTest(member=member), \
+                    self.assertRaisesRegex(ValueError, f"zlib: no installed archive contains member {member}"):
+                self.verify([], {"zlib": [member]})
+
+    def test_member_needs_its_holding_archive_loaded(self) -> None:
+        extra = self.installed / "x64-linux/lib/libzextra.a"
+        subprocess.run(["ar", "rcs", str(extra), str(self.native / "zlib/gzwrite.c.o")], check=True)
+        subprocess.run(["ar", "d", str(self.installed / "x64-linux/lib/libz.a"), "gzwrite.c.o"], check=True)
+        inventory = self.installed / "vcpkg/info/zlib_1.0_x64-linux.list"
+        inventory.write_text(inventory.read_text() + "x64-linux/lib/libzextra.a\n")
+        with self.assertRaisesRegex(ValueError, "zlib: map never loads the archive holding gzwrite.c.o"):
+            self.verify([], {"zlib": ["gzwrite.c.o"]})
+        self.assertEqual(self.verify([], {"zlib": ["deflate.c.o"]})["absent_members"], {"zlib": ["deflate.c.o"]})
+
+    def test_member_port_must_be_loaded_and_not_shared(self) -> None:
+        build_fixture(self.root, shared_port="zlib")
+        with self.assertRaisesRegex(ValueError, "zlib: worker loads shared libraries"):
+            self.verify([], {"zlib": ["gzwrite.c.o"]})
+        build_fixture(self.root)
+        self.link_map.write_text("\n".join(
+            line for line in self.link_map.read_text().splitlines()
+            if not (line.startswith("LOAD ") and line.endswith("libz.a"))
+        ) + "\n")
+        with self.assertRaisesRegex(ValueError, "zlib: map never loads an installed archive"):
+            self.verify([], {"zlib": ["gzwrite.c.o"]})
+
+    def test_nothing_to_check_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "at least one port or member"):
+            self.verify([], {})
+        with self.assertRaisesRegex(ValueError, "every member port needs at least one member"):
+            self.verify([], {"zlib": []})
+
+    def test_cli_member_checks(self) -> None:
+        build_fixture(self.root, included_port="zlib")
+        status, printed, _ = self.run_cli("--member", "zlib:gzwrite.c.o", "--member", "zlib:gzwrite.c.o")
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(printed), self.verify([], {"zlib": ["gzwrite.c.o"]}))
+        self.assertEqual(json.loads(printed)["absent_members"], {"zlib": ["gzwrite.c.o"]})
+        status, printed, _ = self.run_cli("--port", "grpc", "--member", "zlib:gzwrite.c.o")
+        self.assertEqual((status, json.loads(printed)["absent_ports"]), (0, ["grpc"]))
+        cases = {
+            ("--member", "zlib:deflate.c.o"): None,
+            ("--member", "zlib:missing.c.o"): "zlib: no installed archive contains member missing.c.o",
+            ("--member", "zlib"): "invalid member, expected PORT:MEMBER: zlib",
+            ("--member", "zlib:"): "invalid member, expected PORT:MEMBER: zlib:",
+            ("--member", "zlib:../gzwrite.c.o"): "invalid member",
+            ("--member", "Zlib:gzwrite.c.o"): "invalid port: Zlib",
+            ("--port", "zlib"): "zlib: worker extracted archive members from libz.a",
+        }
+        build_fixture(self.root, extracted_members=("zlib:deflate.c.o",))
+        for extra, reason in cases.items():
+            with self.subTest(extra=extra):
+                status, printed, errors = self.run_cli(*extra)
+                self.assertEqual((status, printed), (1, ""), errors)
+                self.assertIn(reason or "zlib: worker extracted libz.a(deflate.c.o)", errors)
+        status, printed, errors = self.run_cli()
+        self.assertEqual((status, printed), (2, ""))
+        self.assertIn("pass at least one --port or --member", errors)
 
     def test_loaded_but_unextracted_archives_are_absent(self) -> None:
         report = self.verify()
