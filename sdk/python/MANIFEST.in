@@ -1,0 +1,3 @@
+# An editable install leaves generated modules in src/; an sdist carries the
+# schema they are generated from (setup.py) and never the modules.
+global-exclude *_pb2.py *_pb2.pyi *_pb2_grpc.py

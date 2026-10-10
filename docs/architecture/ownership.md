@@ -66,6 +66,7 @@ Dependencies flow downward only. Upward dependencies are forbidden.
   protocol/rust/   is consumed by agent/, cli/, observability/.
   protocol/proto/  is compiled into C++ bindings by runtime/'s build when
   TP_ENABLE_STREAMING_GRPC is ON. Only a contract test links them today.
+  sdk/python/'s build compiles it into the Python modules its wheel carries.
   include/tensorplate/ is consumed by runtime/, serving_worker/, and tests.
 ```
 
@@ -89,7 +90,7 @@ must be designed; STL types, vendor SDK types, Rust-owned memory, and
 | `observability/` | `protocol/rust/`, approved third-party Rust crates |
 | `protocol/rust/` | approved third-party Rust crates only |
 | `backends/python_pytorch/` | `protocol/schemas/` (IPC contract), approved Python wheels (PyTorch, etc., system-provided) |
-| `sdk/python/` | standard library and approved third-party Python wheels for client-side HTTP, serialization, and vision helpers |
+| `sdk/python/` | standard library and approved third-party Python wheels for client-side HTTP, serialization, and vision helpers; `protocol/proto/` (as the source of modules its build generates) |
 
 ## Forbidden dependencies
 

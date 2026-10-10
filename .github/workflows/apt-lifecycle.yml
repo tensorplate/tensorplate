@@ -217,8 +217,8 @@ jobs:
 
       # Runs the slice measurement client against a gRPC server built in the
       # test from the same generated bindings. The gRPC stack is the SDK
-      # speech extra's hashed pins, with the generator of the pinned grpcio's
-      # number, in an environment of its own.
+      # speech extra's hashed pins, with the generator from the SDK's hashed
+      # build pins, in an environment of its own.
       - name: Slice measurement client
         shell: bash
         env:
@@ -228,9 +228,8 @@ jobs:
           venv="${RUNNER_TEMP}/slice-measure"
           python3 -m venv "$venv"
           "$venv/bin/pip" install --quiet --require-hashes -r sdk/python/constraints/speech.txt
-          # Unhashed: the pins file is compiled from the SDK's own extra, which has no generator.
-          grpcio="$(sed -n 's/^grpcio==\([^ ]*\).*/\1/p' sdk/python/constraints/speech.txt)"
-          "$venv/bin/pip" install --quiet "grpcio-tools==${grpcio}" jsonschema
+          "$venv/bin/pip" install --quiet --require-hashes -r sdk/python/constraints/build.txt
+          "$venv/bin/pip" install --quiet jsonschema
           "$venv/bin/python" test/validation/slice_measure_test.py
 
   speech-runtime-packages:

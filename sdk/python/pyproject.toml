@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# grpcio-tools generates the stream schema's modules into the wheel (setup.py)
+# and is the release matching the speech extra's grpcio floor.
+# constraints/build.txt pins this environment by hash.
+requires = ["setuptools>=77.0.1", "grpcio-tools==1.81.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -93,6 +96,8 @@ strict = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 files = ["src", "tests"]
+# An editable install generates these beside the package (setup.py).
+exclude = ['/tensorplate/stream/v1/session_pb2']
 
 # numpy is an optional dependency, lazily imported for tensor array access.
 # The dev/CI gate does not install it, so it is ignored when missing; the

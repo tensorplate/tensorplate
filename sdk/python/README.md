@@ -23,6 +23,11 @@ checksum-verified or air-gapped installs. See the
 [SDK quickstart](../../docs/sdk/python.md#install) for that flow and the
 `[numpy]` / `[vision]` / `[speech]` extras.
 
+A build from source generates the stream schema's modules
+(`tensorplate.stream.v1`) with `grpcio-tools`, so it needs that package in
+its build environment; `constraints/build.txt` pins it by hash. See
+[Stream schema modules](../../docs/sdk/python.md#stream-schema-modules).
+
 ## Ownership
 
 - **Layer:** client / user space (no runtime or serving-worker code)

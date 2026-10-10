@@ -68,11 +68,13 @@ pip install "./tensorplate_python-${TP_VERSION}-py3-none-any.whl[vision]"
 
 The `speech` extra declares what the streaming speech transport needs:
 `grpcio>=1.81.1,<2` and `protobuf>=6.33.5,<7`. The streaming client is not
-in the package yet; today the extra and the `tensorplate.speech` package
-fix only the dependency range and the failure mode. `import tensorplate`
-never imports `tensorplate.speech`, grpc or protobuf, so the unary client
-keeps no third-party dependency. Importing `tensorplate.speech` without the
-extra raises `MissingDependencyError`, which names the extra to install.
+in the package yet; today the extra fixes the dependency range and the
+failure mode, and the wheel carries the
+[stream schema's modules](#stream-schema-modules). `import tensorplate`
+never imports `tensorplate.speech`, `tensorplate.stream`, grpc or protobuf,
+so the unary client keeps no third-party dependency. Importing
+`tensorplate.speech` or `tensorplate.stream` without the extra raises
+`MissingDependencyError`, which names the extra to install.
 
 grpcio 1.81.1 is the gRPC version the serving worker links. The worker links
 protobuf 6.33.4; the Python floor is one patch higher because
@@ -98,6 +100,46 @@ hash-required mode for the whole command, and pip then refuses the SDK
 wheel given beside it. `--no-index` in the second command lets pip use only
 the wheel and what is already installed, so it fails rather than fetch
 anything the pins do not cover.
+
+### Stream schema modules
+
+The wheel carries the Python modules of the stream session schema,
+[`session.proto`](../../protocol/proto/tensorplate/stream/v1/session.proto):
+`tensorplate.stream.v1.session_pb2` (the messages, with a `.pyi` stub) and
+`tensorplate.stream.v1.session_pb2_grpc` (the `SessionService` stub and
+servicer). They need the `speech` extra. The schema is a
+[draft](../../protocol/README.md#streaming-session-envelope) that nothing
+serves yet: until it is frozen, a release may change these modules
+incompatibly.
+
+The modules are generated when the package is built, by `grpcio-tools`
+1.81.1, and are never committed: a source tree that was neither built nor
+installed has none, and an editable install writes them beside the package
+in `src/`, where git ignores them. The sdist carries the schema under
+`proto/` and generates the same modules, so it builds the wheel with no
+repository around it.
+
+Every build from source, of a checkout or of the sdist and with or without
+an extra, therefore needs `grpcio-tools` in its build environment.
+`pyproject.toml` requires version 1.81.1, and
+[`sdk/python/constraints/build.txt`](../../sdk/python/constraints/build.txt)
+pins that environment (the generator, what it requires, and setuptools),
+each with the SHA-256 of every file published for it. pip installs the build
+environment from those hashes when given the file:
+
+```bash
+# pip 25.3 or later, from the repository root
+pip install --build-constraint sdk/python/constraints/build.txt ./sdk/python
+# python -m build fills its build environment with a plain pip install
+PIP_CONSTRAINT="$PWD/sdk/python/constraints/build.txt" python -m build sdk/python
+```
+
+A build given neither takes the required versions from the index without a
+hash check. CI uses the first form and the release build the second; the
+release build also runs `tools/release/check-sdk-distribution.py`, which
+fails unless the wheel holds exactly the package's source files and the
+three generated modules, and the sdist holds the schema as committed and no
+generated module.
 
 ## Quickstart
 

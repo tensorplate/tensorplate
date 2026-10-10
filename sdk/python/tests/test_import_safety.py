@@ -3,7 +3,7 @@
 This test must run in an environment WITHOUT the vision extras installed
 (as the default CI Python gate does): importing the package may not pull
 numpy or Pillow at module-import time — only calling the vision helpers may.
-Importing it may not load the speech package or grpc either, installed or not.
+Importing it may not load the speech or stream packages or grpc either, installed or not.
 """
 
 from __future__ import annotations
@@ -34,10 +34,11 @@ def test_vision_surface_imports_without_numpy() -> None:
         assert hasattr(tensorplate, name)
 
 
-def test_core_import_loads_neither_the_speech_package_nor_its_dependencies() -> None:
+def test_core_import_loads_no_speech_or_stream_package_and_none_of_their_dependencies() -> None:
     probe = (
         "import sys, tensorplate; "
-        "print([m for m in ('tensorplate.speech', 'grpc', 'google.protobuf') if m in sys.modules])"
+        "print(sorted(m for m in sys.modules if m.split('.')[0] in ('grpc', 'google') "
+        "or m.startswith(('tensorplate.speech', 'tensorplate.stream', 'tensorplate._extras'))))"
     )
     result = subprocess.run(
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True

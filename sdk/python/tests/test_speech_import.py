@@ -1,4 +1,4 @@
-"""The speech package's dependency guard, and the pins its extra installs from.
+"""The dependency guard of the speech and stream packages, and the pins the extra installs from.
 
 Passes with or without the ``speech`` extra installed. The CI job that
 installs the pins sets ``TENSORPLATE_REQUIRE_SPEECH_EXTRAS=1``, which turns
@@ -25,6 +25,7 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 import tensorplate
+from tensorplate import _extras
 from tensorplate.errors import MissingDependencyError, TensorPlateError
 
 _PINS = Path(__file__).resolve().parents[1] / "constraints" / "speech.txt"
@@ -32,6 +33,7 @@ _REQUIRE_EXTRA = os.environ.get("TENSORPLATE_REQUIRE_SPEECH_EXTRAS") == "1"
 _PIN = re.compile(r"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>[0-9][0-9A-Za-z.]*)")
 _HASH = re.compile(r"--hash=sha256:[0-9a-f]{64}")
 _INSTALL_HINT = 'pip install "tensorplate-python[speech]"'
+_GUARDED = ("tensorplate.speech", "tensorplate.stream")
 
 
 class _Absent(MetaPathFinder):
@@ -72,9 +74,9 @@ def _closure(names: set[str]) -> set[str]:
     return names
 
 
-def _pins() -> dict[str, str]:
+def _pins(path: Path = _PINS) -> dict[str, str]:
     pins: dict[str, str] = {}
-    for line in _PINS.read_text(encoding="utf-8").replace("\\\n", " ").splitlines():
+    for line in path.read_text(encoding="utf-8").replace("\\\n", " ").splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         spec, *hashes = line.split()
@@ -96,9 +98,9 @@ def _installed(distribution: str) -> bool:
     return True
 
 
-def _import_speech() -> ModuleType:
-    sys.modules.pop("tensorplate.speech", None)
-    return importlib.import_module("tensorplate.speech")
+def _import(package: str) -> ModuleType:
+    sys.modules.pop(package, None)
+    return importlib.import_module(package)
 
 
 @pytest.fixture
@@ -109,7 +111,8 @@ def stand_ins(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         module.__path__ = []
         monkeypatch.setitem(sys.modules, name, module)
     yield
-    sys.modules.pop("tensorplate.speech", None)
+    for package in _GUARDED:
+        sys.modules.pop(package, None)
 
 
 def test_the_default_install_declares_no_dependency() -> None:
@@ -139,16 +142,17 @@ def test_the_extra_is_grpcio_and_protobuf_pinned_at_their_floors() -> None:
 
 
 @pytest.mark.usefixtures("stand_ins")
-def test_import_succeeds_when_both_dependencies_import() -> None:
-    assert _import_speech().__name__ == "tensorplate.speech"
+@pytest.mark.parametrize("package", _GUARDED)
+def test_import_succeeds_when_both_dependencies_import(package: str) -> None:
+    assert _import(package).__name__ == package
 
 
-@pytest.mark.usefixtures("stand_ins")
 def test_the_guard_checks_every_distribution_the_extra_declares() -> None:
-    assert sorted(_import_speech()._REQUIRED.values()) == sorted(_extra())
+    assert sorted(_extras.SPEECH_REQUIRED.values()) == sorted(_extra())
 
 
 @pytest.mark.usefixtures("stand_ins")
+@pytest.mark.parametrize("package", _GUARDED)
 @pytest.mark.parametrize(
     ("absent", "module", "dependency"),
     [
@@ -158,7 +162,7 @@ def test_the_guard_checks_every_distribution_the_extra_declares() -> None:
     ],
 )
 def test_import_without_a_dependency_raises_the_typed_error(
-    monkeypatch: pytest.MonkeyPatch, absent: str, module: str, dependency: str
+    monkeypatch: pytest.MonkeyPatch, package: str, absent: str, module: str, dependency: str
 ) -> None:
     for name in ("grpc", "google", "google.protobuf"):
         if f"{name}.".startswith(f"{absent}."):
@@ -166,7 +170,7 @@ def test_import_without_a_dependency_raises_the_typed_error(
     monkeypatch.setattr(sys, "meta_path", [_Absent(absent), *sys.meta_path])
 
     with pytest.raises(MissingDependencyError) as caught:
-        _import_speech()
+        _import(package)
 
     error = caught.value
     assert isinstance(error, TensorPlateError)
@@ -197,18 +201,19 @@ def test_a_dependency_that_fails_inside_its_own_import_is_not_called_missing(
     monkeypatch.delitem(sys.modules, "grpc")
 
     with pytest.raises(ImportError) as caught:
-        _import_speech()
+        _import("tensorplate.speech")
 
     assert not isinstance(caught.value, MissingDependencyError)
     assert caught.value.name == name
 
 
-def test_the_real_import_agrees_with_what_is_installed() -> None:
+@pytest.mark.parametrize("package", _GUARDED)
+def test_the_real_import_agrees_with_what_is_installed(package: str) -> None:
     installed = all(_installed(name) for name in _extra())
     assert installed or not _REQUIRE_EXTRA, "this job must install the speech pins"
 
     result = subprocess.run(
-        [sys.executable, "-c", "import tensorplate.speech"],
+        [sys.executable, "-c", f"import {package}"],
         capture_output=True,
         text=True,
         check=False,
