@@ -43,6 +43,8 @@ DOCTOR_REQUIREMENTS: dict[str, dict[str, tuple[str, ...]]] = {
 }
 SPEECH_FAMILY_MODES = {"in-assets": "installed", "host-built": "installed", "none": "none"}
 STREAMING_SUBJECT = "streaming-latency"
+# What a mode's sessions were sent, as its record section states it.
+STREAMING_INPUT_SETTINGS = {"stt": ("samples", "audio_bytes", "frame_ms"), "tts": ("text_bytes",)}
 
 
 class IndexLineError(Exception):
@@ -271,9 +273,13 @@ def streaming_line(record: dict[str, Any], envelope: dict[str, Any]) -> dict[str
         outcomes: dict[str, int] = {}
         for session in section["sessions"]:
             outcomes[session["outcome"]] = outcomes.get(session["outcome"], 0) + 1
-        checks[f"{mode}.sessions"] = ", ".join(
-            f"{n} {name}" for name, n in sorted(outcomes.items())
-        )
+        if outcomes:
+            sessions = ", ".join(f"{n} {name}" for name, n in sorted(outcomes.items()))
+        elif section["target"]["connect_ns"] is None:
+            sessions = "none: the channel never became ready"
+        else:
+            sessions = "none: the run ended before a session did"
+        checks[f"{mode}.sessions"] = sessions
         for name, summary in section["summary"].items():
             prefix = f"{mode}.{name}"
             metrics[f"{prefix}.count"] = summary["count"]
@@ -282,8 +288,12 @@ def streaming_line(record: dict[str, Any], envelope: dict[str, Any]) -> dict[str
                 nanoseconds = summary[f"{percentile}_ns"]
                 if nanoseconds is not None:
                     metrics[f"{prefix}.{percentile}_ms"] = round(nanoseconds / 1e6, 3)
-    # Percentiles over different numbers of sessions are not the same measurement.
+    # Percentiles over different numbers of sessions, or another input, are another measurement.
     settings = {**envelope["settings"], "streaming_iterations": record["settings"]["iterations"]}
+    for mode, fields in STREAMING_INPUT_SETTINGS.items():
+        if record[mode] is not None:
+            for field in fields:
+                settings[f"streaming_{mode}_{field}"] = record[mode]["input"][field]
     return new_line(
         {**envelope, "settings": settings},
         STREAMING_SUBJECT,
