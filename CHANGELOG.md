@@ -33,6 +33,33 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Recorded on a host of the `ubuntu2404-x86-l4-g2s8` row, with one NVIDIA
+  L4, against `v0.3.1-rc.2`:
+  two candidate qualification runs of Whisper large-v3-turbo through
+  faster-whisper and three of Kokoro-82M (voice `af_heart`), summarized in
+  `docs/validation/evidence/speech-candidate-whisper-l4-2026-10-08/SUMMARY.md`
+  and
+  `docs/validation/evidence/speech-candidate-kokoro-l4-2026-10-08/SUMMARY.md`.
+  Each summary gives the numbers, the method, the build, every negative
+  case's outcome per run, the settings that make the runs not a default
+  install, and the SHA-256 of each record, memory observation file and
+  log it is read from; those files are not in the repository. Both
+  Whisper runs and Kokoro runs 2 and 3 are `pass`: the deploys built to
+  fail while the runner loads returned `unsupported` and `oom_error`, and
+  the rollback issued right after was accepted. Against `v0.3.1-rc.1` the
+  undeclared voice returned `timeout` in both Kokoro runs, and the load
+  under a ballast returned `timeout` in one run of each candidate and was
+  not run in the other. Kokoro run 1 is `fail` and is
+  summarized as recorded: its out-of-memory case deployed successfully
+  under the 21,300,000,000-byte ballast the operator chose, where the
+  later runs held 21,700,000,000 bytes and the deploy was refused. The
+  host still had speech runtime packages built on it, since no release
+  attaches them. The session still set three interim agent settings,
+  because the candidate bundles name no runner profile.
+  Candidate records only; no support row's evidence changes.
+  `docs/validation/speech-candidate-recipes.md` describes both sets of
+  runs and how later runs are filed. (V030-E01-F02-T03)
+
 - The agent judges a format 0.2 bundle against what its target holds before
   anything is staged, with a typed code for each refusal in the error
   context. A refusal is `unsupported` where the installation lacks the
