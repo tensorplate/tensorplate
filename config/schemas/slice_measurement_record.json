@@ -32,7 +32,7 @@
     "provenance": {
       "type": "string",
       "enum": ["recorded", "synthetic"],
-      "description": "`recorded` for a run against a serving worker, which needs the tool's `source_commit`; `synthetic` for a run against a test server or by a tool whose commit was not given, whose numbers measure nothing."
+      "description": "`recorded` for a run against a serving worker, which needs the tool's `source_commit` and the worker's release or build; `synthetic` for a run against a test server, or one whose tool commit or worker was not stated, whose numbers measure nothing."
     },
     "tool": {
       "type": "object",

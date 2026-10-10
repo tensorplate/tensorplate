@@ -551,6 +551,8 @@ def _check_claims(record: dict[str, Any]) -> None:
     stated = worker["version"] is not None or worker["build"] is not None
     if stated != (worker["source"] == "operator_stated"):
         raise RecordError("worker: source does not agree with the version and build")
+    if record["provenance"] == "recorded" and not stated:
+        raise RecordError("provenance: recorded needs the worker's release or build")
     if (run["error"] is None) != (run["ended_by"] != "error"):
         raise RecordError("run: error does not agree with ended_by")
 
