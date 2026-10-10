@@ -2,8 +2,9 @@
 
 Three runs of `tools/validation/candidate-qualify.py` over the
 `tts-kokoro-candidate` bundle (Kokoro-82M, `float32` on CUDA, language
-`en-US`, voice `af_heart`), recorded on a `g2-standard-8` with one
-NVIDIA L4 running the published `v0.3.1-rc.2` packages. These are
+`en-US`, voice `af_heart`), recorded on a host of the platform row
+`ubuntu2404-x86-l4-g2s8`, with one NVIDIA L4, running the published
+`v0.3.1-rc.2` packages. These are
 candidate records: each says `presented_as: candidate` and
 `production_evidence: false`, and none is release evidence for any
 support row.
@@ -15,8 +16,10 @@ by rollback restored the predecessor and all four memory windows were
 measured. The two cases that did not hold on
 [2026-10-01](../speech-candidate-kokoro-l4-2026-10-01/README.md), an
 entry selecting an undeclared voice and a deploy while a ballast holds
-the device's memory, returned `unsupported` and `oom_error`; against the
-first release candidate both returned `timeout`. Run 1's failure is its
+the device's memory, returned `unsupported` and `oom_error`. Against the
+first release candidate the first returned `timeout` in both runs and
+the second in run 2; run 1's ballast did not report holding memory, so
+that run did not run the case. Run 1's failure here is its
 `oom_at_load` case, where the deploy succeeded under the ballast the
 operator had sized; it is described under
 [Run 1](#run-1).
@@ -32,6 +35,10 @@ named. None of them needed a synthetic form from the
 cloud identifier and are as recorded. Generated audio is not among them.
 A record carries each output's sample count, duration and digest, never
 the text or the audio.
+
+The same session's validation pass also ran the tool once on this
+candidate. The pass report cited below records that run as `incomplete`;
+it is not one of the runs summarized here.
 
 ## The three runs
 
@@ -60,17 +67,25 @@ runs 2 and 3. The first request after the deploy is the first sentence's
 first timing sample, timed by the client. The ballast size is in each
 run's `run.log`, not in its record.
 
+The deploy walls are warm-cache: the tool reads and hashes the whole
+bundle before it deploys it. The pass report's `cold-deploy:tts-kokoro`
+step, which drops the page cache and then deploys the bundle at the same
+path once, took 21.6 s in all.
+
 In runs 2 and 3 the three deploys built to fail did so with the code
 expected. `unsupported_voice` was answered `unsupported`, "serving worker
-failed to start: the selected language or voice is not declared", after
-2.3 s. `corrupt_artifact_digest` was refused by the agent's integrity
-check as `load_failed`. `oom_at_load` was answered `oom_error`, "serving
-worker failed to start: the Kokoro model could not be loaded", after
-10.7 s and 10.6 s (`run.log`). The status snapshot that follows found the
-agent `degraded` with that code as its last error and the candidate
-still active, and the rollback issued next was accepted. On 2026-10-01
-the first and the third of those deploys returned `timeout` and the
-rollback was refused as `busy`.
+failed to start: the selected language or voice is not declared".
+`corrupt_artifact_digest` was refused by the agent's integrity check as
+`load_failed`. `oom_at_load` was answered `oom_error`, "serving worker
+failed to start: the Kokoro model could not be loaded", after 10.7 s and
+10.6 s (the deploy `run.log` lists after its ballast line). The status
+snapshot that follows found the agent `degraded` with that code as its
+last error and the candidate still active, and the rollback issued next
+was accepted. On 2026-10-01 `unsupported_voice` returned `timeout` in
+both runs. `oom_at_load` returned `timeout` in run 2, where the rollback
+issued next was refused with `not_ready`, "agent is busy with an
+in-flight transaction"; run 1 of that day did not run the case, and its
+teardown was ok.
 
 `cancel_during_request` is recorded and never judged: the Python-backed
 worker answers the asynchronous route with HTTP 501.
@@ -81,8 +96,9 @@ worker answers the asynchronous route with HTTP 501.
 holds device memory, and expects `oom_error`. The ballast's size is an
 argument the operator passes (`session/scripts/30-qualify.sh`). For run 1
 it held 21,300,000,000 bytes (`run-1/run.log`), and under it the deploy
-succeeded in 11.4 s: the record's outcome is `deployed as
-qualify-kokoro-1-oom` with the reason `the request succeeded`.
+succeeded, in 11.4 s by the deploy that log lists after its ballast
+line: the record's outcome is `deployed as qualify-kokoro-1-oom` with
+the reason `the request succeeded`.
 
 The record's three other failures follow from that deploy having become
 the active deployment:
@@ -106,7 +122,8 @@ judged negatives matched.
 
 Median real-time factor (the runner's `synthesize` time over the
 generated audio's duration) and median exchange time at the client, over
-the requests of each sentence:
+the requests of each sentence. A median here is the tool's nearest-rank
+value, a sample that occurred, not an interpolation:
 
 | Fixture | Run 1 RTF | Run 1 exchange | Run 2 RTF | Run 2 exchange | Run 3 RTF | Run 3 exchange |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -158,9 +175,10 @@ minus available.
 
 The sidecar held at most 552 MiB of device memory warm and idle and
 1,152 MiB under the tool's own load in all three runs, the values
-recorded on 2026-10-01. After the teardown the sidecar is the
-predecessor's again. The device-wide maximum after the teardown is
-higher than in the predecessor window before it in runs 2 and 3; the
+recorded on 2026-10-01. In runs 2 and 3 the sidecar after the teardown
+is the predecessor's again; run 1's rollback restored the candidate and
+its last window did not run. The device-wide maximum after the teardown
+is higher than in the predecessor window before it in runs 2 and 3; the
 samples attribute device memory to the sidecar only, so the records do
 not say what else held it.
 
@@ -184,35 +202,41 @@ not say what else held it.
   7.0.0-1013-gcp, NVIDIA driver 580.178.04, one NVIDIA L4 reporting
   23,034 MiB, 8 processors. The agent resolved the platform row
   `ubuntu2404-x86-l4-g2s8` and reported it validated
-  (`session/pass/logs/05-agent-environment.log`).
+  (`session/pass/logs/05-agent-environment.log`). The machine type is
+  not in a filed file; that row is defined for a `g2-standard-8`.
 
 Four things make these runs not a default install:
 
 1. **Three interim agent settings.** The candidate bundles name no runner
    profile, so nothing selects the speech runtime environment for them
    ([rolling validation](../../rolling-validation.md#bundles-that-name-no-runner-profile)).
-   The pass appended three variables to the agent's environment file and
-   restarted the agent (the report's `agent-environment` step and its
-   log), and the runs were made with them: `TP_PYTHON_PYTORCH_EXECUTABLE`,
-   the speech runtime's interpreter;
-   `TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS=120000`, a raised sidecar startup
-   deadline; and `LD_LIBRARY_PATH`, the speech runtime's cuBLAS directory.
-   No run was made without them, so these records do not show which of
-   the three this host needs.
+   The pass report's `agent-environment` step and its log show three
+   variables appended to the agent's environment file and the agent
+   restarted: `TP_PYTHON_PYTORCH_EXECUTABLE`, the speech runtime's
+   interpreter; `TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS=120000`, a raised
+   sidecar startup deadline; and `LD_LIBRARY_PATH`, the speech runtime's
+   cuBLAS directory. The pass began at 15:02 UTC and these runs were
+   recorded from 15:39. A record does not carry the agent's
+   environment, so no filed file shows the settings in place during
+   these runs; that they were is the operator's statement. Nor do the
+   records show which of the three this host needs.
 2. **Host-built speech runtime packages**, as above.
 3. **PyTorch in the system interpreter.** The host preparation
    (`session/scripts/10-prep.sh`) installs it there when the image has
    none, and recorded 2.14.1+cu130 with CUDA available
-   (`session/raw/torch-system.txt`). The runs used the speech runtime's
-   own engines, as each record's `device_facts` shows.
+   (`session/raw/torch-system.txt`). Each record's `device_facts` reports
+   PyTorch 2.13.0+cu129, not the system interpreter's version.
 4. **The qualification command** (`session/scripts/30-qualify.sh`): a
-   CUDA fixture bundle, `test/models/bundles/v0_1/x86_cuda_smoke`, as the
-   predecessor, whose sidecar holds device memory (248 MiB in the first
-   and last windows); `--window 60s`;
+   predecessor bundle from an installed path; `--window 60s`;
    `--agent-timeout-ms 120000` and `--deploy-wait-timeout-ms 300000`; and
    a ballast of the size the operator passed, held by
    `tools/validation/vram_ballast.py` under the speech runtime's
-   interpreter.
+   interpreter. Each record gives the predecessor's bundle digest,
+   `sha256:f52b460ea693fc2209ee787b8470bae7d13d52c0de88791052970e9a6537fa6e`,
+   which is the digest the row's CUDA baseline records for the
+   `x86-cuda-smoke` fixture bundle
+   ([`cuda-deploy.json`](../v0.2.1/ubuntu2404-x86-l4-g2s8/cuda-baseline/cuda-deploy.json)).
+   Its sidecar holds device memory: 248 MiB in the first window of every run and in the last window of runs 2 and 3.
 
 ## Digests
 

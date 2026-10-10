@@ -205,8 +205,8 @@ deploy left at the default gives up first, the negative case records
 `timeout` instead of the agent's answer, and the agent is still inside the
 transaction when the next command arrives. A later agent answers with the
 runner's code as soon as the candidate worker exits (the 2026-10-08 runs
-below record its answers against `v0.3.1-rc.2`, each inside the warm
-timeout), and a later CLI waits
+below record its answers against `v0.3.1-rc.2`, each within 17 s), and
+a later CLI waits
 at least 120,000 ms for a deploy or rollback by default; the option stays
 for a candidate that hangs instead of exiting. `--teardown-busy-wait-ms` (60,000 by default) bounds how
 long the teardown retries a rollback refused as `busy`, once a second
@@ -304,28 +304,30 @@ runner's typed failure.
 
 [`evidence/speech-candidate-kokoro-l4-2026-10-08/SUMMARY.md`](evidence/speech-candidate-kokoro-l4-2026-10-08/SUMMARY.md)
 summarizes three runs of the `tts` suite against the second 0.3.1 release
-candidate on a `g2-standard-8`, and lists the SHA-256 of each record,
-sampler file and log it is read from. Those files are not in this
+candidate on a host of the `ubuntu2404-x86-l4-g2s8` row, and lists the
+SHA-256 of each record, sampler file and log it is read from. Those files are not in this
 repository.
 
 Run 1 is `fail`, runs 2 and 3 are `pass`, and all three are summarized as
 recorded. Every fixture request returned `ok`, with a median real-time
 factor of 0.012 to 0.051, and the sidecar's sampled device memory was
 552 MiB warm idle and 1,152 MiB under load. In runs 2 and 3 every judged
-negative case returned its typed code, including the two that returned
-`timeout` on 2026-10-01: an entry selecting an undeclared voice was
-answered `unsupported` and a load with the device's memory held by a
-ballast `oom_error`, and the rollback issued right after was accepted.
+negative case returned its typed code: an entry selecting an undeclared
+voice was answered `unsupported` and a load with the device's memory
+held by a ballast `oom_error`, and the rollback issued right after was
+accepted. On 2026-10-01 the first of those returned `timeout` in both
+runs and the second in run 2; run 1 of that day did not run it.
 In run 1 the deploy under the ballast succeeded: the ballast held
 21,300,000,000 bytes, a size the operator chose, against 21,700,000,000
 in the two runs where the deploy was refused. That deploy then stood
 where the tool expected the candidate, so the run's status check and
 teardown failed and its last memory window did not run.
 
-The runs were made with the speech runtime packages built on the host,
-with PyTorch in the system interpreter, and with three interim settings
-in the agent's environment, because the candidate bundles name no runner
-profile. The summary lists them.
+The host had the speech runtime packages built on it, since no release
+attaches them, and PyTorch in its system interpreter. The session also
+set three interim variables in the agent's environment, because the
+candidate bundles name no runner profile. The summary lists all of them
+and says what the filed files do and do not show about each.
 
 ### Whisper on an NVIDIA L4, 2026-10-08
 
@@ -340,7 +342,8 @@ real-time factor of 0.033 for English and 0.029 for Arabic, and the
 sidecar's sampled device memory was 2,138 MiB warm idle and 2,348 MiB
 under load. Every judged negative case returned its typed code: with the
 device's memory held by a ballast, `tensorplate deploy` reported
-`oom_error` where it reported `timeout` on 2026-10-01, and the rollback
-issued right after was accepted. The teardown restored the predecessor
-and all four memory windows were measured in both runs. The interim
-settings are the same as for the Kokoro runs.
+`oom_error`, and the rollback issued right after was accepted. On
+2026-10-01 that deploy reported `timeout` in run 1, and run 2 did not
+run the case. The teardown restored the predecessor and all four memory
+windows were measured in both runs. The host and the interim settings
+are the same as for the Kokoro runs.

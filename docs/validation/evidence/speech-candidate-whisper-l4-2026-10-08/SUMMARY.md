@@ -3,8 +3,9 @@
 Two runs of `tools/validation/candidate-qualify.py` over the
 `stt-whisper-candidate` bundle (a CTranslate2 conversion of Whisper
 large-v3-turbo through faster-whisper, `float16` on CUDA, languages `en`
-and `ar`), recorded on a `g2-standard-8` with one NVIDIA L4 running the
-published `v0.3.1-rc.2` packages. These are candidate
+and `ar`), recorded on a host of the platform row
+`ubuntu2404-x86-l4-g2s8`, with one NVIDIA L4, running the published
+`v0.3.1-rc.2` packages. These are candidate
 records: each says `presented_as: candidate` and `production_evidence:
 false`, and neither is release evidence for any support row.
 
@@ -14,7 +15,8 @@ restored the predecessor and all four memory windows were measured. The
 case that did not hold on
 [2026-10-01](../speech-candidate-whisper-l4-2026-10-01/README.md), a
 deploy while a ballast holds the device's memory, returned `oom_error` in
-both runs; against the first release candidate it returned `timeout`.
+both runs. Against the first release candidate it returned `timeout` in
+run 1; run 2 was given no ballast and did not run the case.
 
 This directory holds this summary and nothing else. The two records,
 their memory observations and logs, and the session files that show the
@@ -27,6 +29,10 @@ named. None of them needed a synthetic form from the
 cloud identifier and are as recorded. Transcripts are not among them. A
 record carries each output's length, segment and word counts, never the
 text.
+
+The same session's validation pass also ran the tool once on this
+candidate. The pass report cited below records that run as `incomplete`;
+it is not one of the runs summarized here.
 
 ## The two runs
 
@@ -54,14 +60,22 @@ the load window's sampler finished, 55 times in all. The first request
 after the deploy is the first clip's first timing sample, timed by the
 client. The ballast size is in each run's `run.log`, not in its record.
 
+The deploy walls are warm-cache: the tool reads and hashes the whole
+bundle before it deploys it. The pass report's `cold-deploy:stt-whisper`
+step, which drops the page cache and then deploys the bundle at the same
+path once, took 21.2 s in all.
+
 The two deploys built to fail did so with the code expected.
 `corrupt_artifact_digest` was refused by the agent's integrity check as
 `load_failed`. `oom_at_load` was answered `oom_error`, "serving worker
 failed to start: the Whisper model could not be loaded", after 16.6 s in
-each run (`run.log`). The status snapshot that follows found the agent
-`degraded` with that code as its last error and the candidate still
-active, and the rollback issued next was accepted. On 2026-10-01 that
-deploy returned `timeout` and the rollback was refused as `busy`.
+each run (the deploy `run.log` lists after its ballast line). The status
+snapshot that follows found the agent `degraded` with that code as its
+last error and the candidate still active, and the rollback issued next
+was accepted. On 2026-10-01 that deploy returned `timeout` in run 1, and
+the rollback issued next was refused with `not_ready`, "agent is busy
+with an in-flight transaction". Run 2 of that day did not run the case,
+and its teardown was ok.
 
 `cancel_during_request` is recorded and never judged: the Python-backed
 worker answers the asynchronous route with HTTP 501.
@@ -70,7 +84,8 @@ worker answers the asynchronous route with HTTP 501.
 
 Median real-time factor (the runner's `decode` time over the clip's
 duration) and median exchange time at the client, over the 55 requests of
-each clip:
+each clip. A median here is the tool's nearest-rank value, a sample that
+occurred, not an interpolation:
 
 | Fixture | Run 1 RTF | Run 1 exchange | Run 2 RTF | Run 2 exchange |
 | --- | --- | --- | --- | --- |
@@ -141,35 +156,42 @@ what else held it.
   7.0.0-1013-gcp, NVIDIA driver 580.178.04, one NVIDIA L4 reporting
   23,034 MiB, 8 processors. The agent resolved the platform row
   `ubuntu2404-x86-l4-g2s8` and reported it validated
-  (`session/pass/logs/05-agent-environment.log`).
+  (`session/pass/logs/05-agent-environment.log`). The machine type is
+  not in a filed file; that row is defined for a `g2-standard-8`.
 
 Four things make these runs not a default install:
 
 1. **Three interim agent settings.** The candidate bundles name no runner
    profile, so nothing selects the speech runtime environment for them
    ([rolling validation](../../rolling-validation.md#bundles-that-name-no-runner-profile)).
-   The pass appended three variables to the agent's environment file and
-   restarted the agent (the report's `agent-environment` step and its
-   log), and the runs were made with them: `TP_PYTHON_PYTORCH_EXECUTABLE`,
-   the speech runtime's interpreter;
-   `TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS=120000`, a raised sidecar startup
-   deadline; and `LD_LIBRARY_PATH`, the speech runtime's cuBLAS directory.
-   No run was made without them, so these records do not show which of
-   the three this host needs.
+   The pass report's `agent-environment` step and its log show three
+   variables appended to the agent's environment file and the agent
+   restarted: `TP_PYTHON_PYTORCH_EXECUTABLE`, the speech runtime's
+   interpreter; `TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS=120000`, a raised
+   sidecar startup deadline; and `LD_LIBRARY_PATH`, the speech runtime's
+   cuBLAS directory. The pass began at 15:02 UTC and these runs were
+   recorded from 15:43. A record does not carry the agent's
+   environment, so no filed file shows the settings in place during
+   these runs; that they were is the operator's statement. Nor do the
+   records show which of the three this host needs.
 2. **Host-built speech runtime packages**, as above.
 3. **PyTorch in the system interpreter.** The host preparation
    (`session/scripts/10-prep.sh`) installs it there when the image has
    none, and recorded 2.14.1+cu130 with CUDA available
-   (`session/raw/torch-system.txt`). The runs used the speech runtime's
-   own engines, as each record's `device_facts` shows.
+   (`session/raw/torch-system.txt`). Each record's `device_facts` names
+   the engines that answered, CTranslate2 and faster-whisper, and no
+   PyTorch version.
 4. **The qualification command** (`session/scripts/30-qualify.sh`): a
-   CUDA fixture bundle, `test/models/bundles/v0_1/x86_cuda_smoke`, as the
-   predecessor, whose sidecar holds device memory (248 MiB in the first
-   and last windows); `--window 60s`;
+   predecessor bundle from an installed path; `--window 60s`;
    `--agent-timeout-ms 120000` and `--deploy-wait-timeout-ms 300000`; and
    a ballast of the size the operator passed, held by
    `tools/validation/vram_ballast.py` under the speech runtime's
-   interpreter.
+   interpreter. Each record gives the predecessor's bundle digest,
+   `sha256:f52b460ea693fc2209ee787b8470bae7d13d52c0de88791052970e9a6537fa6e`,
+   which is the digest the row's CUDA baseline records for the
+   `x86-cuda-smoke` fixture bundle
+   ([`cuda-deploy.json`](../v0.2.1/ubuntu2404-x86-l4-g2s8/cuda-baseline/cuda-deploy.json)).
+   Its sidecar holds device memory: 248 MiB in the first and last windows of both runs.
 
 ## Digests
 
