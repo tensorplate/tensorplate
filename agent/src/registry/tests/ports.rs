@@ -471,3 +471,53 @@ fn a_member_unloaded_while_its_restart_was_in_hand_is_neither_stamped_nor_starte
     assert_eq!(*stamps.lock().unwrap(), []);
     assert_eq!(f.launcher.count(), 1);
 }
+
+#[test]
+fn a_restart_a_deploy_took_hold_of_during_the_staged_read_is_left_owed_and_not_stamped() {
+    let (f, stamps) = stamped_fixture(|restamp| Ok(stamped_for(restamp)));
+    exit(&f.serve("stt"));
+    f.registry.supervise();
+    f.clock.advance(Duration::from_secs(1));
+    let (reading, is_reading) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    *f.registry.before_staged_read.lock().unwrap() = Some(Box::new(move || {
+        reading.send(()).unwrap();
+        let _ = released.recv();
+    }));
+
+    let events = std::thread::scope(|scope| {
+        let release = release;
+        let restarting = scope.spawn(|| f.registry.supervise());
+        is_reading
+            .recv_timeout(GRACE)
+            .expect("the manifest read begins");
+        f.prepare("tts").unwrap();
+        release.send(()).unwrap();
+        restarting.join().unwrap()
+    });
+
+    assert_eq!(events, []);
+    assert_eq!(*stamps.lock().unwrap(), []);
+    assert_eq!(f.launcher.count(), 2);
+
+    // Still owed, and not counted: it starts once the deploy is gone, as
+    // the first restart.
+    f.registry.unload("tts");
+    assert_eq!(
+        restart(&f, 0),
+        [MemberEvent::Restarted {
+            member: MemberRef::new("stt", 4)
+        }]
+    );
+    assert_eq!(
+        *stamps.lock().unwrap(),
+        [("stt".to_owned(), 1, 4, "mock".to_owned())]
+    );
+    exit(&f.launcher.handle(4));
+    let events = f.registry.supervise();
+    assert!(
+        matches!(&events[..], [.., MemberEvent::RestartDue { after, .. }]
+            if *after == Duration::from_secs(2)),
+        "{events:?}"
+    );
+}

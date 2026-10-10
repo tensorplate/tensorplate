@@ -223,6 +223,8 @@ pub type RestartStamp = Arc<dyn Fn(&Restamp<'_>) -> AgentResult<CandidateRef> + 
 struct FailedLaunch {
     error: AgentError,
     stamped: Option<Box<(u64, CandidateRef)>>,
+    /// A restart that was not begun because a deploy holds the member.
+    held_by_a_deploy: bool,
 }
 
 impl From<AgentError> for FailedLaunch {
@@ -230,6 +232,7 @@ impl From<AgentError> for FailedLaunch {
         Self {
             error,
             stamped: None,
+            held_by_a_deploy: false,
         }
     }
 }
@@ -572,10 +575,16 @@ impl MemberRegistry {
             if members.stopping {
                 return Err(AgentError::Stopping.into());
             }
-            // Unloaded or promoted over while the staged manifest was read:
-            // nothing is stamped or started for it.
-            if restart_of.is_some() && !members.restart_in_hand(&recipe.deployment_id) {
-                return Err(AgentError::WorkerNotReady.into());
+            // Unloaded, promoted over or taken hold of by a deploy while the
+            // staged manifest was read: nothing is stamped or started for it.
+            if restart_of.is_some() {
+                let held_by_a_deploy = members.held_by_a_deploy();
+                if held_by_a_deploy || !members.restart_in_hand(&recipe.deployment_id) {
+                    return Err(FailedLaunch {
+                        held_by_a_deploy,
+                        ..AgentError::WorkerNotReady.into()
+                    });
+                }
             }
         }
         let (recipe, stamped) = match (restart_of, &self.restart_stamp) {
@@ -622,7 +631,11 @@ impl MemberRegistry {
                     outside: Some(outside),
                 },
             )),
-            Err(error) => Err(FailedLaunch { error, stamped }),
+            Err(error) => Err(FailedLaunch {
+                error,
+                stamped,
+                held_by_a_deploy: false,
+            }),
         }
     }
 
@@ -1009,6 +1022,9 @@ impl MemberRegistry {
                         members.restart = Restart::Due { owed, due: now };
                     }
                     yielded = Some(member);
+                }
+                Err(failed) if in_hand && failed.held_by_a_deploy => {
+                    members.restart = Restart::Due { owed, due: now };
                 }
                 Err(failed) if in_hand => {
                     members.restarts.push_back(now);
