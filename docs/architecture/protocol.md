@@ -58,7 +58,8 @@ instead: format 0.2 fields are checked against the manifest's own text, so
 the helper refuses a format 0.2 manifest rather than return it unchecked.
 Manifest-local rule failures expose `BundleRuleCode` through the parser and
 agent, with its stable string in the existing error context; the shared wire
-error enum and protocol version remain unchanged. A format 0.2 manifest may
+error enum and protocol version remain unchanged. The enum also holds the
+codes of the rules the agent judges against its target at deploy. A format 0.2 manifest may
 declare variant lineage (`base_model_ref`, `variant_identity`); the parser
 validates the declaration and refuses the bundle, since every variant kind is
 reserved.

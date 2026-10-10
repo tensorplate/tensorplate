@@ -85,7 +85,9 @@ const TTS_MAX_SEGMENT_AUDIO_MS: u64 = 30_000;
 const TTS_MAX_SYNTHESIS_TEXT_BYTES: u64 = 16_384;
 const TTS_MAX_SYNTHESIS_AUDIO_MS: u64 = 120_000;
 
-/// Stable manifest-local rejection codes, also carried in agent error context.
+/// Stable bundle rule rejection codes, also carried in agent error context.
+/// The runner, hardware row and support claim codes are the agent's: they
+/// judge a manifest against what is installed on the target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BundleRuleCode {
     ModelBlock,
@@ -102,6 +104,10 @@ pub enum BundleRuleCode {
     VariantIdentity,
     VariantSupportLevel,
     ReservedVariant,
+    RunnerSelector,
+    RunnerComputeType,
+    HardwareRow,
+    SupportClaim,
 }
 
 impl BundleRuleCode {
@@ -122,6 +128,10 @@ impl BundleRuleCode {
             Self::VariantIdentity => "bundle_r8_variant_identity",
             Self::VariantSupportLevel => "bundle_r8_variant_support_level",
             Self::ReservedVariant => "bundle_r8_reserved_variant",
+            Self::RunnerSelector => "bundle_r6_runner_selector",
+            Self::RunnerComputeType => "bundle_r6_compute_type",
+            Self::HardwareRow => "bundle_r9_hardware_row",
+            Self::SupportClaim => "bundle_r9_support_claim",
         }
     }
 }

@@ -88,6 +88,11 @@ pub enum AgentError {
     #[error("bundle manifest is invalid: {0}")]
     BundleManifest(BundleManifestFailure),
 
+    /// A valid bundle asks for something this installation cannot serve;
+    /// carries the rule code like [`AgentError::BundleManifest`].
+    #[error("bundle cannot be served by this installation: {0}")]
+    BundleUnsupported(BundleManifestFailure),
+
     #[error("bundle artifact `{path}` failed integrity check: {reason}")]
     BundleIntegrity { path: String, reason: String },
 
@@ -208,6 +213,7 @@ impl AgentError {
             | AgentError::BackendUnrunnable { .. }
             | AgentError::PlatformNotAdmissible { .. }
             | AgentError::UnsupportedCapability(_, _)
+            | AgentError::BundleUnsupported(_)
             | AgentError::Unavailable(_) => (ErrorCode::Unsupported, false),
             AgentError::InsufficientCapacity => (ErrorCode::OomError, true),
             AgentError::Busy(_) | AgentError::WorkerNotReady => (ErrorCode::NotReady, true),
@@ -234,6 +240,9 @@ impl AgentError {
         // carried to the wire and rendered by the CLI.
         match self {
             AgentError::BundleManifest(BundleManifestFailure {
+                rule: Some(rule), ..
+            })
+            | AgentError::BundleUnsupported(BundleManifestFailure {
                 rule: Some(rule), ..
             }) => record.with_context(rule.as_str()),
             AgentError::PlatformNotAdmissible {
