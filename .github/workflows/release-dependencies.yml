@@ -59,8 +59,7 @@ jobs:
             clang-15 \
             llvm-15 \
             ninja-build
-          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
-          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          tools/ci/select-clang.sh
 
       - name: Pinned vcpkg checkout and binary cache
         uses: ./.github/actions/release-vcpkg
@@ -135,8 +134,7 @@ jobs:
             clang-15 \
             llvm-15 \
             ninja-build
-          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
-          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          tools/ci/select-clang.sh
 
       - name: Pinned vcpkg checkout and the cache the first job saved
         uses: ./.github/actions/release-vcpkg

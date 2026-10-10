@@ -422,8 +422,7 @@ jobs:
             nlohmann-json3-dev \
             pkg-config \
             python3
-          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
-          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          tools/ci/select-clang.sh
           rustup show active-toolchain || rustup toolchain install
 
       - name: Cache cargo

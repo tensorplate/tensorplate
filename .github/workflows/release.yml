@@ -352,8 +352,7 @@ jobs:
             ninja-build \
             nlohmann-json3-dev \
             pkg-config
-          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
-          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          tools/ci/select-clang.sh
           rustup show active-toolchain || rustup toolchain install
 
       - name: Assert the toolchain meets the build tree's floor
@@ -374,6 +373,9 @@ jobs:
             echo "::error::cmake $have is older than the required $required; jammy's apt cmake is 3.22, so this job depends on the runner image's newer preinstalled cmake"
             exit 1
           }
+          # Both dependency caches key on the compiler binary: a runner image that
+          # changes it must fail here, before the cache restore reports a miss.
+          tools/ci/select-clang.sh --check
 
       # Before anything is compiled: a publishing run with a cold cache fails
       # here. Only a branch other than the default one may save what it builds.

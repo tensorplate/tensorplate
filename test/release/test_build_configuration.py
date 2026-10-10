@@ -4873,6 +4873,7 @@ class HostedCompilerTests(unittest.TestCase):
         self.bin.mkdir()
         self.calls = self.root / "alternatives.log"
         write_executable(self.bin / "sudo", '#!/bin/sh\nexec "$@"\n')
+        (self.bin / "readlink").symlink_to(shutil.which("readlink"))
 
     def image(self, clang: str | None = "14.0.0", clangxx: str | None = "14.0.0",
               alternatives: int = 0) -> None:
@@ -4886,16 +4887,19 @@ class HostedCompilerTests(unittest.TestCase):
         write_executable(self.bin / "update-alternatives", record)
 
     def run_script(self, *args: str) -> subprocess.CompletedProcess:
-        path = f"{self.bin}{os.pathsep}{os.environ['PATH']}"
-        return subprocess.run(["bash", str(SELECT_CLANG), *args], env={"PATH": path}, text=True,
-                              capture_output=True, timeout=60, check=False)
+        # Only the stubs: a clang of the host must not answer for a missing one.
+        return subprocess.run([shutil.which("bash"), str(SELECT_CLANG), *args],
+                              env={"PATH": str(self.bin)}, text=True, capture_output=True,
+                              timeout=60, check=False)
 
-    def test_it_sets_both_alternatives_to_clang_14_and_reports_what_it_found(self):
+    def test_it_registers_and_sets_clang_14_for_both_tools_and_reports_what_it_found(self):
         self.image()
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.calls.read_text().splitlines(), [
-            "--set clang /usr/bin/clang-14", "--set clang++ /usr/bin/clang++-14"])
+            "--install /usr/bin/clang clang /usr/bin/clang-14 100", "--set clang /usr/bin/clang-14",
+            "--install /usr/bin/clang++ clang++ /usr/bin/clang++-14 100",
+            "--set clang++ /usr/bin/clang++-14"])
         self.assertIn("Ubuntu clang version 14.0.0", result.stdout)
 
     def test_an_image_without_clang_14_fails_with_a_sentence_before_anything_builds(self):
@@ -4972,7 +4976,7 @@ class HostedCompilerTests(unittest.TestCase):
                     continue
                 selected = self.selecting_step(job)
                 first = next(index for index, step in enumerate(job["steps"])
-                             if index > selected and step["name"].startswith((
+                             if index > selected and step.get("name", "").startswith((
                                  "Identify what builds", "Pinned vcpkg", "Configure",
                                  "Assert the toolchain")))
                 self.assertLess(selected, first, f"{path.name} {name}")
