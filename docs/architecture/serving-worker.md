@@ -81,11 +81,13 @@ runs speech jobs is wired in.
 - **API and threads.** The listener uses gRPC's callback API: no thread per
   call. gRPC's own threads run each call's reactions, which apply one client
   event to the manager and never wait on a job, plus the manager's timer
-  thread. A feature-ON test on a 12-core machine counted 15 threads added by
-  starting a listener; gRPC sizes its pool by the machine's cores.
-  Each call's queue consumer captures shared state, never the call, and
-  starts the next write when none is in flight; a write that completes marks
-  the item delivered and tells the dispatch.
+  thread. gRPC sizes its pool by the machine's cores.
+- **Write path.** Each call writes through a small writer interface
+  (`stream_output.hpp`), so the path is tested without a transport. The
+  queue's consumer captures the path, never the call, and starts the next
+  write when none is in flight. A write that completes is confirmed to the
+  queue and told to the dispatch before the next write can start, so
+  deliveries are confirmed in the order written.
 - **Target.** The worker serves no generation and no descriptor digest, so an
   `Open` must name the worker's `deployment.endpoint` with generation zero and
   an empty digest; `Ready` names neither. A selector is refused as
@@ -109,14 +111,43 @@ runs speech jobs is wired in.
   `admission_closed` is `UNAVAILABLE`) and whose message names the reason.
   How the status will carry the `OpenRefused` detail is not decided; one
   function builds the status, and it attaches no detail yet.
+- **Final status.** A session's typed outcome is its `SessionClosed`. The
+  call then ends with status OK only when the session closed without a
+  cause (the client half-closed and it drained). With a cause the status
+  code follows the cause's reason: invalid events and input are
+  `INVALID_ARGUMENT`; unsupported, target, generation and illegal-transition
+  reasons `FAILED_PRECONDITION`; count, credit, slow-consumer and
+  out-of-memory reasons `RESOURCE_EXHAUSTED`; timeouts and deadlines
+  `DEADLINE_EXCEEDED`; shutdown, retirement and backend or sidecar loss
+  `UNAVAILABLE`; `client_cancelled` `CANCELLED`. A reason outside that list
+  takes the class of the error code the failure-reason taxonomy pairs it
+  with, and anything else is `INTERNAL`. A session drained by shutdown is
+  therefore `SESSION_STATE_CLOSED` with cause `worker_shutdown` and status
+  `UNAVAILABLE`.
+- **Not enforced yet.** A call that never sends `Open` is not bounded: it
+  stays open until the client ends it, and at shutdown it holds the gRPC
+  server for the whole drain window. The open handshake timeout, the limit on
+  calls that have not been admitted, and the refusal of compressed messages
+  are not enforced by this listener; the change that serves the remaining
+  client events adds them. The listener's sources build only with the
+  feature, which the clang-tidy job leaves off, so CI runs no static
+  analysis on `runtime/src/serving/stream/`. What covers them is the build's
+  warnings; the address and undefined-behaviour sanitizer leg, which runs
+  the listener's tests with manual memory poisoning off because the
+  dependency tree's gRPC and abseil are not instrumented; and the thread
+  sanitizer leg for the write path alone, since that leg cannot run a gRPC
+  call.
 - **Shutdown order.** `shutdown()` stops admission and drains every live
   session with `worker_shutdown`, so later `Open`s are refused with
-  `admission_closed`. `stop()` stops the HTTP listener, then waits for the
+  `admission_closed`, also by a worker that has no dispatch. `stop()` stops
+  the HTTP listener, then waits for the
   stream sessions to close until `shutdown.drain_deadline` after the
   shutdown was asked, then shuts the gRPC server down with what is left of
   that window (a call still open is cancelled, which aborts its session),
   stops the dispatch and destroys the manager, and then runs the HTTP drain
-  below, which waits only for what is left of the same window. The control channel and the signal pipe are unchanged and still
+  below, which waits only for what is left of the same window. The stopped
+  listener stays in place until the worker is destroyed, so a `shutdown()`
+  on another thread never finds it gone. The control channel and the signal pipe are unchanged and still
   end with the worker.
 
 The `ServingWorker::create(config)` factory builds, in this order:

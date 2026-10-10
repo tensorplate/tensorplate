@@ -480,7 +480,9 @@ message Pong {}
 // arrives before Ready or after the session's outcome is fixed.
 message CancelAccepted {}
 
-// The single terminal event.
+// The single terminal event. The call then ends with status OK only when
+// `cause` is absent; otherwise with the status code of the cause's reason
+// (docs/architecture/serving-worker.md, "Stream listener").
 message SessionClosed {
   // SESSION_STATE_CLOSED or SESSION_STATE_FAILED.
   SessionState state = 1;

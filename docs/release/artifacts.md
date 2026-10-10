@@ -424,13 +424,16 @@ with no fixed release listed by that database. The OpenSSL matches listed
 3.6.5 as fixed; the vcpkg baseline now resolves OpenSSL 3.6.5 and their
 thirteen dispositions are removed. The zlib disposition is the one native
 entry left. Since the worker links gRPC, it extracts zlib's deflate and
-inflate objects (`adler32`, `crc32`, `deflate`, `inffast`, `inflate`,
-`inftrees`, `trees`, `zutil`) but no `gz*` object, `compress`, `uncompr` or
-`infback`. The affected `gzwrite` code, with the file-local `gz_vacate`,
-`gz_comp`, `gz_init` and `gz_write`, is defined only in `gzwrite.c.o`, so the
-entry rests on `requires_absent_members: ["gzwrite.c.o"]`, verified at object
-granularity on every native job run, with review due by 2026-11-18. It is
-revisited when a fixed release exists or when any `gz*` object is linked. The report and the identifier controls are uploaded even when
+inflate objects. The entry rests on `requires_absent_members:
+["gzwrite.c.o"]`. What every native job run checks, for the amd64 release
+profile only, is that the worker's link map does not extract `gzwrite.c.o`
+from zlib's archive and that the worker has no zlib shared-library
+dependency. What the entry states without a check is that the affected
+`gzwrite` code, with the file-local `gz_vacate`, `gz_comp`, `gz_init` and
+`gz_write`, is defined only in that member (read in zlib 1.3.2's sources),
+and that the arm64 worker links the same members. Review is due by
+2026-11-18, and the entry is revisited when a fixed release exists, when the
+zlib version changes or when `gzwrite.c.o` is linked. The report and the identifier controls are uploaded even when
 the scan fails.
 
 Both release jobs use `native-release-record.py` to produce a worker SBOM
