@@ -67,7 +67,10 @@ gtest_discover_tests(tp_test_integration
   DISCOVERY_MODE PRE_TEST
 )
 
-if(TP_ENABLE_STREAMING_GRPC)
+# ThreadSanitizer cannot see the hand-offs inside the vcpkg gRPC and abseil
+# archives, which are built without it, so it reports every call's state as
+# raced; the listener's tests run in the other legs.
+if(TP_ENABLE_STREAMING_GRPC AND NOT TP_ENABLE_TSAN)
   # The stream listener with a real gRPC client over loopback, in a binary of
   # its own because it links the generated protobuf bindings.
   add_executable(tp_test_stream_listener stream_listener_test.cpp stream_mapping_test.cpp)
