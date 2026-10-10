@@ -60,6 +60,7 @@ RELEASE_WORKFLOW = WORKFLOWS / "release.yml"
 VCPKG_ACTION_USE = "./.github/actions/release-vcpkg"
 VCPKG_ACTION = REPO_ROOT / VCPKG_ACTION_USE / "action.yml"
 CACHE_WARMER = WORKFLOWS / "release-dependencies.yml"
+SELECT_CLANG = REPO_ROOT / "tools/ci/select-clang.sh"
 SOURCE_INSTALL = REPO_ROOT / "packaging/scripts/build-install-from-source.sh"
 CLOSURE_CHECK = REPO_ROOT / "tools/release/assert-static-streaming-closure.sh"
 FIXTURE_SOURCES = (
@@ -4600,7 +4601,7 @@ class ReleaseWorkflowVcpkgTests(unittest.TestCase):
     def test_the_amd64_job_prepares_vcpkg_after_clang_and_before_it_compiles(self):
         job = self.job("release.yml", "build_packages_amd64")
         use = self.only_step(job, VCPKG_ACTION_USE)
-        self.assertLess(self.only_step(job, "/usr/bin/clang-15 100"), use)
+        self.assertLess(HostedCompilerTests.selecting_step(job), use)
         self.assertLess(use, self.only_step(job, "cargo build"))
         self.assertEqual(job["timeout-minutes"], "${{ %s && 60 || 180 }}" % self.PUBLISHES)
 
@@ -4690,14 +4691,14 @@ class ReleaseWorkflowVcpkgTests(unittest.TestCase):
                     if value == "OFF":
                         self.assertIn("TP_ENABLE_STREAMING_GRPC:BOOL=ON", result.stderr)
 
-    def test_every_caller_installs_clang_before_the_action_keys_the_cache_on_it(self):
+    def test_every_caller_selects_clang_before_the_action_keys_the_cache_on_it(self):
         callers = (("release.yml", "build_packages_amd64"), ("apt-lifecycle.yml", "cpu-only-smoke"),
                    (CACHE_WARMER.name, "warm"), (CACHE_WARMER.name, "restore"),
                    ("supply-chain.yml", "native"))
         for workflow, name in callers:
             job = self.job(workflow, name)
-            installs = self.only_step(job, "/usr/bin/clang-15 100")
-            self.assertLess(installs, self.only_step(job, VCPKG_ACTION_USE), name)
+            selects = HostedCompilerTests.selecting_step(job)
+            self.assertLess(selects, self.only_step(job, VCPKG_ACTION_USE), name)
 
     def test_the_cache_warmer_then_restores_as_a_publishing_run_does(self):
         jobs = yaml.safe_load(CACHE_WARMER.read_text())["jobs"]
@@ -4848,6 +4849,139 @@ class ReleaseWorkflowVcpkgTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 result, written = self.appended(export, MODE=mode, RUNNER_TEMP="/runner/temp")
                 self.assertEqual((result.returncode, written), outcome, result.stderr)
+
+
+class HostedCompilerTests(unittest.TestCase):
+    """The compiler the hosted jobs build with: Clang 14, selected by one script and asserted."""
+
+    SELECTING = re.compile(r"(?m)^\s*tools/ci/select-clang\.sh\s*$")
+    CHECKING = re.compile(r"(?m)^\s*tools/ci/select-clang\.sh --check\s*$")
+    BUILDS_WITH_CLANG = re.compile(r"\bCC\b.{0,8}clang|release-vcpkg|amd64-build-profile")
+
+    @classmethod
+    def selecting_step(cls, job: dict) -> int:
+        found = [index for index, step in enumerate(job["steps"])
+                 if cls.SELECTING.search(step.get("run") or "")]
+        assert len(found) == 1, f"expected one step that selects clang, found {found}"
+        return found[0]
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name)
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.calls = self.root / "alternatives.log"
+        write_executable(self.bin / "sudo", '#!/bin/sh\nexec "$@"\n')
+
+    def image(self, clang: str | None = "14.0.0", clangxx: str | None = "14.0.0",
+              alternatives: int = 0) -> None:
+        """What the runner offers: each clang reporting its version, or absent."""
+        for name, version in (("clang", clang), ("clang++", clangxx)):
+            (self.bin / name).unlink(missing_ok=True)
+            if version:
+                text = f"#!/bin/sh\necho 'Ubuntu clang version {version}-1ubuntu1.1'\necho 'Target: x'\n"
+                write_executable(self.bin / name, text)
+        record = f"#!/bin/sh\necho \"$@\" >>'{self.calls}'\nexit {alternatives}\n"
+        write_executable(self.bin / "update-alternatives", record)
+
+    def run_script(self, *args: str) -> subprocess.CompletedProcess:
+        path = f"{self.bin}{os.pathsep}{os.environ['PATH']}"
+        return subprocess.run(["bash", str(SELECT_CLANG), *args], env={"PATH": path}, text=True,
+                              capture_output=True, timeout=60, check=False)
+
+    def test_it_sets_both_alternatives_to_clang_14_and_reports_what_it_found(self):
+        self.image()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), [
+            "--set clang /usr/bin/clang-14", "--set clang++ /usr/bin/clang++-14"])
+        self.assertIn("Ubuntu clang version 14.0.0", result.stdout)
+
+    def test_an_image_without_clang_14_fails_with_a_sentence_before_anything_builds(self):
+        self.image(alternatives=2)
+        result = self.run_script()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertRegex(result.stdout, r"(?m)^::error::.*clang-14.*runner image")
+
+    def test_a_tool_that_reports_another_major_fails_the_selection_and_the_check(self):
+        for clang, clangxx in (("15.0.7", "14.0.0"), ("14.0.0", "15.0.7"), ("140.1.0", "14.0.0"),
+                               ("14.0.0", "114.0.0")):
+            for args in ((), ("--check",)):
+                with self.subTest(clang=clang, clangxx=clangxx, args=args):
+                    self.image(clang, clangxx)
+                    result = self.run_script(*args)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertRegex(result.stdout, r"(?m)^::error::clang(\+\+)? is .*not Clang 14")
+
+    def test_a_missing_tool_fails_the_check(self):
+        for clang, clangxx in ((None, "14.0.0"), ("14.0.0", None)):
+            with self.subTest(clang=clang, clangxx=clangxx):
+                self.image(clang, clangxx)
+                result = self.run_script("--check")
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertRegex(result.stdout, r"(?m)^::error::clang\S* is not on PATH")
+
+    def test_the_check_selects_nothing(self):
+        self.image()
+        result = self.run_script("--check")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_any_other_argument_is_refused(self):
+        self.image()
+        for args in (("15",), ("--check", "--check"), ("--select",)):
+            with self.subTest(args=args):
+                self.assertNotEqual(self.run_script(*args).returncode, 0)
+        self.assertFalse(self.calls.exists())
+
+    def test_the_release_job_asserts_the_major_version_in_its_toolchain_step(self):
+        job = ReleaseWorkflowVcpkgTests.job(self, "release.yml", "build_packages_amd64")
+        step = job["steps"][ReleaseWorkflowVcpkgTests.only_step(
+            self, job, "Assert the toolchain meets the build tree's floor")]
+        self.assertTrue(self.CHECKING.search(step["run"]))
+        (self.root / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.25)\n")
+        (self.root / "tools/ci").mkdir(parents=True)
+        shutil.copy2(SELECT_CLANG, self.root / "tools/ci/select-clang.sh")
+        write_executable(self.bin / "cmake", "#!/bin/sh\necho 'cmake version 3.31.6'\n")
+
+        def toolchain_step(clang: str) -> subprocess.CompletedProcess:
+            self.image(clang, clang)
+            path = f"{self.bin}{os.pathsep}{os.environ['PATH']}"
+            return run_step(step, self.root, PATH=path)
+
+        passed = toolchain_step("14.0.0")
+        self.assertEqual(passed.returncode, 0, passed.stdout + passed.stderr)
+        failed = toolchain_step("15.0.7")
+        self.assertNotEqual(failed.returncode, 0, failed.stdout)
+        self.assertRegex(failed.stdout, r"(?m)^::error::clang is .*not Clang 14")
+
+    def test_no_workflow_registers_a_clang_alternative_of_its_own(self):
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            registered = re.search(
+                r"update-alternatives\s+--install\s+/usr/bin/clang(\+\+)?\s", path.read_text())
+            self.assertIsNone(
+                registered, f"{path.name}: the image registers clang-14 at the same priority, "
+                "so another registration never takes effect")
+
+    def test_every_job_that_compiles_with_clang_selects_it_before_its_first_build_step(self):
+        selecting = {}
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            for name, job in yaml.safe_load(path.read_text())["jobs"].items():
+                if not self.BUILDS_WITH_CLANG.search(json.dumps(job)):
+                    continue
+                selected = self.selecting_step(job)
+                first = next(index for index, step in enumerate(job["steps"])
+                             if index > selected and step["name"].startswith((
+                                 "Identify what builds", "Pinned vcpkg", "Configure",
+                                 "Assert the toolchain")))
+                self.assertLess(selected, first, f"{path.name} {name}")
+                selecting[path.name, name] = selected
+        self.assertEqual(sorted(selecting), [
+            ("apt-lifecycle.yml", "cpu-only-smoke"), ("cpp.yml", "adapter-shells"),
+            ("cpp.yml", "build-test"), ("cpp.yml", "tidy"),
+            ("release-dependencies.yml", "restore"), ("release-dependencies.yml", "warm"),
+            ("release.yml", "build_packages_amd64"), ("supply-chain.yml", "native")])
 
 
 class NativeClosureScanTests(unittest.TestCase):
