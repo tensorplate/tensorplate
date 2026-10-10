@@ -1,0 +1,533 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/slice_measurement_record.json",
+  "title": "Streaming slice measurement record",
+  "description": "Machine-readable result of one run of tools/validation/slice_measure.py: paced speech-to-text sessions and text-to-speech segments over the stream session envelope, each with a timestamp at every boundary the caller can see, on the caller's monotonic clock. It carries counts, sizes, digests and times only: no audio, text, voice name, address or caller identifier. Every duration, distribution and the result are derived from the timestamps and counts, and the checker recomputes them and refuses a record whose derived fields disagree. It evaluates no latency gate and is never Production lifecycle evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_kind",
+    "provenance",
+    "tool",
+    "recorded_at_utc",
+    "clock",
+    "percentile_method",
+    "settings",
+    "stt",
+    "tts",
+    "gpu",
+    "result"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "0.1" },
+    "record_kind": { "type": "string", "const": "slice_measurement" },
+    "provenance": {
+      "type": "string",
+      "enum": ["recorded", "synthetic"],
+      "description": "`recorded` for a run against a serving worker; `synthetic` for a run against a test server, whose numbers measure nothing."
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source_commit", "python", "grpcio", "protobuf", "generator", "stream_schema_sha256"],
+      "properties": {
+        "name": { "type": "string", "const": "slice-measure" },
+        "source_commit": { "type": ["string", "null"], "pattern": "^[0-9a-f]{40}$" },
+        "python": { "$ref": "#/definitions/Version" },
+        "grpcio": { "$ref": "#/definitions/Version" },
+        "protobuf": { "$ref": "#/definitions/Version" },
+        "generator": {
+          "$ref": "#/definitions/Version",
+          "description": "The grpcio-tools release that generated the bindings for this run; the tool refuses to run unless it equals `grpcio`."
+        },
+        "stream_schema_sha256": {
+          "$ref": "#/definitions/Digest",
+          "description": "Digest of the session.proto the bindings were generated from."
+        }
+      }
+    },
+    "recorded_at_utc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "origin", "resolution_ns"],
+      "description": "Every `_ns` timestamp in the record is read from the machine's monotonic clock and counted from the run's start: a session's in the measuring process, a GPU reading's in the process that takes it.",
+      "properties": {
+        "source": { "type": "string", "const": "caller_monotonic" },
+        "origin": { "type": "string", "const": "run_start" },
+        "resolution_ns": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "percentile_method": {
+      "type": "string",
+      "const": "nearest_rank",
+      "description": "A percentile p of n raw samples is the sample of rank ceil(p * n / 100), counted from 1 in ascending order."
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["iterations", "event_timeout_ms"],
+      "properties": {
+        "iterations": { "type": "integer", "minimum": 1, "description": "Sessions requested per mode, run one after another." },
+        "event_timeout_ms": { "type": "integer", "minimum": 1, "description": "Longest the client waits for the next server event it needs." }
+      }
+    },
+    "stt": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/SttSection" }],
+      "description": "Null when no speech-to-text target was given."
+    },
+    "tts": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/TtsSection" }],
+      "description": "Null when no text-to-speech target was given."
+    },
+    "gpu": { "$ref": "#/definitions/Gpu" },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reasons"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["complete", "incomplete", "failed"],
+          "description": "`failed` when a session did not complete or an answer contradicts what was sent; otherwise `incomplete` when a mode was not run or a measurement has no sample; `complete` otherwise. Never a statement about a latency gate."
+        },
+        "reasons": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    }
+  },
+  "definitions": {
+    "Version": { "type": "string", "pattern": "^[0-9]+(\\.[0-9A-Za-z+-]+)*$" },
+    "Digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "Count": { "type": "integer", "minimum": 0 },
+    "Ns": { "type": "integer", "minimum": 0 },
+    "OptionalNs": { "type": ["integer", "null"], "minimum": 0 },
+    "OptionalCount": { "type": ["integer", "null"], "minimum": 0 },
+    "Target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "descriptor_digest", "loopback", "connect_ns"],
+      "description": "The resolved target every Open of the section named, by generation and descriptor digest only.",
+      "properties": {
+        "generation": { "type": "integer", "minimum": 1 },
+        "descriptor_digest": { "$ref": "#/definitions/Digest" },
+        "loopback": { "type": "boolean", "description": "Whether the endpoint is a loopback address. The address itself is not recorded." },
+        "connect_ns": {
+          "$ref": "#/definitions/OptionalNs",
+          "description": "Time to a ready channel, taken once before the section's first session and outside every measurement; null when the channel never became ready."
+        }
+      }
+    },
+    "AudioFormat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["encoding", "sample_rate_hz", "channels"],
+      "properties": {
+        "encoding": { "type": "string", "enum": ["unspecified", "pcm_s16le", "mulaw"] },
+        "sample_rate_hz": { "$ref": "#/definitions/Count" },
+        "channels": { "$ref": "#/definitions/Count" }
+      }
+    },
+    "Measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "ended_by", "ns"],
+      "description": "One duration between two of the session's boundaries. `ended_by` names the server event that ended it; `ns` is null when either boundary was not reached or the ending event was not a valid sample.",
+      "properties": {
+        "from": { "type": "string", "minLength": 1 },
+        "to": { "type": "string", "minLength": 1 },
+        "ended_by": {
+          "type": "string",
+          "enum": ["ready", "partial_transcript", "final_transcript", "audio_chunk", "segment_completed"]
+        },
+        "ns": { "$ref": "#/definitions/OptionalNs" }
+      }
+    },
+    "Distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "misses", "min_ns", "p50_ns", "p95_ns", "p99_ns", "max_ns"],
+      "description": "One measurement over the section's sessions. `misses` counts the sessions that have no sample for it; they are never dropped from the record.",
+      "properties": {
+        "count": { "$ref": "#/definitions/Count" },
+        "misses": { "$ref": "#/definitions/Count" },
+        "min_ns": { "$ref": "#/definitions/OptionalNs" },
+        "p50_ns": { "$ref": "#/definitions/OptionalNs" },
+        "p95_ns": { "$ref": "#/definitions/OptionalNs" },
+        "p99_ns": { "$ref": "#/definitions/OptionalNs" },
+        "max_ns": { "$ref": "#/definitions/OptionalNs" }
+      }
+    },
+    "ServerStage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "status", "ns"],
+      "description": "A serving stage by its registered `stage` metric label. The caller cannot time it; it stays unmeasured until the worker exposes its own durations.",
+      "properties": {
+        "stage": {
+          "type": "string",
+          "enum": ["ingress", "queue", "vad", "preprocessing", "backend", "postprocessing", "egress"]
+        },
+        "status": { "type": "string", "const": "not_measured" },
+        "ns": { "type": "null" }
+      }
+    },
+    "Outcome": {
+      "type": "string",
+      "enum": ["completed", "session_failed", "call_failed", "timeout", "stopped"],
+      "description": "`completed`: every expected answer arrived, the session closed without a cause and the call ended OK. `session_failed`: the server ended the session as failed or with a cause. `call_failed`: the call ended without a SessionClosed, or with a status other than OK after one; with no server event at all this is how a refused Open reads, by its status code alone. `timeout`: an event the client needed did not arrive in time. `stopped`: the client ended the call for `stop_reason`."
+    },
+    "StopReason": {
+      "type": ["string", "null"],
+      "enum": [null, "sequence_gap", "unexpected_event", "ready_mismatch", "input_outside_limits"],
+      "description": "`sequence_gap`: a server event out of sequence. `unexpected_event`: a server event the session's state does not allow. `ready_mismatch`: Ready names another generation, descriptor or input format than the Open. `input_outside_limits`: the input does not fit the limits or the whole input credit Ready reported, so it was not sent."
+    },
+    "GrpcStatus": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Z][A-Z_]*$",
+      "description": "The status code the call ended with; null when the client ended the call before a status arrived."
+    },
+    "OpenRefusal": {
+      "type": "null",
+      "description": "The typed refusal of a refused Open. Always null: how the call's status carries it is not fixed in the stream schema yet, so a refusal is read by `grpc_status` alone."
+    },
+    "Closed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "reason", "code", "admission", "last_accepted_sequence", "totals"],
+      "description": "The SessionClosed event as received. `reason` and `code` are the end cause's enum names, `unspecified` for a value this client does not know; its detail string is not recorded.",
+      "properties": {
+        "state": { "type": "string", "enum": ["closed", "failed"] },
+        "reason": { "type": ["string", "null"], "minLength": 1 },
+        "code": { "type": ["string", "null"], "minLength": 1 },
+        "admission": { "type": "string", "enum": ["unspecified", "not_admitted", "admitted"] },
+        "last_accepted_sequence": { "$ref": "#/definitions/Count" },
+        "totals": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["input_audio_samples", "input_text_bytes", "output_audio_samples", "utterances_completed", "segments_completed"],
+          "properties": {
+            "input_audio_samples": { "$ref": "#/definitions/Count" },
+            "input_text_bytes": { "$ref": "#/definitions/Count" },
+            "output_audio_samples": { "$ref": "#/definitions/Count" },
+            "utterances_completed": { "$ref": "#/definitions/Count" },
+            "segments_completed": { "$ref": "#/definitions/Count" }
+          }
+        }
+      }
+    },
+    "SttSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "input", "sessions", "summary"],
+      "properties": {
+        "target": { "$ref": "#/definitions/Target" },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["audio_sha256", "audio_bytes", "samples", "format", "frame_ms", "frames", "language_sha256"],
+          "description": "The audio every session of the section sends, in frames of `frame_ms` paced in real time; only the last frame may be shorter.",
+          "properties": {
+            "audio_sha256": { "$ref": "#/definitions/Digest", "description": "Digest of the sample bytes as sent, without a container header." },
+            "audio_bytes": { "type": "integer", "minimum": 1 },
+            "samples": { "type": "integer", "minimum": 1 },
+            "format": { "$ref": "#/definitions/AudioFormat" },
+            "frame_ms": { "type": "integer", "minimum": 1 },
+            "frames": { "type": "integer", "minimum": 1 },
+            "language_sha256": { "$ref": "#/definitions/Digest", "description": "Digest of the language tag the Open named." }
+          }
+        },
+        "sessions": { "type": "array", "items": { "$ref": "#/definitions/SttSession" } },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["session_initialization", "call_start_to_first_transcript", "last_audio_to_final_transcript"],
+          "properties": {
+            "session_initialization": { "$ref": "#/definitions/Distribution" },
+            "call_start_to_first_transcript": { "$ref": "#/definitions/Distribution" },
+            "last_audio_to_final_transcript": { "$ref": "#/definitions/Distribution" }
+          }
+        }
+      }
+    },
+    "SttSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "outcome", "stop_reason", "grpc_status", "open_refusal", "boundaries", "measurements", "client", "server", "server_stages"],
+      "properties": {
+        "index": { "$ref": "#/definitions/Count" },
+        "outcome": { "$ref": "#/definitions/Outcome" },
+        "stop_reason": { "$ref": "#/definitions/StopReason" },
+        "grpc_status": { "$ref": "#/definitions/GrpcStatus" },
+        "open_refusal": { "$ref": "#/definitions/OpenRefusal" },
+        "boundaries": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["call_start", "ready", "first_audio_sent", "last_audio_sent", "finalize_sent", "first_partial", "endpoint", "final_transcript", "session_closed"],
+          "description": "When the client handed an event to the transport or read one from it. `call_start` is taken immediately before the call is started. `first_partial` is the first nonempty PartialTranscript, if any arrived.",
+          "properties": {
+            "call_start": { "$ref": "#/definitions/Ns" },
+            "ready": { "$ref": "#/definitions/OptionalNs" },
+            "first_audio_sent": { "$ref": "#/definitions/OptionalNs" },
+            "last_audio_sent": { "$ref": "#/definitions/OptionalNs" },
+            "finalize_sent": { "$ref": "#/definitions/OptionalNs" },
+            "first_partial": { "$ref": "#/definitions/OptionalNs" },
+            "endpoint": { "$ref": "#/definitions/OptionalNs" },
+            "final_transcript": { "$ref": "#/definitions/OptionalNs" },
+            "session_closed": { "$ref": "#/definitions/OptionalNs" }
+          }
+        },
+        "measurements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["session_initialization", "call_start_to_first_transcript", "last_audio_to_final_transcript"],
+          "properties": {
+            "session_initialization": { "$ref": "#/definitions/Measurement" },
+            "call_start_to_first_transcript": {
+              "$ref": "#/definitions/Measurement",
+              "description": "Ends at the first nonempty partial transcript, or at the final transcript when no partial arrived; an empty final transcript is not a sample."
+            },
+            "last_audio_to_final_transcript": { "$ref": "#/definitions/Measurement" }
+          }
+        },
+        "client": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["events_sent", "frames_sent", "samples_sent", "bytes_sent", "pings_sent", "credit_waits", "finalize_sequence", "max_pacing_lag_ns"],
+          "properties": {
+            "events_sent": { "$ref": "#/definitions/Count" },
+            "frames_sent": { "$ref": "#/definitions/Count" },
+            "samples_sent": { "$ref": "#/definitions/Count" },
+            "bytes_sent": { "$ref": "#/definitions/Count" },
+            "pings_sent": { "$ref": "#/definitions/Count" },
+            "credit_waits": { "$ref": "#/definitions/Count", "description": "Frames that waited for an Accepted to return credit before they could be sent." },
+            "finalize_sequence": { "$ref": "#/definitions/OptionalCount" },
+            "max_pacing_lag_ns": {
+              "$ref": "#/definitions/OptionalNs",
+              "description": "The longest a frame was sent after its place in real time, counted from the first frame."
+            }
+          }
+        },
+        "server": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["events_received", "ignored_events", "accepted_events", "partials", "limits", "endpoint", "final", "closed"],
+          "properties": {
+            "events_received": { "$ref": "#/definitions/Count" },
+            "ignored_events": { "$ref": "#/definitions/Count", "description": "Events whose body this client does not know." },
+            "accepted_events": { "$ref": "#/definitions/Count" },
+            "partials": { "$ref": "#/definitions/Count" },
+            "limits": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["min_frame_ms", "max_frame_ms", "max_utterance_ms"],
+              "properties": {
+                "min_frame_ms": { "$ref": "#/definitions/Count" },
+                "max_frame_ms": { "$ref": "#/definitions/Count" },
+                "max_utterance_ms": { "$ref": "#/definitions/Count" }
+              }
+            },
+            "endpoint": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["reason", "end_sample_offset"],
+              "properties": {
+                "reason": { "type": "string", "enum": ["unspecified", "silence", "client_finalize", "duration_limit", "half_close"] },
+                "end_sample_offset": { "$ref": "#/definitions/Count" }
+              }
+            },
+            "final": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["finalize_sequence", "end_sample_offset", "segments", "text_bytes", "text_sha256"],
+              "description": "The FinalTranscript of the measured utterance, by size and digest.",
+              "properties": {
+                "finalize_sequence": { "$ref": "#/definitions/Count" },
+                "end_sample_offset": { "$ref": "#/definitions/Count" },
+                "segments": { "$ref": "#/definitions/Count" },
+                "text_bytes": { "$ref": "#/definitions/Count" },
+                "text_sha256": { "$ref": "#/definitions/Digest" }
+              }
+            },
+            "closed": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Closed" }] }
+          }
+        },
+        "server_stages": { "type": "array", "items": { "$ref": "#/definitions/ServerStage" } }
+      }
+    },
+    "TtsSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "input", "sessions", "summary"],
+      "properties": {
+        "target": { "$ref": "#/definitions/Target" },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["text_sha256", "text_bytes", "language_sha256", "voice_sha256"],
+          "description": "The one text segment every session of the section sends.",
+          "properties": {
+            "text_sha256": { "$ref": "#/definitions/Digest" },
+            "text_bytes": { "type": "integer", "minimum": 1 },
+            "language_sha256": { "$ref": "#/definitions/Digest" },
+            "voice_sha256": { "$ref": "#/definitions/Digest", "description": "Digest of the voice name the Open named." }
+          }
+        },
+        "sessions": { "type": "array", "items": { "$ref": "#/definitions/TtsSession" } },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["session_initialization", "call_start_to_first_audio", "segment_to_first_audio", "segment_to_completion"],
+          "properties": {
+            "session_initialization": { "$ref": "#/definitions/Distribution" },
+            "call_start_to_first_audio": { "$ref": "#/definitions/Distribution" },
+            "segment_to_first_audio": { "$ref": "#/definitions/Distribution" },
+            "segment_to_completion": { "$ref": "#/definitions/Distribution" }
+          }
+        }
+      }
+    },
+    "TtsSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "outcome", "stop_reason", "grpc_status", "open_refusal", "boundaries", "measurements", "client", "server", "server_stages"],
+      "properties": {
+        "index": { "$ref": "#/definitions/Count" },
+        "outcome": { "$ref": "#/definitions/Outcome" },
+        "stop_reason": { "$ref": "#/definitions/StopReason" },
+        "grpc_status": { "$ref": "#/definitions/GrpcStatus" },
+        "open_refusal": { "$ref": "#/definitions/OpenRefusal" },
+        "boundaries": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["call_start", "ready", "text_segment_sent", "first_audio_chunk", "segment_completed", "finalize_sent", "synthesis_completed", "session_closed"],
+          "description": "When the client handed an event to the transport or read one from it. `first_audio_chunk` is the first AudioChunk that holds whole samples in the format Ready reported.",
+          "properties": {
+            "call_start": { "$ref": "#/definitions/Ns" },
+            "ready": { "$ref": "#/definitions/OptionalNs" },
+            "text_segment_sent": { "$ref": "#/definitions/OptionalNs" },
+            "first_audio_chunk": { "$ref": "#/definitions/OptionalNs" },
+            "segment_completed": { "$ref": "#/definitions/OptionalNs" },
+            "finalize_sent": { "$ref": "#/definitions/OptionalNs" },
+            "synthesis_completed": { "$ref": "#/definitions/OptionalNs" },
+            "session_closed": { "$ref": "#/definitions/OptionalNs" }
+          }
+        },
+        "measurements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["session_initialization", "call_start_to_first_audio", "segment_to_first_audio", "segment_to_completion"],
+          "properties": {
+            "session_initialization": { "$ref": "#/definitions/Measurement" },
+            "call_start_to_first_audio": { "$ref": "#/definitions/Measurement" },
+            "segment_to_first_audio": { "$ref": "#/definitions/Measurement" },
+            "segment_to_completion": { "$ref": "#/definitions/Measurement" }
+          }
+        },
+        "client": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["events_sent", "pings_sent", "credit_waits", "segment_id", "finalize_sequence"],
+          "properties": {
+            "events_sent": { "$ref": "#/definitions/Count" },
+            "pings_sent": { "$ref": "#/definitions/Count" },
+            "credit_waits": { "$ref": "#/definitions/Count", "description": "Whether the segment waited for an Accepted to return credit before it could be sent: 0 or 1." },
+            "segment_id": { "$ref": "#/definitions/OptionalCount" },
+            "finalize_sequence": { "$ref": "#/definitions/OptionalCount" }
+          }
+        },
+        "server": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["events_received", "ignored_events", "accepted_events", "limits", "output_format", "chunks", "audio_bytes", "audio_samples", "audio_sha256", "segment", "synthesis", "closed"],
+          "properties": {
+            "events_received": { "$ref": "#/definitions/Count" },
+            "ignored_events": { "$ref": "#/definitions/Count", "description": "Events whose body this client does not know." },
+            "accepted_events": { "$ref": "#/definitions/Count" },
+            "limits": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["max_segment_text_bytes", "max_segment_audio_ms", "max_synthesis_text_bytes", "max_synthesis_audio_ms"],
+              "properties": {
+                "max_segment_text_bytes": { "$ref": "#/definitions/Count" },
+                "max_segment_audio_ms": { "$ref": "#/definitions/Count" },
+                "max_synthesis_text_bytes": { "$ref": "#/definitions/Count" },
+                "max_synthesis_audio_ms": { "$ref": "#/definitions/Count" }
+              }
+            },
+            "output_format": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/AudioFormat" }] },
+            "chunks": { "$ref": "#/definitions/Count" },
+            "audio_bytes": { "$ref": "#/definitions/Count" },
+            "audio_samples": { "$ref": "#/definitions/Count" },
+            "audio_sha256": {
+              "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Digest" }],
+              "description": "Digest of the chunks' bytes in order; null when no chunk arrived."
+            },
+            "segment": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["segment_id", "total_samples", "chunk_count"],
+              "properties": {
+                "segment_id": { "$ref": "#/definitions/Count" },
+                "total_samples": { "$ref": "#/definitions/Count" },
+                "chunk_count": { "$ref": "#/definitions/Count" }
+              }
+            },
+            "synthesis": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["segment_count", "total_samples", "finalize_sequence"],
+              "properties": {
+                "segment_count": { "$ref": "#/definitions/Count" },
+                "total_samples": { "$ref": "#/definitions/Count" },
+                "finalize_sequence": { "$ref": "#/definitions/Count" }
+              }
+            },
+            "closed": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Closed" }] }
+          }
+        },
+        "server_stages": { "type": "array", "items": { "$ref": "#/definitions/ServerStage" } }
+      }
+    },
+    "Gpu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason", "scope", "interval_ms", "samples", "summary"],
+      "description": "Device-wide readings taken while the run was in progress, when the machine offers them. They describe the whole device, never one model or one session.",
+      "properties": {
+        "status": { "type": "string", "enum": ["not_requested", "unavailable", "sampled"] },
+        "reason": { "type": ["string", "null"], "minLength": 1 },
+        "scope": { "type": "string", "const": "device_wide" },
+        "interval_ms": { "$ref": "#/definitions/OptionalCount" },
+        "samples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["at_ns", "index", "utilization_percent", "memory_used_mib", "memory_total_mib"],
+            "properties": {
+              "at_ns": { "$ref": "#/definitions/Ns" },
+              "index": { "$ref": "#/definitions/Count" },
+              "utilization_percent": { "$ref": "#/definitions/OptionalCount" },
+              "memory_used_mib": { "$ref": "#/definitions/OptionalCount" },
+              "memory_total_mib": { "$ref": "#/definitions/OptionalCount" }
+            }
+          }
+        },
+        "summary": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["samples", "max_utilization_percent", "max_memory_used_mib"],
+          "properties": {
+            "samples": { "type": "integer", "minimum": 1 },
+            "max_utilization_percent": { "$ref": "#/definitions/OptionalCount" },
+            "max_memory_used_mib": { "$ref": "#/definitions/OptionalCount" }
+          }
+        }
+      }
+    }
+  }
+}
