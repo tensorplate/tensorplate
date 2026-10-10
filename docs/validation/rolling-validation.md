@@ -74,7 +74,7 @@ command left none.
 | `provision:<subject>` | `tensorplate bundle provision <bundle>` | That candidate's two other steps do not run |
 | `cold-deploy:<subject>` | `sync`, drops the page cache, then times one `tensorplate deploy` of the bundle | The candidate is still qualified |
 | `qualify:<subject>` | Creates the subject's staging directory, then [`candidate-qualify.py`](speech-candidate-recipes.md) on the provisioned bundle | The other candidates still run |
-| `streaming-latency` | Nothing: no probe measures streaming latency yet, so the step is always `not_run` | |
+| `streaming-latency` | Nothing: a pass does not run the streaming measurement yet, so the step is always `not_run` | |
 | `index` | Derives a line for each subject that left a record, into `lines.jsonl` | A subject whose record is malformed has no line; the others keep theirs |
 
 The harness and the recipe report a failing verdict through their exit code,
@@ -288,7 +288,8 @@ The three `runner_*` findings come with the doctor change that reports
 installed runner profiles; a build without it records them as `absent` and
 its `doctor` line cannot be `pass`.
 
-Streaming latency has no measurement yet: a pass names the gap with a
-`streaming-latency` step that is always `not_run`. When it has one it is a
-subject of its own, and the first pass that carries it names it with
-`--new-subject`.
+Streaming latency is not part of a pass yet. The measurement exists
+([`slice-measurement.md`](slice-measurement.md)), but no serving worker
+answers it, so a pass names the gap with a `streaming-latency` step that is
+always `not_run`. When a pass runs it, it is a subject of its own, and the
+first pass that carries it names it with `--new-subject`.
