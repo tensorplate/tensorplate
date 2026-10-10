@@ -4,12 +4,12 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "documentNamespace": "https://spdx.org/spdxdocs/abseil-x64-linux-20260107.1#3-00000000-0000-4000-8000-000000000001",
-  "name": "abseil:x64-linux@20260107.1#3 65103c9867a0256a6c72a2b31e20cd49215e2a838b6415f14e3bc124192ae7ec",
+  "name": "abseil:x64-linux@20260107.1#3 70fa515f354cc411d451ed9f52ef99a24afb34f1c71d73fe4871a8187ff9fab6",
   "creationInfo": {
     "creators": [
-      "Tool: vcpkg-2026-07-27-98d7cb0cf1f4686a3e43aa5672b6230c1d56bce8"
+      "Tool: vcpkg-2026-09-26-51bf87ca6e9bf3e622d84ff323bd202ab1ca0c0b"
     ],
-    "created": "2026-10-07T16:17:41Z"
+    "created": "2026-10-10T12:40:02Z"
   },
   "relationships": [
     {
@@ -51,7 +51,7 @@
     {
       "name": "abseil:x64-linux",
       "SPDXID": "SPDXRef-binary",
-      "versionInfo": "65103c9867a0256a6c72a2b31e20cd49215e2a838b6415f14e3bc124192ae7ec",
+      "versionInfo": "70fa515f354cc411d451ed9f52ef99a24afb34f1c71d73fe4871a8187ff9fab6",
       "downloadLocation": "NONE",
       "licenseConcluded": "Apache-2.0",
       "licenseDeclared": "NOASSERTION",

@@ -4,12 +4,12 @@
   "dataLicense": "CC0-1.0",
   "SPDXID": "SPDXRef-DOCUMENT",
   "documentNamespace": "https://spdx.org/spdxdocs/c-ares-x64-linux-1.34.8-00000000-0000-4000-8000-000000000002",
-  "name": "c-ares:x64-linux@1.34.8 2fb294fb262e3df1cfd837b1aa6e776fc746e1ab663be321b20e7d0a8163a31a",
+  "name": "c-ares:x64-linux@1.34.8 dfc21543c6e9f20e8803d9ba9c5736c80386198aed6cb3fc05a190500c925fc6",
   "creationInfo": {
     "creators": [
-      "Tool: vcpkg-2026-07-27-98d7cb0cf1f4686a3e43aa5672b6230c1d56bce8"
+      "Tool: vcpkg-2026-09-26-51bf87ca6e9bf3e622d84ff323bd202ab1ca0c0b"
     ],
-    "created": "2026-10-07T16:26:03Z"
+    "created": "2026-10-10T12:49:53Z"
   },
   "relationships": [
     {
@@ -51,7 +51,7 @@
     {
       "name": "c-ares:x64-linux",
       "SPDXID": "SPDXRef-binary",
-      "versionInfo": "2fb294fb262e3df1cfd837b1aa6e776fc746e1ab663be321b20e7d0a8163a31a",
+      "versionInfo": "dfc21543c6e9f20e8803d9ba9c5736c80386198aed6cb3fc05a190500c925fc6",
       "downloadLocation": "NONE",
       "licenseConcluded": "MIT",
       "licenseDeclared": "NOASSERTION",

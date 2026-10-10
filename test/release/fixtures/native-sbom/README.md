@@ -2,9 +2,9 @@
 
 `install-tree/` is what vcpkg wrote for the release configuration: the
 manifest in this repository at its `builtin-baseline`, feature
-`streaming-grpc`, triplet `x64-linux`, installed on 2026-10-07 in an Ubuntu
-22.04 container with clang 15 by vcpkg `2026-07-27` (a cold build, no
-binary cache). It holds the two things `tools/release/native-sbom.py`
+`streaming-grpc`, triplet `x64-linux`, installed on 2026-10-10 in an Ubuntu
+22.04 container with clang 15 by vcpkg `2026-09-26` (a cold build: every
+port compiled from source). It holds the two things `tools/release/native-sbom.py`
 reads from an install tree and nothing else, for all thirteen installed ports
 (the closure's nine, gtest, and vcpkg's own helper ports):
 
