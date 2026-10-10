@@ -205,6 +205,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The synthetic session dispatch leaves the runtime library. It is now
+  `test/mocks/synthetic_session_dispatch.{hpp,cpp}` in namespace
+  `tensorplate::testing`, built as the static test library
+  `tp_synthetic_session_dispatch`, so no production binary contains it.
+  What it yields became a function of the bytes handed over (a transcript
+  that is a digest of the utterance's audio, PCM that follows the text
+  byte by byte); it refuses a language or voice outside a small served
+  set, ends an utterance at the longest its terms grant with an automatic
+  endpoint, and can be paused before work or inside a job. Its tests run
+  through a reference binding with no wire
+  (`test/mocks/session_dispatch_binding.hpp`) as a parameterised suite in
+  the unit test binary, which the dispatch that runs backend jobs will be
+  added to. The session dispatch contract now also states that a client's
+  Finalize which joined an automatic endpoint's finalization is answered
+  by the final that carries its sequence, that a dispatch does not report
+  the completion while a Finalize it has recorded is still to be handed
+  over, and that an utterance is ended as soon as it holds the longest
+  its terms grant.
+  (V030-E04-F03-T02)
+
 - The vcpkg baseline moves to the commit that updates the OpenSSL port to
   3.6.5 (`e182cb4d`). That release fixes the thirteen OpenSSL advisories
   the native closure scan matched against 3.6.4, so their dispositions are
