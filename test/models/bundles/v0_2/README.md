@@ -83,7 +83,10 @@ Three rules compare a manifest with facts only a deployment target holds, so
 the parser accepts both twins of their pairs (`rule` is null) and the agent
 refuses one. Where a deploy's verdict differs from the parser's,
 `expected.json` carries `deploy_code`: the code the refusal returns in its
-error context. `bundle_cross_field_rules.rs` deploys every directory here on
+error context. The error itself is `config_invalid`, as for every rule code,
+unless `deploy_error` names another: `unsupported` where the manifest is
+valid and this installation cannot serve it.
+`bundle_cross_field_rules.rs` deploys every directory here on
 an agent it builds with these facts, against a mock worker:
 
 - the platform rows committed under `config/platform/`, on a machine admitted
@@ -96,9 +99,9 @@ an agent it builds with these facts, against a mock worker:
 | Directory | `deploy_code` |
 | --- | --- |
 | `valid_r6_runner_profile/` | none: the profile is installed and lists `float16` |
-| `invalid_r6_compute_type/` | `bundle_r6_compute_type`: `int8_float16`, which the installed `faster_whisper` does not list |
+| `invalid_r6_compute_type/` | `bundle_r6_compute_type`, `unsupported`: `int8_float16`, which the installed `faster_whisper` does not list |
 | `invalid_r6_runner_selector/` | `bundle_r6_runner_selector`: a runner profile under `tensorrt`, which declares none |
-| `invalid_r6_runner_not_installed/` | `missing_backend_package`: the platform reason an absent profile already had |
+| `invalid_r6_runner_not_installed/` | `missing_backend_package`, `unsupported`: the platform reason an absent profile already had |
 | `invalid_r8_unresolved_base/` | `bundle_r8_base_reference`: the digest is not the deployed base's |
 | `invalid_r8_support_above_row/` | `bundle_r8_variant_support_level`: asks for `production` where the machine holds a Preview row |
 | `valid_r9_hardware_rows/` | none: both rows exist and are Production |

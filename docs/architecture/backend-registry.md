@@ -381,9 +381,10 @@ agent's deploy gate (`verify_before_staging` in `agent/src/bundle.rs`) refuses
 before staging on anything but `Runnable`, and refuses a bundle whose
 profile has no entry as `missing_backend_package`; the reason for either
 comes from `PlatformReason::for_serving_state`. A bundle whose profile is
-installed and runnable is still refused, as `bundle_r6_compute_type`, when
-its `compute_type` is not one of the profile's `compute_types`, and a
-runner profile named under a backend that has no descriptor is refused as
+installed and runnable is still refused, as `unsupported` with
+`bundle_r6_compute_type`, when its `compute_type` is not one of the
+profile's `compute_types`, and a runner profile named under a backend that
+has no descriptor is refused as `config_invalid` with
 `bundle_r6_runner_selector`. Every query the probe
 runs is started from `/` and killed at the probe's limit, five seconds
 by default; the PyTorch import, which reads far more from disk, gets 120. Before this split the

@@ -188,6 +188,7 @@ fn every_rule_fixture_gets_its_code_from_deploy_before_anything_is_staged() {
     assert!(calls > 0);
 
     let mut refused = BTreeMap::new();
+    let mut outer_codes = BTreeMap::new();
     let mut accepted = Vec::new();
     for entry in std::fs::read_dir(fixtures()).unwrap() {
         let path = entry.unwrap().path();
@@ -203,15 +204,23 @@ fn every_rule_fixture_gets_its_code_from_deploy_before_anything_is_staged() {
         let record = error.to_record();
         assert_eq!(record.context.as_deref(), Some(code.as_str()), "{name}");
         assert!(!record.recoverable, "{name}");
-        if code.starts_with("bundle_r") {
-            let AgentError::BundleManifest(ref failure) = error else {
-                panic!("{name}: {error}");
-            };
-            assert_eq!(failure.rule.unwrap().as_str(), code, "{name}");
-            assert_eq!(record.code, ErrorCode::ConfigInvalid, "{name}");
-        } else {
-            assert_eq!(record.code, ErrorCode::Unsupported, "{name}");
+        // `deploy_error` names the outer code where it is not the rule
+        // codes' usual `config_invalid`.
+        let outer = match expected.get("deploy_error").map(|v| v.as_str().unwrap()) {
+            None => ErrorCode::ConfigInvalid,
+            Some("unsupported") => ErrorCode::Unsupported,
+            Some(other) => panic!("{name}: unknown deploy_error `{other}`"),
+        };
+        assert_eq!(record.code, outer, "{name}");
+        match (&error, outer) {
+            (AgentError::BundleManifest(failure), ErrorCode::ConfigInvalid)
+            | (AgentError::BundleUnsupported(failure), ErrorCode::Unsupported) => {
+                assert_eq!(failure.rule.unwrap().as_str(), code, "{name}");
+            }
+            (AgentError::BackendUnrunnable { .. }, ErrorCode::Unsupported) => {}
+            _ => panic!("{name}: {error}"),
         }
+        outer_codes.insert(name.clone(), outer);
         assert!(
             !h.config.staging_dir.join("refused").exists(),
             "{name} must never stage"
@@ -245,6 +254,16 @@ fn every_rule_fixture_gets_its_code_from_deploy_before_anything_is_staged() {
     ] {
         assert_eq!(refused[fixture], code, "{fixture}");
     }
+
+    let unsupported: Vec<&str> = outer_codes
+        .iter()
+        .filter(|(_, outer)| **outer == ErrorCode::Unsupported)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        unsupported,
+        ["invalid_r6_compute_type", "invalid_r6_runner_not_installed"]
+    );
 
     assert_eq!(accepted.len(), 14);
     for path in accepted {

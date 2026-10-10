@@ -1,4 +1,5 @@
 {
   "rule": null,
-  "deploy_code": "bundle_r6_compute_type"
+  "deploy_code": "bundle_r6_compute_type",
+  "deploy_error": "unsupported"
 }

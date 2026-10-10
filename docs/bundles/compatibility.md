@@ -180,16 +180,19 @@ See [variant lineage](manifest.md#variant-lineage).
 Some rules compare a manifest with facts only the target holds. The agent
 judges them in `verify_before_staging`, the one validation path of a deploy
 and of a deploy replayed at startup, before anything is staged. Each refusal
-has the shape of the table above: `config_invalid`, non-recoverable, the
-code in `ErrorRecord.context`. Format 0.1 bundles are not judged by them.
+is non-recoverable and carries its code in `ErrorRecord.context`. The error
+code says which side is at fault: `config_invalid` where the manifest is
+wrong for any target or contradicts itself, `unsupported` where it is a
+valid request this installation cannot serve. Format 0.1 bundles are not
+judged by them.
 
-| Rule code | Refusal | Facts |
-| --- | --- | --- |
-| `bundle_r8_base_reference`, `bundle_r8_variant_support_level` | A variant's base is not a bundle this agent is serving on a row it holds, or the variant asks for more support than that row gives. | The active deployment and the serving members of the resident set, by name, version and bundle digest; the support level of the row the machine was admitted on. |
-| `bundle_r9_hardware_row` | A `hardware_compatibility` id is not a row of the installed registry. | The registry's rows, whatever their level. |
-| `bundle_r9_support_claim` | The manifest asks for `production` and names a row that is not Production. | Each named row's own support level. |
-| `bundle_r6_runner_selector` | The manifest names a runner profile under a backend that has no descriptor (`tensorrt`, `libtorch`, `vitis_ai`, `mock`) and so declares none. | The backend the hint names. |
-| `bundle_r6_compute_type` | The installed runner profile does not list the manifest's `compute_type`. | The profile's `compute_types` in the probed backend descriptor. |
+| Rule code | Error code | Refusal | Facts |
+| --- | --- | --- | --- |
+| `bundle_r8_base_reference`, `bundle_r8_variant_support_level` | `config_invalid` | A variant's base is not a bundle this agent is serving on a row it holds, or the variant asks for more support than that row gives. | The active deployment and the serving members of the resident set, by name, version and bundle digest; the support level of the row the machine was admitted on. |
+| `bundle_r9_hardware_row` | `config_invalid` | A `hardware_compatibility` id is not a row of the installed registry. | The registry's rows, whatever their level. |
+| `bundle_r9_support_claim` | `config_invalid` | The manifest asks for `production` and names a row that is not Production. | Each named row's own support level. |
+| `bundle_r6_runner_selector` | `config_invalid` | The backend and runner selectors contradict each other: the manifest names a runner profile under a backend that has no descriptor (`tensorrt`, `libtorch`, `vitis_ai`, `mock`) and so declares none. | The backend the hint names. |
+| `bundle_r6_compute_type` | `unsupported` | The installed runner profile does not list the manifest's `compute_type`. The deployment descriptor refuses the same fact with the same error code. | The profile's `compute_types` in the probed backend descriptor. |
 
 A runner profile that is not installed, or whose interpreter cannot run, is
 the same rule's refusal and keeps the reason it already had:

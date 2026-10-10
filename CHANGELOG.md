@@ -35,7 +35,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - The agent judges a format 0.2 bundle against what its target holds before
   anything is staged, with a typed code for each refusal in the error
-  context. A variant's base must be a bundle the agent is serving on a
+  context. The refusals are `config_invalid`, except the compute type one,
+  which is `unsupported`: a valid request this installation cannot serve. A variant's base must be a bundle the agent is serving on a
   platform row the machine holds, and the variant may ask for no more
   support than that row gives (`bundle_r8_base_reference`,
   `bundle_r8_variant_support_level`); a variant that passes is still

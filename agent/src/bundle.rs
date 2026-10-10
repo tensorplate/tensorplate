@@ -213,8 +213,10 @@ pub fn verify_with_probes(
 ///   reserved);
 /// - names a `hardware_compatibility` row the registry does not have, or
 ///   asks for `production` on a row that is not Production;
-/// - names a runner profile under a backend that declares none, or a
-///   compute type the installed profile does not list.
+/// - names a runner profile under a backend that declares none.
+///
+/// Returns [`AgentError::BundleUnsupported`] carrying the rule code when
+/// the installed runner profile does not list the manifest's compute type.
 pub fn verify_before_staging(
     bundle_path: &Path,
     config: &AgentConfig,
@@ -281,13 +283,16 @@ pub fn verify_before_staging(
             (installed, profile.and_then(|profile| profile.compute_type))
         {
             if !installed.compute_types.contains(&compute_type) {
-                return Err(rule_refusal(
-                    BundleRuleCode::RunnerComputeType,
-                    "compute_type",
-                    format!(
+                let refusal = BundleProfileError::Rule {
+                    code: BundleRuleCode::RunnerComputeType,
+                    field: "compute_type".to_owned(),
+                    reason: format!(
                         "the installed runner profile `{}` does not list this compute type",
                         installed.id
                     ),
+                };
+                return Err(AgentError::BundleUnsupported(
+                    BundleManifestError::from(refusal).into(),
                 ));
             }
         }
@@ -1167,6 +1172,8 @@ mod tests {
             .expect_err("not listed")
             .to_record();
         assert_eq!(record.context.as_deref(), Some("bundle_r6_compute_type"));
+        assert_eq!(record.code, tensorplate_protocol::ErrorCode::Unsupported);
+        assert!(!record.recoverable);
         assert!(record.message.contains("`kokoro`"), "{}", record.message);
     }
 
