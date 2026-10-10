@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
-#include "serving/session/synthetic_dispatch.hpp"
+#include "synthetic_session_dispatch.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <utility>
 
-namespace tensorplate::serving {
+namespace tensorplate::testing {
 namespace {
 using namespace std::chrono_literals;
+using namespace tensorplate::serving;
 using Effect = LogicalSessionEffect;
 using Event = LogicalSessionEvent;
 
 constexpr StreamAudioFormat kInputFormat{StreamAudioEncoding::PcmS16Le, 16'000, 1};
 constexpr StreamAudioFormat kOutputFormat{StreamAudioEncoding::PcmS16Le, 24'000, 1};
+constexpr std::chrono::seconds kMaxUtterance{30};
 constexpr std::uint32_t kMaxSegmentTextBytes = 4'096;
 /// Two waiting segments and the one being delivered.
 constexpr std::uint32_t kSynthesisSegments = 3;
@@ -35,6 +37,15 @@ bool task_output(OutputKind kind) {
   return kind == OutputKind::Audio || kind == OutputKind::Partial || kind == OutputKind::Result;
 }
 
+template <std::size_t Count>
+bool served(const std::array<std::string_view, Count>& set, std::string_view value) {
+  return std::find(set.begin(), set.end(), value) != set.end();
+}
+
+Error not_served(const char* message, const char* context) {
+  return Error::make(Error::Code::Unsupported, message, context);
+}
+
 /// Input the manager accepted that was not handed over yet, or is still
 /// being worked on, keeps its depth above zero.
 bool input_owed(const SessionManager& manager, std::uint64_t key) {
@@ -47,6 +58,34 @@ Error wrong_input_kind() {
                      "wrong_input_kind");
 }
 }  // namespace
+
+void SyntheticSessionDispatch::Digest::add(std::span<const std::byte> audio) noexcept {
+  for (const std::byte value : audio) {
+    hash = (hash ^ std::to_integer<std::uint64_t>(value)) * 1'099'511'628'211ULL;
+  }
+  bytes += audio.size();
+}
+
+std::string SyntheticSessionDispatch::Digest::text() const {
+  static constexpr std::string_view kDigits = "0123456789abcdef";
+  std::string out = "pcm-" + std::to_string(bytes) + "-";
+  for (unsigned shift = 64; shift != 0; shift -= 4) {
+    out.push_back(kDigits[(hash >> (shift - 4)) & 0xfU]);
+  }
+  return out;
+}
+
+std::string SyntheticSessionDispatch::transcript_of(std::span<const std::byte> audio) {
+  Digest digest;
+  digest.add(audio);
+  return digest.text();
+}
+
+std::int16_t SyntheticSessionDispatch::sample_of(std::string_view text,
+                                                 std::uint64_t index) noexcept {
+  const auto letter = static_cast<unsigned char>(text[index / kSamplesPerTextByte]);
+  return static_cast<std::int16_t>(std::uint64_t{letter} * 128U + index % kSamplesPerTextByte);
+}
 
 SyntheticSessionDispatch::SyntheticSessionDispatch(const SchedulerClock& clock)
     : clock_(clock), worker_([this] { run(); }) {}
@@ -73,20 +112,51 @@ void SyntheticSessionDispatch::stop() noexcept {
   std::call_once(joined_, [this] { worker_.join(); });
 }
 
+void SyntheticSessionDispatch::pause(Gate gate) {
+  if (gate == Gate::InJob) {
+    in_job_paused_.store(true);
+    return;
+  }
+  const std::lock_guard guard(mu_);
+  before_work_paused_ = true;
+}
+
+void SyntheticSessionDispatch::resume() {
+  in_job_paused_.store(false);
+  {
+    const std::lock_guard guard(mu_);
+    before_work_paused_ = false;
+    if (!stopping_) {
+      commands_.push_back({0, Resumed{}});
+    }
+  }
+  cv_.notify_all();
+}
+
+bool SyntheticSessionDispatch::wait_idle(std::chrono::milliseconds patience) {
+  std::unique_lock lock(mu_);
+  return idle_cv_.wait_for(lock, patience, [&] { return commands_.empty() && !working_; });
+}
+
 Result<SessionTerms> SyntheticSessionDispatch::negotiate(const SessionRequest& request) const {
+  if (!served(kLanguages, request.language)) {
+    return unexpected(not_served("language is not served", "unsupported_language"));
+  }
   SessionTerms terms;
   terms.input_kind = request.input_kind;
   terms.language = request.language;
   if (request.input_kind == SessionInputKind::Audio) {
     if (request.input_format != kInputFormat) {
-      return unexpected(Error::make(Error::Code::Unsupported, "audio input format is not served",
-                                    "unsupported_audio_format"));
+      return unexpected(not_served("audio input format is not served", "unsupported_audio_format"));
     }
     terms.audio_format = kInputFormat;
     terms.min_frame = 20ms;
     terms.max_frame = 320ms;
-    terms.max_utterance = 30s;
+    terms.max_utterance = kMaxUtterance;
     return terms;
+  }
+  if (!served(kVoices, request.voice)) {
+    return unexpected(not_served("voice is not served", "unsupported_voice"));
   }
   terms.voice = request.voice;
   terms.audio_format = kOutputFormat;
@@ -108,12 +178,12 @@ void SyntheticSessionDispatch::on_transition(const ManagedSessionTransition& tra
 }
 
 void SyntheticSessionDispatch::audio(std::uint64_t session_key, std::span<const std::byte> frame) {
-  post({session_key, AudioIn{frame.size()}});
+  post({session_key, AudioIn{{frame.begin(), frame.end()}}});
 }
 
 void SyntheticSessionDispatch::text_segment(std::uint64_t session_key, std::uint64_t segment_id,
                                             std::string text) {
-  post({session_key, TextIn{segment_id, text.size()}});
+  post({session_key, TextIn{segment_id, std::move(text)}});
 }
 
 void SyntheticSessionDispatch::finalize(std::uint64_t session_key, std::uint64_t client_sequence) {
@@ -135,21 +205,35 @@ void SyntheticSessionDispatch::post(Command command) {
   cv_.notify_one();
 }
 
+bool SyntheticSessionDispatch::parked_locked() const {
+  if (!before_work_paused_ || commands_.empty()) {
+    return false;
+  }
+  const auto& next = commands_.front().body;
+  return std::holds_alternative<AudioIn>(next) || std::holds_alternative<TextIn>(next) ||
+         std::holds_alternative<FinalizeIn>(next);
+}
+
 void SyntheticSessionDispatch::run() {
   std::unique_lock lock(mu_);
   for (;;) {
-    cv_.wait(lock, [&] { return stopping_ || (manager_ != nullptr && !commands_.empty()); });
+    cv_.wait(lock, [&] {
+      return stopping_ || (manager_ != nullptr && !commands_.empty() && !parked_locked());
+    });
     if (stopping_) {
       return;
     }
     Command command = std::move(commands_.front());
     commands_.pop_front();
     SessionManager& manager = *manager_;
+    working_ = true;
     // The manager is called unlocked: its sink posts back here.
     lock.unlock();
     handle(manager, command);
     held_sessions_.store(sessions_.size());
     lock.lock();
+    working_ = false;
+    idle_cv_.notify_all();
   }
 }
 
@@ -157,6 +241,10 @@ void SyntheticSessionDispatch::handle(SessionManager& manager, Command& command)
   const std::uint64_t key = command.session_key;
   if (auto* opened = std::get_if<Opened>(&command.body)) {
     sessions_[key].terms = std::move(opened->terms);
+    return;
+  }
+  if (std::holds_alternative<Resumed>(command.body)) {
+    resumed(manager);
     return;
   }
   if (const auto* transition = std::get_if<Moved>(&command.body)) {
@@ -168,22 +256,26 @@ void SyntheticSessionDispatch::handle(SessionManager& manager, Command& command)
   }
   Session& session = it->second;
   const bool takes_audio = session.terms.input_kind == SessionInputKind::Audio;
-  if (const auto* frame = std::get_if<AudioIn>(&command.body)) {
+  if (const auto* input = std::get_if<AudioIn>(&command.body)) {
     // On a session that takes text the credit refuses this as wrong_input_kind.
-    if (!manager.release_audio_input(key, 1, frame->bytes)) {
+    if (!manager.release_audio_input(key, 1, input->frame.size())) {
       session.ended = true;
       return;
     }
-    session.samples_accepted += frame->bytes / session.terms.audio_format.bytes_per_sample();
-  } else if (const auto* segment = std::get_if<TextIn>(&command.body)) {
+    take_audio(manager, key, session, input->frame);
+  } else if (auto* segment = std::get_if<TextIn>(&command.body)) {
     if (takes_audio) {
       fail(manager, key, session, wrong_input_kind());
       return;
     }
-    session.waiting.push_back(*segment);
+    session.waiting.push_back(std::move(*segment));
   } else if (const auto* asked = std::get_if<FinalizeIn>(&command.body)) {
     session.owed_finalize -= std::min(session.owed_finalize, 1U);
-    session.finalize_sequence = asked->client_sequence;
+    if (takes_audio) {
+      end_utterance(session, EndpointReason::ClientFinalize, asked->client_sequence);
+    } else {
+      session.finalize_sequence = asked->client_sequence;
+    }
   } else if (const auto* delivered = std::get_if<Delivered>(&command.body)) {
     // Any delivery can make room for a held item; only task output counts.
     if (delivered->task_output && session.undelivered > 0) {
@@ -193,28 +285,96 @@ void SyntheticSessionDispatch::handle(SessionManager& manager, Command& command)
   pump(manager, key, session);
 }
 
+bool SyntheticSessionDispatch::job_held(const Session& session) const {
+  return in_job_paused_.load() &&
+         (!session.ended_utterances.empty() || (session.active && !session.active->synthesized));
+}
+
 void SyntheticSessionDispatch::moved(SessionManager& manager, std::uint64_t key,
                                      const Moved& moved) {
+  const auto it = sessions_.find(key);
   if (moved.effects.contains(Effect::RequestCleanup)) {
+    if (it != sessions_.end() && job_held(it->second)) {
+      it->second.releasing = true;
+      it->second.ended = true;
+      it->second.held.clear();
+      return;
+    }
     sessions_.erase(key);
     (void)manager.apply(key, Event::ReleaseAcknowledged);
     return;
   }
-  const auto it = sessions_.find(key);
   if (it == sessions_.end()) {
     return;
   }
   Session& session = it->second;
   session.output = moved.output;
-  // An automatic endpoint starts a finalization too; only a client's
-  // Finalize is handed over.
-  if (moved.effects.contains(Effect::StartFinalize) && moved.event == Event::Finalize) {
-    ++session.owed_finalize;
+  if (moved.effects.contains(Effect::StartFinalize)) {
+    // An automatic endpoint starts a finalization too; only a client's
+    // Finalize is handed over.
+    if (moved.event == Event::Finalize) {
+      ++session.owed_finalize;
+    }
+    if (session.completions_unseen == 0) {
+      session.finalizing = true;
+    }
+  }
+  if (moved.event == Event::FinalizeCompleted && session.completions_unseen > 0) {
+    --session.completions_unseen;
   }
   if (moved.effects.contains(Effect::StartDrain)) {
     session.draining = true;
     session.close_open_utterance = moved.event == Event::HalfClose;
   }
+}
+
+void SyntheticSessionDispatch::resumed(SessionManager& manager) {
+  std::vector<std::uint64_t> keys;
+  keys.reserve(sessions_.size());
+  for (const auto& [key, session] : sessions_) {
+    keys.push_back(key);
+  }
+  for (const std::uint64_t key : keys) {
+    const auto it = sessions_.find(key);
+    if (it->second.releasing) {
+      sessions_.erase(it);
+      (void)manager.apply(key, Event::ReleaseAcknowledged);
+    } else {
+      pump(manager, key, it->second);
+    }
+  }
+}
+
+void SyntheticSessionDispatch::take_audio(SessionManager& manager, std::uint64_t key,
+                                          Session& session, std::span<const std::byte> frame) {
+  const std::uint64_t width = session.terms.audio_format.bytes_per_sample();
+  const std::uint64_t longest =
+      static_cast<std::uint64_t>(kMaxUtterance.count()) * session.terms.audio_format.sample_rate_hz;
+  while (!frame.empty() && !session.ended) {
+    const std::uint64_t room = longest - (session.samples_accepted - session.utterance_start);
+    const auto part = frame.first(std::min<std::uint64_t>(frame.size(), room * width));
+    session.open_audio.add(part);
+    session.samples_accepted += part.size() / width;
+    frame = frame.subspan(part.size());
+    if (session.samples_accepted - session.utterance_start < longest) {
+      continue;
+    }
+    const auto applied = manager.apply(key, Event::AutomaticEndpoint);
+    if (!applied) {
+      session.ended = true;
+      return;
+    }
+    session.finalizing = session.finalizing || applied->effects.contains(Effect::StartFinalize);
+    end_utterance(session, EndpointReason::DurationLimit, 0);
+  }
+}
+
+void SyntheticSessionDispatch::end_utterance(Session& session, EndpointReason reason,
+                                             std::uint64_t finalize_sequence) {
+  session.ended_utterances.push_back({session.utterance_start, session.samples_accepted,
+                                      session.open_audio, reason, finalize_sequence});
+  session.utterance_start = session.samples_accepted;
+  session.open_audio = {};
 }
 
 void SyntheticSessionDispatch::complete_drain(SessionManager& manager, std::uint64_t key,
@@ -274,33 +434,44 @@ bool SyntheticSessionDispatch::offer_held(SessionManager& manager, std::uint64_t
   return true;
 }
 
-void SyntheticSessionDispatch::hold_final(Session& session, EndpointReason reason,
-                                          std::uint64_t finalize_sequence) {
+bool SyntheticSessionDispatch::complete_utterance(SessionManager& manager, std::uint64_t key,
+                                                  Session& session) {
+  if (in_job_paused_.load()) {
+    return false;
+  }
+  const EndedUtterance done = session.ended_utterances.front();
+  session.ended_utterances.pop_front();
+  // One completion answers every finalization the manager has merged, so it
+  // waits for a client's Finalize that is still to be handed over.
+  if (session.finalizing && session.owed_finalize == 0) {
+    const auto completed = manager.apply(key, Event::FinalizeCompleted);
+    if (!completed) {
+      session.ended = true;
+      return false;
+    }
+    session.finalizing = false;
+    if (completed->state == LogicalSessionState::Active) {
+      ++session.completions_unseen;
+    }
+  }
   FinalTranscriptOutput transcript;
   transcript.utterance_id = ++session.utterances;
-  session.held.push_back(make_task_output_item(
-      EndpointDetectedOutput{transcript.utterance_id, session.samples_accepted, reason}));
-  transcript.end_sample_offset = session.samples_accepted;
-  transcript.finalize_sequence = finalize_sequence;
-  if (session.samples_accepted > session.utterance_start) {
-    transcript.segments.push_back({start_micros(session.utterance_start),
-                                   end_micros(session.samples_accepted), std::string{kTranscript}});
+  transcript.end_sample_offset = done.end_sample;
+  transcript.finalize_sequence = done.finalize_sequence;
+  if (done.end_sample > done.first_sample) {
+    transcript.segments.push_back(
+        {start_micros(done.first_sample), end_micros(done.end_sample), done.audio.text()});
   }
-  session.utterance_start = session.samples_accepted;
+  session.held.push_back(make_task_output_item(
+      EndpointDetectedOutput{transcript.utterance_id, done.end_sample, done.reason}));
   session.held.push_back(make_task_output_item(std::move(transcript)));
+  return true;
 }
 
 bool SyntheticSessionDispatch::advance_audio(SessionManager& manager, std::uint64_t key,
                                              Session& session) {
-  if (session.finalize_sequence) {
-    const std::uint64_t sequence = *session.finalize_sequence;
-    session.finalize_sequence.reset();
-    if (!manager.apply(key, Event::FinalizeCompleted)) {
-      session.ended = true;
-      return false;
-    }
-    hold_final(session, EndpointReason::ClientFinalize, sequence);
-    return true;
+  if (!session.ended_utterances.empty()) {
+    return complete_utterance(manager, key, session);
   }
   if (!session.draining || session.owed_finalize != 0) {
     return false;
@@ -310,7 +481,7 @@ bool SyntheticSessionDispatch::advance_audio(SessionManager& manager, std::uint6
     if (input_owed(manager, key)) {
       return false;
     }
-    hold_final(session, EndpointReason::HalfClose, 0);
+    end_utterance(session, EndpointReason::HalfClose, 0);
     return true;
   }
   complete_drain(manager, key, session);
@@ -327,9 +498,10 @@ bool SyntheticSessionDispatch::advance_text(SessionManager& manager, std::uint64
       session.ended = true;
       return false;
     }
-    const TextIn next = session.waiting.front();
+    TextIn next = std::move(session.waiting.front());
     session.waiting.pop_front();
-    session.active = ActiveSegment{next.segment_id, next.bytes * kSamplesPerTextByte};
+    const std::uint64_t samples = next.text.size() * kSamplesPerTextByte;
+    session.active = ActiveSegment{next.segment_id, std::move(next.text), samples};
     return true;
   }
   if (session.finalize_sequence) {
@@ -357,13 +529,19 @@ bool SyntheticSessionDispatch::advance_segment(SessionManager& manager, std::uin
     return false;
   }
   ActiveSegment& segment = *session.active;
+  if (!segment.synthesized) {
+    if (in_job_paused_.load()) {
+      return false;
+    }
+    segment.synthesized = true;
+  }
   if (segment.next_sample < segment.total_samples) {
     const std::uint64_t count =
         std::min<std::uint64_t>(kChunkSamples, segment.total_samples - segment.next_sample);
     AudioChunkOutput chunk{segment.segment_id, segment.next_chunk, segment.next_sample, {}};
     chunk.pcm.reserve(count * kOutputFormat.bytes_per_sample());
     for (std::uint64_t index = segment.next_sample; index < segment.next_sample + count; ++index) {
-      const auto sample = static_cast<std::uint16_t>(sample_at(index));
+      const auto sample = static_cast<std::uint16_t>(sample_of(segment.text, index));
       chunk.pcm.push_back(static_cast<std::byte>(sample & 0xffU));
       chunk.pcm.push_back(static_cast<std::byte>(sample >> 8U));
     }
@@ -391,4 +569,4 @@ bool SyntheticSessionDispatch::advance_segment(SessionManager& manager, std::uin
   }
   return true;
 }
-}  // namespace tensorplate::serving
+}  // namespace tensorplate::testing
