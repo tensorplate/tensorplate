@@ -785,6 +785,10 @@ jobs:
           python3 -m venv .sdkverify
           .sdkverify/bin/pip install dist/sdk-python/tensorplate_python-*.whl
           .sdkverify/bin/python -c "import tensorplate; print('clean import OK', tensorplate.__version__)"
+          # With the hashed speech pins installed, the generated service module
+          # imports; that import runs the generated code's runtime version checks.
+          .sdkverify/bin/pip install --require-hashes -r sdk/python/constraints/speech.txt
+          .sdkverify/bin/python -c "import tensorplate.stream.v1.session_pb2_grpc"
 
       - name: Upload SDK distribution
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

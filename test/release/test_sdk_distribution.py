@@ -21,6 +21,7 @@ import zipfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "tools/release/check-sdk-distribution.py"
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release.yml"
+PYTHON_WORKFLOW = ROOT / ".github/workflows/python.yml"
 
 SCHEMA = b'syntax = "proto3";\npackage tensorplate.stream.v1;\n'
 SOURCE = {
@@ -181,6 +182,28 @@ class ReleaseJobTests(unittest.TestCase):
             "--schema protocol/proto/tensorplate/stream/v1/session.proto",
         ):
             self.assertIn(argument, job[check:])
+
+    def test_the_smoke_environment_imports_the_generated_service_module_under_the_speech_pins(
+        self,
+    ) -> None:
+        jobs = re.split(r"(?m)^  (?=[a-z_]+:$)", RELEASE_WORKFLOW.read_text(encoding="utf-8"))
+        [job] = [text for text in jobs if text.startswith("build_sdk_python:")]
+        wheel = job.index(".sdkverify/bin/pip install dist/sdk-python/tensorplate_python-*.whl")
+        pins = job.index(
+            ".sdkverify/bin/pip install --require-hashes -r sdk/python/constraints/speech.txt"
+        )
+        run = job.index('.sdkverify/bin/python -c "import tensorplate.stream.v1.session_pb2_grpc"')
+        self.assertLess(wheel, pins)
+        self.assertLess(pins, run)
+
+
+class RequiredStatusTests(unittest.TestCase):
+    def test_the_required_python_check_waits_for_and_requires_the_speech_job(self) -> None:
+        text = PYTHON_WORKFLOW.read_text(encoding="utf-8")
+        [job] = re.findall(r"(?ms)^  python-required-status:\n.*?(?=^  \S+:\n|\Z)", text)
+        self.assertRegex(job, r"(?m)^    needs: \[python, sdk-python-speech\]$")
+        for needed in ("python", "sdk-python-speech"):
+            self.assertIn(f'"${{{{ needs.{needed}.result }}}}" != "success"', job)
 
 
 if __name__ == "__main__":
