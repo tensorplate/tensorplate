@@ -44,9 +44,10 @@ is lower-case letters, digits and hyphens, and not `lifecycle`, `doctor`,
 `logs` or `streaming-latency`. `--predecessor-bundle`, `--sampler`,
 `--oom-ballast-python` and each `--qualify-arg` go to the recipe unchanged,
 and `--oom-ballast` becomes the recipe's `--oom-ballast-bytes` for the one
-candidate it names. A `--qualify-arg` that sets `--oom-ballast-bytes` or
-`--predecessor-bundle`, or abbreviates either, is refused: the report would
-no longer say what ran.
+candidate it names. A `--qualify-arg` that sets `--oom-ballast-bytes`,
+`--predecessor-bundle` or `--sampler`, or abbreviates one of them, is refused:
+the report would no longer say what ran, and a sampler given that way would go
+around the predecessor check below.
 
 ### The predecessor
 
@@ -66,9 +67,16 @@ entry names the `cuda` device and one of the runner profiles `cuda_fixture`,
 `faster_whisper` or `kokoro`. `test/models/bundles/v0_1/x86_cuda_smoke` is the
 CUDA smoke fixture; copy it where the agent can read it, as the
 [cloud-row runbook](cloud-row-runbooks.md) does. Preflight refuses any other
-predecessor, and none, before anything runs. Without `--sampler` no window is
-taken, and where `nvidia-smi` reports no device 0 the pass cannot tell that
-the machine has one, so the predecessor is the operator's choice.
+predecessor, and none, before anything runs. It also refuses one whose path,
+with its links resolved, lies under a directory the agent's unit cannot read
+(the staging directory's rule, below): the agent could not deploy it, and
+every qualification step would fail on it after the lifecycle and the family
+build. Without `--sampler` no window is taken, and where `nvidia-smi` reports
+no device 0 the pass cannot tell that the machine has one, so the predecessor
+is the operator's choice. That includes a machine whose `nvidia-smi` fails: the
+pass does not read the row id as proof of a device. `predecessor_check` in
+`pass-report.json` says whether the check was applied and, when it was not,
+why: no memory window is taken, or what `nvidia-smi` answered.
 
 ### The out-of-memory ballast
 
@@ -81,23 +89,37 @@ candidate is given its own with `--oom-ballast SUBJECT=RULE`, repeatable:
 | --- | --- |
 | `bytes:N` | N bytes |
 | `headroom:N` | the memory `nvidia-smi --id=0 --query-gpu=memory.total` reports for device 0 on this machine, less N bytes |
+| `none` | none: the candidate's out-of-memory case is skipped on purpose |
 
 The pass does not know how much memory a candidate needs or how much the
 ballast process takes beside its allocation: choose N from a run of the
-recipe by hand on the same machine type, and expect to adjust it. A
-`headroom` rule is read with `nvidia-smi` (`--nvidia-smi` names another
-program) and evaluated in preflight, so a machine that reports no single
-figure for device 0 is refused there; so is a headroom that leaves no
+recipe by hand on the same machine type, and expect to adjust it. A headroom
+is subtracted from the device's total memory, so N has to cover the
+candidate's own resident memory and the ballast process's overhead, and a
+figure sized on one build can stop fitting on the next. The pass does not
+size a ballast from the memory that is free at the moment the ballast is
+taken. A `headroom` rule is read with `nvidia-smi` (`--nvidia-smi` names
+another program) and evaluated in preflight, so a machine that reports no
+single figure for device 0 is refused there; so is a headroom that leaves no
 ballast and, where the machine reports a figure, a ballast that does not fit
-the device. A candidate that no `--oom-ballast` names gets none: the recipe
-records its out-of-memory case as `not_run`, and a recipe result with a case
-that did not run is not `pass`.
+the device. A `bytes` or `headroom` rule needs `--oom-ballast-python`, the
+interpreter that holds the ballast: the pass refuses to start without it, and
+preflight refuses one that cannot be run.
+
+Without a ballast the recipe records the out-of-memory case as `not_run`, and
+a recipe result with a case that did not run is not `pass`. Where
+`nvidia-smi` reports device 0, preflight therefore refuses a candidate that no
+`--oom-ballast` names. `--oom-ballast SUBJECT=none` is how a pass skips the
+case on purpose. Where no device answers, a candidate without a rule is not
+refused, and the report says its case will not run.
 
 `pass-report.json` records what was used. `device_memory` holds the figure in
-bytes, or null with the reason, and is null when nothing needed it.
-`oom_ballast` holds, for each candidate, the rule (`bytes`, `headroom` or
-null), the resulting `bytes` (null when none), the `headroom_bytes` of a
-headroom rule, and for a candidate without a ballast the reason.
+bytes, or null with the reason: what `nvidia-smi` answered, that the pass has
+no candidate and so did not ask, or that preflight ended before it.
+`oom_ballast` holds, for each candidate, the rule (`bytes`, `headroom`, `none`
+or null), the resulting `bytes` (null when none), the `headroom_bytes` of a
+headroom rule, and for a candidate without a ballast the reason, which says
+that its out-of-memory case will not run.
 
 `--staging-dir` is where the recipe writes the bundles of its negative cases,
 which the agent has to read. The agent's unit runs with `ProtectHome` and
@@ -121,7 +143,7 @@ command left none.
 
 | Step | What it runs | When it does not end `ok` |
 | --- | --- | --- |
-| `preflight` | Verifies every file the two sets' `SHA256SUMS` list; that the candidate set's manifest and the checkout are both at `--source-commit`, with no uncommitted change; that the agent's environment file names no interpreter yet; that the staging directory is not hidden from the agent; that each ballast fits the device and the predecessor can leave the sidecar on it ([above](#the-predecessor)); that the pass is not run as root; and, last, that `sudo` does not ask for a password | Nothing else runs |
+| `preflight` | Verifies every file the two sets' `SHA256SUMS` list; that the candidate set's manifest and the checkout are both at `--source-commit`, with no uncommitted change; that the agent's environment file names no interpreter yet; that the staging directory is not hidden from the agent; that the ballast interpreter can be run; where a device answers, that every candidate has a ballast rule, that each ballast fits the device, and that the predecessor is readable by the agent and can leave the sidecar on the device ([above](#the-predecessor)); that the pass is not run as root; and, last, that `sudo` does not ask for a password | Nothing else runs |
 | `lifecycle` | [`ubuntu-l4-cloud-lifecycle.sh`](cloud-row-runbooks.md) on the candidate set, with the upgrade and rollback stages when `--baseline-assets-dir` is given | The pass goes on, and a report the harness wrote is still indexed |
 | `install` | The candidate set's own `install.sh`, then enables both services and waits for the agent to answer. A run with a baseline ends with the baseline installed, so this is an upgrade over it | No later step runs |
 | `speech-family` | With `--speech-family host-built` only: builds the speech runtime packages from a scratch clone of the checkout, as [the family's README](../../packaging/speech-runtime/README.md) describes, at the version of the candidate set's serving package, and installs them with `apt-get` | Doctor still runs; no candidate does |
@@ -149,7 +171,8 @@ names another), the installed packages including the speech runtime family,
 and any lines it appended to the agent's environment file.
 
 Every command a step runs has that step's time limit (`--step-timeout
-STEP=SECONDS` changes one). A command that reaches it is sent `SIGTERM`, so
+STEP=SECONDS` changes one). The `streaming-latency` step's limit is
+[derived](#the-streaming-measurement) from the client's arguments. A command that reaches it is sent `SIGTERM`, so
 that the harness removes what it put in place. Once it has ended, or after
 `--stop-grace-s` seconds (240 by default), its process group is sent
 `SIGKILL`, which ends whatever ignored the first signal. Both go through
@@ -168,9 +191,10 @@ that need root run through `sudo`, which must not ask for a password.
 
 `--streaming-arg` appends to the command line of `slice_measure.py run`,
 repeatably, and is written `--streaming-arg=--name=value`, because an argument
-that begins with `--` is not accepted after a space. The pass sets `--out` (`streaming-latency/record.json` in the output directory) and
-`--source-commit` itself and refuses them, or an abbreviation of either, in
-`--streaming-arg`.
+that begins with `--` is not accepted after a space. The pass sets `--out`
+(`streaming-latency/record.json` in the output directory) and
+`--source-commit` itself and refuses them, `--provenance`, or an abbreviation
+of one of them, in `--streaming-arg`.
 
 ```sh
   --streaming-python <an interpreter with the client's packages> \
@@ -178,15 +202,27 @@ that begins with `--` is not accepted after a space. The pass sets `--out` (`str
   --streaming-arg=--stt-target=<deployment> \
   --streaming-arg=--stt-language=<language> \
   --streaming-arg=--audio=<utterance.wav> \
+  --streaming-arg=--tts-endpoint=127.0.0.1:<port> \
+  --streaming-arg=--tts-target=<deployment> \
+  --streaming-arg=--tts-language=<language> \
+  --streaming-arg=--voice=<voice> \
+  --streaming-arg=--text-file=<segment.txt> \
   --streaming-arg=--worker-version=<release> \
   --streaming-arg=--iterations=20 \
 ```
 
+The example names both modes because the client's record is `complete` only
+when both ran: a run of one mode is `incomplete`, its step `failed`, however
+well that mode did. The client refuses a mode whose target, language or input
+is missing, and the step then ends `failed` with no record.
+
 The step runs only when an argument names `--stt-endpoint` or
 `--tts-endpoint`. With no `--streaming-arg` at all it is `not_run`, and
 arguments that name neither are refused. An endpoint also needs
-`--worker-version` or `--worker-build`: without one the client writes a
-`synthetic` record, which the index refuses. `--streaming-python` is the
+`--worker-version` or `--worker-build`, with a value: without one the client
+writes a `synthetic` record, which measured nothing. The pass refuses to
+start that way, the step fails on a record that is not `recorded`, and the
+index refuses one. `--streaming-python` is the
 interpreter that has the client's packages, the one running the pass when it
 is not given. The pass starts and stops no worker; the endpoint is one the
 operator already serves. The step runs after the steps a candidate's
@@ -194,8 +230,27 @@ operator already serves. The step runs after the steps a candidate's
 did not end `ok`.
 
 The client exits 0 only for a `complete` record, so any other result leaves
-the step `failed` with that result beside it, and the record is indexed all
-the same. The index checks the record again before it derives a line.
+the step `failed` with that result beside it, and a record the client's own
+check accepts is indexed all the same; the index runs that check again before
+it derives a line. That holds for a record with no session in it. Where
+nothing answers at an endpoint the client writes a `failed` record whose mode
+has no session, and the line's check for that mode reads `none: the channel
+never became ready`; a mode that did answer keeps its figures beside it. A
+record that is `synthetic`, or that the check refuses, has no line, and the
+`index` step says so.
+
+The step's time limit is every wait of the client at its event timeout, plus
+300 seconds for the interpreter's start, the generated bindings and the GPU
+sampler: for each endpoint named, one wait for the channel and four per
+session (`Ready`, the segment's completion, the answer to `Finalize` and the
+call's end), each `--event-timeout-ms` long, times `--iterations`. The pass
+reads both options from `--streaming-arg` and assumes the client's defaults (1
+and 30,000) for one that is absent. The client's timeout starts again at each
+event a session needs, and an utterance is sent in real time, so a run can be
+longer than this without being stuck: `--step-timeout streaming-latency=SECONDS`
+replaces the derived limit. A client stopped at the limit leaves the record
+it saved last, which is `failed` and is indexed; one stopped before its first
+session was saved shows both modes as `not run`.
 
 ### The speech runtime family
 
@@ -273,7 +328,7 @@ is the shape. A subject is one thing a session ran:
 | --- | --- | --- | --- |
 | `lifecycle` | the harness's `lifecycle-report.json` | stages passed, stages total, harness wall time | each stage's status |
 | `doctor` | `tensorplate doctor --output json` | findings, failing findings | each finding's status, and whether the agent's environment file names an interpreter for the backend |
-| `streaming-latency` | the slice measurement client's `record.json` | for each mode and measurement the number of samples and of misses, and the 50th, 95th and 99th percentile in milliseconds, none of them when no session gave a sample | each mode's session outcomes, or `not run` for a mode the record did not run |
+| `streaming-latency` | the slice measurement client's `record.json` | for each mode and measurement the number of samples and of misses, and the 50th, 95th and 99th percentile in milliseconds, none of them when no session gave a sample | each mode's session outcomes, `none` with the reason for a mode that has no session, or `not run` for a mode the record did not run |
 | a candidate, for example `stt-whisper` | the recipe's `record.json`, and the pass's `cold-deploy.json` when there is one | runner load time, deploy wall time, the first request's exchange time, each fixture's median real-time factor and exchange time, per memory window and domain the consumed maximum and each process's peak, and the cold-cache deploy time | the bundle's name, each negative case's outcome with the code observed, teardown, deploy, the cold deploy, the two status snapshots, each memory window's status |
 
 A line is derived, never written by hand:
@@ -381,8 +436,12 @@ its `doctor` line cannot be `pass`.
 
 Streaming latency is a subject of its own, `streaming-latency`, and the first
 pass that carries it names it with `--new-subject`. The line's settings carry
-`streaming_iterations`, because percentiles over different numbers of
-sessions are not the same measurement. The measurement is described in
+`streaming_iterations` and what each mode that ran was sent: the clip's
+`streaming_stt_samples`, `streaming_stt_audio_bytes` and
+`streaming_stt_frame_ms`, and the segment's `streaming_tts_text_bytes`.
+Percentiles over different numbers of sessions, or over another clip or
+text, are not the same measurement, and the comparison notes the setting that
+differs. The measurement is described in
 [`slice-measurement.md`](slice-measurement.md); no serving worker answers it
 yet, so a pass without a stream endpoint names the gap with a
 `streaming-latency` step that is `not_run`.
