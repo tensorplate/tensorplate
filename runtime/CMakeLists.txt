@@ -123,7 +123,11 @@ target_link_libraries(tp_runtime PUBLIC Threads::Threads)
 target_compile_definitions(tp_runtime PRIVATE
   TP_ENABLE_STREAMING_GRPC=$<BOOL:${TP_ENABLE_STREAMING_GRPC}>)
 if(TP_ENABLE_STREAMING_GRPC)
-  target_link_libraries(tp_runtime PRIVATE gRPC::grpc++)
+  # The stream listener: the only code that references gRPC.
+  target_sources(tp_runtime PRIVATE
+    src/serving/stream/stream_listener.cpp
+    src/serving/stream/stream_mapping.cpp)
+  target_link_libraries(tp_runtime PRIVATE tp::stream_proto gRPC::grpc++)
 endif()
 
 if(TP_ENABLE_TENSORRT)
@@ -197,7 +201,7 @@ tp_apply_sanitizers(tp_runtime)
 
 if(TP_ENABLE_STREAMING_GRPC)
   # C++ bindings of the stream envelope, generated into the build tree and
-  # never committed. Nothing in tp_runtime uses them yet.
+  # never committed.
   set(_tp_stream_proto_root "${CMAKE_SOURCE_DIR}/protocol/proto")
   set(_tp_stream_proto tensorplate/stream/v1/session.proto)
   set(_tp_stream_out "${CMAKE_BINARY_DIR}/generated/proto")

@@ -1,0 +1,597 @@
+// SPDX-License-Identifier: Apache-2.0
+#include "serving/stream/stream_listener.hpp"
+
+#include <grpcpp/grpcpp.h>
+#include <grpcpp/support/server_callback.h>
+
+#include <algorithm>
+#include <chrono>
+#include <map>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <utility>
+
+#include "tensorplate/stream/v1/session.grpc.pb.h"
+
+#include "serving/session/dispatch.hpp"
+#include "serving/session/session_manager.hpp"
+#include "serving/session/timers.hpp"
+#include "serving/stream/stream_mapping.hpp"
+
+namespace tensorplate::serving {
+namespace {
+
+using stream::wire::ClientEvent;
+using stream::wire::ServerEvent;
+namespace wire = stream::wire;
+
+/// The generation the manager binds sessions to on a worker that serves none.
+/// It never reaches the wire: an Open names generation 0 and Ready omits it.
+constexpr std::uint64_t kUnversionedBinding = 1;
+/// The replace key of a Pong: an unsent Pong stands for every Ping before it.
+constexpr std::uint64_t kPongReplaceKey = 1;
+constexpr int kMaxReceiveMessageBytes = 64 * 1024;
+
+bool host_is_loopback(std::string_view host) noexcept {
+  return host == "127.0.0.1" || host == "::1" || host == "localhost";
+}
+
+std::uint32_t whole_ms(std::chrono::nanoseconds duration) noexcept {
+  const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+  return static_cast<std::uint32_t>(std::clamp<std::int64_t>(ms, 0, UINT32_MAX));
+}
+
+/// A server event queued without its sequence, which the stream assigns.
+struct WireEvent final : OutputBody {
+  explicit WireEvent(ServerEvent event_in) : event(std::move(event_in)) {}
+  ServerEvent event;
+};
+
+OutputItem wire_item(ServerEvent event, OutputKind kind, std::uint64_t replace_key = 0) {
+  const auto bytes = std::max<std::uint64_t>(1, event.ByteSizeLong());
+  return OutputItem{kind, bytes, replace_key, std::make_unique<WireEvent>(std::move(event))};
+}
+
+wire::Usage usage(const LogicalSessionUsage& from) {
+  wire::Usage out;
+  out.set_used(from.used());
+  out.set_limit(from.limit());
+  return out;
+}
+
+class SessionCall;
+
+/// What a call's reactor, the manager's sink and the output queue's consumer
+/// share. It outlives the reactor: `reactor` is cleared when the call is done,
+/// and the consumer then finds nothing to write.
+struct CallState {
+  std::mutex mu;
+  SessionCall* reactor = nullptr;
+  std::shared_ptr<BoundedOutputQueue> output;
+  std::optional<std::uint64_t> key;
+  std::string session_id;
+  SessionTerms terms;
+  std::uint32_t waiting_segment_limit = 0;
+  std::uint64_t last_accepted_sequence = 0;
+  bool writing = false;
+  OutputKind writing_kind = OutputKind::Control;
+  std::uint64_t writing_sequence = 0;
+  ServerEvent buffer;
+  std::optional<grpc::Status> finish_wanted;
+  bool finished = false;
+
+  /// Starts the next write if none is in flight.
+  void pump();
+  /// Finishes the call once no write is in flight. The first status wins.
+  void finish(grpc::Status status);
+};
+
+}  // namespace
+
+struct StreamListener::Impl final : wire::SessionService::CallbackService {
+  Impl(StreamListenerOptions options_in, SessionDispatch* dispatch_in,
+       const SchedulerClock& clock_in)
+      : options(std::move(options_in)), dispatch(dispatch_in), clock(clock_in) {}
+
+  grpc::ServerBidiReactor<ClientEvent, ServerEvent>* Session(
+      grpc::CallbackServerContext* context) override;
+
+  void on_transition(const ManagedSessionTransition& transition);
+  void stop_admission_locked() noexcept;
+
+  StreamListenerOptions options;
+  SessionDispatch* dispatch;
+  const SchedulerClock& clock;
+  std::unique_ptr<SessionManager> manager;
+  std::unique_ptr<grpc::Server> server;
+  std::uint16_t port = 0;
+
+  std::mutex calls_mu;
+  std::map<std::uint64_t, std::shared_ptr<CallState>> calls;
+
+  mutable std::mutex lifecycle_mu;
+  bool admission_stopped = false;
+  bool stopped = false;
+};
+
+namespace {
+
+/// One Session call: one logical session.
+class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEvent> {
+ public:
+  explicit SessionCall(StreamListener::Impl& listener)
+      : listener_(listener), state_(std::make_shared<CallState>()) {
+    state_->reactor = this;
+    StartRead(&in_);
+  }
+
+  void OnReadDone(bool ok) override {
+    if (!ok) {
+      half_closed();
+      return;
+    }
+    if (handle(in_)) {
+      StartRead(&in_);
+    }
+  }
+
+  void OnWriteDone(bool ok) override {
+    OutputKind kind = OutputKind::Control;
+    std::uint64_t sequence = 0;
+    std::shared_ptr<BoundedOutputQueue> output;
+    std::optional<std::uint64_t> key;
+    std::optional<grpc::Status> finish_wanted;
+    {
+      const std::lock_guard guard(state_->mu);
+      state_->writing = false;
+      kind = state_->writing_kind;
+      sequence = state_->writing_sequence;
+      output = state_->output;
+      key = state_->key;
+      finish_wanted = state_->finish_wanted;
+    }
+    if (!ok) {
+      state_->finish(grpc::Status::CANCELLED);
+      return;
+    }
+    if (output && output->delivered(sequence, listener_.clock.now()) && key &&
+        listener_.dispatch != nullptr) {
+      listener_.dispatch->output_delivered(*key, kind);
+    }
+    if (kind == OutputKind::Terminal) {
+      state_->finish(grpc::Status::OK);
+    } else if (finish_wanted) {
+      state_->finish(*finish_wanted);
+    } else {
+      state_->pump();
+    }
+  }
+
+  void OnCancel() override {
+    if (const auto key = session_key()) {
+      (void)listener_.manager->apply(
+          *key, LogicalSessionEvent::Abort,
+          Error::make(Error::Code::Cancelled, "the call was cancelled", "client_cancelled"));
+    }
+    state_->finish(grpc::Status::CANCELLED);
+  }
+
+  void OnDone() override {
+    {
+      const std::lock_guard guard(state_->mu);
+      state_->reactor = nullptr;
+    }
+    delete this;
+  }
+
+ private:
+  [[nodiscard]] std::optional<std::uint64_t> session_key() const {
+    const std::lock_guard guard(state_->mu);
+    return state_->key;
+  }
+
+  /// False when no further event is read.
+  bool handle(const ClientEvent& event) {
+    const auto key = session_key();
+    if (!key) {
+      return open(event);
+    }
+    if (event.sequence() != expected_sequence_ || event.sequence() > stream::kMaxWireInteger ||
+        event.session_id() != session_id()) {
+      fail(*key,
+           Error::make(Error::Code::ConfigInvalid,
+                       "client event out of sequence or for another session", "invalid_event"));
+      return false;
+    }
+    ++expected_sequence_;
+    switch (event.body_case()) {
+      case ClientEvent::kPing:
+        (void)listener_.manager->apply(*key, LogicalSessionEvent::Ping);
+        return true;
+      case ClientEvent::kOpen:
+        (void)listener_.manager->apply(*key, LogicalSessionEvent::Open);
+        return false;
+      case ClientEvent::BODY_NOT_SET:
+        fail(*key, Error::make(Error::Code::ConfigInvalid, "client event with no known body",
+                               "invalid_event"));
+        return false;
+      default:
+        fail(*key,
+             Error::make(Error::Code::Unsupported, "this server does not serve that event yet",
+                         "backend_unsupported_capability"));
+        return false;
+    }
+  }
+
+  bool open(const ClientEvent& event) {
+    if (event.body_case() != ClientEvent::kOpen || event.sequence() != 1 ||
+        !event.session_id().empty()) {
+      refuse(Error::make(Error::Code::ConfigInvalid, "the first event must be Open, sequence 1",
+                         "invalid_event"));
+      return false;
+    }
+    const auto& open = event.open();
+    if (auto target =
+            stream::check_target(open, stream::ServedTarget{listener_.options.deployment_id});
+        !target) {
+      refuse(target.error());
+      return false;
+    }
+    auto request = stream::session_request(open);
+    if (!request) {
+      refuse(request.error());
+      return false;
+    }
+    SessionDispatch* dispatch = listener_.dispatch;
+    if (dispatch == nullptr) {
+      refuse(Error::make(Error::Code::Unsupported, "the deployment declares no stream mode",
+                         "backend_unsupported_capability"));
+      return false;
+    }
+    auto terms = dispatch->negotiate(*request);
+    if (!terms) {
+      refuse(terms.error());
+      return false;
+    }
+    auto budgets = budgets_for(*terms);
+    if (!budgets) {
+      refuse(budgets.error());
+      return false;
+    }
+    {
+      const std::lock_guard guard(state_->mu);
+      state_->terms = *terms;
+      state_->waiting_segment_limit = budgets->waiting_items();
+    }
+    const auto opened = listener_.manager->open(kUnversionedBinding, *budgets,
+                                                [&](std::uint64_t key) -> Result<void> {
+                                                  {
+                                                    const std::lock_guard guard(state_->mu);
+                                                    state_->key = key;
+                                                    state_->session_id = "s" + std::to_string(key);
+                                                  }
+                                                  {
+                                                    const std::lock_guard guard(listener_.calls_mu);
+                                                    listener_.calls[key] = state_;
+                                                  }
+                                                  return dispatch->open_session(key, *terms);
+                                                });
+    if (!opened && !session_key()) {
+      refuse(opened.error());
+      return false;
+    }
+    expected_sequence_ = 2;
+    // A failed initialization was admitted: its terminal event ends the call.
+    return opened.has_value();
+  }
+
+  void half_closed() {
+    if (const auto key = session_key()) {
+      (void)listener_.manager->apply(*key, LogicalSessionEvent::HalfClose);
+      return;
+    }
+    refuse(
+        Error::make(Error::Code::ConfigInvalid, "the client closed before Open", "invalid_event"));
+  }
+
+  void fail(std::uint64_t key, Error cause) const {
+    (void)listener_.manager->apply(key, LogicalSessionEvent::Fail, std::move(cause));
+  }
+
+  void refuse(const Error& cause) {
+    wire::OpenRefused refused;
+    *refused.mutable_cause() = stream::end_cause(cause);
+    refused.set_admission(wire::ADMISSION_NOT_ADMITTED);
+    state_->finish(stream::refused_open_status(refused));
+  }
+
+  [[nodiscard]] std::string session_id() const {
+    const std::lock_guard guard(state_->mu);
+    return state_->session_id;
+  }
+
+  StreamListener::Impl& listener_;
+  std::shared_ptr<CallState> state_;
+  ClientEvent in_;
+  std::uint64_t expected_sequence_ = 1;
+};
+
+void CallState::pump() {
+  SessionCall* writer = nullptr;
+  std::optional<grpc::Status> unsendable;
+  {
+    const std::lock_guard guard(mu);
+    if (reactor == nullptr || writing || finished || finish_wanted || !output) {
+      return;
+    }
+    auto next = output->take();
+    if (!next) {
+      return;
+    }
+    writer = reactor;
+    auto* body = dynamic_cast<WireEvent*>(next->item.body.get());
+    if (body == nullptr) {
+      unsendable = grpc::Status(grpc::StatusCode::INTERNAL, "output this server cannot send");
+      finish_wanted = unsendable;
+      finished = true;
+    } else {
+      buffer = std::move(body->event);
+      buffer.set_sequence(next->sequence);
+      writing = true;
+      writing_kind = next->item.kind;
+      writing_sequence = next->sequence;
+    }
+  }
+  if (unsendable) {
+    writer->Finish(*unsendable);
+  } else {
+    writer->StartWrite(&buffer);
+  }
+}
+
+void CallState::finish(grpc::Status status) {
+  SessionCall* writer = nullptr;
+  grpc::Status final_status;
+  {
+    const std::lock_guard guard(mu);
+    if (finished || reactor == nullptr) {
+      return;
+    }
+    if (!finish_wanted) {
+      finish_wanted = std::move(status);
+    }
+    if (writing) {
+      return;
+    }
+    finished = true;
+    writer = reactor;
+    final_status = *finish_wanted;
+  }
+  writer->Finish(std::move(final_status));
+}
+
+}  // namespace
+
+grpc::ServerBidiReactor<ClientEvent, ServerEvent>* StreamListener::Impl::Session(
+    grpc::CallbackServerContext* /*context*/) {
+  return new SessionCall(*this);
+}
+
+void StreamListener::Impl::on_transition(const ManagedSessionTransition& transition) {
+  if (dispatch != nullptr) {
+    dispatch->on_transition(transition);
+  }
+  std::shared_ptr<CallState> state;
+  {
+    const std::lock_guard guard(calls_mu);
+    const auto it = calls.find(transition.session_key);
+    if (it == calls.end()) {
+      return;
+    }
+    state = it->second;
+    if (transition.effects.contains(LogicalSessionEffect::ReleaseSlot)) {
+      calls.erase(it);
+    }
+  }
+  const auto& output = transition.output;
+  bool first = false;
+  std::string session_id;
+  SessionTerms terms;
+  std::uint32_t waiting_segment_limit = 0;
+  std::uint64_t last_accepted_sequence = 0;
+  {
+    const std::lock_guard guard(state->mu);
+    first = state->output == nullptr;
+    state->output = output;
+    session_id = state->session_id;
+    terms = state->terms;
+    waiting_segment_limit = state->waiting_segment_limit;
+    last_accepted_sequence = state->last_accepted_sequence;
+  }
+  const auto offer = [&](ServerEvent event, OutputKind kind, std::uint64_t replace_key = 0) {
+    auto item = wire_item(std::move(event), kind, replace_key);
+    (void)output->offer(item, clock.now());
+  };
+  if (transition.event) {
+    transition.effects.for_each([&](LogicalSessionEffect effect) {
+      ServerEvent event;
+      switch (effect) {
+        case LogicalSessionEffect::EmitCancelAccepted:
+          event.mutable_cancel_accepted();
+          offer(std::move(event), OutputKind::Control);
+          break;
+        case LogicalSessionEffect::EmitReady: {
+          auto& ready = *event.mutable_ready();
+          ready.set_session_id(session_id);
+          const bool audio = terms.input_kind == SessionInputKind::Audio;
+          auto& limits = *ready.mutable_limits();
+          limits.set_idle_timeout_ms(whole_ms(options.limits.idle_timeout()));
+          limits.set_heartbeat_interval_ms(whole_ms(options.limits.heartbeat_interval()));
+          limits.set_liveness_timeout_ms(whole_ms(options.limits.liveness_timeout()));
+          limits.set_max_duration_ms(whole_ms(options.limits.max_duration()));
+          limits.set_finalize_deadline_ms(whole_ms(finalize_deadline(terms.input_kind)));
+          limits.set_output_stall_timeout_ms(whole_ms(SessionBudgets::kOutputNoProgressTimeout));
+          if (audio) {
+            auto& stt = *limits.mutable_speech_to_text();
+            stt.set_min_frame_ms(whole_ms(terms.min_frame));
+            stt.set_max_frame_ms(whole_ms(terms.max_frame));
+            stt.set_max_utterance_ms(whole_ms(terms.max_utterance));
+            *ready.mutable_input_format() = stream::wire_format(terms.audio_format);
+          } else {
+            auto& tts = *limits.mutable_text_to_speech();
+            tts.set_max_segment_text_bytes(terms.max_segment_text_bytes);
+            tts.set_max_segment_audio_ms(whole_ms(terms.max_segment_audio));
+            tts.set_max_synthesis_text_bytes(terms.max_synthesis_text_bytes);
+            tts.set_max_synthesis_audio_ms(whole_ms(terms.max_synthesis_audio));
+            *ready.mutable_output_format() = stream::wire_format(terms.audio_format);
+          }
+          // Ready follows admission at once: the whole duration is left.
+          ready.set_remaining_duration_ms(whole_ms(options.limits.max_duration()));
+          const auto& status = transition.status;
+          auto& wire_status = *ready.mutable_status();
+          wire_status.set_state(stream::wire_state(status.state));
+          wire_status.set_input_queue_depth(status.input_queue_depth);
+          auto& credit = *wire_status.mutable_input_credit();
+          *credit.mutable_bytes() = usage(status.input_credit_bytes);
+          // A session that has accepted nothing has no segment waiting.
+          credit.mutable_waiting_segments()->set_limit(waiting_segment_limit);
+          *wire_status.mutable_output_pcm_bytes() = usage(status.output_pcm_bytes);
+          *wire_status.mutable_output_metadata_bytes() = usage(status.output_metadata_bytes);
+          offer(std::move(event), OutputKind::Control);
+          break;
+        }
+        case LogicalSessionEffect::EmitReply:
+          if (*transition.event == LogicalSessionEvent::Ping) {
+            event.mutable_pong();
+            offer(std::move(event), OutputKind::Control, kPongReplaceKey);
+          }
+          break;
+        case LogicalSessionEffect::EmitTerminal: {
+          auto& closed = *event.mutable_session_closed();
+          closed.set_state(stream::wire_state(transition.state));
+          if (transition.cause) {
+            *closed.mutable_cause() = stream::end_cause(*transition.cause);
+          }
+          closed.set_admission(wire::ADMISSION_ADMITTED);
+          closed.set_last_accepted_sequence(last_accepted_sequence);
+          closed.mutable_totals();
+          offer(std::move(event), OutputKind::Terminal);
+          break;
+        }
+        default:
+          break;
+      }
+    });
+  }
+  if (first) {
+    (void)output->set_consumer([weak = std::weak_ptr<CallState>(state)] {
+      if (const auto shared = weak.lock()) {
+        shared->pump();
+      }
+    });
+  }
+}
+
+void StreamListener::Impl::stop_admission_locked() noexcept {
+  if (admission_stopped || !manager) {
+    return;
+  }
+  admission_stopped = true;
+  try {
+    (void)manager->stop_admission_and_drain(
+        Error::make(Error::Code::Unavailable, "the worker is shutting down", "worker_shutdown"));
+  } catch (...) {  // NOLINT(bugprone-empty-catch): shutdown continues without the drain.
+  }
+}
+
+StreamListener::StreamListener(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
+
+StreamListener::~StreamListener() {
+  stop(std::chrono::steady_clock::now());
+}
+
+Result<std::unique_ptr<StreamListener>> StreamListener::start(StreamListenerOptions options,
+                                                              SessionDispatch* dispatch,
+                                                              const SchedulerClock& clock) {
+  if (options.host.empty() || (!host_is_loopback(options.host) && !options.allow_non_loopback)) {
+    return unexpected(Error::make(
+        Error::Code::Unsupported,
+        "stream listener: non-loopback bind not permitted: " + options.host, "non_loopback_bind"));
+  }
+  auto impl = std::make_unique<Impl>(std::move(options), dispatch, clock);
+  Impl* raw = impl.get();
+  auto manager = SessionManager::create(
+      raw->options.limits, kUnversionedBinding, clock,
+      [raw](const ManagedSessionTransition& transition) { raw->on_transition(transition); });
+  if (!manager) {
+    return unexpected(manager.error());
+  }
+  raw->manager = std::move(manager).value();
+  if (dispatch != nullptr) {
+    dispatch->attach(*raw->manager);
+  }
+  const std::string address =
+      (raw->options.host == "::1" ? std::string{"[::1]"} : raw->options.host) + ":" +
+      std::to_string(raw->options.port);
+  int selected = 0;
+  grpc::ServerBuilder builder;
+  builder.AddListeningPort(address, grpc::InsecureServerCredentials(), &selected);
+  builder.RegisterService(raw);
+  builder.SetMaxReceiveMessageSize(kMaxReceiveMessageBytes);
+  // A second process must not share the port.
+  builder.AddChannelArgument(GRPC_ARG_ALLOW_REUSEPORT, 0);
+  raw->server = builder.BuildAndStart();
+  if (!raw->server || selected <= 0) {
+    if (dispatch != nullptr) {
+      dispatch->stop();
+    }
+    return unexpected(Error::make(Error::Code::Unavailable,
+                                  "stream listener could not bind " + address,
+                                  "stream_bind_failed"));
+  }
+  raw->port = static_cast<std::uint16_t>(selected);
+  return std::unique_ptr<StreamListener>(new StreamListener(std::move(impl)));
+}
+
+std::uint16_t StreamListener::bound_port() const noexcept {
+  return impl_->port;
+}
+
+void StreamListener::stop_admission() noexcept {
+  // A stop() under way has already stopped admission and holds the lock.
+  const std::unique_lock lock(impl_->lifecycle_mu, std::try_to_lock);
+  if (lock.owns_lock()) {
+    impl_->stop_admission_locked();
+  }
+}
+
+void StreamListener::stop(std::chrono::steady_clock::time_point deadline) noexcept {
+  const std::lock_guard lock(impl_->lifecycle_mu);
+  if (impl_->stopped) {
+    return;
+  }
+  impl_->stopped = true;
+  impl_->stop_admission_locked();
+  while (impl_->manager->held_slots() > 0 && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
+  }
+  // Calls still open at the deadline are cancelled, and each aborts its session.
+  const auto left = std::max(deadline - std::chrono::steady_clock::now(),
+                             std::chrono::steady_clock::duration::zero());
+  impl_->server->Shutdown(std::chrono::system_clock::now() +
+                          std::chrono::duration_cast<std::chrono::system_clock::duration>(left));
+  if (impl_->dispatch != nullptr) {
+    impl_->dispatch->stop();
+  }
+  impl_->server.reset();
+  impl_->manager.reset();
+}
+
+std::size_t StreamListener::live_sessions() const noexcept {
+  const std::lock_guard lock(impl_->lifecycle_mu);
+  return impl_->manager ? impl_->manager->held_slots() : 0;
+}
+
+}  // namespace tensorplate::serving

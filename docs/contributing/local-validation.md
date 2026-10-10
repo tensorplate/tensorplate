@@ -46,9 +46,11 @@ mapfile -t cpp_files < <(
 )
 clang-format --dry-run -Werror "${cpp_files[@]}"
 
-# 5. clang-tidy on runtime + serving_worker translation units.
+# 5. clang-tidy on runtime + serving_worker translation units; the stream
+#    listener's build only with TP_ENABLE_STREAMING_GRPC=ON.
 mapfile -t tidy_files < <(
-  git ls-files runtime serving_worker | grep -E '\.cpp$'
+  git ls-files runtime serving_worker | grep -E '\.cpp$' |
+    grep -v '^runtime/src/serving/stream/'
 )
 clang-tidy --quiet -p build --warnings-as-errors='*' "${tidy_files[@]}"
 

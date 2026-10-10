@@ -33,6 +33,9 @@
 
 #include "serving/control_channel.hpp"
 #include "serving/mock_session.hpp"
+#if TP_ENABLE_STREAMING_GRPC
+#include "serving/stream/stream_listener.hpp"
+#endif
 
 namespace tensorplate {
 
@@ -114,10 +117,17 @@ struct ServingWorker::Impl {
   // Declared last: the control thread stops before anything it could reach.
   serving::UnimplementedControlTarget control_target;
   std::unique_ptr<serving::ControlChannel> control;
+#if TP_ENABLE_STREAMING_GRPC
+  std::unique_ptr<serving::StreamListener> stream;
+  std::atomic<std::chrono::steady_clock::rep> stream_drain_deadline{0};
+#endif
 
   Result<void> attach_control();
   Result<void> build();
   Result<void> start_listener();
+  Result<void> start_stream_listener();
+  void stop_stream_admission() noexcept;
+  void stop_stream_listener() noexcept;
   // Dispatcher / evictor only call into the owned `unique_ptr` members, so
   // they could be marked const; we keep them non-const so future hooks
   // (e.g. recording dispatcher state on Impl) do not require an API change.
@@ -392,6 +402,65 @@ Result<void> ServingWorker::Impl::start_listener() {
 // const. We keep them non-const so a future hook on `Impl` (e.g.
 // dispatcher state) does not force a signature churn.
 // NOLINTNEXTLINE(readability-make-member-function-const)
+Result<void> ServingWorker::Impl::start_stream_listener() {
+#if TP_ENABLE_STREAMING_GRPC
+  if (!config.streaming.enabled) {
+    return Result<void>{};
+  }
+  const auto defaults = serving::SessionLimits::defaults();
+  // The streaming slice serves one session at a time.
+  auto limits =
+      serving::SessionLimits::create(defaults.idle_timeout(), defaults.heartbeat_interval(),
+                                     defaults.liveness_timeout(), defaults.max_duration(), 1);
+  if (!limits) {
+    return unexpected(limits.error());
+  }
+  serving::StreamListenerOptions options;
+  options.host = config.bind.host;
+  options.port = config.streaming.port;
+  options.allow_non_loopback = config.bind.allow_non_loopback;
+  options.deployment_id = config.deployment.endpoint;
+  options.limits = *limits;
+  // No speech dispatch is built yet, so the listener refuses every Open.
+  auto listener = serving::StreamListener::start(std::move(options), nullptr, *clock);
+  if (!listener) {
+    log_stderr(config, "error", "stream listener start failed",
+               {{"code", std::string{to_string(listener.error().code)}},
+                {"message", listener.error().message}});
+    return unexpected(listener.error());
+  }
+  stream = std::move(listener).value();
+  log_stderr(
+      config, "info", "stream listener bound",
+      {{"host", config.bind.host}, {"port", stream->bound_port()}, {"serves_sessions", false}});
+#endif
+  return Result<void>{};
+}
+
+void ServingWorker::Impl::stop_stream_admission() noexcept {
+#if TP_ENABLE_STREAMING_GRPC
+  if (stream) {
+    auto expected = std::chrono::steady_clock::rep{0};
+    const auto deadline = std::chrono::steady_clock::now() + config.shutdown.drain_deadline;
+    (void)stream_drain_deadline.compare_exchange_strong(expected,
+                                                        deadline.time_since_epoch().count());
+    stream->stop_admission();
+  }
+#endif
+}
+
+void ServingWorker::Impl::stop_stream_listener() noexcept {
+#if TP_ENABLE_STREAMING_GRPC
+  if (stream) {
+    stop_stream_admission();
+    // Sessions drain inside the window that began when shutdown was asked.
+    stream->stop(std::chrono::steady_clock::time_point{
+        std::chrono::steady_clock::duration{stream_drain_deadline.load()}});
+    stream.reset();
+  }
+#endif
+}
+
 void ServingWorker::Impl::dispatcher_loop() {
   while (!stop_workers.load()) {
     if (!pipeline->dispatch_one(*async_store)) {
@@ -504,6 +573,11 @@ Result<void> ServingWorker::start() {
     impl_->started.store(false);
     return r;
   }
+  if (auto r = impl_->start_stream_listener(); !r) {
+    impl_->server->stop();
+    impl_->started.store(false);
+    return r;
+  }
   impl_->stop_workers.store(false);
   impl_->dispatcher = std::thread([this] { impl_->dispatcher_loop(); });
   impl_->evictor = std::thread([this] { impl_->evictor_loop(); });
@@ -542,6 +616,7 @@ void ServingWorker::shutdown(std::string_view reason) noexcept {
     if (impl_->pipeline != nullptr) {
       impl_->pipeline->set_stopping(true);
     }
+    impl_->stop_stream_admission();
     impl_->health.set_state(ServingState::Stopping);
   } catch (...) {  // NOLINT(bugprone-empty-catch): noexcept shutdown is fire-and-forget.
   }
@@ -570,6 +645,7 @@ ServingExitCode ServingWorker::stop() {
   if (impl_->server != nullptr) {
     impl_->server->stop();
   }
+  impl_->stop_stream_listener();
   // Drain + cleanup.
   impl_->run_drain();
   // Release async-store entries.
