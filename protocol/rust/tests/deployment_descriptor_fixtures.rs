@@ -410,6 +410,8 @@ fn a_restamp_takes_only_a_newer_generation() {
         let err = first.restamp(generation).expect_err("refused");
         assert_eq!(refusal_of(&err), "Invalid(generation)", "{generation}");
     }
+    // No state can name this generation, so a re-stamp to it is accepted but
+    // can never be started.
     first.restamp((1 << 53) - 1).expect("the last generation");
 }
 

@@ -273,6 +273,11 @@ impl LedgerStatus {
 
 /// Reference to a verified, staged candidate the agent asks the worker to
 /// load and warm.
+///
+/// The three descriptor identity fields are all or none. That is checked in
+/// the request payload's validation and in [`CandidateRef::descriptor_identity`];
+/// a reference built in process is not checked until its consumer calls the
+/// latter. A consumer must call it before using any of the three fields.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateRef {

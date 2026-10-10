@@ -154,11 +154,6 @@ fn the_legacy_fixture_is_the_writers_exact_encoding() {
     let encoded =
         String::from_utf8(serde_json::to_vec_pretty(&decoded).expect("encode")).expect("utf8");
     assert_eq!(format!("{encoded}\n"), raw);
-    // A state whose records name no descriptor is written as before.
-    for record in [&decoded.active, &decoded.previous_active] {
-        let record = record.as_ref().expect("record");
-        assert_eq!(record.descriptor_identity(), Ok(None));
-    }
     // What the recording covers.
     assert!(decoded.active.is_some() && decoded.previous_active.is_some());
     assert!(decoded.last_error.is_some() && decoded.quarantined.len() == 1);
@@ -1404,6 +1399,14 @@ fn a_named_generation_is_below_the_counter() {
             "`in_flight_transaction` generation 6 was never allocated (next_generation is 6)",
         ),
         (
+            "a transaction past the counter",
+            |v| {
+                remove(v, "", "candidate");
+                *at(v, "/in_flight_transaction/generation") = json!(7);
+            },
+            "`in_flight_transaction` generation 7 was never allocated (next_generation is 6)",
+        ),
+        (
             "an identity in a state with no counter",
             |v| remove(v, "", "next_generation"),
             "`active` generation 3 was never allocated (the state has no next_generation)",
@@ -1458,10 +1461,11 @@ fn a_records_descriptor_identity_has_the_members_names_and_shapes() {
     assert_eq!(named.generation, 3);
     let candidate = fixture.candidate.as_ref().expect("candidate");
     let transaction = fixture.in_flight_transaction.as_ref().expect("transaction");
+    // The fixture's transaction and candidate carry the same identity; the
+    // decoder does not require that.
     assert_eq!(
         transaction.descriptor_identity(),
-        candidate.descriptor_identity(),
-        "the transaction carries its candidate's identity"
+        candidate.descriptor_identity()
     );
     let previous = fixture.previous_active.as_ref().expect("previous");
     assert_eq!(previous.descriptor_identity(), Ok(None));

@@ -262,7 +262,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["transaction_id", "deployment_id", "phase", "kind"],
-      "description": "The transaction in flight. `generation`, `descriptor_digest` and `configuration_digest` are its candidate's descriptor identity, under the rules `DeploymentRecord` states.",
+      "description": "The transaction in flight. `generation`, `descriptor_digest` and `configuration_digest` are the transaction's descriptor identity, under the rules `DeploymentRecord` states: all three or none, with the generation below the counter. The decoder does not check that they match the candidate record's.",
       "properties": {
         "transaction_id": {"type": "string", "minLength": 1},
         "deployment_id": {"type": "string", "minLength": 1},

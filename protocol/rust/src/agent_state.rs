@@ -1430,5 +1430,14 @@ mod tests {
             .replace("\"0.2\"", "\"0.1\"")
             .replace(",\"next_generation\":1", "");
         decode_agent_state(&legacy).expect("0.1 reads the array form as before");
+        // The same holds for an array-form `active` record: the three
+        // identity fields come after every field a 0.1 writer knew.
+        let active = r#"{"schema_version":"0.1","store_version":1,"active":["d","sha256:aa","n","v","b","m","/s",5,{}]}"#;
+        let decoded = decode_agent_state(active).expect("0.1 reads the array-form record");
+        let record = decoded.active.expect("active");
+        assert_eq!(record.deployment_id, "d");
+        assert_eq!(record.staged_path, "/s");
+        assert_eq!(record.promoted_monotonic_ns, Some(5));
+        assert_eq!(record.descriptor_identity(), Ok(None));
     }
 }
