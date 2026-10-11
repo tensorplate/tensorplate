@@ -20,6 +20,20 @@ names another `protoc`. The fixture format, how to
 record the frames again and what the suite checks are in
 [`protocol/README.md`](../../protocol/README.md#streaming-session-envelope).
 
+## Job bridge conformance cases
+
+`bounded_job_bridge_conformance.hpp` holds what
+`include/tensorplate/backend/bounded_job_bridge.hpp` promises the caller of
+a bridge whose backend runs `stt_decode` and `tts_synthesis`. The comment
+above each case quotes the sentence it holds. A binding implements
+`BridgeUnderTest` (the bridge, its buffer manager, the session's prime and
+unload, a lost backend, a hold on started jobs, the backend's results) and
+a test binary instantiates `BoundedJobBridgeConformance` with its bindings
+from the one source file that includes the header. The T1 binary runs the
+suite against the in-process `FixtureJobBridge`
+(`test/unit/bounded_job_bridge_conformance_test.cpp`); it needs no backend
+SDK, process or hardware.
+
 ## V01-E04 ExecutionSession conformance suite
 
 `execution_session_conformance.hpp` is the V01-E04-F07-T01 shared

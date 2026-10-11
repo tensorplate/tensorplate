@@ -226,6 +226,45 @@ or rule edits the header and the vectors in the same commit. There is no
 standalone JSON, and a socket transport carries PCM as frame payload bytes,
 not as buffer handles.
 
+### Conformance cases and the fixture bridge
+
+`test/contract/bounded_job_bridge_conformance.hpp` holds what the bridge
+header promises the caller of a bridge whose backend runs `stt_decode` and
+`tts_synthesis`, as one parameterised suite: twenty cases, each under the
+sentence it holds. A binding (`BridgeUnderTest`) supplies the bridge with
+its backend, the session's side of it (prime, unload, a backend that is
+lost) and a hold on started jobs; the cases force every order they need
+with that hold and never wait on the clock. They do not hold
+`job_not_permitted` or the destruction of the session. A test binary
+includes the header in one source file and instantiates the suite with the
+bridges it builds.
+
+`FixtureJobBridge` (`test/mocks/fixture_job_bridge.hpp`, the test library
+`tp::fixture_job_bridge`) is the one binding today: a bridge with a
+backend in the test's own process, for tests of what sits above a bridge.
+No production binary contains it. It keeps the refusals and each job's
+event order through `FakeBoundedJobBridge`, which it wraps, and plays the
+backend by the in-tree sidecar runner's rules: one job runs and eight wait
+in submission order; one more ends with `failed`
+(`job_capacity_exhausted`) without `accepted`; a job is `accepted` when it
+is taken in; a cancellation is acknowledged at once and ends a waiting job
+then, the running one when its work returns, both as `cancelled`; a lost
+backend fails its jobs with `backend_reset` and releases them only at the
+unload. Its results are those of the runner's fixture backend (the word
+`hello` ending a quarter of the payload's bytes after the window's start;
+160 bytes of silence for each byte of text) unless the test passes a
+result function, which receives the request. One thread runs the jobs and
+makes every callback while the backend lives; the unload makes the last
+ones on its caller's thread, so `prime`, `lose_backend`, `unload` and the
+destructor are never called from a sink callback. A test can hold started
+jobs, fail the next one, set what `health` answers, and ask whether
+everything submitted so far was worked through (`settled`).
+
+That the fixture's results and rules are the runner's is held by constants
+and by `FixtureJobBridge`'s own tests in
+`test/unit/bounded_job_bridge_conformance_test.cpp`; no test runs the same
+cases against the runner yet.
+
 ### Job messages in the C++ adapter
 
 `runtime/src/adapters/python_pytorch/job_wire.{hpp,cpp}` is the adapter's
