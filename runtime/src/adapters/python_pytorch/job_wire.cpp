@@ -139,17 +139,6 @@ const json* member(const json& object, const char* name, json::value_t type) {
   return it != object.end() && it->type() == type ? &*it : nullptr;
 }
 
-void cut_to_bound(std::string& text) {
-  if (text.size() <= kMaxJobErrorTextBytes) {
-    return;
-  }
-  std::size_t end = kMaxJobErrorTextBytes;
-  while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0U) == 0x80U) {
-    --end;
-  }
-  text.resize(end);
-}
-
 // The error object of a `job_failed` or an `error_event`.
 std::optional<Error> read_error(const json& header) {
   const json* object = member(header, "error", json::value_t::object);
@@ -163,13 +152,13 @@ std::optional<Error> read_error(const json& header) {
   }
   Error error{error_code_from_string(*code).value_or(Error::Code::Internal), std::move(*message),
               std::nullopt};
-  cut_to_bound(error.message);
+  cut_to_job_error_bound(error.message);
   if (object->contains("context")) {
     error.context = wire_text(*object, "context");
     if (!error.context.has_value()) {
       return std::nullopt;
     }
-    cut_to_bound(*error.context);
+    cut_to_job_error_bound(*error.context);
   }
   return error;
 }
@@ -481,6 +470,17 @@ SidecarJobMessage read_job_message(const json& header, std::string_view kind,
 }
 
 }  // namespace
+
+void cut_to_job_error_bound(std::string& text) {
+  if (text.size() <= kMaxJobErrorTextBytes) {
+    return;
+  }
+  std::size_t end = kMaxJobErrorTextBytes;
+  while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0U) == 0x80U) {
+    --end;
+  }
+  text.resize(end);
+}
 
 std::size_t job_submit_payload_size(const JobRequest& request) noexcept {
   if (const auto* audio = std::get_if<AudioFrames>(&request.payload())) {

@@ -32,6 +32,7 @@ add_executable(tp_test_unit
   sidecar_process_test.cpp
   runner_profile_test.cpp
   job_wire_test.cpp
+  job_channel_test.cpp
   scheduler_interface_test.cpp
   scheduler_fifo_test.cpp
   scheduler_deadline_test.cpp

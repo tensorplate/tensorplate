@@ -164,6 +164,10 @@ struct JobMessageFault {
   friend bool operator==(const JobMessageFault&, const JobMessageFault&) noexcept = default;
 };
 
+/// Cuts `text` to kMaxJobErrorTextBytes at a character boundary: the longest
+/// text the error of a `failed` event carries.
+void cut_to_job_error_bound(std::string& text);
+
 using SidecarJobMessage = std::variant<NotJobMessage, JobEvent, SessionReleased, MessageRefused,
                                        JobMessageFault, UnreadableHeader>;
 
