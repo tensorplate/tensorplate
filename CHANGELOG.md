@@ -239,19 +239,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `speech_jobs_v1` where the sidecar's `ready_event` lists it (a sidecar
   that does not is not asked to load: `unsupported`,
   `speech_jobs_not_offered`), reads the declared job classes and starts the
-  job channel on the socket. From then
-  on prime, the health check and unload go through the channel's exchange
-  slot; jobs are admitted once prime's health check has passed; unload
-  closes admission before it sends the unload; and unload, destruction and
-  every failed exchange stop the channel before the sidecar process is
-  ended, so an open job fails with `session_unloaded` or `backend_reset`
-  and is released afterwards. Such a session refuses a tensor `infer`
-  (`unsupported`, `tensor_inference_unsupported`). The channel does not
-  start for a load that declared no job class a lane runs (`unsupported`,
+  job channel on the socket. From then on prime, the health check and
+  unload go through the channel's exchange slot; jobs are admitted once
+  prime's health check has passed; unload closes admission before it sends
+  the unload; and unload, destruction and every failed exchange stop the
+  channel before the sidecar process is ended, so an open job fails with
+  `session_unloaded` or `backend_reset` and is released afterwards. Such a
+  session refuses a tensor `infer` (`unsupported`,
+  `tensor_inference_unsupported`). The channel does not start for a load
+  that declared no job class a lane runs (`unsupported`,
   `job_class_unsupported`), and its reader takes no frame that declares a
   payload larger than the longest synthesized segment: the body of such a
-  frame is neither allocated nor read. Additive inside protocol 0.1; version constants
-  unchanged. (V030-E04-F03-T01)
+  frame is neither allocated nor read. Additive inside protocol 0.1;
+  version constants unchanged. (V030-E04-F03-T01)
 - A measurement client for the streaming path,
   `tools/validation/slice_measure.py`. It runs paced speech-to-text sessions
   and text-to-speech segments over the stream session envelope and takes a

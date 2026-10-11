@@ -11,6 +11,7 @@
 //   - a frame whose `schema_version` is not "0.1" is refused `unsupported`,
 //     and one without a `message_id` or a `kind` `config_invalid` under an id
 //     of this sidecar's own, both in arrival order behind what waits;
+//   - a frame whose header is not a JSON object ends the connection;
 //   - a load is refused as the runner refuses it (an empty `capabilities`
 //     list, a capability it did not list, a runner with no job class);
 //   - `health_check` is answered at once; any other unary request and every
@@ -26,16 +27,32 @@
 //   - a write that makes no progress for `write_stall` ends the connection,
 //     and it never stops reading unless a test tells it to.
 //
-// Where it differs from the runner: of a submit's input it checks the type
-// and the payload's length only, and keeps the payload for the test to read;
-// it has no bound on the unary requests that wait; it writes a unary answer
-// under the job lock, where the runner writes it outside. It declares the
-// job classes it is given, so a load whose runner has no class a lane runs
-// is answered where the runner refuses it. An id of its own for a frame
-// without one is the next `s<n>`, where the runner draws a random one. It
-// runs no tensor: `infer` and `cancel` are refused as unknown kinds, a
-// `prime` is answered whether or not anything is loaded, and a load is not
-// held to its `model_spec`.
+// Where it is known to differ from the runner:
+//
+//   - of a submit's input it checks the type and the payload's length only,
+//     and keeps the payload for the test to read;
+//   - it has no bound on the unary requests that wait, and it writes a unary
+//     answer under the job lock, where the runner writes it outside;
+//   - it declares the job classes it is given, so a load whose runner has no
+//     class a lane runs is answered where the runner refuses it;
+//   - an id of its own for a frame without one is the next `s<n>`, where the
+//     runner draws a random one, and a `message_id` that is not a string
+//     counts as none, where the runner echoes it;
+//   - it runs no tensor: `infer`, `infer_async` and `cancel` are refused as
+//     unknown kinds, a `prime` is answered whether or not anything is
+//     loaded, and a load is not held to its `model_spec`;
+//   - `capabilities` that is `null` or an empty object is refused as an
+//     empty list is (`config_invalid`), where the runner answers
+//     `unsupported`;
+//   - a load answered while an unload waits behind it enables jobs, and they
+//     stay enabled after that unload; the runner's does not enable them;
+//   - `health` carries `ready` alone, and an error's text is one letter;
+//   - a frame whose prefix is wrong (the magic, the version, a length over
+//     the codec's bound) is waited on as an incomplete frame, where the
+//     runner ends the connection;
+//   - at end of file it only stops reading, and still answers what waits
+//     when the test says how it ends; the runner, once a load enabled jobs,
+//     writes no more and drops what waits.
 //
 // The test is the backend: it takes the job at the head of the FIFO and says
 // how it ends. emit(), refuse(), stop_reading(), stop_reading_after() and the

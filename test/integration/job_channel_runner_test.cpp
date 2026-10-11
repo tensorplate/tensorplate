@@ -161,7 +161,7 @@ TEST_F(JobChannelRunner, BehindAHeldJobHealthIsAnsweredAndWaitingJobsEndWhenCanc
   EXPECT_EQ(h.channel.counters(), JobChannelCounters{});
 
   h.stop(kSessionUnloaded);
-  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  ASSERT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
   EXPECT_EQ(h.sink->events().at(h.sink->events().size() - 2).error()->context.value_or(""),
             kSessionUnloaded);
 }
@@ -177,7 +177,7 @@ TEST_F(JobChannelRunner, StoppingWithAJobOpenFailsItAndReleasesItOnceTheRunnerIs
   ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
 
   h.stop(kBackendReset);
-  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  ASSERT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
   const Error failure = *h.sink->events().at(1).error();
   EXPECT_EQ(failure.code, Error::Code::Unavailable);
   EXPECT_EQ(failure.context.value_or(""), kBackendReset);

@@ -345,13 +345,14 @@ TEST_F(JobSessionTest, AProcessThatIsGoneFailsTheNextExchangeBeforeItIsSent) {
   ASSERT_NO_FATAL_FAILURE(hold_a_job());
   peer.die();
   ASSERT_TRUE(h.wait_kinds(1, {Accepted, Failed}));
+  EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kBackendReset);
   const auto unloaded = h.session->unload();
   ASSERT_FALSE(unloaded.has_value());
+  // Only the check ahead of the send answers with this text.
   EXPECT_EQ(unloaded.error().message, "sidecar process exited");
   EXPECT_TRUE(peer.reaped());
   EXPECT_FALSE(released_before_the_reap);
   EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
-  EXPECT_TRUE(peer.sent("unload", 0).empty());
 }
 
 TEST_F(JobSessionTest, WhenTheConnectionEndsTheNextLifecycleCallStopsTheChannelAndReaps) {

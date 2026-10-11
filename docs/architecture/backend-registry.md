@@ -443,25 +443,33 @@ assume:
   waited for; it reports no result, and the channel releases whatever the
   reap did.
 - Nothing announces that the connection ended. Open jobs fail at once; a
-  session with none learns of it at its next exchange, which fails with the
-  connection's error and stops the channel.
+  session with none learns of it at its next exchange, which fails and
+  stops the channel: with the connection's error, or with `sidecar process
+  exited` when the process itself is gone, which the session finds before
+  it sends.
 - `cancel` and `release_session` can be refused with `send_queue_full`,
   from a callback as from any other caller.
 - A sink callback that does not return stops the reading: the session's
   health check then times out, and the sidecar gives up a peer that has not
   read for five seconds.
-- A frame that is neither a job message nor the answer the session waits
-  for fails the exchange and resets the backend, as a response of the wrong
-  kind always has. The schema defines one such frame, `metric_event`; no
-  runner sends it today.
+- A frame that is neither a job message nor an `error_event`, arriving
+  while an exchange waits, is taken as that exchange's answer; when it is
+  not the answer, the exchange fails and the backend is reset, as a
+  response of the wrong kind always has. With no exchange waiting it is
+  dropped and counted, as is an `error_event` that names neither a job's
+  message nor the waiting request. Besides the unary responses, the
+  schema's frames of that class are the `ready_event`, which the runner
+  writes once, before it reads a request, and `metric_event`, which no
+  runner sends today.
 
 `test/unit/python_pytorch_job_session_test.cpp` replays the two recorded
 negotiation files through the session's load against the scripted sidecar
 and then forces each order above: the health check held unread while a
-submit is still refused, the unload held behind a running job while a
-submit is already refused and the slot is taken, the reap observed only
-after the open job has failed, a sidecar that dies, an answer to another
-request, an exchange that times out.
+submit is still refused, a health check that answers not ready, the unload
+held behind a running job while a submit is already refused and the slot
+is taken, the reap observed only after the open job has failed, a sidecar
+that dies, a connection that ends under a live process, an answer to
+another request, an exchange that times out.
 `test/integration/python_pytorch_job_session_test.cpp` runs both speech
 classes on a channel the session started against the in-tree runner.
 

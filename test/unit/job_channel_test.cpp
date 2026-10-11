@@ -882,7 +882,7 @@ TEST_F(JobChannelTest, WhenTheSidecarGoesAwayOpenJobsFailAndAreReleasedOnlyAfter
   EXPECT_TRUE(peer.reaped());
   EXPECT_FALSE(released_before_the_reap);
   EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Completed, Released}));
-  EXPECT_EQ(h.sink->kinds_for(2), (Kinds{Accepted, Failed, Released}));
+  ASSERT_EQ(h.sink->kinds_for(2), (Kinds{Accepted, Failed, Released}));
   EXPECT_EQ(failure_of(h, 2)->context.value_or(""), kBackendReset) << "not the stop's reason";
   EXPECT_EQ(h.sink->session_releases().size(), 2U);
 }
@@ -1005,10 +1005,30 @@ TEST_F(JobChannelTest, TheScriptedSidecarRefusesAFrameTheRunnerWouldNotRead) {
   EXPECT_EQ(unnamed.value("error", Json::object()).value("code", ""), "config_invalid");
   EXPECT_FALSE(unnamed.value("message_id", "").empty()) << "an id of the sidecar's own";
 
+  // The version is judged before the id, and the answer still carries one.
+  const Json neither =
+      answer_to({{"schema_version", "0.2"}, {"message_id", ""}, {"kind", "prime"}});
+  EXPECT_EQ(neither.value("error", Json::object()).value("code", ""), "unsupported");
+  EXPECT_FALSE(neither.value("message_id", "").empty());
+
   const Json no_kind = answer_to({{"schema_version", "0.1"}, {"message_id", "tp-msg-y"}});
   EXPECT_EQ(no_kind.value("kind", ""), "error_event");
   EXPECT_EQ(no_kind.value("message_id", ""), "tp-msg-y");
   EXPECT_EQ(no_kind.value("error", Json::object()).value("code", ""), "config_invalid");
+}
+
+TEST_F(JobChannelTest, TheScriptedSidecarEndsTheConnectionOnAHeaderThatIsNotAnObject) {
+  up();
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
+  // The runner ends the connection on such a frame, and so does this
+  // sidecar: the exchange fails at once and the open job with it.
+  const auto answered = h.channel.exchange(
+      {"[]", {}}, "tp-msg-z", JobChannel::TimePoint::clock::now() + JobChannelHarness::kPatience);
+  ASSERT_FALSE(answered.has_value());
+  EXPECT_NE(answered.error().code, Error::Code::Timeout);
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted, Failed}));
+  EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kBackendReset);
 }
 
 // -- The writer. -----------------------------------------------------------------
@@ -1042,7 +1062,7 @@ TEST(JobChannelWriter, StopWakesAWriterTheSidecarIsNotReading) {
   // The frame is larger than the socket holds, so the writer is inside it.
   ASSERT_TRUE(h.wait([&] { return peer.unread_bytes() >= 65'536; }));
   h.stop(kSessionUnloaded);
-  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Failed, Released}));
+  ASSERT_EQ(h.sink->kinds_for(1), (Kinds{Failed, Released}));
   EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kSessionUnloaded);
 }
 
