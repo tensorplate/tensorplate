@@ -15,7 +15,14 @@
         "enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Opt in to streaming support. A build without TP_ENABLE_STREAMING_GRPC refuses true with unsupported. The stream listener is not implemented yet."
+          "description": "Opt in to the gRPC stream listener. A build without TP_ENABLE_STREAMING_GRPC refuses true with unsupported, and so does a worker with deployment.generation."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 0,
+          "description": "TCP port of the stream listener, on bind.host and under the same loopback rule; with streaming enabled it must differ from bind.port. 0 requests an ephemeral port."
         }
       }
     },

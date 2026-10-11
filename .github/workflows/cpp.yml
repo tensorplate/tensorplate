@@ -334,8 +334,11 @@ jobs:
       - name: Run clang-tidy
         shell: bash
         run: |
+          # The stream listener's sources build only with the streaming
+          # feature, which this job leaves off.
           mapfile -t files < <(
-            git ls-files runtime serving_worker | grep -E '\.cpp$' || true
+            git ls-files runtime serving_worker | grep -E '\.cpp$' |
+              grep -v '^runtime/src/serving/stream/' || true
           )
           if [[ ${#files[@]} -eq 0 ]]; then
             echo "No C++ source files for clang-tidy."

@@ -66,3 +66,28 @@ gtest_discover_tests(tp_test_integration
     LABELS "T2"
   DISCOVERY_MODE PRE_TEST
 )
+
+# ThreadSanitizer cannot see the hand-offs inside the vcpkg gRPC and abseil
+# archives, which are built without it, so it reports every call's state as
+# raced; the listener's tests run in the other legs, and its write path has
+# test/unit/stream_output_test.cpp, which runs no gRPC call, in every leg.
+if(TP_ENABLE_STREAMING_GRPC AND NOT TP_ENABLE_TSAN)
+  # The stream listener with a real gRPC client over loopback, in a binary of
+  # its own because it links the generated protobuf bindings.
+  add_executable(tp_test_stream_listener stream_listener_test.cpp stream_mapping_test.cpp)
+  # The synthetic session dispatch behind the listener.
+  set(_tp_stream_test_dispatch tp::synthetic_session_dispatch)
+  target_include_directories(tp_test_stream_listener
+    PRIVATE ${CMAKE_SOURCE_DIR}/test/mocks ${CMAKE_SOURCE_DIR}/runtime/src)
+  target_link_libraries(tp_test_stream_listener
+    PRIVATE tp::runtime ${_tp_stream_test_dispatch} tp::stream_proto gRPC::grpc++
+            GTest::gtest_main)
+  target_compile_definitions(tp_test_stream_listener PRIVATE TP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  target_compile_features(tp_test_stream_listener PRIVATE cxx_std_20)
+  tp_apply_warnings(tp_test_stream_listener)
+  tp_apply_sanitizers(tp_test_stream_listener)
+  tp_uninstrumented_grpc_test_properties(_tp_stream_listener_test_properties)
+  gtest_discover_tests(tp_test_stream_listener
+    PROPERTIES LABELS "T2" ${_tp_stream_listener_test_properties}
+    DISCOVERY_MODE PRE_TEST)
+endif()

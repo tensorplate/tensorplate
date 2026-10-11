@@ -247,11 +247,11 @@ message EndCause {
 // `invalid_event` (a malformed Open), `backend_unsupported_capability` (a
 // mode, language, format or voice the deployment does not declare),
 // `target_unresolved`, `target_mismatch`, `stale_generation`,
-// `admission_closed`, `session_count_limit`, `config_invalid` (the worker
-// serves no generation) and `internal` (a fault before a slot was reserved,
-// such as an exhausted session key space). A reason added later says here
-// whether it precedes admission. The proof that a call was not admitted is
-// `admission`, not membership of this list.
+// `admission_closed`, `session_count_limit`, `config_invalid` and `internal`
+// (a fault before a slot was reserved, such as an exhausted session key
+// space). A reason added later says here whether it precedes admission. The
+// proof that a call was not admitted is `admission`, not membership of this
+// list.
 message OpenRefused {
   EndCause cause = 1;
   // Always ADMISSION_NOT_ADMITTED: the same Open may be sent to another
@@ -287,15 +287,22 @@ message ClientEvent {
 }
 
 // A deployment as the client, or a proxy in front of the server, resolved it.
+//
+// A worker started without a deployment generation serves no generation and
+// no descriptor digest. It is addressed by its deployment alone: generation
+// zero and an empty digest, and its Ready names neither. Such a worker
+// refuses a non-zero generation with reason `stale_generation` and any
+// digest with reason `target_mismatch`.
 message ResolvedTarget {
   // 1 to 128 characters of [A-Za-z0-9._-], not `.` or `..`.
   string deployment_id = 1;
-  // The deployment generation addressed. Never zero. The session keeps it:
-  // no later client event names a generation.
+  // The deployment generation addressed; zero only for a worker that serves
+  // none. The session keeps it: no later client event names a generation.
   uint64 generation = 2;
-  // Identity of the descriptor addressed, never empty: `sha256:` and 64
-  // lowercase hexadecimal digits. An Open whose deployment id or digest is
-  // not the served one is refused with reason `target_mismatch`.
+  // Identity of the descriptor addressed: `sha256:` and 64 lowercase
+  // hexadecimal digits, empty only for a worker that serves no generation.
+  // An Open whose deployment id or digest is not the served one is refused
+  // with reason `target_mismatch`.
   string descriptor_digest = 3;
 }
 
@@ -413,7 +420,8 @@ message ServerEvent {
 message Ready {
   // Server-allocated; 1 to 64 ASCII characters.
   string session_id = 1;
-  // The generation the session serves, the one its Open named.
+  // The generation the session serves, the one its Open named. Zero, with
+  // an empty digest, on a worker that serves no generation.
   uint64 generation = 2;
   // Identity of the descriptor the session serves.
   string descriptor_digest = 3;
@@ -472,7 +480,9 @@ message Pong {}
 // arrives before Ready or after the session's outcome is fixed.
 message CancelAccepted {}
 
-// The single terminal event.
+// The single terminal event. The call then ends with status OK only when
+// `cause` is absent; otherwise with the status code of the cause's reason
+// (docs/architecture/serving-worker.md, "Stream listener").
 message SessionClosed {
   // SESSION_STATE_CLOSED or SESSION_STATE_FAILED.
   SessionState state = 1;

@@ -5045,7 +5045,7 @@ class NativeClosureScanTests(unittest.TestCase):
         return f"{self.root / 'bin'}{os.pathsep}{os.environ['PATH']}"
 
     def run_named(self, name: str, path: str,
-                  today: datetime.date = datetime.date(2026, 10, 7)) -> subprocess.CompletedProcess:
+                  today: datetime.date = datetime.date(2026, 10, 10)) -> subprocess.CompletedProcess:
         job = self.job("supply-chain.yml", "native")
         step = job["steps"][self.only_step(job, name)]
         write_executable(
@@ -5099,19 +5099,36 @@ class NativeClosureScanTests(unittest.TestCase):
         self.assertNotIn("CVE-2026-0994", [rule["vulnerability"] for rule in config["ignore"]])
 
     def test_the_workflow_cannot_ignore_an_advisory_once_its_code_is_linked(self):
-        from test_native_code_absence import build_fixture
+        from test_native_code_absence import MEMBERS, PORTS, build_fixture
         entries = json.loads((REPO_ROOT / "tools/release/vulnerability-dispositions.json").read_text())["dispositions"]
         ports = sorted({e["package"] for e in entries if e.get("requires_absent")})
-        if not ports:
+        members = sorted({(e["package"], member) for e in entries
+                          for member in e.get("requires_absent_members", [])})
+        if not ports and not members:
             self.skipTest("no live disposition rests on absent code")
-        for port in ports:
-            with self.subTest(port=port):
-                build_fixture(self.root / "temp", included_port=port)
+        cases = [({"included_port": port}, f"{port}: worker extracted archive members") for port in ports]
+        for port, member in members:
+            # The fixture archive must hold the member, or the guard refuses it as unknown.
+            self.assertIn(member, MEMBERS.get(port, ()), f"add {port}:{member} to the fixture")
+            cases.append(({"extracted_members": (f"{port}:{member}",)},
+                          f"{port}: worker extracted {PORTS[port]}({member})"))
+            cases.append(({"shared_port": port}, f"{port}: worker loads shared libraries"))
+        for fixture, reason in cases:
+            with self.subTest(**fixture):
+                build_fixture(self.root / "temp", **fixture)
                 result = self.run_named("grype, with the recorded dispositions",
                                         self.grype(0, self.scan_report()))
                 self.assertNotEqual(result.returncode, 0, result.stdout)
-                self.assertIn(f"{port}: worker extracted archive members", result.stderr)
+                self.assertIn(reason, result.stderr)
                 self.assertFalse((self.root / "grype-calls").exists())
+        # The objects beside the named member stay linkable: the advisory's object alone decides.
+        for port, member in members:
+            others = tuple(f"{port}:{other}" for other in MEMBERS[port] if other != member)
+            with self.subTest(linked=others):
+                build_fixture(self.root / "temp", included_port=port, extracted_members=others)
+                result = self.run_named("grype, with the recorded dispositions",
+                                        self.grype(0, self.scan_report()))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_build_sbom_control_and_scan_run_in_order(self):
         job = self.job("supply-chain.yml", "native")
@@ -5124,7 +5141,13 @@ class NativeClosureScanTests(unittest.TestCase):
         build = job["steps"][order[1]]["run"]
         self.assertIn("cmake --build", build)
         self.assertIn("--target tp_serving_worker", build)
-        self.assertIn("--port grpc --port openssl --port zlib", build)
+        entries = json.loads((REPO_ROOT / "tools/release/vulnerability-dispositions.json").read_text())["dispositions"]
+        # The step checks exactly what the live dispositions rest on: whole ports and named members.
+        ports = sorted({e["package"] for e in entries if e.get("requires_absent")})
+        members = sorted({f"{e['package']}:{m}" for e in entries for m in e.get("requires_absent_members", [])})
+        self.assertEqual(sorted(re.findall(r"--port (\S+)", build)), ports)
+        self.assertEqual(sorted(re.findall(r"--member (\S+)", build)), members)
+        self.assertIn("--member zlib:gzwrite.c.o", build)
         collect = job["steps"][order[2]]["run"]
         for arg in ("native-sbom.py check", "--cmake-cache", "--worker", "--created"):
             self.assertIn(arg, collect)

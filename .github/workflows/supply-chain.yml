@@ -386,7 +386,7 @@ jobs:
             --worker "${RUNNER_TEMP}/native/serving_worker/tensorplate-serving" \
             --link-map "${RUNNER_TEMP}/native/worker.map" \
             --install-root "${RUNNER_TEMP}/native/vcpkg_installed" --triplet x64-linux \
-            --port grpc --port openssl --port zlib \
+            --member zlib:gzwrite.c.o \
             --output "${RUNNER_TEMP}/native-code-absence.json"
 
       - name: SPDX SBOM of the native closure, from the install tree

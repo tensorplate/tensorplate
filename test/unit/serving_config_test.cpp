@@ -35,7 +35,7 @@ TEST(ServingConfig, StreamingDisabledByDefault) {
   EXPECT_FALSE(ServingConfig{}.streaming.enabled);
 }
 
-TEST(ServingConfig, StreamingSchemaDeclaresOptionalBoolean) {
+TEST(ServingConfig, StreamingSchemaDeclaresOptionalFields) {
   std::ifstream input{std::string{TP_SOURCE_DIR} + "/config/schemas/serving_worker.json"};
   ASSERT_TRUE(input.is_open());
   const auto schema = nlohmann::json::parse(input);
@@ -45,7 +45,12 @@ TEST(ServingConfig, StreamingSchemaDeclaresOptionalBoolean) {
   const auto& enabled = streaming.at("properties").at("enabled");
   EXPECT_EQ(enabled.at("type"), "boolean");
   EXPECT_EQ(enabled.at("default"), ServingConfig{}.streaming.enabled);
-  EXPECT_EQ(streaming.at("properties").size(), 1U);
+  const auto& port = streaming.at("properties").at("port");
+  EXPECT_EQ(port.at("type"), "integer");
+  EXPECT_EQ(port.at("minimum"), 0);
+  EXPECT_EQ(port.at("maximum"), 65535);
+  EXPECT_EQ(port.at("default"), ServingConfig{}.streaming.port);
+  EXPECT_EQ(streaming.at("properties").size(), 2U);
   EXPECT_FALSE(streaming.contains("required"));
   for (const auto& required : schema.at("required")) {
     EXPECT_NE(required, "streaming");
@@ -56,15 +61,17 @@ TEST(ServingConfig, StreamingRequiresCompiledFeature) {
   ServingConfig config;
   config.streaming.enabled = true;
   const auto validated = config.validate();
-  const auto parsed =
-      ServingConfig::parse_json(R"({"schema_version":"0.1","streaming":{"enabled":true}})");
+  const auto parsed = ServingConfig::parse_json(
+      R"({"schema_version":"0.1","streaming":{"enabled":true,"port":50051}})");
 #if TP_ENABLE_STREAMING_GRPC
   ASSERT_TRUE(validated.has_value());
   ASSERT_TRUE(parsed.has_value());
   EXPECT_TRUE(parsed->streaming.enabled);
+  EXPECT_EQ(parsed->streaming.port, 50051);
   const auto again = ServingConfig::parse_json(parsed->to_json());
   ASSERT_TRUE(again.has_value());
   EXPECT_TRUE(again->streaming.enabled);
+  EXPECT_EQ(again->streaming.port, 50051);
 #else
   ASSERT_FALSE(validated.has_value());
   EXPECT_EQ(validated.error().code, Error::Code::Unsupported);
@@ -75,9 +82,11 @@ TEST(ServingConfig, StreamingRequiresCompiledFeature) {
 }
 
 TEST(ServingConfig, StreamingRejectsMalformedConfiguration) {
-  for (const char* value : {"null", "true", "[]", "7", R"("on")", R"({"enabled":null})",
-                            R"({"enabled":1})", R"({"enabled":"true"})", R"({"enabled":[]})",
-                            R"({"enable":true})", R"({"enabled":false,"extra":1})"}) {
+  for (const char* value :
+       {"null", "true", "[]", "7", R"("on")", R"({"enabled":null})", R"({"enabled":1})",
+        R"({"enabled":"true"})", R"({"enabled":[]})", R"({"enable":true})",
+        R"({"enabled":false,"extra":1})", R"({"port":-1})", R"({"port":65536})", R"({"port":"1"})",
+        R"({"port":1.5})", R"({"port":null})", R"({"port":true})"}) {
     SCOPED_TRACE(value);
     const auto parsed = ServingConfig::parse_json(
         std::string{R"({"schema_version":"0.1","streaming":)"} + value + "}");
@@ -85,6 +94,56 @@ TEST(ServingConfig, StreamingRejectsMalformedConfiguration) {
     EXPECT_EQ(parsed.error().code, Error::Code::ConfigInvalid);
     EXPECT_NE(parsed.error().message.find("streaming accepts only"), std::string::npos);
   }
+}
+
+TEST(ServingConfig, StreamingPortAloneRoundTripsInEitherBuild) {
+  const auto parsed =
+      ServingConfig::parse_json(R"({"schema_version":"0.1","streaming":{"port":65535}})");
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_FALSE(parsed->streaming.enabled);
+  EXPECT_EQ(parsed->streaming.port, 65535);
+  const auto again = ServingConfig::parse_json(parsed->to_json());
+  ASSERT_TRUE(again.has_value());
+  EXPECT_EQ(again->streaming.port, 65535);
+  EXPECT_FALSE(again->streaming.enabled);
+}
+
+TEST(ServingConfig, StreamingRefusesAGenerationAMalformedDeploymentIdAndTheHttpPort) {
+  ServingConfig with_generation;
+  with_generation.streaming.enabled = true;
+  with_generation.deployment.endpoint = "dep-a";
+  with_generation.deployment.generation = 3;
+  const auto refused = with_generation.validate();
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.error().code, Error::Code::Unsupported);
+  with_generation.streaming.enabled = false;
+  EXPECT_TRUE(with_generation.validate().has_value());
+
+  ServingConfig malformed;
+  malformed.streaming.enabled = true;
+  malformed.deployment.endpoint = "dep a";
+  const auto invalid = malformed.validate();
+  ASSERT_FALSE(invalid.has_value());
+#if TP_ENABLE_STREAMING_GRPC
+  EXPECT_EQ(invalid.error().code, Error::Code::ConfigInvalid);
+  EXPECT_NE(invalid.error().message.find("deployment.endpoint"), std::string::npos);
+#else
+  EXPECT_EQ(invalid.error().code, Error::Code::Unsupported);
+#endif
+  malformed.streaming.enabled = false;
+  EXPECT_TRUE(malformed.validate().has_value());
+
+  ServingConfig shared_port;
+  shared_port.streaming.enabled = true;
+  shared_port.bind.port = 18080;
+  shared_port.streaming.port = 18080;
+  const auto clash = shared_port.validate();
+  ASSERT_FALSE(clash.has_value());
+#if TP_ENABLE_STREAMING_GRPC
+  EXPECT_EQ(clash.error().code, Error::Code::ConfigInvalid);
+  shared_port.streaming.port = 18081;
+  EXPECT_TRUE(shared_port.validate().has_value());
+#endif
 }
 
 TEST(ServingConfig, AcceptsIPv6LoopbackLiteral) {
