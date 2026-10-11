@@ -86,9 +86,11 @@ target_compile_features(tp_test_unit PRIVATE cxx_std_20)
 tp_apply_warnings(tp_test_unit)
 tp_apply_sanitizers(tp_test_unit)
 
+# A test that hangs fails after two minutes, not after ctest's default 25.
 gtest_discover_tests(tp_test_unit
   PROPERTIES
     LABELS "T1"
+    TIMEOUT 120
   DISCOVERY_MODE PRE_TEST
 )
 

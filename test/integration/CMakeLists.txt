@@ -10,6 +10,8 @@ add_executable(tp_test_integration
   python_pytorch_adapter_test.cpp
   # The job channel against the in-tree sidecar runner.
   job_channel_runner_test.cpp
+  # The session and its job channel against the in-tree sidecar runner.
+  python_pytorch_job_session_test.cpp
   scheduler_smolvla_test.cpp
   # V01-E07-F08: full serving worker end-to-end coverage.
   serving_e2e_test.cpp
@@ -63,9 +65,11 @@ target_compile_features(tp_test_integration PRIVATE cxx_std_20)
 tp_apply_warnings(tp_test_integration)
 tp_apply_sanitizers(tp_test_integration)
 
+# A test that hangs fails after two minutes, not after ctest's default 25.
 gtest_discover_tests(tp_test_integration
   PROPERTIES
     LABELS "T2"
+    TIMEOUT 120
   DISCOVERY_MODE PRE_TEST
 )
 
