@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
 use tensorplate_protocol::agent_state::ErrorRecord;
 use tensorplate_protocol::worker_control::{CandidateRef, MemberRef};
+use tensorplate_protocol::ErrorCode;
 
 use crate::bundle::StagedManifest;
 use crate::config::{AgentConfig, WorkerConfig};
@@ -438,9 +439,39 @@ impl Members {
 
     /// Whether a deploy holds the member: it is preparing a candidate, or
     /// has one it may still promote. No restart starts meanwhile, so a
-    /// promoted generation is never older than the one it replaces.
+    /// generation allocated for the candidate is newer than the one it
+    /// replaces; a handed one is checked by [`Self::admissible`].
     fn held_by_a_deploy(&self) -> bool {
         self.preparing > 0 || (self.candidate.is_some() && !self.candidate_abandoned)
+    }
+
+    /// Whether a launch may start `deployment_id` as `generation`: one
+    /// `handed` to the registry must be above every generation it holds, a
+    /// member's or the one a restart is owed for; an allocated one must not
+    /// be running.
+    fn admissible(&self, deployment_id: &str, generation: u64, handed: bool) -> AgentResult<()> {
+        if !handed {
+            if self.by_generation.contains_key(&generation) {
+                return Err(AgentError::Internal(format!(
+                    "the generation source gave `{deployment_id}` generation {generation}, which is running"
+                )));
+            }
+            return Ok(());
+        }
+        let owed = match &self.restart {
+            Restart::Due { owed, .. } => Some(owed.stamped),
+            _ => None,
+        };
+        let newest = self.by_generation.keys().next_back().copied().max(owed);
+        match newest.filter(|held| generation <= *held) {
+            Some(held) => Err(AgentError::DeploymentDescriptor {
+                code: ErrorCode::LoadFailed,
+                message: format!(
+                    "of `{deployment_id}` generation {generation} is not started: the registry holds generation {held}, and a generation handed to it must be above every one it holds"
+                ),
+            }),
+            None => Ok(()),
+        }
     }
 
     fn restart_names(&self, deployment_id: &str) -> bool {
@@ -563,7 +594,8 @@ impl MemberRegistry {
     /// Start the next generation of `recipe` on `ports`. Refused once the
     /// registry is stopping; a launch that began before is waited for.
     /// `restart_of` is the generation a restart replaces. A deploy's recipe
-    /// that names a descriptor is started as the generation it names.
+    /// that names a descriptor is started as the generation it names, which
+    /// must be above every generation the registry holds.
     fn launch(
         &self,
         recipe: &CandidateRef,
@@ -591,13 +623,7 @@ impl MemberRegistry {
             if members.stopping {
                 return Err(AgentError::Stopping.into());
             }
-            if members.by_generation.contains_key(&generation) {
-                return Err(AgentError::Internal(format!(
-                    "`{}` was handed generation {generation}, which is running",
-                    recipe.deployment_id
-                ))
-                .into());
-            }
+            members.admissible(&recipe.deployment_id, generation, handed.is_some())?;
             // Unloaded, promoted over or taken hold of by a deploy while the
             // staged manifest was read: nothing is stamped or started for it.
             if restart_of.is_some() {

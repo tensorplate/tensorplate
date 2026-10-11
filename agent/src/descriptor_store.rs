@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
@@ -22,6 +22,9 @@ const PREFIX: &str = "descriptor-";
 const SUFFIX: &str = ".json";
 /// Appended to a document's name while it is being written.
 const UNFINISHED: &str = ".tmp";
+/// The most a document holds: a descriptor is a few kilobytes and a few
+/// hundred bytes for each artifact, so this is room for thousands of them.
+const MAX_DOCUMENT_BYTES: u64 = 1 << 20;
 
 /// The one place a document's file name is built; none for an id that is
 /// not a deployment id. Such an id is ASCII letters, digits, `-`, `_` and
@@ -83,7 +86,9 @@ pub fn identity_of(candidate: &CandidateRef) -> AgentResult<Option<DescriptorIde
 /// # Errors
 ///
 /// [`AgentError::DeploymentDescriptor`] when the candidate names another
-/// generation's descriptor, there is no store, or the read is refused.
+/// generation's descriptor, there is no store, the read is refused, or the
+/// candidate states another bundle digest, staged path, model class or
+/// backend than the descriptor.
 pub fn resolve(
     store: Option<&DescriptorStore>,
     candidate: &CandidateRef,
@@ -103,7 +108,40 @@ pub fn resolve(
             "of `{id}` generation {named} cannot be read: no descriptor store"
         )));
     };
-    store.read(id, identity).map(Some)
+    let descriptor = store.read(id, identity)?;
+    let configuration = &descriptor.configuration;
+    let disagrees = |field: &str, described: &str, referenced: &str| {
+        unusable(format!(
+            "of `{id}` generation {named} is not the candidate's: its `{field}` is `{described}`, and the reference's is `{referenced}`"
+        ))
+    };
+    let bundle = &configuration.bundle.bundle_digest;
+    if !crate::bundle::bundle_digests_equal(bundle, &candidate.bundle_digest) {
+        return Err(disagrees("bundle_digest", bundle, &candidate.bundle_digest));
+    }
+    let stated = [
+        (
+            "staged_path",
+            &*descriptor.staged_path,
+            &*candidate.staged_path,
+        ),
+        (
+            "model_class",
+            configuration.model_class.as_str(),
+            &*candidate.model_class,
+        ),
+        (
+            "backend_hint",
+            &*configuration.backend_hint,
+            &*candidate.backend_hint,
+        ),
+    ];
+    for (field, described, referenced) in stated {
+        if described != referenced {
+            return Err(disagrees(field, described, referenced));
+        }
+    }
+    Ok(Some(descriptor))
 }
 
 /// One step of a document write, which a test can make fail.
@@ -151,7 +189,8 @@ impl DescriptorStore {
 
     /// Write `descriptor` as the document of its generation: a temporary
     /// file, synced, renamed over the document, then the directory synced.
-    /// Called inside the state update that names the descriptor.
+    /// A write that fails removes its temporary file. Called inside the
+    /// state update that names the descriptor.
     ///
     /// # Errors
     ///
@@ -176,8 +215,35 @@ impl DescriptorStore {
                 synced.or_else(|e| if cfg!(unix) { Err(e) } else { Ok(()) })
             })
         };
-        let failed = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+        let failed = |e: io::Error| {
+            let _ = fs::remove_file(&unfinished);
+            io::Error::new(e.kind(), format!("{}: {e}", path.display()))
+        };
         Ok(write().map_err(failed)?)
+    }
+
+    /// The text of the document at `path`. Only a regular file is opened:
+    /// a FIFO there would block the state update the read runs in.
+    fn text(path: &Path) -> AgentResult<String> {
+        let unverified = |reason: String| refused(path, format!("does not verify: {reason}"));
+        let unread = |e: io::Error| match e.kind() {
+            ErrorKind::NotFound => refused(path, "is missing"),
+            kind => io::Error::new(kind, format!("{}: {e}", path.display())).into(),
+        };
+        if !fs::symlink_metadata(path).map_err(unread)?.is_file() {
+            return Err(unverified("it is not a regular file".into()));
+        }
+        let mut bytes = Vec::new();
+        let mut bounded = File::open(path)
+            .map_err(unread)?
+            .take(MAX_DOCUMENT_BYTES + 1);
+        bounded.read_to_end(&mut bytes).map_err(unread)?;
+        if bytes.len() as u64 > MAX_DOCUMENT_BYTES {
+            return Err(unverified(format!(
+                "it holds more than {MAX_DOCUMENT_BYTES} bytes"
+            )));
+        }
+        String::from_utf8(bytes).map_err(|e| unverified(format!("it is not UTF-8: {e}")))
     }
 
     /// Read the document `identity` names for `deployment_id` and verify
@@ -186,18 +252,16 @@ impl DescriptorStore {
     /// # Errors
     ///
     /// [`AgentError::DeploymentDescriptor`] when the document is missing,
+    /// is not a regular file of at most [`MAX_DOCUMENT_BYTES`] of UTF-8,
     /// does not verify, or is not the one named; [`AgentError::Io`] when
-    /// it cannot be read.
+    /// reading it fails otherwise.
     pub fn read(
         &self,
         deployment_id: &str,
         identity: DescriptorIdentity<'_>,
     ) -> AgentResult<DeploymentDescriptor> {
         let path = self.path(deployment_id, identity.generation)?;
-        let text = fs::read_to_string(&path).map_err(|e| match e.kind() {
-            ErrorKind::NotFound => refused(&path, "is missing"),
-            kind => io::Error::new(kind, format!("{}: {e}", path.display())).into(),
-        })?;
+        let text = Self::text(&path)?;
         let descriptor = DeploymentDescriptor::from_json(&text)
             .map_err(|e| refused(&path, format!("does not verify: {e}")))?;
         if descriptor.deployment_id != deployment_id || descriptor.identity() != identity {

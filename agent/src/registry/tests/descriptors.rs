@@ -98,6 +98,15 @@ impl Described {
         let name = format!("descriptor-stt-{generation}.json");
         self.store.state_dir().join(name)
     }
+    /// Every file of the state directory, the documents included, by name.
+    fn state_files(&self) -> BTreeMap<String, Vec<u8>> {
+        let entries = std::fs::read_dir(self.store.state_dir()).unwrap();
+        let file = |entry: std::fs::DirEntry| {
+            let name = entry.file_name().into_string().unwrap();
+            (name, std::fs::read(entry.path()).unwrap())
+        };
+        entries.map(|entry| file(entry.unwrap())).collect()
+    }
     fn documents(&self) -> usize {
         let entries = std::fs::read_dir(self.store.state_dir()).unwrap();
         let names = entries.map(|e| e.unwrap().file_name().into_string().unwrap());
@@ -150,11 +159,60 @@ fn a_deploys_launch_is_the_generation_its_reference_names_and_takes_none() {
 
     // The generation is running: it is not handed to a second launch.
     let error = d.registry.prepare("tx", &d.recipe, WARM).unwrap_err();
-    assert!(
-        error.to_string().contains("generation 1, which is running"),
-        "{error}"
-    );
+    let says = "generation 1 is not started: the registry holds generation 1";
+    assert!(error.to_string().contains(says), "{error}");
     assert!(d.launcher.count() == 1 && launched.calls().is_empty());
+}
+
+#[test]
+fn a_handed_generation_is_refused_unless_it_is_above_every_generation_the_registry_holds() {
+    // Generation 2 is held as the serving member, then as the restart owed for it.
+    for owed in [false, true] {
+        let d = described();
+        let second = d.first.restamp(2).unwrap();
+        let third = d.first.restamp(3).unwrap();
+        d.descriptors.write(&second).unwrap();
+        d.descriptors.write(&third).unwrap();
+        d.serve(&reference(&second));
+        if owed {
+            d.stop(2);
+        }
+
+        for stale in [&d.first, &second] {
+            let handed = reference(stale);
+            let error = d.registry.prepare("tx", &handed, WARM).unwrap_err();
+            let record = error.to_record();
+            assert!(
+                matches!(error, AgentError::DeploymentDescriptor { .. }),
+                "{error}"
+            );
+            assert!(record.code == ErrorCode::LoadFailed && !record.recoverable);
+            let says = format!(
+                "of `stt` generation {} is not started: the registry holds generation 2",
+                stale.generation
+            );
+            assert!(record.message.contains(&says), "owed {owed}: {record:?}");
+        }
+        assert_eq!(d.launcher.count(), 1, "owed {owed}");
+
+        d.registry.prepare("tx", &reference(&third), WARM).unwrap();
+        let member = MemberRef::new("stt", 3);
+        assert_eq!(d.launcher.handle(3).spec.member, member, "owed {owed}");
+    }
+}
+
+#[test]
+fn a_running_generation_the_source_gives_again_is_an_internal_error_and_starts_nothing() {
+    let f = fixture();
+    f.serve("stt");
+    f.next_generation.store(1, Ordering::SeqCst);
+
+    let error = f.prepare("stt").unwrap_err();
+
+    let says = "the generation source gave `stt` generation 1, which is running";
+    assert!(matches!(error, AgentError::Internal(_)), "{error}");
+    assert!(error.to_string().contains(says), "{error}");
+    assert_eq!(f.launcher.count(), 1);
 }
 
 #[test]
@@ -186,13 +244,35 @@ fn prepare_refuses_a_reference_that_names_part_of_a_descriptor_before_it_displac
 #[test]
 fn a_candidate_that_names_a_descriptor_is_rendered_from_its_document_and_no_staged_manifest() {
     let d = described();
-    let gone = d.state.path().join("gone").display().to_string();
-    let another = staged_copy(&d.state, "another", "v0_2/speech_tts_streaming");
-    for staged_path in [gone, another] {
-        let mut elsewhere = d.recipe.clone();
-        elsewhere.staged_path = staged_path;
-        d.registry.prepare("tx", &elsewhere, WARM).unwrap();
-        assert_eq!(d.last_config()["model"]["runner_profile"], "faster_whisper");
+    let staged = std::path::Path::new(&d.recipe.staged_path);
+    std::fs::remove_file(staged.join("manifest.json")).unwrap();
+
+    d.registry.prepare("tx", &d.recipe, WARM).unwrap();
+
+    assert_eq!(d.last_config()["model"]["runner_profile"], "faster_whisper");
+}
+
+#[test]
+fn a_candidate_that_contradicts_the_descriptor_it_names_is_not_started() {
+    let d = described();
+    let mut elsewhere = d.recipe.clone();
+    elsewhere.staged_path = staged_copy(&d.state, "another", "v0_2/speech_tts_streaming");
+    let mut unrelated = d.recipe.clone();
+    unrelated.bundle_digest = format!("sha256:{}", "0".repeat(64));
+    unrelated.model_class = "vision".into();
+    unrelated.backend_hint = "mock".into();
+
+    for (field, contradicting) in [("staged_path", elsewhere), ("bundle_digest", unrelated)] {
+        let error = d.registry.prepare("tx", &contradicting, WARM).unwrap_err();
+        let record = error.to_record();
+        assert!(
+            matches!(error, AgentError::DeploymentDescriptor { .. }),
+            "{error}"
+        );
+        assert!(record.code == ErrorCode::LoadFailed && !record.recoverable);
+        let says = format!("of `stt` generation 1 is not the candidate's: its `{field}` is");
+        assert!(record.message.contains(&says), "{record:?}");
+        assert_eq!((d.launcher.count(), d.configs()), (0, 0), "{field}");
     }
 }
 
@@ -248,6 +328,7 @@ fn a_restart_whose_descriptor_cannot_be_re_stamped_is_a_launch_that_failed_and_w
         ", not generation 1 of `stt`",
         NOT_NAMED,
         NOT_NAMED,
+        NOT_NAMED,
     ];
     for (case, says) in says.into_iter().enumerate() {
         let d = described();
@@ -258,7 +339,11 @@ fn a_restart_whose_descriptor_cannot_be_re_stamped_is_a_launch_that_failed_and_w
             1 => std::fs::write(d.document(1), "{}").unwrap(),
             2 => std::fs::write(d.document(1), &other).unwrap(),
             3 => d.edit_active(|active| active.deployment_id = "tts".into()),
-            _ => d.edit_active(|active| active.generation = Some(2)),
+            4 => d.edit_active(|active| active.generation = Some(2)),
+            // The same generation, another descriptor.
+            _ => d.edit_active(|active| {
+                active.descriptor_digest = Some(format!("sha256:{}", "0".repeat(64)));
+            }),
         }
         let before = (d.active(), d.documents());
         d.stop(1);
@@ -277,22 +362,33 @@ fn a_restart_whose_descriptor_cannot_be_re_stamped_is_a_launch_that_failed_and_w
 }
 
 #[test]
-fn a_restart_is_refused_when_the_staged_bundle_is_not_the_one_the_descriptor_describes() {
+fn a_described_member_whose_staged_copy_was_replaced_is_failed_and_nothing_is_stamped() {
     let d = described();
-    let bundle = "v0_2/speech_tts_streaming";
-    let mut another = d.recipe.clone();
-    another.bundle_digest = candidate_staged_at("stt", &bundle_fixture(bundle)).bundle_digest;
-    another.staged_path = staged_copy(&d.state, "another", bundle);
-    d.serve(&another);
+    d.serve(&d.recipe);
+    staged_copy(&d.state, "staged", "v0_2/speech_tts_streaming");
+    let before = d.state_files();
+    assert_eq!(before.len(), 3, "{:?}", before.keys());
     d.stop(1);
 
     let events = d.step(1);
 
-    let message = refused_restart(&events);
-    let described = &d.first.configuration.bundle.bundle_digest;
-    assert!(message.contains(&another.bundle_digest), "{message}");
-    assert!(message.contains(described), "{message}");
-    assert!(d.records(&d.first) && d.launcher.count() == 1);
+    // Failed at once: no launch failed and no restart is owed.
+    let [MemberEvent::Failed {
+        deployment_id,
+        error,
+    }] = &events[..]
+    else {
+        panic!("{events:?}");
+    };
+    let says = "`stt` is not restarted: the bundle staged at";
+    assert!(
+        deployment_id == "stt" && error.message.contains(says),
+        "{error:?}"
+    );
+    assert_eq!((d.launcher.count(), d.configs()), (1, 0));
+    assert_eq!(d.state_files(), before);
+    assert_eq!(d.step(60), []);
+    assert_eq!(d.state_files(), before);
 }
 
 #[test]

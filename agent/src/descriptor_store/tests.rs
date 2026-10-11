@@ -255,8 +255,79 @@ fn a_document_reads_back_only_as_the_descriptor_its_identity_names() {
     refusal(f.read(identity));
 }
 
+/// The message of a read refused because the document does not verify.
+fn unverified(f: &Fixture, named: &DeploymentDescriptor) -> String {
+    let message = refusal(f.read(named.identity()));
+    assert!(message.contains("does not verify: "), "{message}");
+    message
+}
+
 #[test]
-fn a_write_that_stops_leaves_the_document_it_replaces_or_none() {
+fn a_document_that_is_not_utf8_is_a_directory_or_is_over_the_bound_does_not_verify() {
+    let f = fixture();
+    let named = derive("stt", 3, STAGED);
+    let path = f.path("descriptor-stt-3.json");
+    let whole = serde_json::to_vec_pretty(&named).unwrap();
+
+    fs::write(&path, [&whole[..], b"\xff"].concat()).unwrap();
+    let message = unverified(&f, &named);
+    assert!(message.contains("it is not UTF-8"), "{message}");
+
+    // Trailing spaces keep it the same descriptor: only its size changes.
+    let bound = usize::try_from(MAX_DOCUMENT_BYTES).unwrap();
+    let mut padded = whole;
+    padded.resize(bound, b' ');
+    fs::write(&path, &padded).unwrap();
+    assert_eq!(f.read(named.identity()).unwrap(), named);
+    padded.push(b' ');
+    fs::write(&path, &padded).unwrap();
+    let message = unverified(&f, &named);
+    assert!(message.contains("more than 1048576 bytes"), "{message}");
+
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    let message = unverified(&f, &named);
+    assert!(message.contains("it is not a regular file"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_or_a_symlink_at_a_documents_name_is_refused_without_being_opened() {
+    let f = fixture();
+    let named = derive("stt", 3, STAGED);
+    let path = f.path("descriptor-stt-3.json");
+
+    // A symlink to the very document is not the document.
+    let elsewhere = f.path("elsewhere.json");
+    fs::write(&elsewhere, serde_json::to_vec_pretty(&named).unwrap()).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+    let message = unverified(&f, &named);
+    assert!(message.contains("it is not a regular file"), "{message}");
+    fs::remove_file(&path).unwrap();
+
+    // Opening a FIFO nothing writes to never returns, so the read runs on a
+    // thread of its own and a read that blocks is let go before the test fails.
+    let made = std::process::Command::new("mkfifo").arg(&path).status();
+    assert!(made.expect("mkfifo(1) runs").success());
+    let (answered, answer) = std::sync::mpsc::channel();
+    let (descriptors, identity) = (f.descriptors.clone(), named.clone());
+    let reader = std::thread::spawn(move || {
+        let read = descriptors.read("stt", identity.identity());
+        let _ = answered.send(read.map_err(|e| e.to_record()));
+    });
+    let read = answer.recv_timeout(std::time::Duration::from_secs(5));
+    if read.is_err() {
+        let _released = fs::OpenOptions::new().write(true).open(&path);
+    }
+    reader.join().unwrap();
+    let refused = read.expect("the read returns at once").unwrap_err();
+    assert!(refused.code == ErrorCode::LoadFailed && !refused.recoverable);
+    let says = "does not verify: it is not a regular file";
+    assert!(refused.message.contains(says), "{refused:?}");
+}
+
+#[test]
+fn a_write_that_stops_leaves_the_document_it_replaces_or_none_and_no_temporary_file() {
     let (old, new) = (derive("stt", 3, STAGED), derive("stt", 3, ELSEWHERE));
     let whole = serde_json::to_vec_pretty(&new).unwrap();
     let steps = [Step::SyncFile, Step::Rename, Step::SyncDirectory];
@@ -276,8 +347,8 @@ fn a_write_that_stops_leaves_the_document_it_replaces_or_none() {
             assert_eq!(f.names(), ["descriptor-stt-3.json"], "{step:?}");
             assert_eq!(fs::read(&at).unwrap(), whole, "{step:?}");
         } else {
-            let unfinished = fs::read(f.path("descriptor-stt-3.json.tmp")).unwrap();
-            assert_eq!(unfinished, whole, "{step:?}");
+            let left = replaces.then_some("descriptor-stt-3.json");
+            assert_eq!(f.names(), left.into_iter().collect::<Vec<_>>(), "{step:?}");
             let kept = f.read(old.identity()).ok();
             assert_eq!(kept, replaces.then(|| old.clone()), "{step:?}");
         }
@@ -448,6 +519,47 @@ fn a_candidate_resolves_to_its_document_only_as_the_generation_it_names() {
     assert_eq!(resolve(None, &unnamed, 9).unwrap(), None);
 }
 
+#[test]
+fn a_candidate_resolves_to_its_document_only_when_it_states_what_the_descriptor_states() {
+    let f = fixture();
+    let descriptor = derive("stt", 3, STAGED);
+    f.descriptors.write(&descriptor).unwrap();
+    let store = Some(&*f.descriptors);
+    let named = reference(&descriptor);
+
+    // A digest differs in case only: the same bundle.
+    let mut shouting = named.clone();
+    shouting.bundle_digest = named
+        .bundle_digest
+        .to_uppercase()
+        .replace("SHA256", "sha256");
+    assert_ne!(shouting.bundle_digest, named.bundle_digest);
+    assert_eq!(resolve(store, &shouting, 3).unwrap(), Some(descriptor));
+
+    let zero = format!("sha256:{}", "0".repeat(64));
+    let stated = [
+        ("bundle_digest", zero.as_str()),
+        ("staged_path", ELSEWHERE),
+        ("model_class", "vision"),
+        ("backend_hint", "mock"),
+    ];
+    for (field, other) in stated {
+        let mut contradicting = named.clone();
+        let changed = match field {
+            "bundle_digest" => &mut contradicting.bundle_digest,
+            "staged_path" => &mut contradicting.staged_path,
+            "model_class" => &mut contradicting.model_class,
+            _ => &mut contradicting.backend_hint,
+        };
+        other.clone_into(changed);
+        let message = refusal(resolve(store, &contradicting, 3));
+        let says = format!("of `stt` generation 3 is not the candidate's: its `{field}` is `");
+        assert!(message.contains(&says), "{message}");
+        let theirs = format!("and the reference's is `{other}`");
+        assert!(message.contains(&theirs), "{message}");
+    }
+}
+
 #[cfg(unix)]
 mod stamp {
     use super::*;
@@ -483,6 +595,25 @@ mod stamp {
         let message = refusal(refused);
         let says = "descriptor-stt-1.json` is not re-stamped: the restart replaces generation 7";
         assert!(message.contains(says), "{message}");
+        assert_eq!(named_on_disk(&f), (1, first.descriptor_digest));
+        let names = ["descriptor-stt-1.json", "state.json", "state.json.bak"];
+        assert_eq!(f.names(), names);
+    }
+
+    #[test]
+    fn the_stamp_refuses_a_recipe_of_another_bundle_than_its_descriptor_describes() {
+        let f = fixture();
+        let first = deploy(&f.store, &f.descriptors, "stt", STAGED).unwrap();
+        let mut another = reference(&first);
+        another.bundle_digest = format!("sha256:{}", "0".repeat(64));
+
+        let (_, refused) = stamp(&f, &another, 1);
+
+        let message = refusal(refused);
+        let described = &first.configuration.bundle.bundle_digest;
+        let says = format!("is not re-stamped: it describes bundle `{described}`");
+        assert!(message.contains(&says), "{message}");
+        assert!(message.contains(&another.bundle_digest), "{message}");
         assert_eq!(named_on_disk(&f), (1, first.descriptor_digest));
         let names = ["descriptor-stt-1.json", "state.json", "state.json.bak"];
         assert_eq!(f.names(), names);
