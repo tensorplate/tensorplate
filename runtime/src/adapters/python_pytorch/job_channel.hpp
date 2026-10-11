@@ -104,7 +104,8 @@ inline constexpr std::size_t kMaxRememberedSessions = 1'024;
 /// Largest payload of a frame the reader takes: the longest synthesized
 /// segment a job returns (kMaxAudioChunkBytes), which no frame the sidecar
 /// sends a started channel exceeds. A frame that declares more ends the
-/// connection, as an unreadable header does, before anything is allocated.
+/// connection, as an unreadable header does; its body is neither allocated
+/// nor read.
 inline constexpr std::size_t kMaxJobFramePayloadBytes = kMaxAudioChunkBytes;
 
 /// Error::context of the `failed` a job gets when its connection ends.

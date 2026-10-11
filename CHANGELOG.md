@@ -220,8 +220,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   session release, a refusal that names one of the adapter's messages, or a
   fault that names the job; it also reads the `speech_jobs_v1` capability
   from a `ready_event` and the job classes from a load response. The golden
-  frames and the job seam's vectors are replayed through it. The adapter
-  does not exchange these messages with a sidecar yet. Additive inside
+  frames and the job seam's vectors are replayed through it. Additive inside
   protocol 0.1; version constants unchanged. (V030-E04-F03-T01)
 - A job channel for the Python/PyTorch adapter
   (`runtime/src/adapters/python_pytorch/job_channel.{hpp,cpp}`, internal):
@@ -237,8 +236,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   them (`PythonPytorchConfig::speech_jobs`, a field of the adapter's
   internal configuration, off by default; the serving configuration has no
   key for it and the registered backend does not set it). Its load enables
-  `speech_jobs_v1` where the sidecar's `ready_event` lists it, reads the
-  declared job classes and starts the job channel on the socket. From then
+  `speech_jobs_v1` where the sidecar's `ready_event` lists it (a sidecar
+  that does not is not asked to load: `unsupported`,
+  `speech_jobs_not_offered`), reads the declared job classes and starts the
+  job channel on the socket. From then
   on prime, the health check and unload go through the channel's exchange
   slot; jobs are admitted once prime's health check has passed; unload
   closes admission before it sends the unload; and unload, destruction and
@@ -246,9 +247,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   ended, so an open job fails with `session_unloaded` or `backend_reset`
   and is released afterwards. Such a session refuses a tensor `infer`
   (`unsupported`, `tensor_inference_unsupported`). The channel does not
-  start for a load that declared no job class a lane runs, and its reader
-  takes no frame that declares a payload larger than the longest
-  synthesized segment. Additive inside protocol 0.1; version constants
+  start for a load that declared no job class a lane runs (`unsupported`,
+  `job_class_unsupported`), and its reader takes no frame that declares a
+  payload larger than the longest synthesized segment: the body of such a
+  frame is neither allocated nor read. Additive inside protocol 0.1; version constants
   unchanged. (V030-E04-F03-T01)
 - A measurement client for the streaming path,
   `tools/validation/slice_measure.py`. It runs paced speech-to-text sessions

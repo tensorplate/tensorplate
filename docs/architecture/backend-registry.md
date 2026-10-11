@@ -342,7 +342,7 @@ declared neither class a lane runs (`unsupported`,
   so a caller whose exchange timed out stops the channel before the next
   one. An unreadable header ends the connection, and so does a frame that
   declares a payload larger than the longest synthesized segment a job
-  returns (`kMaxAudioChunkBytes`): the reader allocates nothing for it. A
+  returns (`kMaxAudioChunkBytes`): its body is neither allocated nor read. A
   sidecar whose jobs an
   unload has closed refuses a `session_release`; the refusal is counted and
   the release stays pending until `stop` acknowledges it.
@@ -450,6 +450,10 @@ assume:
 - A sink callback that does not return stops the reading: the session's
   health check then times out, and the sidecar gives up a peer that has not
   read for five seconds.
+- A frame that is neither a job message nor the answer the session waits
+  for fails the exchange and resets the backend, as a response of the wrong
+  kind always has. The schema defines one such frame, `metric_event`; no
+  runner sends it today.
 
 `test/unit/python_pytorch_job_session_test.cpp` replays the two recorded
 negotiation files through the session's load against the scripted sidecar

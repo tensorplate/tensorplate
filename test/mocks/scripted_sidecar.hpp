@@ -29,7 +29,13 @@
 // Where it differs from the runner: of a submit's input it checks the type
 // and the payload's length only, and keeps the payload for the test to read;
 // it has no bound on the unary requests that wait; it writes a unary answer
-// under the job lock, where the runner writes it outside.
+// under the job lock, where the runner writes it outside. It declares the
+// job classes it is given, so a load whose runner has no class a lane runs
+// is answered where the runner refuses it. An id of its own for a frame
+// without one is the next `s<n>`, where the runner draws a random one. It
+// runs no tensor: `infer` and `cancel` are refused as unknown kinds, a
+// `prime` is answered whether or not anything is loaded, and a load is not
+// held to its `model_spec`.
 //
 // The test is the backend: it takes the job at the head of the FIFO and says
 // how it ends. emit(), refuse(), stop_reading(), stop_reading_after() and the
@@ -136,7 +142,7 @@ class ScriptedSidecar {
             std::lock_guard<std::mutex> lock(log_mutex_);
             reaped_ = true;
           },
-          [this](adapters::python_pytorch::SidecarHandle&) { return !reaped(); });
+          [this](adapters::python_pytorch::SidecarHandle&) { return !dead_ && !reaped(); });
     };
   }
 
@@ -239,6 +245,17 @@ class ScriptedSidecar {
     std::lock_guard<std::mutex> lock(log_mutex_);
     return reaped_;
   }
+
+  /// The process is gone, as after a crash: the connection ends and the
+  /// handle a SidecarProcess holds reports it dead.
+  void die() {
+    dead_ = true;
+    close();
+  }
+
+  /// From now on `health_check` reports `ready: false`, which no runner
+  /// does while a backend is loaded.
+  void report_not_ready() { unready_ = true; }
 
   /// True once a write stalled or failed and this sidecar gave the peer up.
   [[nodiscard]] bool gave_up() const {
@@ -440,8 +457,14 @@ class ScriptedSidecar {
       auto frame = ipc::decode_frame(buffer, &consumed);
       if (frame.has_value()) {
         buffer.erase(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(consumed));
-        route(Json::parse(frame.value().json_header, nullptr, false),
-              std::move(frame.value().payload));
+        Json header = Json::parse(frame.value().json_header, nullptr, false);
+        if (!header.is_object()) {
+          // Not a message: a frame error, which ends the connection.
+          ended_ = true;
+          (void)::shutdown(fd_, SHUT_RDWR);
+          return;
+        }
+        route(header, std::move(frame.value().payload));
         continue;
       }
       if (!reading_) {
@@ -500,7 +523,7 @@ class ScriptedSidecar {
     }
     if (kind == "health_check") {
       Json response = answer(header, "health_check_response");
-      response["health"] = {{"ready", loaded_.load()}};
+      response["health"] = {{"ready", loaded_.load() && !unready_.load()}};
       write_frame(response, 0);
       return;
     }
@@ -553,13 +576,16 @@ class ScriptedSidecar {
 
   Json unary_locked(const Json& request) {
     const std::string kind = text_of(request, "kind");
-    if (text_of(request, "schema_version") != "0.1") {
-      return refusal(request, response_kind(kind), "unsupported", nullptr);
-    }
-    if (text_of(request, "message_id").empty()) {
-      Json unnamed = request.is_object() ? request : Json::object();
-      unnamed["message_id"] = "s" + std::to_string(++originated_);
-      return refusal(unnamed, response_kind(kind), "config_invalid", nullptr);
+    const bool unnamed = text_of(request, "message_id").empty();
+    if (unnamed || text_of(request, "schema_version") != "0.1") {
+      // The version is judged first; an answer always carries an id.
+      Json named = request;
+      if (unnamed) {
+        named["message_id"] = "s" + std::to_string(++originated_);
+      }
+      const bool another_version = text_of(request, "schema_version") != "0.1";
+      return refusal(named, response_kind(kind), another_version ? "unsupported" : "config_invalid",
+                     nullptr);
     }
     if (kind.empty()) {
       return refusal(request, "error_event", "config_invalid", nullptr);
@@ -747,6 +773,8 @@ class ScriptedSidecar {
   std::atomic<bool> ended_{false};
   std::atomic<bool> reading_{true};
   std::atomic<bool> loaded_{false};
+  std::atomic<bool> dead_{false};
+  std::atomic<bool> unready_{false};
   std::atomic<std::uint64_t> originated_{0};
 
   // Lock order: the job lock, then the write lock, then the log lock.

@@ -153,7 +153,7 @@ TEST_F(JobSessionRunner, DestroyingTheSessionWithAJobOpenFailsItAndReleasesIt) {
   ASSERT_TRUE(h->submit(h->stt(1, 1)).has_value());
   ASSERT_TRUE(h->wait_kinds(1, {Accepted}));
   h->session.reset();
-  EXPECT_EQ(h->sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  ASSERT_EQ(h->sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
   const Error failure = *h->sink->events().at(1).error();
   EXPECT_EQ(failure.code, Error::Code::Unavailable);
   EXPECT_EQ(failure.context.value_or(""), kSessionUnloaded);

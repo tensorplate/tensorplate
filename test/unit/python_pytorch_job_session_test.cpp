@@ -61,6 +61,13 @@ PythonPytorchConfig with_jobs() {
   return config;
 }
 
+// A session not built for jobs, with the same patience.
+PythonPytorchConfig without_jobs() {
+  PythonPytorchConfig config = with_jobs();
+  config.speech_jobs = false;
+  return config;
+}
+
 // The model the recorded negotiation loads.
 ModelSpec recorded_spec() {
   const Json spec = golden("negotiation").at(1).at("model_spec");
@@ -146,7 +153,7 @@ TEST(JobSessionNegotiation, TheRecordedRefusalFailsTheLoadWithTheSidecarsError) 
 
 TEST(JobSessionNegotiation, ASessionNotBuiltForJobsEnablesNothingTheSidecarLists) {
   ScriptedSidecar peer;
-  JobSessionHarness h(PythonPytorchConfig{}, peer.launcher());
+  JobSessionHarness h(without_jobs(), peer.launcher());
   ASSERT_TRUE(h.session->load(recorded_spec()).has_value());
   const auto sent = peer.sent("load_model", 1);
   ASSERT_EQ(sent.size(), 1U);
@@ -160,7 +167,7 @@ TEST(JobSessionNegotiation, ASessionNotBuiltForJobsEnablesNothingTheSidecarLists
 
 TEST(JobSessionNegotiation, ASessionNotBuiltForJobsLoadsOnASidecarThatListsNothing) {
   ScriptedSidecar peer(ScriptedSidecar::Options{.capabilities = {}});
-  JobSessionHarness h(PythonPytorchConfig{}, peer.launcher());
+  JobSessionHarness h(without_jobs(), peer.launcher());
   ASSERT_TRUE(h.session->load(recorded_spec()).has_value());
   EXPECT_TRUE(h.session->prime().has_value());
 }
@@ -260,6 +267,16 @@ TEST_F(JobSessionTest, JobsAreAdmittedOnlyOncePrimesHealthCheckHasPassed) {
   EXPECT_TRUE(h.wait_kinds(1, {Accepted}));
 }
 
+TEST_F(JobSessionTest, AHealthCheckThatReportsNotReadyAdmitsNoJob) {
+  ASSERT_NO_FATAL_FAILURE(loaded());
+  peer.report_not_ready();
+  expect_refused(h.session->prime(), Error::Code::NotReady, "");
+  // An answer, not a failed exchange: the connection stays.
+  EXPECT_FALSE(peer.reaped());
+  expect_refused(h.channel->submit(JobSessionHarness::tts(1, 1)), Error::Code::NotReady,
+                 "backend_not_ready");
+}
+
 TEST_F(JobSessionTest, UnloadClosesAdmissionThenExchangesThroughTheChannelThenStops) {
   ASSERT_NO_FATAL_FAILURE(up());
   ASSERT_NO_FATAL_FAILURE(hold_a_job());
@@ -298,7 +315,7 @@ TEST_F(JobSessionTest, AnUnloadAnsweredWithAJobStillOpenFailsThatJobAsUnloaded) 
   unload.join();
   ASSERT_TRUE(unloaded.has_value()) << unloaded.error().message;
   EXPECT_FALSE(released_before_the_reap);
-  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  ASSERT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
   EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kSessionUnloaded);
 }
 
@@ -322,10 +339,26 @@ TEST_F(JobSessionTest, DestructionFailsAnOpenJobAndReleasesItOnlyAfterTheReap) {
                  "backend_unavailable");
 }
 
-TEST_F(JobSessionTest, WhenTheSidecarDiesTheNextLifecycleCallStopsTheChannelAndReaps) {
+TEST_F(JobSessionTest, AProcessThatIsGoneFailsTheNextExchangeBeforeItIsSent) {
   watch_releases();
   ASSERT_NO_FATAL_FAILURE(up());
   ASSERT_NO_FATAL_FAILURE(hold_a_job());
+  peer.die();
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted, Failed}));
+  const auto unloaded = h.session->unload();
+  ASSERT_FALSE(unloaded.has_value());
+  EXPECT_EQ(unloaded.error().message, "sidecar process exited");
+  EXPECT_TRUE(peer.reaped());
+  EXPECT_FALSE(released_before_the_reap);
+  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  EXPECT_TRUE(peer.sent("unload", 0).empty());
+}
+
+TEST_F(JobSessionTest, WhenTheConnectionEndsTheNextLifecycleCallStopsTheChannelAndReaps) {
+  watch_releases();
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_a_job());
+  // The socket is shut down and the "process" lives on.
   peer.close();
   ASSERT_TRUE(h.wait_kinds(1, {Accepted, Failed}));
   EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kBackendReset);
@@ -356,7 +389,7 @@ TEST_F(JobSessionTest, AnAnswerToAnotherRequestEndsTheConnection) {
   EXPECT_EQ(unloaded.error().message, "sidecar response answers another request");
   EXPECT_TRUE(peer.reaped());
   EXPECT_FALSE(released_before_the_reap);
-  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  ASSERT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
   EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kBackendReset);
 }
 
