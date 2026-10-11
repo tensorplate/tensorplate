@@ -281,6 +281,8 @@ fn a_member_promoted_over_is_draining_until_it_has_been_reaped() {
     let (is_stopping, release) = hold_stop(&old);
 
     std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets what is held end.
+        let release = release;
         let promoting = scope.spawn(|| f.registry.promote("tx", &candidate("tts")));
         is_stopping
             .recv_timeout(GRACE)
@@ -319,6 +321,8 @@ fn a_draining_member_that_was_never_judged_ready_is_listed_not_ready() {
     let (is_stopping, release) = hold_stop(&f.launcher.handle(1));
 
     std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets what is held end.
+        let release = release;
         let unloading = scope.spawn(|| f.registry.unload("stt"));
         is_stopping
             .recv_timeout(GRACE)
@@ -359,6 +363,8 @@ fn every_member_is_draining_and_none_serves_while_the_registry_stops() {
     let (is_stopping, release) = hold_stop(&serving);
 
     std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets what is held end.
+        let release = release;
         let stopping = scope.spawn(|| f.registry.shutdown());
         is_stopping
             .recv_timeout(GRACE)

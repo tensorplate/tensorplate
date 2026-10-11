@@ -176,6 +176,8 @@ fn a_candidate_summary_names_the_generation_being_prepared_beside_the_one_servin
     let (is_warming, release) = agent.workers.hold_probe();
 
     std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets what is held end.
+        let release = release;
         let deploying = scope.spawn(deploy);
         is_warming
             .recv_timeout(HELD)
@@ -277,6 +279,8 @@ fn a_member_asked_to_stop_is_draining_until_its_process_is_reaped() {
     let (is_stopping, release) = worker.hold_stop();
 
     std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets what is held end.
+        let release = release;
         let unloading = scope.spawn(|| agent.registry.unload(MEMBER.0));
         is_stopping
             .recv_timeout(HELD)
