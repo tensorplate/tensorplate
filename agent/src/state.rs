@@ -196,6 +196,16 @@ impl StateStore {
         &self.state_dir
     }
 
+    /// The state each file of the pair holds, for the files that decode.
+    /// They differ after a write that stopped between its two renames.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::Io`] when a file is there and cannot be read.
+    pub fn files(&self) -> AgentResult<Vec<AgentState>> {
+        Ok(Vec::new())
+    }
+
     /// Clone of the currently-loaded state. Cheap; intended for status
     /// projection.
     ///
@@ -1635,6 +1645,153 @@ mod tests {
         match StateStore::open(td.path()).expect_err("refused") {
             super::AgentError::Io(_) => {}
             other => panic!("expected Io, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn files_reads_the_state_of_each_file_of_the_pair_that_decodes() {
+        let td = TempDir::new().expect("td");
+        let store = StateStore::open(td.path()).expect("open");
+        assert_eq!(store.files().expect("no file yet"), []);
+
+        store.update(allocate).expect("first");
+        let first = store.snapshot().expect("snap");
+        assert_eq!(store.files().expect("pair"), [first.clone(), first.clone()]);
+
+        // Stopped between its renames, a write leaves the backup ahead.
+        store.fail_at_step.store(2, Ordering::SeqCst);
+        store.update(allocate).expect_err("stopped");
+        let pair = store.files().expect("pair");
+        let counters: Vec<_> = pair.iter().map(|s| s.next_generation).collect();
+        assert_eq!((&pair[0], counters), (&first, vec![Some(2), Some(3)]));
+
+        let backup = td.path().join("state.json.bak");
+        fs::write(&backup, "{").expect("damage");
+        assert_eq!(store.files().expect("the primary alone"), [first]);
+
+        fs::remove_file(&backup).expect("rm");
+        fs::create_dir(&backup).expect("mkdir");
+        let err = store.files().expect_err("a backup that cannot be read");
+        assert!(matches!(err, AgentError::Io(_)), "{err:?}");
+    }
+
+    fn digest(of: char) -> String {
+        format!("sha256:{}", of.to_string().repeat(64))
+    }
+
+    /// `id` naming a descriptor of `generation` whose configuration digest
+    /// is all `configuration`.
+    fn described(id: &str, generation: u64, configuration: char) -> DeploymentRecord {
+        DeploymentRecord {
+            generation: Some(generation),
+            descriptor_digest: Some(digest('d')),
+            configuration_digest: Some(digest(configuration)),
+            ..sample_record(id)
+        }
+    }
+
+    /// A promoted rollback to `previous` that names what `started` names.
+    fn rollback_of(previous: &DeploymentRecord, started: &DeploymentRecord) -> TransactionRecord {
+        TransactionRecord {
+            kind: TransactionKind::Rollback,
+            phase: DeployState::Promoted,
+            generation: started.generation,
+            descriptor_digest: started.descriptor_digest.clone(),
+            configuration_digest: started.configuration_digest.clone(),
+            ..sample_tx("tx-rollback", &previous.deployment_id)
+        }
+    }
+
+    /// A store about to swap `previous` back, with `transaction` in flight.
+    fn before_the_swap(
+        dir: &Path,
+        previous: DeploymentRecord,
+        transaction: Option<TransactionRecord>,
+    ) -> StateStore {
+        let store = StateStore::open(dir).expect("open");
+        let seed = |s: &mut AgentState| {
+            s.next_generation = Some(9);
+            s.active = Some(described("serving", 4, 'a'));
+            s.previous_active = Some(previous);
+            s.in_flight_transaction = transaction;
+            Ok(())
+        };
+        store.update(seed).expect("seed");
+        store
+    }
+
+    #[test]
+    fn the_swap_gives_the_previous_record_the_identity_its_rollback_started_it_at() {
+        let td = TempDir::new().expect("td");
+        let previous = described("stt", 2, 'c');
+        let started = DeploymentRecord {
+            descriptor_digest: Some(digest('e')),
+            ..described("stt", 5, 'c')
+        };
+        let rollback = rollback_of(&previous, &started);
+        let store = before_the_swap(td.path(), previous, Some(rollback));
+
+        store.swap_active_with_previous(300).expect("swap");
+
+        let read = StateStore::open(td.path()).expect("reopen");
+        let s = read.snapshot().expect("snap");
+        let active = s.active.expect("active");
+        assert_eq!(active.descriptor_identity(), started.descriptor_identity());
+        assert_eq!(active.promoted_monotonic_ns, Some(300));
+        assert_eq!(s.previous_active, Some(described("serving", 4, 'a')));
+    }
+
+    #[test]
+    fn the_swap_refuses_a_record_its_rollback_did_not_start_at_a_later_generation() {
+        let previous = described("stt", 2, 'c');
+        let later = described("stt", 5, 'c');
+        let plain = sample_record("stt");
+        let deploy = TransactionRecord {
+            kind: TransactionKind::Deploy,
+            ..rollback_of(&previous, &later)
+        };
+        let elsewhere = rollback_of(&described("tts", 2, 'c'), &later);
+        let cases = [
+            ("no transaction", &previous, None),
+            (
+                "one that names none",
+                &previous,
+                Some(rollback_of(&previous, &plain)),
+            ),
+            ("a deploy", &previous, Some(deploy)),
+            ("another deployment's", &previous, Some(elsewhere)),
+            (
+                "the same generation",
+                &previous,
+                Some(rollback_of(&previous, &previous)),
+            ),
+            (
+                "an older generation",
+                &previous,
+                Some(rollback_of(&previous, &described("stt", 1, 'c'))),
+            ),
+            (
+                "another configuration",
+                &previous,
+                Some(rollback_of(&previous, &described("stt", 5, 'f'))),
+            ),
+            (
+                "a record that names none",
+                &plain,
+                Some(rollback_of(&plain, &later)),
+            ),
+        ];
+        for (case, previous, transaction) in cases {
+            let td = TempDir::new().expect("td");
+            let store = before_the_swap(td.path(), previous.clone(), transaction);
+            let before = store.snapshot().expect("snap");
+
+            let err = store.swap_active_with_previous(300).expect_err(case);
+
+            assert!(matches!(err, AgentError::Internal(_)), "{case}: {err:?}");
+            assert_eq!(store.snapshot().expect("snap"), before, "{case}");
+            let read = StateStore::open(td.path()).expect("reopen");
+            assert_eq!(read.snapshot().expect("snap"), before, "{case}");
         }
     }
 }

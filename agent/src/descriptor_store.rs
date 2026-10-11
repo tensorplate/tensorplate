@@ -12,11 +12,12 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
-use tensorplate_protocol::agent_state::AgentState;
+use tensorplate_protocol::agent_state::{AgentState, DeploymentRecord};
 use tensorplate_protocol::worker_control::CandidateRef;
 use tensorplate_protocol::{ArtifactRole, DeploymentDescriptor, DescriptorIdentity, ErrorCode};
 
 use crate::error::{AgentError, AgentResult};
+use crate::state::StateStore;
 
 const PREFIX: &str = "descriptor-";
 const SUFFIX: &str = ".json";
@@ -352,6 +353,64 @@ fn named_by(state: &AgentState) -> AgentResult<BTreeSet<String>> {
         }
     }
     Ok(kept)
+}
+
+/// Remove, at a start, every document that neither file of the state pair
+/// names. The two differ after a write that stopped between its renames,
+/// and a later start reads the backup once the primary is damaged.
+///
+/// # Errors
+///
+/// As [`DescriptorStore::prune`], and when a state file cannot be read;
+/// nothing is removed then.
+pub fn prune_at_start(store: &StateStore) -> AgentResult<usize> {
+    let _ = store;
+    Ok(0)
+}
+
+/// Which record the agent starts again, and so where the new generation's
+/// descriptor is named.
+#[derive(Clone, Copy, Debug)]
+pub enum Start<'a> {
+    /// Recovery restores `active`: named on it.
+    Restore,
+    /// The rollback transaction of this id restores `previous_active`:
+    /// named on the transaction, and the swap gives it to the record.
+    Rollback(&'a str),
+}
+
+/// The reference `record` is started again from. For a record that names a
+/// descriptor, one state update takes the next generation, re-stamps the
+/// descriptor for it, names it where `start` says and writes its document;
+/// the reference names it. A record that names none is referenced as it is.
+///
+/// # Errors
+///
+/// [`AgentError::BundleIntegrity`] when the bundle staged for a described
+/// record is not the record's; [`AgentError::DeploymentDescriptor`] when
+/// the record no longer stands where `start` reads it, its document is
+/// refused or describes another bundle, or a rollback's transaction is not
+/// in flight; and the errors of the state update.
+pub fn start_again(
+    store: &StateStore,
+    record: &DeploymentRecord,
+    artifact_relative_path: String,
+    start: Start<'_>,
+) -> AgentResult<CandidateRef> {
+    let _ = (store, start);
+    Ok(CandidateRef {
+        deployment_id: record.deployment_id.clone(),
+        staged_path: record.staged_path.clone(),
+        bundle_digest: record.bundle_digest.clone(),
+        generation: None,
+        descriptor_digest: None,
+        configuration_digest: None,
+        backend_hint: record.backend_hint.clone(),
+        model_class: record.model_class.clone(),
+        bundle_name: Some(record.bundle_name.clone()),
+        bundle_version: Some(record.bundle_version.clone()),
+        artifact_relative_path: Some(artifact_relative_path),
+    })
 }
 
 /// The restart stamp of an agent that keeps descriptor documents: in one
