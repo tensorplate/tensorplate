@@ -39,6 +39,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The Python SDK's wheel carries the modules of the stream session schema,
+  `tensorplate.stream.v1.session_pb2` (with a `.pyi` stub) and
+  `session_pb2_grpc`. The SDK's build generates them from
+  `protocol/proto/tensorplate/stream/v1/session.proto` with `grpcio-tools`
+  1.81.1 and nothing generated is committed. The sdist carries the schema
+  and builds the same wheel with no repository around it. Importing
+  `tensorplate.stream` needs the `speech` extra and otherwise raises
+  `MissingDependencyError`; `import tensorplate` loads none of it, and an
+  install without the extra still has no runtime dependency. The schema is
+  a draft and nothing in the SDK calls the modules yet. Every build of the
+  SDK from source now needs `grpcio-tools` in its build environment:
+  `sdk/python/constraints/build.txt` pins that environment by hash, CI and
+  the release build install from it, and the slice measurement test takes
+  its generator from it. The release build checks, with the new
+  `tools/release/check-sdk-distribution.py`, that the wheel holds exactly
+  the package's source files and the generated modules and that the sdist
+  holds the committed schema. The SDK's tests decode every recorded
+  stream/v1 frame through the modules and encode it back byte for byte.
+  (V030-E04-F02-T04)
+
 - A deployment record, the in-flight transaction and a candidate reference
   can name the deployment descriptor of their generation. Three optional
   fields, `generation`, `descriptor_digest` and `configuration_digest`,

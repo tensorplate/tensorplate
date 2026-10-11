@@ -45,6 +45,15 @@ is frozen. The JSON contracts under `schemas/` are unchanged by it.
   gRPC plugin of the pinned vcpkg baseline (target `tp::stream_proto`).
   Generated files are never committed. A build without the feature
   generates nothing and gains no target.
+- **Python modules.** A build of the Python SDK generates
+  `tensorplate.stream.v1.session_pb2` and `session_pb2_grpc` into its wheel
+  with `grpcio-tools` of the gRPC release the worker links
+  ([`docs/sdk/python.md`](../docs/sdk/python.md#stream-schema-modules)).
+  They are never committed either. The SDK's tests decode every stream/v1
+  golden frame with them and encode it again byte for byte, read the
+  `extension.proto` frames as the C++ test does, and fail when the modules
+  of the installed package are not what the generator makes of this file;
+  a change to a comment alone does not fail them.
 - **Golden frames.** `test/contract/fixtures/stream/v1/` holds recorded
   frames as text, one per line: a name, the message type, the bytes `protoc`
   emitted in lowercase hex, and the message in protobuf text format. Two

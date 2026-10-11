@@ -178,14 +178,13 @@ the run ends is ended with it. The record says whether sampling ran
 
 The tool needs Python 3.10 or later, `grpcio` and `protobuf` at the versions
 the SDK's speech extra pins, and the `grpcio-tools` release of the same
-number as `grpcio`; it refuses to start when the two differ. From a
-checkout:
+number as `grpcio`; it refuses to start when the two differ. The SDK's
+build pins hold that generator by hash. From a checkout:
 
 ```bash
 python3 -m venv /var/tmp/slice-measure
 /var/tmp/slice-measure/bin/pip install --require-hashes -r sdk/python/constraints/speech.txt
-/var/tmp/slice-measure/bin/pip install \
-  "grpcio-tools==$(sed -n 's/^grpcio==\([^ ]*\).*/\1/p' sdk/python/constraints/speech.txt)"
+/var/tmp/slice-measure/bin/pip install --require-hashes -r sdk/python/constraints/build.txt
 ```
 
 Give either mode or both. The endpoint, generation and descriptor digest

@@ -261,7 +261,8 @@ rather than misreading it.
 ## Bindings
 
 Bindings of the JSON contracts are **hand-written**, not code-generated.
-The stream session envelope's C++ bindings are the one generated set.
+The stream session envelope's C++ bindings and Python modules are the
+generated sets.
 
 | Component | Path | Status |
 |-----------|------|--------|
@@ -271,6 +272,7 @@ The stream session envelope's C++ bindings are the one generated set.
 | C++ Python sidecar IPC binding | `runtime/src/adapters/python_pytorch/python_pytorch_session.cpp` | Reads the header fields it uses by name and ignores the rest. It sends and reads no job or session message yet. |
 | Python sidecar IPC binding | `backends/python_pytorch/src/tensorplate_pytorch_backend/protocol.py` | Kind, status, error-code, capability and job literals, and the job seam's limits. `job_objects.py` validates a `job_submit` and renders job results and messages as the seam's objects do. `codec.py` frames headers without interpreting them. |
 | C++ stream session envelope binding (draft) | build tree only, target `tp::stream_proto` | Generated from `protocol/proto/tensorplate/stream/v1/session.proto` by the pinned `protoc` and gRPC plugin when `TP_ENABLE_STREAMING_GRPC` is ON; never committed. Only `test/contract/stream_envelope_conformance_test.cpp` links it. |
+| Python stream session envelope modules (draft) | inside the `tensorplate-python` wheel, `tensorplate.stream.v1` | Generated from the same file by the pinned `grpcio-tools` when the SDK is built (`sdk/python/setup.py`); never committed. Nothing in the SDK calls them yet; `sdk/python/tests/test_stream_modules.py` reads the golden frames through them. |
 
 We chose hand-written bindings over code generation because:
 

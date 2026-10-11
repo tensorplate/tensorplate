@@ -770,12 +770,25 @@ jobs:
           PY
           python3 -m venv .sdkbuild
           .sdkbuild/bin/pip install --upgrade pip build twine
-          .sdkbuild/bin/python -m build sdk/python --outdir dist/sdk-python
+          # The build generates the stream schema's modules into the wheel.
+          # Its environment installs from the SDK's hashed build pins, and
+          # the wheel is built from the sdist, outside this checkout.
+          PIP_CONSTRAINT="${PWD}/sdk/python/constraints/build.txt" \
+            .sdkbuild/bin/python -m build sdk/python --outdir dist/sdk-python
           .sdkbuild/bin/python -m twine check dist/sdk-python/*
+          python3 tools/release/check-sdk-distribution.py \
+            --wheel dist/sdk-python/tensorplate_python-*.whl \
+            --sdist dist/sdk-python/tensorplate_python-*.tar.gz \
+            --source sdk/python/src \
+            --schema protocol/proto/tensorplate/stream/v1/session.proto
           # Dry-run gate: a clean environment installs the built wheel and imports it.
           python3 -m venv .sdkverify
           .sdkverify/bin/pip install dist/sdk-python/tensorplate_python-*.whl
           .sdkverify/bin/python -c "import tensorplate; print('clean import OK', tensorplate.__version__)"
+          # With the hashed speech pins installed, the generated service module
+          # imports; that import runs the generated code's runtime version checks.
+          .sdkverify/bin/pip install --require-hashes -r sdk/python/constraints/speech.txt
+          .sdkverify/bin/python -c "import tensorplate.stream.v1.session_pb2_grpc"
 
       - name: Upload SDK distribution
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

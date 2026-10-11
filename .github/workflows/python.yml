@@ -46,10 +46,16 @@ jobs:
           cache: pip
           cache-dependency-path: ${{ matrix.package }}/pyproject.toml
 
+      # A package that pins its build environment builds from those hashed
+      # pins: sdk/python, whose build generates the stream schema's modules.
       - name: Install package and dev dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          build_pins=()
+          if [ -f constraints/build.txt ]; then
+            build_pins=(--build-constraint "${PWD}/constraints/build.txt")
+          fi
+          pip install "${build_pins[@]}" -e ".[dev]"
 
       - name: ruff check
         run: ruff check .
@@ -66,7 +72,7 @@ jobs:
   python-required-status:
     name: ruff + mypy + pytest (${{ matrix.python-version }})
     runs-on: ubuntu-22.04
-    needs: python
+    needs: [python, sdk-python-speech]
     if: ${{ always() }}
     strategy:
       fail-fast: false
@@ -77,6 +83,10 @@ jobs:
         run: |
           if [ "${{ needs.python.result }}" != "success" ]; then
             echo "Python package matrix result: ${{ needs.python.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.sdk-python-speech.result }}" != "success" ]; then
+            echo "Speech extra matrix result: ${{ needs.sdk-python-speech.result }}"
             exit 1
           fi
           echo "Python package matrix passed."
@@ -104,7 +114,7 @@ jobs:
       - name: Install package with dev and vision dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,vision]"
+          pip install --build-constraint "${PWD}/constraints/build.txt" -e ".[dev,vision]"
 
       - name: pytest vision examples
         env:
@@ -132,16 +142,25 @@ jobs:
           cache-dependency-path: |
             sdk/python/pyproject.toml
             sdk/python/constraints/speech.txt
+            sdk/python/constraints/build.txt
 
       # The pins go in first and alone: a hashed file puts pip in
-      # hash-required mode, which refuses the local package.
-      - name: Install the hashed speech pins, then the package with dev and speech dependencies
+      # hash-required mode, which refuses the local package. The build pins
+      # add the generator, which the schema drift test and the build test
+      # run. The package is installed as a wheel built here, not in place,
+      # so the tests read the modules a wheel carries.
+      - name: Install the hashed pins, then a wheel of the package with dev and speech dependencies
         run: |
           python -m pip install --upgrade pip
           pip install --require-hashes -r constraints/speech.txt
-          pip install -e ".[dev,speech]"
+          pip install --require-hashes -r constraints/build.txt
+          pip wheel --no-deps --build-constraint "${PWD}/constraints/build.txt" \
+            --wheel-dir "${RUNNER_TEMP}/sdk-wheel" .
+          pip install "$(echo "${RUNNER_TEMP}"/sdk-wheel/tensorplate_python-*.whl)[dev,speech]"
 
-      - name: pytest speech import guard and pins
+      - name: pytest the dependency guard, the pins, the stream modules and the build
         env:
           TENSORPLATE_REQUIRE_SPEECH_EXTRAS: '1'
-        run: pytest -q tests/test_import_safety.py tests/test_speech_import.py
+        run: >-
+          pytest -q tests/test_import_safety.py tests/test_speech_import.py
+          tests/test_stream_modules.py tests/test_distribution.py
