@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -26,34 +27,39 @@ except MissingDependencyError as missing:
 import grpc
 import grpc.aio
 
-from stream_server import STATUS, StreamServer, recorded
+from stream_server import STATUS, StreamServer, end_cause, frames, recorded
 from tensorplate.stream.v1 import session_pb2 as pb
 from tensorplate.stream.v1 import session_pb2_grpc as rpc
 
-_STT_CLIENT = ["stt_open", *(f"stt_audio_{n}" for n in range(1, 6)), "stt_finalize_1"]
-_STT_CLIENT += ["stt_audio_6", "stt_finalize_2", "stt_audio_7", "stt_audio_8"]
+Steps = list[tuple[Any, ...]]
 
 
-def exchange(
-    server: StreamServer, events: list[Any], *, half_close: bool = True, then: str = ""
+def converse(
+    server: StreamServer, *turns: tuple[list[Any], Steps], half_close: bool = True
 ) -> tuple[list[Any], Any]:
-    """Send `events` on one call and return what the server sent and the final status.
+    """Run one call and return what the server sent and the final status.
 
-    `then` is a reason the server ends the session with once it is ready.
+    Each turn is client events to send and the steps to queue on the server
+    once it has taken them; the last turn's events end with the half-close.
     """
 
     async def call_once() -> tuple[list[Any], Any]:
         async with server.serving() as endpoint, grpc.aio.insecure_channel(endpoint) as channel:
             call = rpc.SessionServiceStub(channel).Session()
             got: list[Any] = []
+            sent = 0
             with contextlib.suppress(grpc.aio.AioRpcError):
-                for event in events:
-                    await call.write(event)
-                if then:
-                    got.append(await call.read())
-                    server.end(then)
-                if half_close:
-                    await call.done_writing()
+                for events, steps in turns:
+                    for event in events:
+                        await call.write(event)
+                    sent += len(events)
+                    last = half_close and steps is turns[-1][1]
+                    if last:
+                        await call.done_writing()
+                    if steps:
+                        await server.until(_took(server, sent, last))
+                    for step, *arguments in steps:
+                        getattr(server, step)(*arguments)
                 while (event := await call.read()) is not grpc.aio.EOF:
                     got.append(event)
             return got, await call.code()
@@ -61,31 +67,78 @@ def exchange(
     return asyncio.run(asyncio.wait_for(call_once(), 60))
 
 
-def test_the_recorded_speech_to_text_session_is_served_as_recorded() -> None:
-    server = StreamServer()
+def _took(server: StreamServer, count: int, half_closed: bool) -> Callable[[], bool]:
+    return lambda: len(server.received) == count and server.half_closed == half_closed
 
-    got, status = exchange(server, [recorded(name) for name in _STT_CLIENT])
+
+def exchange(
+    server: StreamServer, events: list[Any], *, half_close: bool = True, then: str = ""
+) -> tuple[list[Any], Any]:
+    """Send `events` on one call; `then` is a reason the server ends the session with after them."""
+    return converse(
+        server, (events, [("end", then)] if then else []), half_close=half_close and not then
+    )
+
+
+def test_the_recorded_speech_to_text_session_is_served_frame_for_frame() -> None:
+    # The server has no recognizer, so this supplies what one decides and nothing else: each
+    # transcript's text and intervals, the silence that ends the first utterance at sample
+    # 480, and when audio is consumed and an Accepted goes out. Every other byte of the
+    # twenty recorded server frames is the server's own, and none differs.
+    server = StreamServer(hold_credit=True, hold_accepted=True, hold_finals=True)
+    first = [(0, 30000, "synthetic"), (30000, 60000, " transcript")]
+    second = [(75000, 100000, "synthetic"), (100000, 110000, " words")]
+    turns: list[tuple[list[str], Steps]] = [
+        (["stt_open"], []),
+        (["stt_audio_1", "stt_audio_2"], [("accept",), ("partial", "synthetic")]),
+        (
+            ["stt_audio_3"],
+            [
+                ("consume", 320),
+                ("accept",),
+                ("partial", "synthetic transcript"),
+                ("endpoint", 480),
+                ("final", first),
+                ("consume", 320),
+                ("accept",),
+            ],
+        ),
+        (
+            ["stt_audio_4", "stt_audio_5", "stt_finalize_1"],
+            [
+                ("accept",),
+                ("partial", "synthetic words"),
+                ("endpoint",),
+                ("final", second),
+                ("consume", 240),
+            ],
+        ),
+        (
+            ["stt_audio_6", "stt_finalize_2"],
+            [("accept",), ("endpoint",), ("final", []), ("consume", 160)],
+        ),
+        (
+            ["stt_audio_7", "stt_audio_8"],
+            [
+                ("accept",),
+                ("partial", "synthetic end"),
+                ("endpoint",),
+                ("final", [(135000, 160000, "synthetic end")]),
+            ],
+        ),
+    ]
+    session = frames("stt_session")
+    client = [name for name, kind, _ in session if kind == "ClientEvent"]
+    assert [name for names, _ in turns for name in names] == client
+
+    got, status = converse(
+        server, *(([recorded(name) for name in names], steps) for names, steps in turns)
+    )
 
     assert status is grpc.StatusCode.OK
-    assert got[0].SerializeToString() == recorded("stt_ready").SerializeToString()
-    assert [event.sequence for event in got] == list(range(1, len(got) + 1))
-    finals = [event.final_transcript for event in got if event.HasField("final_transcript")]
-    answers = [recorded("stt_final_2").final_transcript, recorded("stt_final_3").final_transcript]
-    assert [(final.finalize_sequence, final.end_sample_offset) for final in finals] == [
-        *((answer.finalize_sequence, answer.end_sample_offset) for answer in answers),
-        (0, 1280),
-    ]
-    endpoints = [event.endpoint_detected for event in got if event.HasField("endpoint_detected")]
-    last = recorded("stt_endpoint_4").endpoint_detected
-    assert (endpoints[-1].reason, endpoints[-1].end_sample_offset) == (
-        last.reason,
-        last.end_sample_offset,
-    )
-    closed, expected = got[-1].session_closed, recorded("stt_closed").session_closed
-    assert not closed.HasField("cause")
-    assert (closed.state, closed.admission) == (expected.state, expected.admission)
-    assert closed.last_accepted_sequence == expected.last_accepted_sequence
-    assert closed.totals.input_audio_samples == expected.totals.input_audio_samples
+    expected = [(name, encoded) for name, kind, encoded in session if kind == "ServerEvent"]
+    assert got == [recorded(name) for name, _ in expected]
+    assert [event.SerializeToString() for event in got] == [encoded for _, encoded in expected]
 
 
 def _open(**changes: Any) -> Any:
@@ -100,10 +153,18 @@ def _open(**changes: Any) -> Any:
     return opened
 
 
+def _first(event: Any) -> Any:
+    """`event` as the first of a call: sequence one and no session named."""
+    event.sequence = 1
+    event.ClearField("session_id")
+    return event
+
+
 @pytest.mark.parametrize(
     ("reason", "opened", "server"),
     [
         ("invalid_event", _open(sequence=2), StreamServer()),
+        ("invalid_event", _first(recorded("stt_audio_1")), StreamServer()),
         ("backend_unsupported_capability", _open(language="xx"), StreamServer()),
         ("target_unresolved", recorded("open_selector"), StreamServer()),
         ("target_mismatch", _open(deployment_id="another-deployment"), StreamServer()),
@@ -186,6 +247,81 @@ def test_audio_after_a_short_frame_fails_the_session_unless_a_finalize_came_betw
     got, status = exchange(StreamServer(), [recorded("stt_open"), short, finalize, _audio(4, 80)])
     assert status is grpc.StatusCode.OK
     assert got[-1].session_closed.totals.utterances_completed == 2
+
+
+def test_a_short_frame_stays_the_last_across_an_automatic_endpoint() -> None:
+    server = StreamServer(hold_finals=True)
+    opening = ([recorded("stt_open"), _audio(2, 0, 80)], [("endpoint",), ("final",)])
+
+    got, status = converse(server, opening, ([_audio(3, 80)], []), half_close=False)
+
+    assert status is grpc.StatusCode.INVALID_ARGUMENT
+    assert [event.WhichOneof("body") for event in got[2:]] == [
+        "endpoint_detected",
+        "final_transcript",
+        "session_closed",
+    ]
+
+
+def _finalize(sequence: int) -> Any:
+    return pb.ClientEvent(sequence=sequence, session_id=_SESSION, finalize=pb.Finalize())
+
+
+def test_audio_before_the_answer_to_a_finalize_fails_the_session() -> None:
+    server = StreamServer(hold_finals=True)
+    events = [recorded("stt_open"), _audio(2, 0), _finalize(3), _audio(4, 160)]
+
+    got, status = exchange(server, events, half_close=False)
+
+    assert status is grpc.StatusCode.FAILED_PRECONDITION
+    closed = got[-1].session_closed
+    assert (closed.state, closed.cause) == (
+        pb.SESSION_STATE_FAILED,
+        end_cause("illegal_transition"),
+    )
+    assert closed.last_accepted_sequence == 2
+    assert not any(event.HasField("final_transcript") for event in got)
+
+
+def test_a_finalize_repeated_before_its_answer_has_no_answer_of_its_own() -> None:
+    server = StreamServer(hold_finals=True)
+    events = [recorded("stt_open"), _audio(2, 0), _finalize(3), _finalize(4)]
+
+    got, status = converse(server, (events, [("final",)]))
+
+    assert status is grpc.StatusCode.OK
+    finals = [event.final_transcript for event in got if event.HasField("final_transcript")]
+    assert [(final.utterance_id, final.finalize_sequence) for final in finals] == [(1, 3)]
+
+
+def test_an_automatic_endpoints_final_names_no_finalize_and_precedes_a_finalizes_own() -> None:
+    server = StreamServer(hold_finals=True)
+    opening = ([recorded("stt_open"), _audio(2, 0)], [("endpoint", 100)])
+    joined = ([_audio(3, 160), _finalize(4)], [("final",), ("final",)])
+
+    got, status = converse(server, opening, joined)
+
+    assert status is grpc.StatusCode.OK
+    silence, client = pb.ENDPOINT_REASON_SILENCE, pb.ENDPOINT_REASON_CLIENT_FINALIZE
+    task = [event for event in got if event.WhichOneof("body") not in ("ready", "accepted")]
+    assert [event.WhichOneof("body") for event in task] == [
+        "endpoint_detected",
+        "final_transcript",
+        "endpoint_detected",
+        "final_transcript",
+        "session_closed",
+    ]
+    endpoints = [task[0].endpoint_detected, task[2].endpoint_detected]
+    assert [(e.utterance_id, e.end_sample_offset, e.reason) for e in endpoints] == [
+        (1, 100, silence),
+        (2, 320, client),
+    ]
+    finals = [task[1].final_transcript, task[3].final_transcript]
+    assert [(f.utterance_id, f.end_sample_offset, f.finalize_sequence) for f in finals] == [
+        (1, 100, 0),
+        (2, 320, 4),
+    ]
+    assert task[4].session_closed.totals.utterances_completed == 2
 
 
 def test_a_cancel_a_ping_and_a_timer_end_as_recorded() -> None:

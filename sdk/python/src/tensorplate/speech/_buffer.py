@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from collections import deque
 from typing import Generic, TypeVar
 
@@ -32,7 +33,7 @@ class EventBuffer(Generic[T]):
     """
 
     def __init__(self, capacity: int) -> None:
-        self._capacity = capacity
+        self._capacity: float = capacity
         self._items: deque[tuple[T, int]] = deque()
         self._used = 0
         self._ended = False
@@ -42,9 +43,14 @@ class EventBuffer(Generic[T]):
     def used(self) -> int:
         return self._used
 
-    async def put(self, item: T, size: int) -> None:
+    async def put(self, item: T, size: int, patience: float | None = None) -> None:
+        """Admit `item` once it fits; an ended buffer drops it.
+
+        Raises ``asyncio.TimeoutError`` when `patience` seconds pass with
+        the buffer full and nothing taken from it.
+        """
         while self._items and self._used + size > self._capacity and not self._ended:
-            await self._changed.wait()
+            await asyncio.wait_for(self._changed.wait(), patience)
         if not self._ended:
             self._items.append((item, size))
             self._used += size
@@ -60,6 +66,11 @@ class EventBuffer(Generic[T]):
         self._used -= size
         self._changed.notify()
         return item
+
+    def unbound(self) -> None:
+        """Admit whatever still comes: the call has ended, so the transport holds little more."""
+        self._capacity = math.inf
+        self._changed.notify()
 
     def end(self, *, discard: bool = False) -> None:
         """Admit nothing more; with ``discard``, also drop what is held."""

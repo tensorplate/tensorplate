@@ -45,21 +45,30 @@ class SpeechClient:
         trace_id: str = "",
         turn_id: str = "",
         open_timeout: float | None = 10.0,
+        close_timeout: float | None = 30.0,
+        cancel_timeout: float = 5.0,
     ) -> SpeechToTextSession:
         """A speech-to-text session on `target`, not yet open: enter it with ``async with``.
 
         `language` and `input_format` must be ones the deployment declares.
-        `open_timeout`, in seconds, bounds the wait for the server's answer
-        to the open.
+        The three timeouts are in seconds. `open_timeout` bounds the wait
+        for the server's answer to the open. `close_timeout` bounds
+        ``close()`` and a clean exit from ``async with``; past it the call
+        is cancelled. `cancel_timeout` is how long ``cancel()``, and an exit
+        on an exception or a cancellation, wait for the server to end the
+        session before the call is cancelled. ``None`` leaves the open or
+        the close unbounded.
         """
-        return SpeechToTextSession(
-            self._stub,
+        return SpeechToTextSession._create(
+            self._stub.Session,
             target,
             language=language,
             input_format=input_format,
             trace_id=trace_id,
             turn_id=turn_id,
             open_timeout=open_timeout,
+            close_timeout=close_timeout,
+            cancel_timeout=cancel_timeout,
         )
 
     async def aclose(self) -> None:

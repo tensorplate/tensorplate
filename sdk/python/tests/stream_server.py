@@ -1,12 +1,18 @@
 """An in-process stream server for the streaming client's tests.
 
-It serves speech-to-text sessions as the stream schema and
-``docs/architecture/serving-worker.md`` ("Logical sessions", "Session
-dispatch") say a worker does, and refuses what they say it refuses. ``test_streaming_server.py`` holds it to the recorded frames
-under ``test/contract/fixtures/stream/v1``. It runs no timer, detects no
-endpoint by itself and serves no text-to-speech session; a test ends a
-session from the server's side with ``end()``. A `fault` makes it break one
-rule, for the tests of what the client does then.
+``StreamServer`` serves speech-to-text sessions as the stream schema and
+``docs/architecture/serving-worker.md`` ("Stream listener", "Logical
+sessions", "Session dispatch") say a worker does, and refuses what they say
+it refuses: audio before its Open, a second Open, audio above the credit or
+the frame bound, audio after a short frame, and audio while a Finalize is
+unanswered. It keeps the envelope itself: sequences, credit, utterance ids,
+sample offsets, the Finalize a final transcript answers, the totals. It has
+no recognizer and runs no timer, so a test supplies what those would: the
+text of a transcript, where an automatic endpoint falls (``endpoint()``),
+when audio is consumed (``consume()``), and a timer or the worker ending the
+session (``end()``). A `fault` makes it break one rule, for the tests of
+what the client does then. ``test_streaming_server.py`` holds it to the
+recorded frames under ``test/contract/fixtures/stream/v1``.
 """
 
 from __future__ import annotations
@@ -14,7 +20,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from collections.abc import AsyncIterator
+from collections import deque
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,11 +30,11 @@ import grpc
 import grpc.aio
 
 from tensorplate.stream.v1 import session_pb2 as pb
-from tensorplate.stream.v1 import session_pb2_grpc as rpc
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 FRAMES = REPOSITORY / "test/contract/fixtures/stream/v1"
 _REASONS = REPOSITORY / "docs/observability/failure-reasons.md"
+_SERVICE = "tensorplate.stream.v1.SessionService"
 
 Code = grpc.StatusCode
 # The status a reason ends a call with, by the kind of reason: invalid input, a
@@ -39,8 +46,10 @@ STATUS = {
     "target_unresolved": Code.FAILED_PRECONDITION,
     "target_mismatch": Code.FAILED_PRECONDITION,
     "stale_generation": Code.FAILED_PRECONDITION,
+    "illegal_transition": Code.FAILED_PRECONDITION,
     "session_count_limit": Code.RESOURCE_EXHAUSTED,
     "input_credit_exceeded": Code.RESOURCE_EXHAUSTED,
+    "slow_consumer": Code.RESOURCE_EXHAUSTED,
     "idle_timeout": Code.DEADLINE_EXCEEDED,
     "admission_closed": Code.UNAVAILABLE,
     "worker_shutdown": Code.UNAVAILABLE,
@@ -49,17 +58,32 @@ STATUS = {
 }
 # Reasons that end a session failed; every other one ends it closed (serving-worker.md,
 # "How sessions end").
-FAILS = ("invalid_event", "empty_input", "input_credit_exceeded", "backend_reset")
+FAILS = (
+    "invalid_event",
+    "empty_input",
+    "input_credit_exceeded",
+    "backend_reset",
+    "illegal_transition",
+)
 _SAMPLE_BYTES = {pb.AUDIO_ENCODING_PCM_S16LE: 2, pb.AUDIO_ENCODING_MULAW: 1}
+
+
+def frames(file: str = "*") -> list[tuple[str, str, bytes]]:
+    """The recorded frames of `file` in its order: name, message type, bytes."""
+    rows = []
+    for path in sorted(FRAMES.glob(f"{file}.frames")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line and not line.startswith("#"):
+                name, kind, encoded = line.split("\t")[:3]
+                rows.append((name, kind.rsplit(".", 1)[1], bytes.fromhex(encoded)))
+    return rows
 
 
 def recorded(name: str) -> Any:
     """The recorded frame called `name`, decoded with the SDK's generated modules."""
-    for path in sorted(FRAMES.glob("*.frames")):
-        for line in path.read_text(encoding="utf-8").splitlines():
-            frame = line.split("\t")
-            if frame[0] == name:
-                return getattr(pb, frame[1].rsplit(".", 1)[1]).FromString(bytes.fromhex(frame[2]))
+    for frame, kind, encoded in frames():
+        if frame == name:
+            return getattr(pb, kind).FromString(encoded)
     raise AssertionError(f"no recorded frame {name}")
 
 
@@ -71,6 +95,29 @@ def end_cause(reason: str) -> Any:
         reason=pb.FailureReason.Value(f"FAILURE_REASON_{reason.upper()}"),
         code=pb.ErrorCode.Value(f"ERROR_CODE_{row.group(1).upper()}"),
     )
+
+
+def _wire(event: Any) -> bytes:
+    """A server event as sent; bytes go out as they are, which is how a recording does."""
+    return event if isinstance(event, bytes) else bytes(event.SerializeToString())
+
+
+@contextlib.asynccontextmanager
+async def serve(session: Callable[[Any, Any], Awaitable[None]]) -> AsyncIterator[str]:
+    """Serve `session` as the schema's one method on a loopback port."""
+    # A fixed HTTP/2 window, so that a server that reads nothing holds a writer back.
+    server = grpc.aio.server(options=[("grpc.http2.bdp_probe", 0)])
+    method = grpc.stream_stream_rpc_method_handler(
+        session, request_deserializer=pb.ClientEvent.FromString, response_serializer=_wire
+    )
+    handler = grpc.method_handlers_generic_handler(_SERVICE, {"Session": method})
+    server.add_generic_rpc_handlers((handler,))
+    port = server.add_insecure_port("127.0.0.1:0")
+    await server.start()
+    try:
+        yield f"127.0.0.1:{port}"
+    finally:
+        await server.stop(None)
 
 
 class _Ends(Exception):
@@ -92,43 +139,85 @@ class StreamServer:
     min_frame_ms: int = 20
     max_frame_ms: int = 40
     heartbeat_interval_ms: int = 10000
+    output_stall_timeout_ms: int = 5000
     max_sessions: int = 1
     admission_open: bool = True
-    # Accepted audio stays charged until `consume()` or the utterance's Finalize.
+    # Accepted audio stays charged until `consume()`.
     hold_credit: bool = False
+    # No Accepted is sent until `accept()`.
+    hold_accepted: bool = False
+    # A Finalize and a half-close stay unanswered until `endpoint()` and `final()`.
+    hold_finals: bool = False
+    # A partial transcript follows the first frame of each utterance.
     partials: bool = False
+    # A partial transcript of this many bytes follows every frame.
+    partial_bytes: int = 0
     fault: str = ""
     calls: int = 0
     live: int = 0
+    half_closed: bool = False
     received: list[Any] = field(default_factory=list)
     refusals: list[Any] = field(default_factory=list)
     closed: list[Any] = field(default_factory=list)
-    _inbox: asyncio.Queue[tuple[str, Any]] | None = None
+    _session: _Live | None = None
+    _changed: asyncio.Event = field(default_factory=asyncio.Event)
 
-    @contextlib.asynccontextmanager
-    async def serving(self) -> AsyncIterator[str]:
-        # A fixed HTTP/2 window, so that a server that reads nothing holds a writer back.
-        server = grpc.aio.server(options=[("grpc.http2.bdp_probe", 0)])
-        rpc.add_SessionServiceServicer_to_server(self, server)
-        port = server.add_insecure_port("127.0.0.1:0")
-        await server.start()
-        try:
-            yield f"127.0.0.1:{port}"
-        finally:
-            await server.stop(None)
+    def serving(self) -> contextlib.AbstractAsyncContextManager[str]:
+        return serve(self.Session)
 
     def bodies(self) -> list[str | None]:
         return [event.WhichOneof("body") for event in self.received]
 
-    def consume(self) -> None:
-        """Take the audio the live session holds, which returns its credit."""
-        assert self._inbox is not None
-        self._inbox.put_nowait(("consume", None))
+    async def until(self, done: Callable[[], bool]) -> None:
+        """Wait for `done`, asked again after each thing the server does."""
+        while not done():
+            await self._changed.wait()
+
+    def _notify(self) -> None:
+        self._changed.set()
+        self._changed = asyncio.Event()
+
+    def _tell(self, step: str, *arguments: Any) -> None:
+        """Queue a step for the live session, which takes it in turn with the client's events."""
+        assert self._session is not None, "no session is live"
+        self._session.inbox.put_nowait((step, arguments))
+
+    def accept(self) -> None:
+        """Send an Accepted: the last input accepted and the credit as it stands."""
+        self._tell("accepted")
+
+    def consume(self, size: int | None = None) -> None:
+        """Take `size` bytes of the audio the session holds, or all, which returns their credit."""
+        self._tell("consume", size)
+
+    def partial(self, text: str) -> None:
+        """Send the next revision of the open utterance's partial transcript."""
+        self._tell("partial", text)
+
+    def endpoint(self, at: int | None = None) -> None:
+        """End the open utterance at sample `at`, or at the last sample received.
+
+        The endpoint is the Finalize's when one waits for it, the
+        half-close's when the session drains, and automatic otherwise.
+        """
+        self._tell("endpoint", at)
+
+    def final(self, segments: list[tuple[int, int, str]] | None = None) -> None:
+        """Send the final transcript owed longest, after its endpoint if that is still due.
+
+        `segments` are (start_us, end_us, text); none given is one synthetic
+        segment over the utterance, or no segment for an utterance without audio.
+        """
+        self._tell("final", segments)
 
     def end(self, reason: str) -> None:
         """End the live session from the server's side."""
-        assert self._inbox is not None
-        self._inbox.put_nowait(("end", reason))
+        self._tell("end", reason)
+
+    def hear(self) -> None:
+        """Let a `deaf` server start reading."""
+        assert self._session is not None, "no session is live"
+        self._session.hearing.set()
 
     def _admit(self, first: Any) -> Any:
         """The Ready for an Open, or the reason it is refused with."""
@@ -171,7 +260,7 @@ class StreamServer:
                 liveness_timeout_ms=30000,
                 max_duration_ms=3600000,
                 finalize_deadline_ms=10000,
-                output_stall_timeout_ms=5000,
+                output_stall_timeout_ms=self.output_stall_timeout_ms,
                 speech_to_text=pb.SpeechToTextLimits(
                     min_frame_ms=self.min_frame_ms,
                     max_frame_ms=self.max_frame_ms,
@@ -205,10 +294,11 @@ class StreamServer:
             await _Live(self, context, ready).run()
         finally:
             self.live -= 1
+            self._notify()
 
 
 class _Live:
-    """One admitted session."""
+    """One admitted session. Each step is a client event or one a test queued, taken in turn."""
 
     def __init__(self, server: StreamServer, context: Any, ready: Any) -> None:
         self.server, self.context, self.ready = server, context, ready
@@ -216,10 +306,16 @@ class _Live:
         self.rate, self.width = audio.sample_rate_hz, _SAMPLE_BYTES[audio.encoding] * audio.channels
         self.limit = ready.status.input_credit.bytes.limit
         self.out = self.used = self.samples = self.last = self.finals = 0
-        self.utterance, self.utterance_start = 1, 0
-        self.short = False
-        self.inbox: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
-        server._inbox = self.inbox
+        self.expected = 1
+        self.utterance, self.utterance_start, self.revision = 1, 0, 0
+        # Ended utterances whose final transcript is owed: id, first sample, end, Finalize.
+        self.owed: deque[tuple[int, int, int, int]] = deque()
+        # The client Finalize not answered yet; audio is refused until it is.
+        self.finalize = 0
+        self.short = self.draining = self.done = False
+        self.hearing = asyncio.Event()
+        self.inbox: asyncio.Queue[tuple[str, tuple[Any, ...]]] = asyncio.Queue()
+        server._session = self
 
     async def emit(self, **body: Any) -> None:
         self.out += 1
@@ -231,8 +327,8 @@ class _Live:
 
     async def pump(self) -> None:
         while (event := await self.context.read()) is not grpc.aio.EOF:
-            self.inbox.put_nowait(("event", event))
-        self.inbox.put_nowait(("half_close", None))
+            self.inbox.put_nowait(("event", (event,)))
+        self.inbox.put_nowait(("half_close", ()))
 
     async def run(self) -> None:
         fault = self.server.fault
@@ -247,46 +343,47 @@ class _Live:
         if fault == "no_credit":
             self.ready.status.ClearField("input_credit")
         await self.emit(ready=self.ready)
-        if fault == "deaf":
-            await asyncio.Event().wait()
+        if fault.startswith("deaf"):
+            await self.hearing.wait()
         if fault == "drop":
             await self.context.abort(Code.UNAVAILABLE, "synthetic connection loss")
-        if fault == "unknown_event":
+        if fault.endswith("undecodable"):
+            await self.context.write(b"\xff")
+        if fault in ("unknown_event", "audio_chunk"):
             self.out += 1
-            unknown = recorded("added_server_body")
-            unknown.sequence = self.out
-            await self.context.write(unknown)
+            strange = recorded("added_server_body" if fault == "unknown_event" else "tts_chunk_1_1")
+            strange.sequence = self.out
+            await self.context.write(strange)
+        self.server._notify()
         pump = asyncio.create_task(self.pump())
         try:
-            expected = 2
-            while True:
-                kind, value = await self.inbox.get()
-                if kind == "event":
-                    self.server.received.append(value)
-                    # Only a Cancel sent before the client read Ready may name no session.
-                    early = value.WhichOneof("body") == "cancel" and not value.session_id
-                    named = early or value.session_id == self.ready.session_id
-                    if value.sequence != expected or not named:
-                        raise _Ends("invalid_event")
-                    expected += 1
-                    await self.take(value)
-                elif kind == "consume":
-                    self.used = 0
-                    await self.accepted()
-                elif kind == "end":
-                    raise _Ends(value)
-                else:
-                    if self.samples > self.utterance_start:
-                        await self.transcript(pb.ENDPOINT_REASON_HALF_CLOSE, 0)
-                    if fault != "ok_without_closed":
-                        await self.close(None)
-                    return
+            while not self.done:
+                step, arguments = await self.inbox.get()
+                await getattr(self, step)(*arguments)
+                await self.settle()
+                self.server._notify()
         except _Ends as end:
             await self.close(str(end))
         finally:
             pump.cancel()
 
+    async def settle(self) -> None:
+        """Send what the session owes unless a test holds it back, and close a drained session."""
+        ends = self.finalize and not any(self.finalize == entry[3] for entry in self.owed)
+        if not self.server.hold_finals:
+            # A final transcript owed to an earlier endpoint comes before the Finalize's own.
+            while self.owed:
+                await self.final()
+            if ends or (self.draining and self.samples > self.utterance_start):
+                await self.final()
+        idle = not self.owed and not self.finalize and self.samples == self.utterance_start
+        if self.draining and idle and not self.done:
+            await self.close(None)
+
     async def close(self, reason: str | None) -> None:
+        self.done = True
+        if reason is None and self.server.fault == "ok_without_closed":
+            return
         closed = pb.SessionClosed(
             state=pb.SESSION_STATE_FAILED if reason in FAILS else pb.SESSION_STATE_CLOSED,
             admission=pb.ADMISSION_ADMITTED,
@@ -302,8 +399,22 @@ class _Live:
         if reason is not None and self.server.fault != "ok_with_cause":
             await self.context.abort(STATUS[reason], reason)
 
-    async def take(self, event: Any) -> None:
+    async def half_close(self) -> None:
+        self.draining = self.server.half_closed = True
+
+    async def end(self, reason: str) -> None:
+        raise _Ends(reason)
+
+    async def event(self, event: Any) -> None:
+        self.server.received.append(event)
+        self.expected += 1
         body = event.WhichOneof("body")
+        # Only a Cancel sent before the client read Ready may name no session.
+        early = body == "cancel" and not event.session_id
+        if event.sequence != self.expected or not (
+            early or event.session_id == self.ready.session_id
+        ):
+            raise _Ends("invalid_event")
         if body == "ping":
             await self.emit(pong=pb.Pong())
         elif body == "status_request":
@@ -312,12 +423,10 @@ class _Live:
             await self.emit(cancel_accepted=pb.CancelAccepted())
             raise _Ends("client_cancelled")
         elif body == "finalize":
-            if self.server.fault == "stall_finalize":
-                return
-            if self.used:
-                self.used = 0
-                await self.accepted()
-            await self.transcript(pb.ENDPOINT_REASON_CLIENT_FINALIZE, event.sequence)
+            # Repeated before its answer, a Finalize starts nothing and has no answer of its own.
+            # Only the client's own Finalize or half-close makes a short frame the last.
+            if not self.finalize:
+                self.finalize, self.short = event.sequence, False
         elif body == "audio":
             await self.audio(event)
         else:
@@ -327,6 +436,8 @@ class _Live:
     async def audio(self, event: Any) -> None:
         audio, limits = event.audio, self.ready.limits.speech_to_text
         count = audio.sample_count
+        if self.finalize:
+            raise _Ends("illegal_transition")
         if not audio.data:
             raise _Ends("empty_input")
         if (
@@ -341,37 +452,61 @@ class _Live:
         self.short = count * 1000 < limits.min_frame_ms * self.rate
         self.samples, self.last = self.samples + count, event.sequence
         self.used += len(audio.data)
-        if not self.server.hold_credit:
-            self.used = 0
-        await self.accepted()
+        await self.consume(0 if self.server.hold_credit else None)
         if self.server.partials and self.samples - count == self.utterance_start:
-            partial = pb.PartialTranscript(
-                utterance_id=self.utterance, revision=1, text="synthetic"
-            )
-            await self.emit(partial_transcript=partial)
+            await self.partial("synthetic")
+        if self.server.partial_bytes:
+            await self.partial("x" * self.server.partial_bytes)
 
-    async def transcript(self, reason: Any, finalize_sequence: int) -> None:
-        """End the open utterance: its endpoint, then its one final transcript."""
-        fault, start, end = self.server.fault, self.utterance_start, self.samples
+    async def consume(self, size: int | None) -> None:
+        self.used -= self.used if size is None else size
+        if not self.server.hold_accepted:
+            await self.accepted()
+
+    async def partial(self, text: str) -> None:
+        self.revision += 1
+        partial = pb.PartialTranscript(
+            utterance_id=self.utterance, revision=self.revision, text=text
+        )
+        await self.emit(partial_transcript=partial)
+
+    async def endpoint(self, at: int | None = None) -> None:
+        end = self.samples if at is None else at
+        sequence, reason = 0, pb.ENDPOINT_REASON_SILENCE
+        if self.finalize and not any(self.finalize == entry[3] for entry in self.owed):
+            sequence, reason = self.finalize, pb.ENDPOINT_REASON_CLIENT_FINALIZE
+        elif self.draining:
+            reason = pb.ENDPOINT_REASON_HALF_CLOSE
+        self.owed.append((self.utterance, self.utterance_start, end, sequence))
         endpoint = pb.EndpointDetected(
             utterance_id=self.utterance, end_sample_offset=end, reason=reason
         )
-        segment = pb.TranscriptSegment(
-            start_us=start * 1_000_000 // self.rate,
-            end_us=-(-end * 1_000_000 // self.rate),
-            text="synthetic transcript",
-        )
-        final = pb.FinalTranscript(
-            utterance_id=self.utterance,
-            segments=[segment] if end > start else [],
-            end_sample_offset=end,
-            finalize_sequence=finalize_sequence + (100 if fault == "other_finalize" else 0),
-        )
-        if fault != "final_without_endpoint":
+        for _ in range(
+            {"final_without_endpoint": 0, "second_endpoint": 2}.get(self.server.fault, 1)
+        ):
             await self.emit(endpoint_detected=endpoint)
+        self.utterance, self.utterance_start, self.revision = self.utterance + 1, end, 0
+
+    async def final(self, segments: list[tuple[int, int, str]] | None = None) -> None:
+        fault = self.server.fault
+        if not self.owed:
+            await self.endpoint()
+        utterance, start, end, sequence = self.owed.popleft()
+        if segments is None:
+            whole = (start * 1_000_000 // self.rate, -(-end * 1_000_000 // self.rate))
+            segments = [(*whole, "synthetic transcript")] if end > start else []
+        final = pb.FinalTranscript(
+            utterance_id=utterance,
+            segments=[
+                pb.TranscriptSegment(start_us=a, end_us=b, text=text) for a, b, text in segments
+            ],
+            end_sample_offset=end,
+            finalize_sequence=sequence + (100 if fault == "other_finalize" else 0),
+        )
         if fault == "partial_after_endpoint":
-            late = pb.PartialTranscript(utterance_id=self.utterance, revision=2, text="late")
+            late = pb.PartialTranscript(utterance_id=utterance, revision=2, text="late")
             await self.emit(partial_transcript=late)
         await self.emit(final_transcript=final)
         self.finals += 1
-        self.utterance, self.utterance_start, self.short = self.utterance + 1, end, False
+        if sequence:
+            self.finalize = 0

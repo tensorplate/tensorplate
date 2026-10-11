@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from types import TracebackType
 from typing import Any, Generic, TypeVar
 
@@ -27,17 +27,22 @@ from tensorplate.speech.errors import (
 )
 from tensorplate.speech.events import SessionLimits, SessionTotals, SpeechToTextLimits, Target
 from tensorplate.stream.v1 import session_pb2 as pb
-from tensorplate.stream.v1.session_pb2_grpc import SessionServiceStub
 
 EventT = TypeVar("EventT")
+ResultT = TypeVar("ResultT")
 SessionT = TypeVar("SessionT", bound="Session[Any]")
 
 # Transcripts and control events a session holds for its caller before it stops reading.
 METADATA_BUFFER_BYTES = 16 * 1024
 
+# What a write raises once its call has ended. The CancelledError among them is gRPC's, for a
+# call this side cancelled: a session's own writes are never cancelled (`Session._within`).
+_CALL_ENDED = (grpc.RpcError, grpc.aio.BaseError, asyncio.InvalidStateError, asyncio.CancelledError)
+
 _ERROR_OF_STATUS: dict[str, type[SpeechError]] = {
     "INVALID_ARGUMENT": InvalidEventError,
     "FAILED_PRECONDITION": PreconditionFailedError,
+    "UNIMPLEMENTED": PreconditionFailedError,
     "RESOURCE_EXHAUSTED": ResourceExhaustedError,
     "DEADLINE_EXCEEDED": SessionTimeoutError,
     "UNAVAILABLE": ServiceUnavailableError,
@@ -83,23 +88,50 @@ def failure_of(
     )
 
 
+def _retrieve(task: asyncio.Future[Any]) -> None:
+    """Take the outcome of a task nobody awaits any more, so that asyncio does not report it."""
+    if not task.cancelled():
+        task.exception()
+
+
 class Session(Generic[EventT]):
     """What both kinds of session share. Obtained from a ``SpeechClient``, never constructed.
 
     Iterating a session yields its events in the order the server sent them
     and ends when the session does; a session that failed raises its error
     once the events read before the failure are taken.
+
+    Events must be read while the session sends. Credit, the answer to a
+    Finalize and the end of the session all arrive on the stream the events
+    arrive on, and the session stops reading it once it holds 16 KiB of
+    events its caller has not taken. A session left that way for the
+    server's output stall time (``limits.output_stall_timeout_ms``) is ended
+    with ``ResourceExhaustedError``.
+
+    A task cancelled inside a method gets its ``CancelledError`` and the
+    session stays open; an event it was writing at that moment is still sent.
     """
 
-    def __init__(
-        self, stub: SessionServiceStub, target: Target, open_timeout: float | None
+    def __init__(self) -> None:
+        raise TypeError("a session is obtained from a SpeechClient, not constructed")
+
+    def _setup(
+        self,
+        connect: Callable[[], Any],
+        target: Target,
+        open_timeout: float | None,
+        close_timeout: float | None,
+        cancel_timeout: float,
     ) -> None:
-        self._stub, self._target, self._open_timeout = stub, target, open_timeout
+        self._connect, self._target = connect, target
+        self._open_timeout, self._close_timeout = open_timeout, close_timeout
+        self._cancel_timeout = cancel_timeout
         self._call: Any = None
         self._reader: asyncio.Task[None] | None = None
         self._pinger: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
-        # Held by one input or one finalize at a time: input never overtakes a Finalize's answer.
+        self._writer: asyncio.Task[Any] | None = None
+        # Held by one input or one finalize at a time, so that input goes out in one order.
         self._input_gate = asyncio.Lock()
         self._changed = Signal()
         self._events: EventBuffer[EventT] = EventBuffer(METADATA_BUFFER_BYTES)
@@ -116,8 +148,9 @@ class Session(Generic[EventT]):
         self._credit_used = self._credit_limit = 0
         self._unaccepted: dict[int, int] = {}
         self._last_input = self._accepted = 0
-        self._finalizes: set[int] = set()
-        self._answers: dict[int, EventT] = {}
+        # The Finalize whose answer has not arrived, whoever waits for it, and the last answer.
+        self._finalizing: int | None = None
+        self._answer: tuple[int, EventT] | None = None
         self._unknown_events = 0
 
     # --- what a subclass supplies ---------------------------------------------
@@ -170,12 +203,14 @@ class Session(Generic[EventT]):
     async def open(self) -> None:
         """Send the open and wait for the server to admit the session.
 
-        Raises the typed error of a refusal, and ``SessionTimeoutError`` when
-        no answer arrives in time. Entering the session with ``async with``
-        calls this.
+        Raises the typed error of a refusal, ``SessionTimeoutError`` when no
+        answer arrives within the session's `open_timeout`, and
+        ``SessionClosedError`` for a session that was opened before or whose
+        client or channel is closed. Entering the session with ``async
+        with`` calls this.
         """
-        if self._call is not None:
-            raise SessionClosedError("the session was already opened")
+        if self._call is not None or self._ended:
+            raise SessionClosedError("the session was opened before, or its client is closed")
         target = self._target
         opening = self._open_body(
             pb.ResolvedTarget(
@@ -184,11 +219,14 @@ class Session(Generic[EventT]):
                 descriptor_digest=target.descriptor_digest,
             )
         )
-        self._call = self._stub.Session()
+        try:
+            self._call = self._connect()
+        except grpc.aio.UsageError:
+            self._shut()
+            raise SessionClosedError("the client's channel is closed") from None
         self._reader = asyncio.create_task(self._read())
         try:
-            await self._send(pb.ClientEvent(open=opening))
-            await self._until(lambda: self._ready is not None, self._open_timeout, "answer to Open")
+            await self._bounded(self._begin(opening), self._open_timeout, "answer to Open")
         except BaseException:
             self._call.cancel()
             raise
@@ -196,22 +234,17 @@ class Session(Generic[EventT]):
     async def close(self, *, timeout: float | None = None) -> SessionTotals:
         """Close the sending half, let the server finish what it accepted, and return the totals.
 
-        Events that arrive meanwhile are still held for iteration, so a
-        session whose held events are at their bound ends only once some are
-        taken, or `timeout` seconds pass. Raises the session's error if it
-        failed. Leaving ``async with`` without an exception calls this.
+        The end of the session is read from the server after the events
+        that precede it, so they must be read meanwhile; they are still held
+        for iteration. `timeout`, in seconds, bounds the whole call, and the
+        session's `close_timeout` does when none is given: past it the call
+        is cancelled and ``SessionTimeoutError`` raised. Raises the
+        session's error if it failed. Leaving ``async with`` without an
+        exception calls this.
         """
         self._opened()
-        async with self._write_lock:
-            if not self._ended and not self._half_closed:
-                self._half_closed = True
-                self._stop_ping()
-                try:
-                    await self._call.done_writing()
-                except BaseException as error:
-                    if not self._call_ended(error):
-                        raise
-        await self._until(lambda: self._ended, timeout, "end of the session")
+        bound = self._close_timeout if timeout is None else timeout
+        await self._bounded(self._drain(), bound, "end of the session")
         if self._failure is not None:
             raise self._failure
         if self._closed is None or self._cancelling:
@@ -225,29 +258,26 @@ class Session(Generic[EventT]):
             totals.segments_completed,
         )
 
-    async def cancel(self, *, timeout: float = 5.0) -> None:
+    async def cancel(self, *, timeout: float | None = None) -> None:
         """Abandon the session.
 
         Drops every event not yet taken and every one that still arrives,
-        tells the server, and waits up to `timeout` seconds for it to end the
-        session before ending the call. Leaving ``async with`` on an exception
-        calls this.
+        tells the server, and waits up to `timeout` seconds (the session's
+        `cancel_timeout` when none is given) for it to end the session
+        before ending the call. Leaving ``async with`` on an exception, or
+        cancelled, calls this.
         """
         if self._call is None or self._ended:
             return
         self._cancelling = True
         self._events.end(discard=True)
         self._changed.notify()
-
-        async def ask() -> None:
-            await self._send(pb.ClientEvent(cancel=pb.Cancel()))
-            await self._until_ended()
-
+        bound = self._cancel_timeout if timeout is None else timeout
         try:
             if not self._half_closed:
                 # One bound for both: a writer held by the transport holds the Cancel back too.
                 with contextlib.suppress(SpeechError, asyncio.TimeoutError):
-                    await asyncio.wait_for(ask(), timeout)
+                    await self._within(self._ask_to_end(), bound)
         finally:
             self._call.cancel()
         await self._until_ended()
@@ -262,9 +292,12 @@ class Session(Generic[EventT]):
         error: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if kind is None:
-            await self.close()
-        else:
+        try:
+            if kind is None:
+                await self.close()
+        finally:
+            # Does nothing once the session has ended; an exception or a cancelled close
+            # leaves it open.
             await self.cancel()
 
     def __aiter__(self: SessionT) -> SessionT:
@@ -302,13 +335,71 @@ class Session(Generic[EventT]):
             f"the server broke the stream protocol: {what}", admitted=admitted
         )
 
+    async def _within(self, work: Coroutine[Any, Any, ResultT], timeout: float | None) -> ResultT:
+        """Run `work` as a task; ``asyncio.TimeoutError`` once `timeout` seconds from now pass.
+
+        ``asyncio.wait`` raises ``CancelledError`` for the calling task's own
+        cancellation and for nothing else, so the caller is never told that
+        it was cancelled when gRPC cancelled the call, nor the reverse. Work
+        left unfinished is cancelled, unless it is writing: gRPC cancels a
+        call when a write on it is cancelled, so that write runs to its end.
+        """
+        task = asyncio.ensure_future(work)
+        try:
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+        finally:
+            if not task.done():
+                if task is not self._writer:
+                    task.cancel()
+                task.add_done_callback(_retrieve)
+        if not done:
+            raise asyncio.TimeoutError
+        return task.result()
+
+    async def _bounded(
+        self, work: Coroutine[Any, Any, ResultT], timeout: float | None, what: str
+    ) -> ResultT:
+        """Run `work` under one deadline, `timeout` seconds from now on the loop's clock.
+
+        The deadline covers all of it: the wait for its turn, its write and
+        its answer. Past it the session is ended with ``SessionTimeoutError``.
+        """
+        try:
+            return await self._within(work, timeout)
+        except asyncio.TimeoutError:
+            admitted = True if self._ready is not None else None
+            self._abort(SessionTimeoutError(f"no {what} within {timeout} s", admitted=admitted))
+            await self._until_ended()
+            raise self._end_error() from None
+
+    async def _begin(self, opening: pb.Open) -> None:
+        await self._send(pb.ClientEvent(open=opening))
+        await self._until(lambda: self._ready is not None)
+
+    async def _drain(self) -> None:
+        async with self._write_lock:
+            if not self._ended and not self._half_closed:
+                self._half_closed = True
+                self._stop_ping()
+                self._writer = asyncio.current_task()
+                try:
+                    with contextlib.suppress(*_CALL_ENDED):
+                        await self._call.done_writing()
+                finally:
+                    self._writer = None
+        await self._until_ended()
+
+    async def _ask_to_end(self) -> None:
+        await self._send(pb.ClientEvent(cancel=pb.Cancel()))
+        await self._until_ended()
+
     async def _send(
-        self, event: pb.ClientEvent, *, charge: int | None = None, answered: bool = False
+        self, event: pb.ClientEvent, *, charge: int | None = None, finalize: bool = False
     ) -> int:
         """Write one client event and return its sequence.
 
         `charge` is the input credit an Audio or a TextSegment takes;
-        `answered` marks a Finalize, whose answer names the sequence.
+        `finalize` marks a Finalize, which holds input back until its answer.
         """
         # One writer at a time: gRPC ends a call given two writes at once, and
         # the sequence must be the order on the wire.
@@ -320,53 +411,49 @@ class Session(Generic[EventT]):
             if charge is not None:
                 self._unaccepted[sequence] = charge
                 self._last_input = sequence
-            if answered:
-                self._finalizes.add(sequence)
+            if finalize:
+                self._finalizing = sequence
             event.sequence, event.session_id = sequence, self._session_id
+            self._writer = asyncio.current_task()
             try:
                 await self._call.write(event)
-            except BaseException as error:
-                if not self._call_ended(error):
-                    raise
-                # The reader has the reason unless it is held behind a full
-                # buffer, so it gets a moment and no more.
-                if self._reader is not None:
-                    await asyncio.wait({self._reader}, timeout=1.0)
-                await self._conclude()
+            except _CALL_ENDED:
+                # The reader has the reason, and is let past a full buffer to reach it. The
+                # cancel is for a call that a failed write left open, if gRPC ever does.
+                self._events.unbound()
+                self._call.cancel()
+                await self._until_ended()
                 raise self._end_error() from None
+            finally:
+                self._writer = None
             return sequence
-
-    def _call_ended(self, error: BaseException) -> bool:
-        """Whether `error`, raised by a write to the call, means the call has ended."""
-        if isinstance(error, asyncio.CancelledError):
-            # gRPC raises it for a call this side cancelled; otherwise it is the task's own.
-            return self._cancelling or self._abort_error is not None
-        return isinstance(error, (grpc.aio.AioRpcError, asyncio.InvalidStateError))
 
     def _fits(self, size: int) -> bool:
         """Whether the credit last reported, less what was sent since, admits `size` more bytes."""
         return self._credit_used + sum(self._unaccepted.values()) + size <= self._credit_limit
 
-    async def _finalize(self, timeout: float | None) -> EventT:
-        """Send a Finalize and return the event that answers it; the caller holds the input gate."""
+    async def _send_finalize(self) -> int:
+        """Send a Finalize once none is unanswered; the caller holds the input gate."""
+        # A Finalize repeated before the answer has none of its own.
+        await self._until(lambda: self._finalizing is None)
         self._check_sending()
-        sequence = await self._send(pb.ClientEvent(finalize=pb.Finalize()), answered=True)
-        await self._until(lambda: sequence in self._answers, timeout, "answer to Finalize")
-        return self._answers.pop(sequence)
+        return await self._send(pb.ClientEvent(finalize=pb.Finalize()), finalize=True)
 
-    async def _until(self, done: Callable[[], bool], timeout: float | None, what: str) -> None:
-        """Wait for `done`; a session that ends first raises its error, and a timeout ends it."""
+    async def _answer_to(self, sequence: int) -> EventT:
+        await self._until(lambda: self._answer is not None and self._answer[0] == sequence)
+        assert self._answer is not None
+        return self._answer[1]
 
-        async def wait() -> None:
-            while not done() and not self._ended:
-                await self._changed.wait()
+    def _take_answer(self, sequence: int, answer: EventT) -> None:
+        """Record the event that answers the Finalize `sequence`; input may follow it."""
+        if sequence != self._finalizing:
+            raise self._violation("an answer to a Finalize that is not waiting")
+        self._finalizing, self._answer = None, (sequence, answer)
 
-        try:
-            await asyncio.wait_for(wait(), timeout)
-        except asyncio.TimeoutError:
-            admitted = True if self._ready is not None else None
-            self._abort(SessionTimeoutError(f"no {what} within {timeout} s", admitted=admitted))
-            await self._until_ended()
+    async def _until(self, done: Callable[[], bool]) -> None:
+        """Wait for `done`; a session that ends first raises its error."""
+        while not done() and not self._ended:
+            await self._changed.wait()
         if not done():
             raise self._end_error()
 
@@ -380,6 +467,16 @@ class Session(Generic[EventT]):
             self._abort_error = error
         self._events.end()
         self._call.cancel()
+
+    def _shut(self) -> None:
+        """End the session because its client or channel closed; unread events are dropped."""
+        self._cancelling = True
+        self._events.end(discard=True)
+        if self._call is None:
+            self._ended = True
+        else:
+            self._call.cancel()
+        self._changed.notify()
 
     def _stop_ping(self) -> None:
         if self._pinger is not None:
@@ -399,16 +496,21 @@ class Session(Generic[EventT]):
                 event = await self._call.read()
                 if event is grpc.aio.EOF:
                     break
+                if not isinstance(event, pb.ServerEvent):
+                    # gRPC hands back nothing for bytes that do not decode, and reads on.
+                    raise self._violation("a message that is not a server event")
                 await self._take(event)
-        except grpc.aio.AioRpcError:
+        except (grpc.RpcError, asyncio.CancelledError):
+            # The call ended with a status, or was cancelled: by this side, or with this task.
             pass
-        except StreamProtocolError as violation:
+        except SpeechError as error:
+            self._abort(error)
+        except Exception as error:
+            violation = self._violation(f"reading the call failed with {type(error).__name__}")
+            violation.__cause__ = error
             self._abort(violation)
-        except asyncio.CancelledError:
-            # Raised by a read once this side cancelled the call, which is not this task's own.
-            if not self._call.cancelled():
-                raise
-        await self._conclude()
+        finally:
+            await self._conclude()
 
     async def _take(self, event: pb.ServerEvent) -> None:
         self._received += 1
@@ -442,8 +544,20 @@ class Session(Generic[EventT]):
                 self._unknown_events += 1
             else:
                 self._changed.notify()
-                await self._events.put(item, event.ByteSize())
+                await self._hold(item, event.ByteSize())
         self._changed.notify()
+
+    async def _hold(self, item: EventT, size: int) -> None:
+        """Keep `item` for the caller, waiting for room no longer than the server would."""
+        patience = self._opened().limits.output_stall_timeout_ms / 1000 or None
+        try:
+            await self._events.put(item, size, patience)
+        except asyncio.TimeoutError:
+            raise ResourceExhaustedError(
+                f"the session's events were left unread for {patience} s; "
+                "read them while the session sends",
+                admitted=True,
+            ) from None
 
     def _take_ready(self, ready: pb.Ready) -> None:
         target = self._target
@@ -454,13 +568,13 @@ class Session(Generic[EventT]):
             target.descriptor_digest,
         ):
             raise self._violation("Ready names another generation or descriptor")
-        if not ready.limits.heartbeat_interval_ms:
-            raise self._violation("Ready gives no heartbeat interval")
         self._take_credit(ready.status.input_credit)
         self._check_ready(ready)
         self._session_id, self._ready = ready.session_id, ready
-        interval = ready.limits.heartbeat_interval_ms / 1000
-        self._pinger = asyncio.create_task(self._ping(interval))
+        # No interval means that the server expects no Ping.
+        if ready.limits.heartbeat_interval_ms:
+            interval = ready.limits.heartbeat_interval_ms / 1000
+            self._pinger = asyncio.create_task(self._ping(interval))
 
     def _take_accepted(self, accepted: pb.Accepted) -> None:
         if not self._accepted <= accepted.accepted_sequence <= self._last_input:
@@ -476,13 +590,13 @@ class Session(Generic[EventT]):
         self._credit_used, self._credit_limit = credit.bytes.used, credit.bytes.limit
 
     async def _conclude(self) -> None:
-        """Fix the session's outcome from the ended call; the first conclusion stands."""
+        """Fix the session's outcome from the ended call and wake everything that waits on it."""
+        # Ends a call the reader left open, which it does only when cancelled itself.
+        self._call.cancel()
         status = await self._call.code()
         refusal = None
         if not self._received and status is not grpc.StatusCode.OK:
             refusal = decode_refusal(await self._call.trailing_metadata())
-        if self._ended:
-            return
         closed = self._closed
         cause = closed.cause if closed is not None and closed.HasField("cause") else None
         admitted = True if self._ready is not None or closed is not None else None
