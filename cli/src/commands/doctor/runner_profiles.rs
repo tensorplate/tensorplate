@@ -1212,12 +1212,23 @@ mod tests {
     /// The dependency check against a staged interpreter that is this
     /// shell script.
     fn observed_from(script: &str) -> Result<DependencyFacts, String> {
-        use std::os::unix::fs::PermissionsExt;
         let td = tempfile::TempDir::new().unwrap();
         let interpreter = td.path().join("opt/env/bin/python");
         std::fs::create_dir_all(interpreter.parent().unwrap()).unwrap();
-        std::fs::write(&interpreter, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&interpreter, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The executable is a link to a file that is never written: a test
+        // thread that forks while this one holds a file open for writing
+        // makes executing that file fail with "Text file busy".
+        std::os::unix::fs::symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/doctor_runner_profiles/run-body.sh"),
+            &interpreter,
+        )
+        .unwrap();
+        std::fs::write(
+            interpreter.with_file_name("python.body"),
+            format!("{script}\n"),
+        )
+        .unwrap();
         observe_dependencies(
             &profile("kokoro", &["float32"], &[]),
             &requirements("kokoro").unwrap(),
