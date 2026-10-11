@@ -130,13 +130,13 @@ fn a_restarted_generation_serves_only_once_it_is_ready() {
 
     assert_eq!(step(&f, secs(1)), []);
     assert_eq!(f.registry.active_deployment_id().unwrap(), None);
-    assert_eq!(f.registry.active_serving_url().unwrap(), None);
+    assert_eq!(serving_url(&f), None);
 
     // Ready on `/health` with no ledger reported is still not serving.
     f.probe.silent.store(false, Ordering::SeqCst);
     f.launcher.handle(2).set_contact(ControlContact::Pending);
     assert_eq!(step(&f, secs(1)), []);
-    assert_eq!(f.registry.active_serving_url().unwrap(), None);
+    assert_eq!(serving_url(&f), None);
 
     f.launcher.handle(2).set_contact(ControlContact::Reporting);
     // Nor is a worker that reports another model than the member's.
@@ -155,7 +155,7 @@ fn a_restarted_generation_serves_only_once_it_is_ready() {
         f.registry.active_deployment_id().unwrap().as_deref(),
         Some("stt")
     );
-    assert!(f.registry.active_serving_url().unwrap().is_some());
+    assert!(serving_url(&f).is_some());
 }
 
 #[test]

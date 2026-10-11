@@ -163,14 +163,21 @@ pub trait WorkerControl: Send + Sync {
     /// Returns [`AgentError::WorkerControl`] for adapter/IPC failures.
     fn active_deployment_id(&self) -> AgentResult<Option<String>>;
 
-    /// Data-plane endpoint for the active worker, when this control
-    /// implementation owns a concrete serving process.
+    /// The generation serving now and its data-plane URL, in one reading,
+    /// when this control owns a concrete serving process.
     ///
     /// # Errors
     ///
     /// Returns [`AgentError::WorkerControl`] for process inspection failures.
-    fn active_serving_url(&self) -> AgentResult<Option<String>> {
+    fn serving_member(&self) -> AgentResult<Option<ServingMember>> {
         Ok(None)
+    }
+
+    /// Every worker process this control holds, as it stands now: the
+    /// serving member, then the candidate, then the draining ones, oldest
+    /// first. `None` when this control does not report its processes.
+    fn live_members(&self) -> Option<Vec<LiveMember>> {
+        None
     }
 
     /// Look after the serving member: replace a generation that stopped
@@ -194,6 +201,42 @@ pub trait WorkerControl: Send + Sync {
     fn stopping(&self) -> bool {
         false
     }
+}
+
+/// The member generation that serves requests, and where.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServingMember {
+    pub member: MemberRef,
+    pub serving_url: String,
+}
+
+/// What a worker process the agent holds is there for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemberRole {
+    Serving,
+    /// Prepared by a deploy that has not promoted it.
+    Candidate,
+    /// Asked to stop, and not reaped yet.
+    Draining,
+}
+
+/// One worker process the agent holds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveMember {
+    pub member: MemberRef,
+    pub role: MemberRole,
+    /// The process has not been seen to exit. A draining one counts as
+    /// running until it is reaped.
+    pub running: bool,
+    /// The agent judged this generation ready, when it was warmed or
+    /// restarted; it is not read again afterwards.
+    pub ready: bool,
+    /// Whether the generation's control channel is in contact; unknown for
+    /// a draining one, which the thread stopping it holds.
+    pub in_contact: Option<bool>,
+    pub http_port: u16,
+    /// Held for the generation's stream listener; nothing listens on it.
+    pub stream_port: Option<u16>,
 }
 
 /// What one supervision step did about the serving member.

@@ -61,7 +61,7 @@ fn each_member_binds_the_http_port_of_the_first_free_pair_and_nothing_names_its_
     assert!(!second.config.to_string().contains("41103"));
     assert!(second.config.get("streaming").is_none());
     assert_eq!(
-        f.registry.active_serving_url().unwrap().as_deref(),
+        serving_url(&f).as_deref(),
         Some("http://127.0.0.1:41100/infer")
     );
 }
@@ -235,6 +235,8 @@ fn a_member_dropped_while_its_process_runs_holds_its_ports_until_the_process_is_
     let held_at_drop = Arc::new(AtomicBool::new(false));
     let member = Member {
         deployment_id: "stt".into(),
+        generation: 1,
+        ready: false,
         config_path: PathBuf::new(),
         process: Box::new(DroppedProcess {
             pool: pool.clone(),
