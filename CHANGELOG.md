@@ -24,7 +24,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   did, and the interface states that rule. (V030-E04-F03-T02)
 
 - The C++ workflow's dependency cache is keyed on what vcpkg builds the
-  packages with: the runner image's vcpkg checkout, the compiler binaries
+  packages with: the vcpkg checkout, the compiler binaries
   and the image's cmake version (which vcpkg runs once it is new enough),
   as well as the triplet, the manifest features and `vcpkg.json`. The key
   named only `vcpkg.json`, so when a new runner image brought a vcpkg
@@ -344,6 +344,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The C++ workflow checks vcpkg out at the `builtin-baseline` of
+  `vcpkg.json` and bootstraps it (`tools/ci/checkout-vcpkg.sh`), in the
+  three jobs that use it, as the release jobs already did. It built with the
+  runner image's own checkout instead, and vcpkg reads every port version
+  the baseline names from the `versions/` files of the checkout it runs
+  from, so a baseline newer than the checkout of the oldest image in
+  rotation fails at configure with "no version database entry" on the jobs
+  that draw that image. The dependency cache key now names the baseline's
+  checkout, not the image's, so a weekly image update no longer opens a new
+  key. The first run after this change rebuilds gRPC, protobuf and OpenSSL
+  once (60 to 90 minutes a leg), because a package's identity includes the
+  checkout's helper scripts, which differ from the image's. The devcontainer
+  clones vcpkg with its full history instead of one commit, which cannot
+  hold a baseline that is not the newest.
+
 - The native code absence check
   (`tools/release/check-native-code-absence.py`) also checks single archive
   members: `--member PORT:MEMBER` fails when the fresh worker's GNU ld map
@@ -423,9 +438,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   SDK's `speech` extra keeps its `grpcio` and `protobuf` floors. The
   release dependency cache and the ARM64 release runner's cache are keyed
   on the baseline: both must be rebuilt before the next release build.
-  Hosted C++ tests need a runner image whose vcpkg checkout contains the
-  baseline; `cmake/features/README.md` says which does. The recorded
-  native-closure fixture is recorded again at the new baseline.
+  The recorded native-closure fixture is recorded again at the new
+  baseline.
   (V030-E04-F02-T04)
 
 - The `SessionDispatch` contract states the rules its first version left
