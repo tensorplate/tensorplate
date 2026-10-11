@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -131,10 +132,6 @@ bool JobChannel::live_locked() const noexcept {
   return phase_ != Phase::Idle && phase_ != Phase::Stopped && !ended_;
 }
 
-bool JobChannel::queue_full_locked() const noexcept {
-  return outbox_.size() >= kMaxQueuedFrames;
-}
-
 // -- The session's side. -------------------------------------------------------
 
 Result<void> JobChannel::start(ipc::UnixSocket& socket, const std::vector<JobClass>& job_classes) {
@@ -207,11 +204,8 @@ Result<ipc::SidecarFrame> JobChannel::exchange(const ipc::SidecarFrame& request,
   if (unary_ != nullptr) {
     return unexpected(Error::Code::Internal, "a sidecar exchange is already waiting");
   }
-  if (queue_full_locked()) {
-    return refuse(Error::Code::ResourceExhausted, "send_queue_full");
-  }
   // Queued first: a push that throws must leave no waiter registered.
-  queue_locked(std::move(encoded).value());
+  queue_locked(QueuedFor::Exchange, 0, std::move(encoded).value());
   UnaryWaiter waiter{message_id, std::nullopt};
   unary_ = &waiter;
   unary_cv_.wait_until(lock, deadline, [&waiter] { return waiter.outcome.has_value(); });
@@ -219,6 +213,7 @@ Result<ipc::SidecarFrame> JobChannel::exchange(const ipc::SidecarFrame& request,
     return std::move(*waiter.outcome);
   }
   unary_ = nullptr;
+  unqueue_locked(QueuedFor::Exchange, 0);
   return unexpected(Error::Code::Timeout, "deadline elapsed waiting for the sidecar's response");
 }
 
@@ -254,7 +249,6 @@ void JobChannel::stop(std::string_view reason, const std::function<void()>& reap
     while (!releasing_.empty()) {
       acknowledge_locked(releasing_.begin(), out);
     }
-    outbox_.clear();
     failure_.reset();
     write_failure_.reset();
     socket_ = nullptr;
@@ -305,9 +299,6 @@ Result<void> JobChannel::submit(const JobRequest& request) {
   if (jobs_.size() >= kMaxOpenJobs) {
     return refuse(Error::Code::ResourceExhausted, "job_capacity_exhausted");
   }
-  if (queue_full_locked()) {
-    return refuse(Error::Code::ResourceExhausted, "send_queue_full");
-  }
   std::string message_id = next_message_id();
   auto header = encode_job_submit(request, message_id);
   if (!header.has_value()) {
@@ -324,7 +315,7 @@ Result<void> JobChannel::submit(const JobRequest& request) {
   message_jobs_.emplace(message_id, identity.job_id);
   jobs_.emplace(identity.job_id,
                 Job{identity, JobEventSequence(request), std::move(message_id), std::string{}});
-  queue_locked(std::move(frame).value());
+  queue_locked(QueuedFor::Submit, identity.job_id, std::move(frame).value());
   return Result<void>{};
 }
 
@@ -338,9 +329,6 @@ Result<void> JobChannel::cancel(std::uint64_t job_id) {
   if (job.sequence.terminal() || !job.cancel_message_id.empty()) {
     return Result<void>{};
   }
-  if (queue_full_locked()) {
-    return refuse(Error::Code::ResourceExhausted, "send_queue_full");
-  }
   std::string message_id = next_message_id();
   auto header = encode_job_cancel(job.identity, message_id);
   if (!header.has_value()) {
@@ -353,7 +341,7 @@ Result<void> JobChannel::cancel(std::uint64_t job_id) {
   job.sequence.note_cancel_requested();
   message_jobs_.emplace(message_id, job_id);
   job.cancel_message_id = std::move(message_id);
-  queue_locked(std::move(frame).value());
+  queue_locked(QueuedFor::Cancel, job_id, std::move(frame).value());
   return Result<void>{};
 }
 
@@ -371,9 +359,6 @@ Result<void> JobChannel::release_session(std::uint64_t session_key, std::uint64_
   if (releasing_.size() >= kMaxPendingSessionReleases) {
     return refuse(Error::Code::ResourceExhausted, "session_release_capacity_exhausted");
   }
-  if (queue_full_locked()) {
-    return refuse(Error::Code::ResourceExhausted, "send_queue_full");
-  }
   auto header = encode_session_release(session_key, generation, next_message_id());
   if (!header.has_value()) {
     return unexpected(header.error());
@@ -389,7 +374,7 @@ Result<void> JobChannel::release_session(std::uint64_t session_key, std::uint64_
       job.sequence.note_cancel_requested();
     }
   }
-  queue_locked(std::move(frame).value());
+  queue_locked(QueuedFor::Release, session_key, std::move(frame).value());
   return Result<void>{};
 }
 
@@ -401,6 +386,11 @@ JobChannelCounters JobChannel::counters() const {
 std::size_t JobChannel::released_session_runs() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return released_sessions_.runs();
+}
+
+std::size_t JobChannel::queued_frames() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return outbox_.size();
 }
 
 // -- The threads. ----------------------------------------------------------------
@@ -430,7 +420,8 @@ void JobChannel::write_loop() {
       if (ended_) {
         return;
       }
-      frame = std::move(outbox_.front());
+      // Out of the queue before the first byte: nothing can remove it now.
+      frame = std::move(outbox_.front().bytes);
       outbox_.pop_front();
     }
     auto written = socket_->write_all(frame, ipc::UnixSocket::Clock::now() + write_timeout_);
@@ -455,6 +446,7 @@ void JobChannel::end_connection(const Error& error) {
     ended_ = true;
     if (unary_ != nullptr) {
       std::exchange(unary_, nullptr)->outcome = unexpected(*failure_);
+      unqueue_locked(QueuedFor::Exchange, 0);
     }
     Error ended = kConnectionEnded;
     ended.context = stopping_ ? stop_reason_ : std::string(kBackendReset);
@@ -615,10 +607,13 @@ void JobChannel::release_locked(std::map<std::uint64_t, Job>::iterator job,
 
 void JobChannel::forget_locked(std::map<std::uint64_t, Job>::iterator job,
                                std::vector<Delivery>& out) {
+  const std::uint64_t job_id = job->first;
   const std::uint64_t session_key = job->second.identity.session_key;
   message_jobs_.erase(job->second.submit_message_id);
   message_jobs_.erase(job->second.cancel_message_id);
   jobs_.erase(job);
+  unqueue_locked(QueuedFor::Submit, job_id);
+  unqueue_locked(QueuedFor::Cancel, job_id);
   settle_locked(session_key, out);
 }
 
@@ -639,6 +634,7 @@ void JobChannel::acknowledge_locked(std::map<std::uint64_t, PendingRelease>::ite
                                     std::vector<Delivery>& out) {
   out.emplace_back(SessionReleased{pending->first, pending->second.generation});
   released_sessions_.insert(pending->first);
+  unqueue_locked(QueuedFor::Release, pending->first);
   releasing_.erase(pending);
 }
 
@@ -667,12 +663,19 @@ void JobChannel::offer_unary_locked(ipc::SidecarFrame&& frame, const std::string
   }
   // Taking the waiter is what answers it: a later frame finds none.
   std::exchange(unary_, nullptr)->outcome = std::move(frame);
+  unqueue_locked(QueuedFor::Exchange, 0);
   unary_cv_.notify_all();
 }
 
-void JobChannel::queue_locked(std::vector<std::byte> frame) {
-  outbox_.push_back(std::move(frame));
+void JobChannel::queue_locked(QueuedFor owner, std::uint64_t key, std::vector<std::byte> frame) {
+  outbox_.push_back(QueuedFrame{owner, key, std::move(frame)});
   outbox_cv_.notify_one();
+}
+
+void JobChannel::unqueue_locked(QueuedFor owner, std::uint64_t key) {
+  std::erase_if(outbox_, [owner, key](const QueuedFrame& queued) {
+    return queued.owner == owner && queued.key == key;
+  });
 }
 
 }  // namespace tensorplate::adapters::python_pytorch

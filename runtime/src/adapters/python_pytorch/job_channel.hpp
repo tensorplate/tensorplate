@@ -15,14 +15,14 @@
 // peer, because it writes a job message while holding the lock its own reader
 // needs, and gives up a peer that stops reading.
 //
-// The queue the writer drains holds at most kMaxQueuedFrames frames: room for
-// one `job_submit` and one `job_cancel` for each of kMaxOpenJobs unreleased
-// jobs, one `session_release` for each of kMaxPendingSessionReleases
-// sessions, and one unary request. A caller that finds the table, the pending
-// releases or the queue full is refused with Error::Code::ResourceExhausted;
-// nothing waits for room. The queue is counted by itself because a frame can
-// outlive what it was queued for: a cancel whose job the sidecar released
-// first, the request of an exchange that timed out.
+// The queue the writer drains is exact. A frame is queued for a record (a job
+// in the table, a pending session release, the exchange that waits), at most
+// once per kind of frame, and leaves the queue with its record. So the queue
+// never holds more than kMaxQueuedFrames frames and nobody is refused or
+// waits for room in it: only the job table and the pending releases refuse a
+// caller, with Error::Code::ResourceExhausted. The writer takes a frame out
+// before its first byte, so a frame it has begun is written whole. Frames
+// leave in the order they were queued: a cancel waits behind earlier submits.
 //
 // A write that fails, or a frame the sidecar does not take within the write
 // bound, ends the connection: the writer records the error, shuts the socket
@@ -84,11 +84,26 @@ namespace tensorplate::adapters::python_pytorch {
 /// eight wait. It bounds the message-id correlation as well.
 inline constexpr std::size_t kMaxOpenJobs = 16;
 
-/// Most sessions whose release the sidecar has not acknowledged yet.
-inline constexpr std::size_t kMaxPendingSessionReleases = 64;
+/// Most sessions whose release the sidecar has not acknowledged yet: the
+/// protocol's ceiling on logical sessions. A session manager keeps a
+/// session's slot until its release is acknowledged, so it never has more
+/// pending; only a caller that is not bounded that way finds this full.
+inline constexpr std::size_t kMaxPendingSessionReleases = 2'048;
+
+/// Most frames of each kind that wait for the writer: a `job_submit` and a
+/// `job_cancel` for each job in the table, a `session_release` for each
+/// pending release, the request of the one exchange that waits.
+inline constexpr std::size_t kMaxQueuedSubmits = kMaxOpenJobs;
+inline constexpr std::size_t kMaxQueuedCancels = kMaxOpenJobs;
+inline constexpr std::size_t kMaxQueuedReleases = kMaxPendingSessionReleases;
+inline constexpr std::size_t kMaxQueuedRequests = 1;
 
 /// Most frames that wait for the writer.
-inline constexpr std::size_t kMaxQueuedFrames = 2 * kMaxOpenJobs + kMaxPendingSessionReleases + 1;
+inline constexpr std::size_t kMaxQueuedFrames =
+    kMaxQueuedSubmits + kMaxQueuedCancels + kMaxQueuedReleases + kMaxQueuedRequests;
+static_assert(kMaxQueuedFrames == 2 * kMaxOpenJobs + kMaxPendingSessionReleases + 1,
+              "the queue has a place for every frame the job table, the pending releases and "
+              "the waiting exchange can own, and no other");
 
 /// Every session key whose release was acknowledged, as runs of consecutive
 /// keys. The sidecar forgets a session it released, so this record is what
@@ -179,12 +194,13 @@ class JobChannel {
   /// not a job message, or the `error_event` that names `message_id`. One
   /// exchange at a time. A response is not matched to its request: after
   /// Error::Code::Timeout a late one would answer the next exchange, so the
-  /// caller stops the channel before it exchanges again.
+  /// caller stops the channel before it exchanges again. A request the writer
+  /// had not begun when its exchange ended is not sent.
   ///
   /// @return the response frame, or Error::Code::Timeout at `deadline`, the
   ///   error the connection ended with, Error::Code::NotReady when the
   ///   channel is not started, Error::Code::Internal when another exchange
-  ///   is waiting, Error::Code::ResourceExhausted, "send_queue_full".
+  ///   is waiting.
   [[nodiscard]] Result<ipc::SidecarFrame> exchange(const ipc::SidecarFrame& request,
                                                    std::string_view message_id, TimePoint deadline);
 
@@ -220,8 +236,7 @@ class JobChannel {
   ///   Error::Code::NotReady, "session_releasing";
   ///   Error::Code::ConfigInvalid, "duplicate_job_id";
   ///   Error::Code::ResourceExhausted, "job_capacity_exhausted" (kMaxOpenJobs
-  ///   are unreleased);
-  ///   Error::Code::ResourceExhausted, "send_queue_full";
+  ///   are unreleased; a job in the table has its place in the queue);
   ///   encode_job_submit()'s refusal;
   ///   Error::Code::ConfigInvalid, "pcm_buffer_invalid" (the buffer manager
   ///   does not hold the request's window); ipc::encode_frame()'s refusal.
@@ -229,10 +244,11 @@ class JobChannel {
 
   /// Queues a `job_cancel`, once per job; a repeat, or a job that already has
   /// its terminal event, changes nothing. The sidecar answers nothing for a
-  /// job it no longer knows, so nothing waits for an acknowledgement.
+  /// job it no longer knows, so nothing waits for an acknowledgement. Never
+  /// refused for room: every job in the table has a place for its cancel. The
+  /// cancel is sent in its turn, behind the frames queued before it.
   ///
-  /// @return success, or Error::Code::NotReady, "unknown_job";
-  ///   Error::Code::ResourceExhausted, "send_queue_full".
+  /// @return success, or Error::Code::NotReady, "unknown_job".
   [[nodiscard]] Result<void> cancel(std::uint64_t job_id);
 
   /// Queues a `session_release`, once per session key for as long as the
@@ -241,19 +257,23 @@ class JobChannel {
   /// on_session_released follows the `released` of the session's last job. A
   /// sidecar whose jobs an unload has closed refuses the release; that refusal
   /// is counted and the release stays pending until stop() acknowledges it.
+  /// Never refused for room in the queue: every pending release has a place.
   ///
   /// @return success, or Error::Code::NotReady, "event_sink_missing";
   ///   Error::Code::Unavailable, "backend_unavailable" (not started, or the
   ///   connection ended); Error::Code::ResourceExhausted,
   ///   "session_release_capacity_exhausted" (kMaxPendingSessionReleases are
-  ///   unacknowledged) or "send_queue_full"; or encode_session_release()'s
-  ///   refusal of a zero key or generation.
+  ///   unacknowledged); or encode_session_release()'s refusal of a zero key
+  ///   or generation.
   [[nodiscard]] Result<void> release_session(std::uint64_t session_key, std::uint64_t generation);
 
   [[nodiscard]] JobChannelCounters counters() const;
 
   /// Runs of consecutive keys in the record of released sessions.
   [[nodiscard]] std::size_t released_session_runs() const;
+
+  /// Frames that wait for the writer; the one it is writing is not among them.
+  [[nodiscard]] std::size_t queued_frames() const;
 
  private:
   enum class Phase : std::uint8_t { Idle, Started, Admitting, Closing, Stopped };
@@ -269,6 +289,15 @@ class JobChannel {
   struct PendingRelease {
     std::uint64_t generation = 0;
     bool acknowledged = false;
+  };
+
+  // What a queued frame was queued for; `key` is the job's id, the session's
+  // key, or zero for the exchange.
+  enum class QueuedFor : std::uint8_t { Submit, Cancel, Release, Exchange };
+  struct QueuedFrame {
+    QueuedFor owner;
+    std::uint64_t key;
+    std::vector<std::byte> bytes;
   };
 
   // One sink call: a job event, or a session release.
@@ -289,7 +318,6 @@ class JobChannel {
   void deliver(const std::vector<Delivery>& deliveries);
 
   [[nodiscard]] bool live_locked() const noexcept;
-  [[nodiscard]] bool queue_full_locked() const noexcept;
   // The `*_locked` members below need mutex_ held and append what the sink is
   // owed to `out`.
   // True when `event` itself was appended.
@@ -306,7 +334,11 @@ class JobChannel {
   // Answers the waiting exchange with `frame`; `message_id` is the request an
   // `error_event` names, null for any other frame.
   void offer_unary_locked(ipc::SidecarFrame&& frame, const std::string* message_id);
-  void queue_locked(std::vector<std::byte> frame);
+  void queue_locked(QueuedFor owner, std::uint64_t key, std::vector<std::byte> frame);
+  // Takes out of the queue the frame of a record that is gone. Reached from
+  // the reader as it routes or ends the connection, from stop() and from an
+  // exchange that gives up: from no call a sink callback may make.
+  void unqueue_locked(QueuedFor owner, std::uint64_t key);
 
   BufferManager* const manager_;
   const std::chrono::milliseconds write_timeout_;
@@ -336,7 +368,7 @@ class JobChannel {
   std::map<std::uint64_t, PendingRelease> releasing_;
   ReleasedSessionKeys released_sessions_;
 
-  std::deque<std::vector<std::byte>> outbox_;
+  std::deque<QueuedFrame> outbox_;
 
   /// The exchange that waits for its answer; null once it has one.
   UnaryWaiter* unary_ = nullptr;

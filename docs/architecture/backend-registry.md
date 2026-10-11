@@ -307,18 +307,32 @@ declared neither class a lane runs (`unsupported`,
   it writes a job message under the lock its own reader takes to act on one,
   and ends a connection on which its write makes no progress for five
   seconds.
-- **Everything queued is bounded.** The channel holds at most 16 unreleased
-  jobs and 64 sessions whose release is unacknowledged; one more is refused
-  with `resource_exhausted` (`job_capacity_exhausted`,
-  `session_release_capacity_exhausted`). The queue the writer drains holds at
-  most 97 frames, which is room for a submit and a cancel for each job, a
-  release for each session and one unary request; a caller that finds it
-  full is refused with `resource_exhausted` (`send_queue_full`), and no
-  caller waits for room. The queue has its own count because a frame can
-  outlive what it was queued for: a cancel whose job the sidecar released
-  first, the request of an exchange that timed out.
+- **Everything queued is bounded, and the queue is exact.** The channel
+  holds at most 16 unreleased jobs and 2,048 sessions whose release is
+  unacknowledged; one more is refused with `resource_exhausted`
+  (`job_capacity_exhausted`, `session_release_capacity_exhausted`). Those two
+  tables are the only bounds a caller meets. A frame in the queue the writer
+  drains belongs to a record: a job in the table, a pending release, or the
+  exchange that waits. A record has each of its frames queued at most once,
+  and a frame still queued when its record goes leaves with it: a job's
+  submit and cancel when the job is released, a release when it is
+  acknowledged, a unary request when its exchange is answered, gives up or
+  fails with the connection. So the queue never holds more than 2,081
+  frames (a submit and a cancel for each of 16 jobs, a release for each of
+  2,048 sessions, one unary request), nobody is refused or waits for room
+  in it, and `cancel` and `release_session` are never refused for capacity
+  by it. The writer takes a frame out of the queue before its first byte, so
+  a frame it has begun is written whole whatever becomes of its record.
   The `message_id` of a job's submit and cancel is kept until the job is
   released, because the sidecar's `error_event` names only that id.
+- **Who can find the pending releases full.** 2,048 is the protocol's
+  ceiling on logical sessions. A session keeps its slot in the session
+  manager until its release is acknowledged, and the session manager admits
+  at most that many sessions, so it never has more releases pending. Only a
+  caller that is not bounded that way is refused
+  (`session_release_capacity_exhausted`), which is why the bridge's list of
+  refusals above does not name it. The refusal is not reported as
+  `backend_unavailable`: that would tell the caller the session is released.
 - **A released session stays released.** The sidecar forgets a session it
   released and would answer a repeated `session_release` again, so the
   channel records every session key whose release was acknowledged, for as
@@ -445,9 +459,8 @@ and releases, and never starts or stops.
   and with the end of the sidecar process as the reap. The channel's threads
   have left the socket before the process object closes it. A failed
   exchange stops the channel whatever the failure: after a timeout a late
-  answer could be taken for the next one, and a full send queue at the
-  session's own exchange means the sidecar is not reading. The same helper
-  serves a session without jobs, where the stop only runs the reap.
+  answer could be taken for the next one. The same helper serves a session
+  without jobs, where the stop only runs the reap.
 
 What a caller of the session, and the holder of its channel, must not
 assume:
@@ -470,8 +483,10 @@ assume:
   stops the channel: with the connection's error, or with `sidecar process
   exited` when the process itself is gone, which the session finds before
   it sends.
-- `cancel` and `release_session` can be refused with `send_queue_full`,
-  from a callback as from any other caller.
+- A cancel waits its turn. Frames are sent in the order they were queued, so
+  a `job_cancel` leaves behind every frame queued before it, the submits
+  among them, and a large submit the sidecar is slow to read delays it.
+  Nothing sends a cancel ahead of them today.
 - A sink callback that does not return stops the reading: the session's
   health check then times out, and the sidecar gives up a peer that has not
   read for five seconds.
