@@ -244,6 +244,9 @@ Two workflows live under `.github/workflows/`:
   vcpkg finds unchanged in the previous tree are kept. The clang-tidy and
   adapter-shell jobs build their two small dependencies each run. The
   release jobs keep a separate cache (`.github/actions/release-vcpkg`).
+- Every hosted job compiles with Clang 14, the runner image's default, which
+  `tools/ci/select-clang.sh` selects and checks. The devcontainer's Clang 15 is
+  separate, and another compiler opens a new key in both dependency caches.
 - Cargo build artifacts and registry are cached via
   [`Swatinem/rust-cache`](https://github.com/Swatinem/rust-cache) keyed on
   `Cargo.lock` and `rust-toolchain.toml`.

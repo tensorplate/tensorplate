@@ -361,8 +361,13 @@ cache, and a package the cache lacks fails the configure step.
   the first line of `clang --version`, the SHA-256 of the `clang++` binary,
   and the bytes of `tools/release/amd64-build-profile.sh` and of the action
   itself: a change to any of them opens a new key, and only the exact key is
-  ever read. It sets `VCPKG_FORCE_DOWNLOADED_BINARIES=1`, so vcpkg runs the
-  CMake and Ninja its checkout pins and not the hosted image's. A run that
+  ever read. The job compiles with Clang 14, the runner image's default:
+  `tools/ci/select-clang.sh` selects it and the toolchain step fails when
+  `clang` or `clang++` reports another major version. A different compiler is
+  a different key, so moving to one is a deliberate change to that script,
+  followed by a run of `release-dependencies.yml`. It sets
+  `VCPKG_FORCE_DOWNLOADED_BINARIES=1`, so vcpkg runs the CMake and Ninja its
+  checkout pins and not the hosted image's. A run that
   publishes restores that key before it compiles anything and fails there on
   a miss: it builds nothing and saves nothing. A build-only dispatch builds
   what is missing, within 180 minutes instead of 60, and saves it only on a

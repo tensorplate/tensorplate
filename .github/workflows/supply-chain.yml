@@ -348,8 +348,7 @@ jobs:
             clang-15 \
             llvm-15 \
             ninja-build
-          sudo update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-15 100
-          sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 100
+          tools/ci/select-clang.sh
 
       # Never saves: the dependency workflow is the one writer on develop.
       - name: Pinned vcpkg checkout and binary cache
