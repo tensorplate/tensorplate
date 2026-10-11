@@ -464,7 +464,7 @@
       }
     },
     "Ballast": {
-      "description": "How the out-of-memory case sized the device memory it held, as the ballast process reported it. Absent when no ballast was asked for.",
+      "description": "How the out-of-memory case sized the device memory it held, as the ballast process reported it. Absent when no ballast was asked for, and carried by the `oom_at_load` case only. The record's check also holds the figures to each other: neither `held_bytes` nor `left_bytes` above `free_bytes`, `held_bytes` equal to `free_bytes` less `requested_bytes` under `leave_free`, and bytes held in a case that is `matched`.",
       "type": "object",
       "additionalProperties": false,
       "required": ["rule", "requested_bytes", "free_bytes", "held_bytes", "left_bytes", "reason"],
@@ -480,7 +480,11 @@
           "minimum": 0,
           "description": "Free device memory the ballast read before it held anything."
         },
-        "held_bytes": { "type": ["integer", "null"], "minimum": 1 },
+        "held_bytes": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "The size the ballast asked of the allocator and was given, not what the allocator reserved to give it."
+        },
         "left_bytes": {
           "type": ["integer", "null"],
           "minimum": 0,

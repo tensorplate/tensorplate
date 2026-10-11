@@ -1082,14 +1082,17 @@ def check_ballast_left_free(machine: Machine) -> None:
     rules = (
         "--oom-ballast", "stt-whisper=leave-free:7000",
         "--oom-ballast", "tts-kokoro=bytes:5000", *BALLAST_PYTHON,
+        "--qualify-arg=--oom-ballast-report-wait-s=45",
     )  # fmt: skip
     tool = ROOT / "tools/validation/candidate-qualify.py"
     spec = importlib.util.spec_from_file_location("candidate_qualify", tool)
     recipe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(recipe)
-    # Every ballast option the recipe has is one the pass sets or passes on itself.
+    # Every ballast option the recipe has is one the pass sets or passes on itself, but the
+    # wait for the ballast's report, which only `--qualify-arg` gives.
     options = set(re.findall(r'"(--oom-ballast-[a-z-]+)"', tool.read_text(encoding="utf-8")))
-    assert options == {*run_mod.RECIPE_BALLAST_OPTIONS, BALLAST_PYTHON[0]}, options
+    passed_on = {*run_mod.RECIPE_BALLAST_OPTIONS, BALLAST_PYTHON[0]}
+    assert options == {*passed_on, "--oom-ballast-report-wait-s"}, options
     # With a device that answers and with none, the count goes through as given.
     for gpu in (str(GPU_MIB), None):
         result = machine.run(*rules, gpu=gpu)
@@ -1104,6 +1107,7 @@ def check_ballast_left_free(machine: Machine) -> None:
         assert (whisper.oom_ballast_leave_free, whisper.oom_ballast_bytes) == (7000, 0)
         assert (kokoro.oom_ballast_leave_free, kokoro.oom_ballast_bytes) == (0, 5000)
         assert whisper.oom_ballast_python == kokoro.oom_ballast_python == BALLAST_PYTHON[1]
+        assert whisper.oom_ballast_report_wait_s == kokoro.oom_ballast_report_wait_s == 45
     # One byte less than the device still leaves a ballast; the device's size leaves none.
     result = machine.run(
         "--oom-ballast", f"stt-whisper=leave-free:{GPU_BYTES - 1}",

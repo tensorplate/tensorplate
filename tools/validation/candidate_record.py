@@ -23,6 +23,7 @@ ERROR_SCHEMA_PATH = REPO_ROOT / "protocol/schemas/error.json"
 RECORD_KIND = "candidate_qualification"
 CONVENTION = "candidate_only_text_utf8_result_json"
 TOOL_NAME = "candidate-qualify"
+OOM_CASE = "oom_at_load"
 SAMPLER_ENTRY = "tools/validation/memory-sample.sh"
 WINDOW_NAMES = ("predecessor_idle", "candidate_warm_idle", "candidate_load", "after_teardown")
 WINDOW_PHASES = {
@@ -239,6 +240,41 @@ def validate_error_codes(record: dict[str, Any], codes: frozenset[str]) -> None:
     for pointer, code in seen:
         if code not in codes:
             raise RecordError(f"{pointer}: {code!r} is not an error code the protocol defines")
+
+
+def ballast_contradiction(negative: dict[str, Any]) -> str | None:
+    """How a case's ballast figures contradict each other or the case; None when they agree.
+
+    The ballast reports the size it asked the allocator for, so under `leave_free` the
+    bytes held are the free figure less the request exactly, with no rounding between them.
+    """
+    ballast = negative.get("ballast")
+    if ballast is None:
+        return None
+    if negative["case"] != OOM_CASE:
+        return f"only the {OOM_CASE} case carries a ballast"
+    free, held, left = (ballast[f"{name}_bytes"] for name in ("free", "held", "left"))
+    if held is None and negative["status"] == "matched":
+        return "the case is matched with no bytes held"
+    if free is not None and held is not None and held > free:
+        return f"{held} bytes held are more than the {free} free before"
+    if free is not None and left is not None and left > free:
+        return f"{left} bytes left free are more than the {free} free before"
+    if ballast["rule"] == "leave_free" and held is not None:
+        requested = ballast["requested_bytes"]
+        if free is None:
+            return f"{held} bytes held under leave_free with no free figure to size them from"
+        if held != free - requested:
+            return f"{held} bytes held are not the {free} free less the {requested} to leave free"
+    return None
+
+
+def validate_ballast(record: dict[str, Any]) -> None:
+    """No case's ballast figures contradict each other or the case that carries them."""
+    for index, negative in enumerate(record["negatives"]):
+        contradiction = ballast_contradiction(negative)
+        if contradiction is not None:
+            raise RecordError(f"/negatives/{index}/ballast: {contradiction}")
 
 
 _TYPE_CHECKS = {
