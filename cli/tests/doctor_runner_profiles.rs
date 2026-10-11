@@ -128,6 +128,17 @@ fn write(path: &Path, body: &str, mode: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }
 
+/// Puts `script` at an interpreter's path as `<path>.body`, run by a link to
+/// a checked-in script. A file a test writes and then executes fails with
+/// "Text file busy" when another test thread forks in between.
+fn stage_interpreter(path: &Path, script: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(fixture("run-body.sh"), path).unwrap();
+    let mut body = path.as_os_str().to_owned();
+    body.push(".body");
+    fs::write(body, script).unwrap();
+}
+
 /// A shell script standing at an interpreter's path that answers each query
 /// with the recorded output and exit status, and logs, per query, the
 /// environment and the directory it was started in.
@@ -191,19 +202,17 @@ fn stage(root: &Path, case: &Case) {
                 .join(format!("{profile}.json")),
         );
     }
-    write(
+    stage_interpreter(
         &root.join(ENVIRONMENT_ROOT).join("bin/python"),
         &replaying_interpreter(
             &fixture("recordings").join(case.recording),
             &root.join("sidecar"),
             PROFILE_QUERIES,
         ),
-        0o755,
     );
-    write(
+    stage_interpreter(
         &root.join("usr/bin/python3"),
         &replaying_interpreter(&fixture("recordings/own"), &root.join("own"), OWN_QUERIES),
-        0o755,
     );
     copy(
         repo_path("packaging/debian/tensorplate-agent.service"),
