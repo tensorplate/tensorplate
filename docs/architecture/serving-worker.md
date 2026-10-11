@@ -83,7 +83,11 @@ runs speech jobs is wired in.
   event to the manager and never wait on a job, plus the manager's timer
   thread and one thread of the listener's own, which cancels calls that
   outlive their session (see "Calls that outlive their session"). gRPC
-  sizes its pool by the machine's cores.
+  sizes its pool by the machine's cores. The method is registered raw:
+  gRPC hands the listener each message as bytes, and the listener parses
+  client events and serializes server events itself, with the calls
+  gRPC's typed path makes. A message that does not parse therefore reaches
+  the call's reader instead of failing its read.
 - **Write path.** Each call writes through a small writer interface
   (`stream_output.hpp`), so the path is tested without a transport. The
   queue's consumer captures the path, never the call, and starts the next
@@ -107,11 +111,13 @@ runs speech jobs is wired in.
   `SessionStatus`, `Pong`, `CancelAccepted`, `EndpointDetected`,
   `FinalTranscript`, `AudioChunk`, `SegmentCompleted`, `SynthesisCompleted`
   and `SessionClosed`. No client event of the schema is refused as
-  unsupported. A body the schema does not define, a second `Open`, or an
-  event out of sequence or naming another session fails the session with
-  `invalid_event`. No `PartialTranscript` is sent: the dispatch contract
-  has no partial result yet. `Ready` reports the deployment's limits and
-  the session's initial credit.
+  unsupported. A message that does not parse as a client event (a
+  truncated one, or a `TextSegment` whose text is not UTF-8), a body the
+  schema does not define, a second `Open`, or an event out of sequence or
+  naming another session fails the session with `invalid_event`, and
+  nothing behind it is read. No `PartialTranscript` is sent: the dispatch
+  contract has no partial result yet. `Ready` reports the deployment's
+  limits and the session's initial credit.
 - **Input.** The listener checks each `Audio` and `TextSegment` before it
   offers it to the manager, against the terms the dispatch granted and
   what the session accepted before. A check that fails fails the session
@@ -173,10 +179,9 @@ runs speech jobs is wired in.
   the cancellation aborts it (`client_cancelled`). A read fails, too, once
   the listener has ended a call itself for output it cannot send. A
   session still live when its call is done is failed (`internal`), so that
-  it does not stay draining with no stream to deliver to. gRPC also
-  reports a message it cannot decode as a failed read, with no
-  cancellation after it: such an event closes the session as a half-close
-  does (see "Not enforced yet").
+  it does not stay draining with no stream to deliver to. A message that
+  does not parse is not a failed read: the listener parses each message
+  itself and fails the session (see "What it serves").
 - **Transport window.** A delivery is a completed write, and gRPC completes
   a write when HTTP/2 flow control lets the bytes pass, not when the
   client's application reads them. The no-progress limit and the output
@@ -221,6 +226,7 @@ runs speech jobs is wired in.
   `INVALID_ARGUMENT`; unsupported, target and generation reasons are
   `FAILED_PRECONDITION`; `session_count_limit` is `RESOURCE_EXHAUSTED`;
   `admission_closed` is `UNAVAILABLE`) and whose message names the reason.
+  A first message that does not parse is refused as `invalid_event`.
   How the status will carry the `OpenRefused` detail is not decided; one
   function builds the status, and it attaches no detail yet.
 - **Final status.** A session's typed outcome is its `SessionClosed`. The
@@ -246,22 +252,14 @@ runs speech jobs is wired in.
   receive window, which bounds what a client can leave in the server's
   transport beyond its input credit; a following change adds them. A call
   whose `Open` was refused is not watched after its status is handed to
-  the transport. A
-  client event that does not decode, for example a `TextSegment` whose
-  text is not UTF-8, does not fail its session with `invalid_event` as the
-  schema says a refused event does: the session drains and closes with no
-  cause and status OK, because the listener cannot tell that failed read
-  from a half-close. In a speech-to-text session the open utterance is
-  therefore finalized and transcribed as if the client had asked for it,
-  and in either mode every valid event the client sends after the bad one
-  goes unread: `last_accepted_sequence` in `SessionClosed` is the only
-  trace of where the server stopped. A listener test holds this behaviour
-  until it is changed. A client event larger than the 64 KiB the listener
-  receives is rejected by the transport before the listener sees it: the
-  call ends with a transport status and no `SessionClosed`, and its session
-  ends as a cancelled call's does, not failed with a typed reason: aborted
-  `client_cancelled`, unless it had nothing in progress and the half-close
-  of the failed read closed it first. A text
+  the transport. A client event larger than the 64 KiB the listener
+  receives is rejected by the transport's own limit, below the listener's
+  parse: the call ends with a transport status and no `SessionClosed`, and
+  its session ends as a cancelled call's does, not failed with a typed
+  reason: aborted `client_cancelled`, unless it had nothing in progress
+  and the half-close of the failed read closed it first. Failing it with a
+  typed reason would mean receiving it first, and gRPC buffers a whole
+  message before it hands it over. A text
   segment is refused as empty when it holds nothing but ASCII whitespace;
   other Unicode whitespace is not recognized, so such a segment is accepted
   and synthesized. The listener's sources build only with the

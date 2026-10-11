@@ -2,6 +2,8 @@
 #include "serving/stream/stream_listener.hpp"
 
 #include <grpcpp/grpcpp.h>
+#include <grpcpp/impl/proto_utils.h>
+#include <grpcpp/support/byte_buffer.h>
 #include <grpcpp/support/server_callback.h>
 
 #include <algorithm>
@@ -114,12 +116,15 @@ struct CallState {
 
 }  // namespace
 
-struct StreamListener::Impl final : wire::SessionService::CallbackService {
+/// The method is registered raw: gRPC hands over each message as bytes, so a
+/// message that does not parse reaches the call instead of failing its read.
+struct StreamListener::Impl final
+    : wire::SessionService::WithRawCallbackMethod_Session<wire::SessionService::Service> {
   Impl(StreamListenerOptions options_in, SessionDispatch* dispatch_in,
        const SchedulerClock& clock_in)
       : options(std::move(options_in)), dispatch(dispatch_in), clock(clock_in) {}
 
-  grpc::ServerBidiReactor<ClientEvent, ServerEvent>* Session(
+  grpc::ServerBidiReactor<grpc::ByteBuffer, grpc::ByteBuffer>* Session(
       grpc::CallbackServerContext* context) override;
 
   void on_transition(const ManagedSessionTransition& transition);
@@ -162,7 +167,7 @@ struct StreamListener::Impl final : wire::SessionService::CallbackService {
 namespace {
 
 /// One Session call: one logical session.
-class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEvent>,
+class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc::ByteBuffer>,
                           public stream::CallWriter {
  public:
   SessionCall(StreamListener::Impl& listener, grpc::CallbackServerContext& context)
@@ -177,7 +182,13 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
       half_closed();
       return;
     }
-    if (handle(in_)) {
+    // The parse gRPC runs for a typed method, which reports its failure as a
+    // failed read.
+    if (!grpc::SerializationTraits<ClientEvent>::Deserialize(&in_, &event_).ok()) {
+      unparsed();
+      return;
+    }
+    if (handle(event_)) {
       StartRead(&in_);
     }
   }
@@ -210,7 +221,18 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
     delete this;
   }
 
-  void start_write(const ServerEvent& event) override { StartWrite(&event); }
+  void start_write(const ServerEvent& event) override {
+    bool owned = false;
+    // gRPC serializes into an empty buffer only.
+    out_.Clear();
+    if (grpc::SerializationTraits<ServerEvent>::Serialize(event, &out_, &owned).ok()) {
+      StartWrite(&out_);
+      return;
+    }
+    // Only an event past protobuf's 2 GiB limit: its write is answered as failed.
+    state_->out->finish({grpc::StatusCode::INTERNAL, "output this server cannot send"});
+    state_->out->write_done(false);
+  }
   void finish(const grpc::Status& status) override { Finish(status); }
   // The context lives until OnDone has returned, and detach() runs in it.
   void cancel() override { context_.TryCancel(); }
@@ -462,6 +484,17 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
         Error::make(Error::Code::ConfigInvalid, "the client closed before Open", "invalid_event"));
   }
 
+  /// A message that is no client event; nothing after it is read.
+  void unparsed() {
+    auto cause = Error::make(Error::Code::ConfigInvalid, "client message that does not parse",
+                             "invalid_event");
+    if (const auto key = session_key()) {
+      fail(*key, std::move(cause));
+      return;
+    }
+    refuse(cause);
+  }
+
   void fail(std::uint64_t key, Error cause) const {
     (void)listener_.manager->apply(key, LogicalSessionEvent::Fail, std::move(cause));
   }
@@ -481,7 +514,10 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
   StreamListener::Impl& listener_;
   grpc::CallbackServerContext& context_;
   std::shared_ptr<CallState> state_;
-  ClientEvent in_;
+  grpc::ByteBuffer in_;
+  ClientEvent event_;
+  /// The write in flight, serialized; kept until it is answered.
+  grpc::ByteBuffer out_;
   std::uint64_t expected_sequence_ = 1;
   /// The reader's own: gRPC runs one read reaction of a call at a time.
   SessionTerms terms_;
@@ -491,7 +527,7 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
 
 }  // namespace
 
-grpc::ServerBidiReactor<ClientEvent, ServerEvent>* StreamListener::Impl::Session(
+grpc::ServerBidiReactor<grpc::ByteBuffer, grpc::ByteBuffer>* StreamListener::Impl::Session(
     grpc::CallbackServerContext* context) {
   return new SessionCall(*this, *context);
 }

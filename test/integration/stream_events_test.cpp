@@ -5,7 +5,10 @@
 // the dispatch yields is a function of the bytes handed over, so each test
 // that reads output also checks that the right bytes were handed over.
 
+#include <grpcpp/generic/generic_stub.h>
 #include <grpcpp/grpcpp.h>
+#include <grpcpp/impl/proto_utils.h>
+#include <grpcpp/support/byte_buffer.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -34,6 +37,7 @@ using tensorplate::testing::FakeSchedulerClock;
 using tensorplate::testing::stream_listener::Client;
 using tensorplate::testing::stream_listener::end_of;
 using tensorplate::testing::stream_listener::eventually;
+using tensorplate::testing::stream_listener::open_event;
 using tensorplate::testing::stream_listener::Served;
 using Fake = tensorplate::testing::SyntheticSessionDispatch;
 namespace wire = tensorplate::stream::v1;
@@ -64,6 +68,55 @@ wire::ClientEvent raw_text(std::uint64_t segment_id, std::string text) {
   event.mutable_text_segment()->set_text(std::move(text));
   return event;
 }
+
+/// A call that sends the bytes it is given, for messages no typed client
+/// builds. One operation at a time, each waited for.
+class RawCall {
+ public:
+  explicit RawCall(const std::shared_ptr<grpc::Channel>& channel) : stub_(channel) {
+    context_.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds{20});
+    call_ = stub_.PrepareCall(&context_, "/tensorplate.stream.v1.SessionService/Session", &queue_);
+    call_->StartCall(this);
+    (void)done();
+  }
+
+  bool write(const std::string& bytes) {
+    const grpc::Slice slice(bytes);
+    call_->Write(grpc::ByteBuffer(&slice, 1), this);
+    return done();
+  }
+  bool write(const wire::ClientEvent& event) { return write(event.SerializeAsString()); }
+
+  std::optional<wire::ServerEvent> read() {
+    grpc::ByteBuffer bytes;
+    call_->Read(&bytes, this);
+    wire::ServerEvent event;
+    if (!done() ||
+        !grpc::SerializationTraits<wire::ServerEvent>::Deserialize(&bytes, &event).ok()) {
+      return std::nullopt;
+    }
+    return event;
+  }
+
+  grpc::Status finish() {
+    grpc::Status status;
+    call_->Finish(&status, this);
+    (void)done();
+    return status;
+  }
+
+ private:
+  bool done() {
+    void* tag = nullptr;
+    bool ok = false;
+    return queue_.Next(&tag, &ok) && ok;
+  }
+
+  grpc::ClientContext context_;
+  grpc::CompletionQueue queue_;
+  grpc::GenericStub stub_;
+  std::unique_ptr<grpc::GenericClientAsyncReaderWriter> call_;
+};
 
 /// Reads to the session's SessionClosed, past whatever precedes it.
 wire::SessionClosed closed_of(Client& client) {
@@ -741,19 +794,113 @@ TEST(StreamEvents, CreditReturnedAfterACancelIsNotAnnounced) {
   EXPECT_EQ(last->session_closed().cause().reason(), wire::FAILURE_REASON_CLIENT_CANCELLED);
 }
 
-// gRPC reports a message it cannot decode as a read that failed, which is all
-// a half-close is to the listener: the session closes with no cause.
-TEST(StreamEvents, AnEventThatDoesNotDecodeClosesTheSessionAsAHalfCloseDoes) {
+constexpr const char* kUnparsedDetail = "client message that does not parse";
+
+// The listener parses each message itself, so one that does not parse is a
+// refused event and not a read that failed, which is all a half-close is.
+TEST(StreamEvents, AnEventThatDoesNotParseFailsItsSession) {
   Served served;
+  auto& seen = served.dispatch().seen;
   auto client = served.ready(wire::SESSION_MODE_TTS_STREAMING);
-  // Not UTF-8, which the server's parse of a string field requires.
+  // Not UTF-8, which the parse of a string field requires.
   ASSERT_TRUE(client.send(raw_text(1, "\xff")));
   const auto closed = closed_of(client);
-  EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
-  EXPECT_FALSE(closed.has_cause());
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_FAILED);
+  EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_INVALID_EVENT);
+  EXPECT_EQ(closed.cause().detail(), kUnparsedDetail);
+  EXPECT_EQ(closed.last_accepted_sequence(), 0U);
   EXPECT_EQ(closed.totals().input_text_bytes(), 0U);
   EXPECT_TRUE(client.accepted.empty());
-  EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::OK);
+  EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_FALSE(seen.saw(LogicalSessionEvent::HalfClose));
+  EXPECT_EQ(seen.inputs(), 0U) << "the event that did not parse was accepted";
+}
+
+// Applied as a half-close, the failed read used to finalize and transcribe
+// the open utterance: one frame opens it and nothing here ends it.
+TEST(StreamEvents, AnEventThatDoesNotParseDoesNotFinalizeTheOpenUtterance) {
+  Served served;
+  auto& seen = served.dispatch().seen;
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  ASSERT_TRUE(client.send_audio(kFrame));
+  ASSERT_TRUE(eventually([&] { return seen.inputs() == 1; }));
+  const auto accepted_sequence = client.sequence;
+  wire::ClientEvent unparsed;
+  unparsed.set_sequence(++client.sequence);
+  unparsed.set_session_id("\xff");
+  ASSERT_TRUE(client.call->Write(unparsed));
+  // Valid, and behind the event that failed the session: never applied.
+  (void)client.send(raw_audio(kFrame, kFrame));
+  bool closed_seen = false;
+  while (const auto event = client.next()) {
+    if (event->has_session_closed()) {
+      closed_seen = true;
+      const auto& closed = event->session_closed();
+      EXPECT_EQ(closed.state(), wire::SESSION_STATE_FAILED);
+      EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_INVALID_EVENT);
+      EXPECT_EQ(closed.cause().detail(), kUnparsedDetail);
+      EXPECT_EQ(closed.last_accepted_sequence(), accepted_sequence);
+      EXPECT_EQ(closed.totals().input_audio_samples(), kFrame);
+      EXPECT_EQ(closed.totals().utterances_completed(), 0U);
+      break;
+    }
+    EXPECT_FALSE(event->has_endpoint_detected() || event->has_final_transcript())
+        << event->ShortDebugString();
+  }
+  ASSERT_TRUE(closed_seen) << "the call ended without SessionClosed";
+  EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_FALSE(seen.saw(LogicalSessionEvent::HalfClose));
+  EXPECT_EQ(seen.inputs(), 1U);
+  ASSERT_TRUE(eventually([&] { return served.listener().live_sessions() == 0; }));
+}
+
+// A whole Open with a byte behind it that is no field: were the result of
+// the parse ignored, the Open would be served.
+TEST(StreamEvents, AFirstMessageThatDoesNotParseOpensNoSession) {
+  Served served;
+  RawCall call{served.channel()};
+  ASSERT_TRUE(
+      call.write(open_event(wire::SESSION_MODE_STT_STREAMING).SerializeAsString() + "\x0f"));
+  EXPECT_FALSE(call.read().has_value()) << "a refused Open has no event";
+  const auto status = call.finish();
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+  EXPECT_NE(status.error_message().find("FAILURE_REASON_INVALID_EVENT"), std::string::npos)
+      << status.error_message();
+  EXPECT_TRUE(served.dispatch().seen.events().empty()) << "a session was opened";
+  EXPECT_EQ(served.listener().live_sessions(), 0U);
+}
+
+// Bytes no client library would send: gRPC hands them over as they came.
+TEST(StreamEvents, BytesThatAreNoClientEventFailTheirSession) {
+  auto truncated = raw_text(1, "abc");
+  truncated.set_sequence(2);
+  struct Case {
+    const char* name;
+    std::string bytes;
+  };
+  const std::vector<Case> cases = {
+      // The text's length prefix promises a byte the message does not hold.
+      {"a truncated event", truncated.SerializeAsString().substr(0, truncated.ByteSizeLong() - 1)},
+      // Field 1 with wire type 7, which protobuf does not define.
+      {"an undefined wire type", "\x0f"},
+  };
+  for (const auto& entry : cases) {
+    SCOPED_TRACE(entry.name);
+    Served served;
+    RawCall call{served.channel()};
+    ASSERT_TRUE(call.write(open_event(wire::SESSION_MODE_TTS_STREAMING)));
+    const auto ready = call.read();
+    ASSERT_TRUE(ready && ready->has_ready());
+    ASSERT_TRUE(call.write(entry.bytes));
+    const auto last = call.read();
+    ASSERT_TRUE(last && last->has_session_closed());
+    EXPECT_EQ(last->session_closed().state(), wire::SESSION_STATE_FAILED);
+    EXPECT_EQ(last->session_closed().cause().reason(), wire::FAILURE_REASON_INVALID_EVENT);
+    EXPECT_EQ(last->session_closed().cause().detail(), kUnparsedDetail);
+    EXPECT_FALSE(call.read().has_value());
+    EXPECT_EQ(call.finish().error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_FALSE(served.dispatch().seen.saw(LogicalSessionEvent::HalfClose));
+  }
 }
 
 // The transport rejects an event above the 64 KiB the listener receives
