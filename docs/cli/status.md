@@ -19,12 +19,14 @@ tensorplate status [--observability-snapshot <path>] [--no-quarantine] [--output
   `readiness=` and `draining=` when the agent reports how its worker
   process stands (see [what status reads from the
   registry](../architecture/agent.md#what-status-reads-from-the-registry)).
-  When the agent names the generation serving the active deployment, human
+  When the agent names the generation of the active deployment (the one
+  serving it, or beside a resident set of one the committed one), human
   output adds a `generation=` line under `active:`; in JSON, `active`,
   `previous_active` and `candidate` always carry a `generation` key, `null`
   when the agent did not name one. Not done yet: `severity` does not judge
-  `process` or `readiness`, so a `serving` member whose process is `stopped`
-  does not by that alone lower it.
+  `process` or `readiness`. It judges `contact`, and a member whose process
+  is `stopped` or draining reports none, so a `serving` member whose process
+  is `stopped` does not lower it.
 - **Observability snapshot** (optional): when `--observability-snapshot
   <path>` is supplied, the CLI reads the V01-E10 status snapshot at that
   path (schema: [`protocol/schemas/observability_status.json`](../../protocol/schemas/observability_status.json))

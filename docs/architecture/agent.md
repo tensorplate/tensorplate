@@ -698,6 +698,7 @@ launched and counts as one. A `process`-mode agent installs the stamp
 described under [descriptor documents](#deployment-descriptor-documents); a
 restart in a registry without one is unchanged. The registry writes no
 resident set.
+
 ### What status reads from the registry
 
 The registry answers for every worker process it holds: the serving member,
@@ -707,9 +708,10 @@ stopped is recorded as draining under the same lock that took it out, and
 the record is removed once its process has been reaped. A worker the
 registry is still starting is not listed until its launch has returned, and
 one it kills, for lost contact or for not becoming ready after a restart,
-is not listed while it is killed. For each one listed the registry reports its deployment id and generation, whether its process has
-been seen to exit, whether the agent judged it ready, whether its control
-channel is in contact, and the ports it holds.
+is not listed while it is killed. For each one listed the registry reports
+its deployment id and generation, whether its process has been seen to
+exit, whether the agent judged it ready, whether its control channel is in
+contact, and the ports it holds.
 
 - **Ready** is the agent's last judgement, not a reading taken for the
   status: `warm` records it for a candidate it found ready, and the
@@ -722,16 +724,19 @@ channel is in contact, and the ports it holds.
   with the readiness they had; their control channel is held by the thread
   that stops them and is not read.
 
-Agent status uses this in two places. `active.generation` is the generation
-serving at `active.serving_url`, read together with the URL; it is attached
-only when the member serving is the recorded active deployment (a worker is
-promoted before the record that names it is written, so for a moment it may
-not be), and both are absent while nothing serves: the worker stopped, a
-restart is waiting or loading, or the member is failed.
-`candidate.generation` is the generation a deploy has prepared.
-`previous_active.generation` is absent: nothing runs for a retained
-deployment, and the agent does not yet write a generation into a
-deployment record.
+Agent status uses this in two places. Beside a singleton record,
+`active.generation` is the generation serving at `active.serving_url`, read
+together with the URL. It is attached only when the member serving is the
+recorded active deployment: the same id, started from the same bundle. A
+worker is promoted before the record that names it is written, and the
+worker it replaces is stopped in between, so for up to the stop deadline
+(ten seconds) the member serving is not the recorded one; `active` then
+carries the new worker's URL and no generation. Both are absent while
+nothing serves: the worker stopped, a restart is waiting or loading, or the
+member is failed. `candidate.generation` is the generation a deploy has
+prepared and not promoted. `previous_active.generation` is absent: nothing
+runs for a retained deployment, and the agent does not yet write a
+generation into a deployment record.
 
 For a resident set, each member is matched to the registry by deployment id
 and generation. A committed generation the registry holds no running
@@ -741,22 +746,33 @@ restart the registry runs a later generation than the committed one, so the
 committed generation stays `stopped` until a record names the generation
 that runs.
 
-`draining` describes the committed generation only. After a promotion the
-generation that was replaced drains for up to the stop deadline (ten
-seconds), and the registry holds it as draining, but it is no longer a
-committed member, so status does not list it: during that window an
-operator sees only the new generation, serving. The older one is visible on
-the host as a worker process that still runs, and through the ports it
-still holds: a deploy that needs them waits for it to be reaped.
+`draining` describes the committed generation only, and the committed
+generation is the one the record names, whichever serves. A committed
+generation that was promoted over reads `process: running` and
+`draining: true`, with the readiness it had and no `contact`, until it is
+reaped, which takes up to the stop deadline (ten seconds); from then on it
+reads `stopped`. Its successor serves from the promotion on and is not in
+status until a record names it. A generation that drains and is not a
+committed member, as the one a singleton deploy replaced, is not listed: it
+is visible on the host as a worker process that still runs, and through the
+ports it still holds, since a deploy that needs them waits for it to be
+reaped.
 
 Not done yet: `tensorplate status` severity and `tensorplate doctor` do not
-judge `process` or `readiness`. A member in `serving` state whose process
-is `stopped` is still counted as healthy.
+judge `process` or `readiness`. They judge `contact`, which the agent now
+fills: a member in `serving` state reported `out_of_contact` lowers
+severity to `degraded` and is named by `doctor`. A member whose process is
+`stopped` or draining reports no `contact`, so it is still counted as
+healthy, and `doctor` says that contact is not reported for it.
 
-The slots a set of one projects carry the committed
-generations (`active.generation`, and `previous_active.generation` from the
-retained one). No production path writes a resident set yet, so these
-member fields are reached only through a state that already holds one.
+Beside a resident set the singleton slots are projections of the record. A
+set of one carries its committed generations into `active.generation` and
+`previous_active.generation`, and its committed unary endpoint into
+`active.serving_url`. They say what is committed, not what serves: after a
+promotion the registry serves a later generation on another port, and the
+projected slot does not move. No production path writes a resident set yet,
+so the member fields and these projections are reached only through a state
+that already holds one.
 
 `WorkerSupervisor` is a separate process manager that no packaged
 configuration enables; a configuration that enables `supervision` beside
