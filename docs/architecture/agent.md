@@ -476,9 +476,10 @@ previous generations, and the committed endpoint map; the singleton
 `active`, `previous_active` and `candidate` slots are absent beside it). It
 also lets a singleton record and the in-flight transaction name the
 deployment descriptor of their generation by `generation`,
-`descriptor_digest` and `configuration_digest`, all three or none; the
-agent does not write them yet
-([`integrity.md`](../bundles/integrity.md#naming-a-descriptor)). The
+`descriptor_digest` and `configuration_digest`, all three or none; no
+deploy records them yet
+([`integrity.md`](../bundles/integrity.md#naming-a-descriptor),
+[descriptor documents](#deployment-descriptor-documents)). The
 agent stamps the oldest state version whose readers decode the file without
 loss: `0.2` from the first generation it allocates, `0.1` until then. An
 agent through 0.2.x refuses a `0.2` file with its typed unsupported-version
@@ -490,6 +491,46 @@ file with any field it does not know.
 The durable state file is read only by the agent. The CLI (V01-E11) and
 observability (V01-E10) read the status the agent projects from it, and the
 deploy transaction phase names are load-bearing for both.
+
+## Deployment descriptor documents
+
+`agent/src/descriptor_store.rs` keeps the
+[deployment descriptor](../bundles/integrity.md#deployment-descriptor-digests)
+a record names as one file in the state directory, beside `state.json`:
+`descriptor-<deployment_id>-<generation>.json`. A deployment id holds only
+ASCII letters, digits, `-`, `_` and `.`, so the name is one path segment; a
+generation holds no `-`, so the last one ends the id. Nothing is created
+before the first document is written.
+
+- **Write.** Inside the state update that names the descriptor, after the
+  update has set the identity in the next state and before the store writes
+  that state: a `.tmp` file, `fsync`, `rename(2)`, then a sync of the
+  directory. A document that cannot be written fails the update. A crash
+  between the two writes leaves a document no record names.
+- **Read.** By deployment id and the identity a record or candidate
+  reference carries. The document must verify and be that deployment's
+  descriptor at that generation with those digests; a missing or different
+  one is refused with `load_failed`, not recoverable, naming the file.
+- **Prune.** `DescriptorStore::prune` removes every document that no
+  singleton record, in-flight transaction or resident-set member (with the
+  generation it retains) names, and every `.tmp` a write left; no other
+  file, and nothing when a record's identity cannot be read. It is for a
+  start, before anything writes a document. Nothing calls it yet, so the
+  document of a generation a restart replaced stays where it is.
+- **Restart stamp.** For a member whose recipe names a descriptor, the stamp
+  a `process`-mode agent installs reads the stopped generation's document,
+  [re-stamps](../bundles/integrity.md#re-stamping) it, writes the new
+  document and names it on `active` in one state update, and returns the
+  recipe naming it. It refuses, as a launch that failed, unless `active`
+  names the recipe's descriptor, the restart replaces that descriptor's
+  generation, and the descriptor describes the member's bundle, whose
+  digest the staged bundle check has just compared with the staged
+  manifest's. A descriptor is re-stamped as recorded: after a package
+  upgrade it still states the deploy's runtime version and runner
+  environment. A recipe that names no descriptor is returned unchanged.
+
+No deploy records a descriptor yet: no record names one, no document is
+written, and all of the above is inert in a deployed agent.
 
 ## Worker runtime control transport
 
@@ -513,13 +554,22 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   its launch. The first allocation moves the state file to state
   version `0.2` (see [durable state](#durable-state-store-v01-e08-f02)); startup
   recovery relaunches the recorded active deployment through the same path,
-  so it happens on the first start that has a deployment to restore.
+  so it happens on the first start that has a deployment to restore. A
+  deploy's candidate reference that names a
+  [descriptor](#deployment-descriptor-documents) hands over its generation
+  instead: the launch is that generation and takes none from the counter,
+  and a generation the registry is running is refused. A restart always
+  takes a new one, whatever its recipe names.
 - **Start.** The registry renders the serving config with
   `deployment.generation` and `deployment.endpoint` set to the deployment id,
   hands the worker its control socket on fd 0 in the same launch, and starts
   the 1 Hz ledger poll at once, before it waits for the model to load. The
   config file is named for the deployment and generation and is removed with
-  the worker; files an earlier agent process left are removed at start.
+  the worker; files an earlier agent process left are removed at start. The
+  runner profile in the config is the staged manifest's, read by `prepare`
+  and before a restart. For a candidate that names a descriptor it is the
+  descriptor's instead: `prepare` does not read the staged manifest, and
+  the document is read, once per launch, when the config is rendered.
 - **Readiness.** A candidate is warm when `/health` reports it ready for the
   deployment and its control channel has delivered a ledger. A candidate
   that exits while loading answers with its startup failure record; one
@@ -616,8 +666,10 @@ before the config is rendered, with what the stopped generation was started
 from, the generation that was last stamped or started, and the new one. The
 new generation is started from what the stamp returns, and so is the
 restart after it; a stamp that fails is a restart that could not be
-launched and counts as one. The agent installs no stamp yet, and a restart
-without one is unchanged. The registry writes no resident set.
+launched and counts as one. A `process`-mode agent installs the stamp
+described under [descriptor documents](#deployment-descriptor-documents); a
+restart in a registry without one is unchanged. The registry writes no
+resident set.
 `WorkerSupervisor` is a separate process manager that no packaged
 configuration enables; a configuration that enables `supervision` beside
 `worker.mode: process` is refused at start, since each would start its own
