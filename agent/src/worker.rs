@@ -174,8 +174,9 @@ pub trait WorkerControl: Send + Sync {
     }
 
     /// Every worker process this control holds, as it stands now: the
-    /// serving member, then the candidate, then the draining ones, oldest
-    /// first. `None` when this control does not report its processes.
+    /// serving member, then the candidate (or the one a deploy abandoned),
+    /// then the draining ones, oldest first. `None` when this control does
+    /// not report its processes.
     fn live_members(&self) -> Option<Vec<LiveMember>> {
         None
     }
@@ -218,6 +219,9 @@ pub enum MemberRole {
     Serving,
     /// Prepared by a deploy that has not promoted it.
     Candidate,
+    /// Prepared by a deploy that ended without promoting it; it runs until
+    /// the next deploy displaces it.
+    Abandoned,
     /// Asked to stop, and not reaped yet.
     Draining,
 }

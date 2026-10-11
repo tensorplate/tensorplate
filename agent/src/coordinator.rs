@@ -969,7 +969,8 @@ fn serves(serving: &ServingMember, recorded: &DeploymentSummary) -> bool {
 }
 
 /// The generation a deploy of `deployment_id` has prepared and not promoted.
-/// A candidate an earlier deploy left behind is another deployment's.
+/// A candidate an earlier deploy abandoned is not this deploy's, whatever
+/// its id.
 fn prepared_generation(live: &[LiveMember], deployment_id: &str) -> Option<u64> {
     live.iter()
         .find(|held| {

@@ -62,7 +62,14 @@ fn a_warm_that_does_not_find_the_candidate_ready_judges_nothing() {
 
     assert!(!f.warm("stt").unwrap().ready);
 
-    assert_eq!(view(&f), [loading]);
+    // A warm that gives up abandons the candidate.
+    assert_eq!(
+        view(&f),
+        [LiveMember {
+            role: MemberRole::Abandoned,
+            ..loading
+        }]
+    );
     assert_eq!(f.registry.serving_member().unwrap(), None);
 }
 
@@ -106,6 +113,35 @@ fn the_serving_member_is_listed_before_the_candidate_each_with_its_own_generatio
                 ..live("tts", 2, MemberRole::Candidate, CANDIDATE_PORT)
             },
         ]
+    );
+}
+
+#[test]
+fn a_candidate_its_deploy_abandoned_is_listed_as_abandoned_until_the_next_one_displaces_it() {
+    let f = fixture();
+    f.serve("stt");
+    f.prepare("tts").unwrap();
+    let abandoned = LiveMember {
+        ready: false,
+        ..live("tts", 2, MemberRole::Abandoned, CANDIDATE_PORT)
+    };
+
+    f.registry.abandon(&candidate("stt"));
+    assert_eq!(view(&f)[1].role, MemberRole::Candidate);
+
+    f.registry.abandon(&candidate("tts"));
+    assert_eq!(
+        view(&f),
+        [live("stt", 1, MemberRole::Serving, ACTIVE_PORT), abandoned]
+    );
+
+    f.prepare("tts").unwrap();
+    assert_eq!(
+        view(&f)[1],
+        LiveMember {
+            ready: false,
+            ..live("tts", 3, MemberRole::Candidate, CANDIDATE_PORT)
+        }
     );
 }
 

@@ -17,7 +17,7 @@ use std::time::Duration;
 use common::{vision_bundle, write_bundle, BundleSpec, Harness};
 use registry_agent::{RegistryAgent, HELD, MEMBER, PORTS, PREDECESSOR};
 use tensorplate_agent::registry::ControlContact;
-use tensorplate_agent::worker::WorkerControl;
+use tensorplate_agent::worker::{MemberRole, WorkerControl};
 use tensorplate_protocol::agent_control::{
     AgentStatus, ContactState, DeploymentSummary, MemberStatus, ProcessState, Readiness,
 };
@@ -248,6 +248,35 @@ fn a_candidate_summary_names_the_generation_being_prepared_beside_the_one_servin
     let after = status(&agent);
     assert_eq!(after.candidate, None);
     assert_eq!(after.active.expect("active").generation, Some(2));
+}
+
+#[test]
+fn a_candidate_summary_does_not_name_a_generation_an_earlier_deploy_abandoned() {
+    let h = Harness::new();
+    let agent = RegistryAgent::start(&h);
+    agent
+        .deploy("stt", &vision_bundle(h.td.path(), "stt"))
+        .expect("deploy");
+    let recorded = h.store.snapshot().expect("state").active.expect("active");
+    // A deploy records its candidate before it prepares a worker for it,
+    // and the worker of a deploy that failed runs until then.
+    let retried = staged_as("stt", &recorded);
+    agent
+        .registry
+        .prepare("tx", &retried, HELD)
+        .expect("prepare");
+    h.store.record_candidate(recorded).expect("record");
+    let candidate = |agent: &RegistryAgent| status(agent).candidate.expect("a candidate");
+    assert_eq!(candidate(&agent).generation, Some(2));
+
+    agent.registry.abandon(&retried);
+
+    assert_eq!(candidate(&agent).generation, None);
+    let live = agent.registry.live_members().expect("the registry reports");
+    assert_eq!(
+        (live[1].member.generation, live[1].role, live[1].running),
+        (2, MemberRole::Abandoned, true)
+    );
 }
 
 #[test]

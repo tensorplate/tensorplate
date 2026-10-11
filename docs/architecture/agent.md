@@ -702,10 +702,12 @@ resident set.
 ### What status reads from the registry
 
 The registry answers for every worker process it holds: the serving member,
-the candidate a deploy has prepared, and each generation it has asked to
-stop and not yet reaped. A generation that left the registry's map to be
-stopped is recorded as draining under the same lock that took it out, and
-the record is removed once its process has been reaped. A worker the
+the candidate a deploy has prepared (listed as abandoned once that deploy
+ended without promoting it, and running until the next deploy displaces
+it), and each generation it has asked to stop and not yet reaped. A
+generation that left the registry's map to be stopped is recorded as
+draining under the same lock that took it out, and the record is removed
+once its process has been reaped. A worker the
 registry is still starting is not listed until its launch has returned, and
 one it kills, for lost contact or for not becoming ready after a restart,
 is not listed while it is killed. For each one listed the registry reports
@@ -731,10 +733,12 @@ recorded active deployment: the same id, started from the same bundle. A
 worker is promoted before the record that names it is written, and the
 worker it replaces is stopped in between, so for up to the stop deadline
 (ten seconds) the member serving is not the recorded one; `active` then
-carries the new worker's URL and no generation. Both are absent while
+carries the new worker's URL and, unless the same bundle was redeployed
+under the same id, no generation. Both are absent while
 nothing serves: the worker stopped, a restart is waiting or loading, or the
 member is failed. `candidate.generation` is the generation a deploy has
-prepared and not promoted. `previous_active.generation` is absent: nothing
+prepared and not promoted; a worker an earlier deploy abandoned is not
+named. `previous_active.generation` is absent: nothing
 runs for a retained deployment, and the agent does not yet write a
 generation into a deployment record.
 

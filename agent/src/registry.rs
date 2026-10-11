@@ -1478,9 +1478,14 @@ impl WorkerControl for MemberRegistry {
 
     fn live_members(&self) -> Option<Vec<LiveMember>> {
         let mut members = self.members().ok()?;
+        let prepared = if members.candidate_abandoned {
+            MemberRole::Abandoned
+        } else {
+            MemberRole::Candidate
+        };
         let slots = [
             (members.serving, MemberRole::Serving),
-            (members.candidate, MemberRole::Candidate),
+            (members.candidate, prepared),
         ];
         let mut live: Vec<LiveMember> = slots
             .into_iter()
