@@ -1043,7 +1043,9 @@ mod tests {
 
     use super::{prepared_generation, report_process};
     use crate::worker::{LiveMember, MemberRole};
-    use tensorplate_protocol::agent_control::{MemberStatus, ProcessState, ResidentSetStatus};
+    use tensorplate_protocol::agent_control::{
+        MemberStatus, ProcessState, Readiness, ResidentSetStatus,
+    };
     use tensorplate_protocol::agent_state::decode_agent_state;
     use tensorplate_protocol::worker_control::MemberRef;
 
@@ -1084,6 +1086,18 @@ mod tests {
                 "{id} generation {generation}"
             );
         }
+    }
+
+    #[test]
+    fn a_running_process_is_ready_only_once_the_agent_judged_it_so() {
+        let mut loading = held("vision-v2", 2, MemberRole::Serving);
+        loading.ready = false;
+        let mut member = committed();
+        report_process(&mut member, &[loading]);
+        assert_eq!(
+            (member.process, member.readiness),
+            (Some(ProcessState::Running), Some(Readiness::NotReady))
+        );
     }
 
     #[test]
