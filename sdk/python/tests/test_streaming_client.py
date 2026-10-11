@@ -832,6 +832,9 @@ def test_a_finalize_waits_for_the_audio_that_is_ahead_of_it() -> None:
         async with session:
             sender = asyncio.create_task(send(session, 51, FRAME))
             await fake.until(lambda: fake.bodies().count("audio") == 50)
+            # The server can take frame 50 before the sender is back with frame 51.
+            while not (session._input_gate.locked() and session._samples_sent == 50 * 320):
+                await asyncio.sleep(0)
             finalizing = asyncio.create_task(session.finalize())
             await turns()
             await barrier(fake, session)
