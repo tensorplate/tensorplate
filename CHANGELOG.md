@@ -186,7 +186,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `cancel()` abandons the session. Events are read while the session sends:
   a session holds 16 KiB of unread events and then reads nothing more from
   the server, and one left that way for the server's output stall time ends
-  with `ResourceExhaustedError`. The open, the close and the cancel are
+  with `ResourceExhaustedError`; a `Ready` that declares no stall time is
+  refused at open. A frame that is empty or not a whole number of samples
+  is refused at once, before any wait. The open, the close and the cancel are
   bounded (`open_timeout`, `close_timeout`, `cancel_timeout`); a timeout is
   one deadline over the whole call and ends the session. A cancelled caller
   gets its cancellation and the session stays open. Closing the client ends

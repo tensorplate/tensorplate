@@ -115,6 +115,16 @@ async def turns() -> None:
         await asyncio.sleep(0)
 
 
+async def at_once(call: Coroutine[Any, Any, Any]) -> BaseException | None:
+    """What `call` raises without waiting for anything; a call that waits fails the test."""
+    attempt = asyncio.ensure_future(call)
+    await turns()
+    done = attempt.done()
+    attempt.cancel()
+    assert done, "the call waits"
+    return attempt.exception()
+
+
 async def barrier(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
     """Return once the server has taken everything the session wrote before this call.
 
@@ -261,6 +271,26 @@ def test_a_frame_outside_the_bounds_is_refused_before_it_is_sent() -> None:
         assert fake.bodies() == ["open", "audio", "finalize", "audio"]
 
     play(scenario)
+
+
+def test_a_frame_no_session_would_send_is_refused_at_once_behind_an_unanswered_finalize() -> None:
+    async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
+        async with session:
+            await session.send_audio(FRAME)
+            finalizing = asyncio.create_task(session.finalize())
+            # The answer is held back, and the Finalize holds the input gate until it comes.
+            await fake.until(lambda: "finalize" in fake.bodies())
+            assert session._input_gate.locked()
+            for data in (b"", bytes(641), bytearray()):
+                refusal = await at_once(session.send_audio(data))
+                assert isinstance(refusal, ValueError)
+                assert "whole, non-zero number of samples" in str(refusal)
+            assert isinstance(await at_once(session.send_audio(7)), TypeError)  # type: ignore[arg-type]
+            fake.final()
+            await finalizing
+        assert fake.bodies() == ["open", "audio", "finalize"]
+
+    play(scenario, StreamServer(hold_finals=True))
 
 
 def test_closing_ends_the_open_utterance_and_iteration_ends_with_the_session() -> None:
@@ -1120,20 +1150,14 @@ def test_the_stall_timer_runs_only_while_the_reader_is_held_by_unread_events() -
     play(scenario, StreamServer(output_stall_timeout_ms=8000, heartbeat_interval_ms=0))
 
 
-def test_a_ready_without_a_stall_time_means_no_stall_timer() -> None:
+def test_a_ready_without_a_stall_time_is_refused_at_open() -> None:
     async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
-        await session.open()
-        assert session.limits.output_stall_timeout_ms == 0
-        assert await fill(fake, session) == [None] * 17
-        with stopped_clock() as advance:
-            await advance(20.0)
-            assert not session._ended
-            await anext(session)
-            await advance(10.0)
-            assert not session._ended
-        await session.cancel()
+        with pytest.raises(speech.StreamProtocolError, match="no output stall time") as caught:
+            await session.open()
+        assert caught.value.admitted is None
+        await fake.until(lambda: fake.live == 0)
 
-    play(scenario, StreamServer(output_stall_timeout_ms=0, heartbeat_interval_ms=0))
+    play(scenario, StreamServer(output_stall_timeout_ms=0))
 
 
 def test_a_sender_waiting_for_credit_raises_the_cause_the_server_ends_the_session_with() -> None:

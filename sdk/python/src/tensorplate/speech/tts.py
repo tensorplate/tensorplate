@@ -118,34 +118,40 @@ class TextToSpeechSession(Session[TextToSpeechEvent]):
         """Send one complete text segment and return its id.
 
         The id is the ``segment_id`` of the segment's ``AudioChunk`` and
-        ``SegmentCompleted`` events; ids grow by one from 1. Waits until
-        the session's input credit admits the segment: its bytes, and a
-        place among the segments whose synthesis has not started. Also
-        waits until a ``finalize()`` still unanswered has its answer. Both
-        come from the server behind the audio it sent first, so events
-        must be read meanwhile; when the session ends first, this raises
-        its error.
+        ``SegmentCompleted`` events; ids grow by one from 1.
 
-        Raises ``ValueError`` and sends nothing for text that is empty or
-        only whitespace, text above ``limits.text_to_speech``'s bound on
+        Raises ``TypeError`` for text that is not a ``str``, and
+        ``ValueError`` for text that is empty, only whitespace or not
+        encodable as UTF-8 and for a `turn_id` that is not at most 64
+        printable ASCII characters. These are raised at once, before any
+        wait and whatever the state of the session.
+
+        Waits until the session's input credit admits the segment: its
+        bytes, and a place among the segments whose synthesis has not
+        started. Also waits until a ``finalize()`` still unanswered has its
+        answer. Both come from the server behind the audio it sent first,
+        so events must be read meanwhile; when the session ends first, this
+        raises its error. After those waits, raises ``ValueError`` and
+        sends nothing for text above ``limits.text_to_speech``'s bound on
         one segment or on the segments between two ``finalize()`` calls
-        (both in bytes of UTF-8), and a `turn_id` that is not at most 64
-        printable ASCII characters. Raises ``TypeError`` for text that is
-        not a ``str``.
+        (both in bytes of UTF-8), and for a segment larger than the
+        session's whole input credit.
         """
         if not isinstance(text, str):
             raise TypeError(f"text is a str, not {type(text).__name__}")
-        return await self._within(self._send_segment(text, turn_id), None)
+        size = len(text.encode())
+        if not text.strip():
+            raise ValueError("a text segment holds text that is not only whitespace")
+        if len(turn_id) > 64 or not (turn_id.isascii() and turn_id.isprintable()):
+            raise ValueError("a turn id is at most 64 printable ASCII characters")
+        return await self._within(self._send_segment(text, turn_id, size), None)
 
-    async def _send_segment(self, text: str, turn_id: str) -> int:
+    async def _send_segment(self, text: str, turn_id: str, size: int) -> int:
         async with self._input_gate:
             self._check_sending()
             # Text sent before a Finalize's answer is refused by the server.
             await self._until(lambda: self._finalizing is None)
             limits = self._opened().limits.text_to_speech
-            size = len(text.encode())
-            if not text.strip():
-                raise ValueError("a text segment holds text that is not only whitespace")
             if size > limits.max_segment_text_bytes:
                 raise ValueError(
                     f"a text segment holds at most {limits.max_segment_text_bytes} bytes of UTF-8"
@@ -155,8 +161,6 @@ class TextToSpeechSession(Session[TextToSpeechEvent]):
                     f"the segments between two finalize() calls hold at most "
                     f"{limits.max_synthesis_text_bytes} bytes of UTF-8 together"
                 )
-            if len(turn_id) > 64 or not (turn_id.isascii() and turn_id.isprintable()):
-                raise ValueError("a turn id is at most 64 printable ASCII characters")
             if size > self._credit_limit:
                 raise ValueError("the segment is larger than the session's input credit")
             await self._until(lambda: self._fits(size))

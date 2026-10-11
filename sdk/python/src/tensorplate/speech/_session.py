@@ -618,7 +618,7 @@ class Session(Generic[EventT]):
 
     async def _hold(self, item: EventT, size: int, audio: bool) -> None:
         """Keep `item` for the caller, waiting for room no longer than the server would."""
-        patience = self._opened().limits.output_stall_timeout_ms / 1000 or None
+        patience = self._opened().limits.output_stall_timeout_ms / 1000
         try:
             await self._events.put(item, size, patience, audio=audio)
         except asyncio.TimeoutError:
@@ -638,6 +638,9 @@ class Session(Generic[EventT]):
         ):
             raise self._violation("Ready names another generation or descriptor")
         self._take_credit(ready.status.input_credit)
+        # Without it nothing would end a session whose events nobody reads.
+        if not ready.limits.output_stall_timeout_ms:
+            raise self._violation("Ready declares no output stall time")
         self._check_ready(ready)
         self._session_id, self._ready = ready.session_id, ready
         # No interval means that the server expects no Ping.

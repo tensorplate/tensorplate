@@ -27,7 +27,7 @@ from stream_server import REPOSITORY, Playback, StreamServer, frames, recorded
 from tensorplate.speech import tts
 from tensorplate.speech._buffer import EventBuffer
 from tensorplate.stream.v1 import session_pb2 as pb
-from test_streaming_client import run, turns
+from test_streaming_client import at_once, run, turns
 
 TARGET = speech.Target("synthetic-deployment", 7, "sha256:" + "0" * 64)
 PCM = speech.AudioFormat("pcm_s16le", 24000)
@@ -237,6 +237,7 @@ _SECOND_UNFINISHED: Edit = ("tts_segment_2", "", LEFT_OUT)
         ("no text bounds", [("tts_ready", _BOUNDS, None)]),
         ("no text bounds", [("tts_ready", f"{_BOUNDS}.max_segment_text_bytes", 0)]),
         ("no text bounds", [("tts_ready", f"{_BOUNDS}.max_synthesis_text_bytes", 0)]),
+        ("no output stall time", [("tts_ready", "ready.limits.output_stall_timeout_ms", 0)]),
         ("no output format", [("tts_ready", _READY, None)]),
         ("no output format", [("tts_ready", f"{_READY}.encoding", 7)]),
         ("no output format", [("tts_ready", f"{_READY}.sample_rate_hz", 0)]),
@@ -357,6 +358,31 @@ def test_a_segment_is_refused_before_it_is_sent_when_the_server_would_refuse_it(
         ]
 
     play(scenario, StreamServer(max_synthesis_text_bytes=700))
+
+
+def test_text_no_session_would_send_is_refused_at_once_behind_an_unanswered_finalize() -> None:
+    async def scenario(fake: StreamServer, session: speech.TextToSpeechSession) -> None:
+        async with session:
+            reader = asyncio.create_task(taken(session))
+            await session.send_text(TEXT)
+            finalizing = asyncio.create_task(session.finalize())
+            # The answer is held back, and the Finalize holds the input gate until it comes.
+            await fake.until(lambda: "finalize" in fake.bodies())
+            assert session._input_gate.locked()
+            for text in ("", " \t\n", chr(0xD800)):
+                assert isinstance(await at_once(session.send_text(text)), ValueError)
+            refusal = await at_once(session.send_text(TEXT, turn_id="turn\n"))
+            assert isinstance(refusal, ValueError)
+            assert "turn id" in str(refusal)
+            assert isinstance(await at_once(session.send_text(7)), TypeError)  # type: ignore[arg-type]
+            fake.start()
+            fake.speak(480)
+            fake.complete()
+            assert (await finalizing).segment_count == 1
+        await reader
+        assert fake.bodies() == ["open", "text_segment", "finalize"]
+
+    play(scenario, StreamServer(hold_synthesis=True))
 
 
 def test_a_segment_larger_than_the_byte_credit_is_refused_before_it_is_sent() -> None:

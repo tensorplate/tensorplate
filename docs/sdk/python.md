@@ -335,9 +335,11 @@ async def show_partials(session: SpeechToTextSession) -> None:
   each event taken, and never runs for a caller that has nothing to read.
   It can end a session before the server's timer would, since the server's
   clock stops once its output is delivered, and the transport's window
-  takes that output before the session reads it. A server that gives no
-  stall time turns the timer off. The iteration ends when the session
-  does, and raises the session's error if it failed.
+  takes that output before the session reads it. A `Ready` that gives no
+  stall time is refused at open with `StreamProtocolError`, since the schema
+  allows no limit of zero and nothing else ends a session whose events
+  nobody reads. The iteration ends when the session does, and raises the
+  session's error if it failed.
 - **Endpoint and target.** `SpeechClient(endpoint)` takes the `host:port` of
   the worker's stream endpoint, on loopback or forwarded to it, and opens one
   cleartext channel, which it closes with itself; create it inside a running
@@ -380,9 +382,12 @@ async def show_partials(session: SpeechToTextSession) -> None:
   `memoryview` of one), which is copied once. Anything else raises
   `TypeError` before anything is sent: an integer, a list, and a view of
   items other than bytes, which `memoryview.cast("B")` turns into one of
-  bytes. The client takes its credit from the
-  server's messages only, never from time. A frame outside the session's
-  frame bounds raises `ValueError` before anything is sent; a frame shorter
+  bytes. A frame that is empty or not a whole number of samples raises
+  `ValueError`. Both are raised at once, before any wait and whatever the
+  state of the session. The client takes its credit from the
+  server's messages only, never from time. Once the frame's turn has come,
+  a frame longer than the session's frame bound or larger than its whole
+  input credit raises `ValueError` before anything is sent; a frame shorter
   than the least one is allowed only as the last before `finalize()` or
   `close()`.
 - **Events.** Iterating a session (`async for event in session`) yields
@@ -536,12 +541,15 @@ async def play_audio(
   credit does not admit the segment. That credit has two budgets, bytes of
   text and segments whose synthesis has not started (the worker lets two
   wait), and both return as a segment's synthesis starts, which the server
-  reports behind the audio it sent first. Text that is empty or only whitespace, text above a bound
-  of `session.limits.text_to_speech` (`max_segment_text_bytes` for one
-  segment, `max_synthesis_text_bytes` for the segments between two
-  `finalize()` calls, both in bytes of UTF-8) and a `turn_id` that is not at
-  most 64 printable ASCII characters raise `ValueError` before anything is
-  sent; text that is not a `str` raises `TypeError`.
+  reports behind the audio it sent first. Text that is not a `str` raises
+  `TypeError`; text that is empty, only whitespace or not encodable as
+  UTF-8, and a `turn_id` that is not at most 64 printable ASCII characters,
+  raise `ValueError`. Those are raised at once, before any wait and
+  whatever the state of the session. Once the segment's turn has come, text
+  above a bound of `session.limits.text_to_speech` (`max_segment_text_bytes`
+  for one segment, `max_synthesis_text_bytes` for the segments between two
+  `finalize()` calls, both in bytes of UTF-8) and a segment larger than the
+  session's whole input credit raise `ValueError` before anything is sent.
 - **Events.** Iterating the session yields each segment's `AudioChunk`
   events and then its `SegmentCompleted`, segment after segment in the order
   sent, and a `SynthesisCompleted` for each `finalize()`. A chunk carries
