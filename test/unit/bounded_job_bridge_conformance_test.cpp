@@ -47,20 +47,38 @@ std::unique_ptr<BufferManager> make_buffers(std::size_t capacity_bytes = 16U << 
 
 class FixtureBridgeUnderTest final : public BridgeUnderTest {
  public:
+  /// @param holds  false for a binding that cannot hold its backend's jobs.
+  explicit FixtureBridgeUnderTest(FixtureJobBridgeOptions options, bool holds = true)
+      : options_(options), holds_(holds) {}
   ~FixtureBridgeUnderTest() override {
     bridge_.unload();
     EXPECT_TRUE(bridge_.refusals().empty());
   }
 
+  // With late cancels it states nothing more than its hold and the class it
+  // refuses: one binding that the cases must pass on the header alone.
+  Choices choices() const override {
+    Choices stated{.holds_started_jobs = holds_, .refuses_vad_frames = true};
+    if (!options_.cancels_arrive_late) {
+      stated.runs_one_job_at_a_time = true;
+      stated.ends_a_waiting_job_at_its_cancel = true;
+      stated.fails_a_held_job_that_was_cancelled = true;
+      stated.open_jobs = 1 + FixtureJobBridge::kWaitingJobs;
+    }
+    return stated;
+  }
   BoundedJobBridge& bridge() override { return bridge_; }
   BufferManager& buffers() override { return *buffers_; }
   void prime() override { bridge_.prime(); }
   void unload() override { bridge_.unload(); }
   void lose_backend() override { bridge_.lose_backend(); }
-  void hold_jobs() override { bridge_.hold_jobs(); }
+  void hold_jobs() override {
+    if (holds_) {
+      bridge_.hold_jobs();
+    }
+  }
   void release_jobs() override { bridge_.release_jobs(); }
   bool settled(std::chrono::milliseconds patience) override { return bridge_.settled(patience); }
-  std::size_t waiting_jobs() const override { return FixtureJobBridge::kWaitingJobs; }
   TranscriptResult transcript(const JobRequest& request) const override {
     return fixture_transcript(std::get<AudioFrames>(request.payload()));
   }
@@ -70,9 +88,16 @@ class FixtureBridgeUnderTest final : public BridgeUnderTest {
   }
 
  private:
+  const FixtureJobBridgeOptions options_;
+  const bool holds_;
   std::unique_ptr<BufferManager> buffers_ = make_buffers();
-  FixtureJobBridge bridge_{*buffers_};
+  FixtureJobBridge bridge_{*buffers_, fixture_job_result, options_};
 };
+
+BridgeCase fixture_case(std::string name, FixtureJobBridgeOptions options, bool holds = true) {
+  return {std::move(name),
+          [options, holds] { return std::make_unique<FixtureBridgeUnderTest>(options, holds); }};
+}
 
 // The depth of the runner's job queue (GPU_LANE_QUEUE_DEPTH in jobs.py).
 static_assert(FixtureJobBridge::kWaitingJobs == 8);
@@ -595,9 +620,15 @@ TEST(InsideABridgeCall, CountsTheCallsOfItsOwnThreadOnly) {
 
 }  // namespace
 
-INSTANTIATE_TEST_SUITE_P(Bridges, BoundedJobBridgeConformance,
-                         ::testing::Values(BridgeCase{
-                             "fixture", [] { return std::make_unique<FixtureBridgeUnderTest>(); }}),
-                         [](const auto& bridge_case) { return bridge_case.param.name; });
+// The fixture with each of its options, so that both outcomes the header
+// allows pass the same cases, and once without its hold.
+INSTANTIATE_TEST_SUITE_P(
+    Bridges, BoundedJobBridgeConformance,
+    ::testing::Values(fixture_case("fixture", {}),
+                      fixture_case("fixture_refusing_at_capacity",
+                                   {.submit_refuses_at_capacity = true}),
+                      fixture_case("fixture_with_late_cancels", {.cancels_arrive_late = true}),
+                      fixture_case("fixture_without_a_hold", {}, /*holds=*/false)),
+    [](const auto& bridge_case) { return bridge_case.param.name; });
 
 }  // namespace tensorplate::testing
