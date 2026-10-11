@@ -286,7 +286,100 @@ sixteen names, known or not. `test/unit/job_wire_test.cpp` replays every golden
 file it finds beside the Rust replay and all four sections of the vectors
 through it; the six vectors the socket cannot carry (an in-process buffer
 handle, ill-formed UTF-8, a non-finite probability) are listed there by
-name. The adapter does not send or read these messages on a socket yet.
+name.
+
+### The job channel in the C++ adapter
+
+`runtime/src/adapters/python_pytorch/job_channel.{hpp,cpp}` carries those
+messages on one sidecar connection. It is internal, and nothing starts it
+yet: the session still makes its synchronous exchange on the socket, and the
+change that enables `speech_jobs_v1` on a load hands the socket over to the
+channel.
+
+- **Two threads own the socket.** A reader reads one frame at a time, routes
+  it and calls the `JobEventSink`; while the connection lives nothing else
+  calls the sink. A writer sends whole frames in the order they were queued
+  and is the only thread that writes. `submit`, `cancel`, `release_session`
+  and the unary `exchange` only queue, so a sink callback may call the first
+  three while the reader keeps reading. The sidecar needs that of its peer:
+  it writes a job message under the lock its own reader takes to act on one,
+  and ends a connection on which its write makes no progress for five
+  seconds.
+- **Everything queued is bounded.** The channel holds at most 16 unreleased
+  jobs and 64 sessions whose release is unacknowledged; one more is refused
+  with `resource_exhausted` (`job_capacity_exhausted`,
+  `session_release_capacity_exhausted`). The queue the writer drains holds at
+  most 97 frames, which is room for a submit and a cancel for each job, a
+  release for each session and one unary request; a caller that finds it
+  full is refused with `resource_exhausted` (`send_queue_full`), and no
+  caller waits for room. The queue has its own count because a frame can
+  outlive what it was queued for: a cancel whose job the sidecar released
+  first, the request of an exchange that timed out.
+  The `message_id` of a job's submit and cancel is kept until the job is
+  released, because the sidecar's `error_event` names only that id. The last
+  1,024 acknowledged sessions are remembered: the sidecar forgets a session
+  it released and would answer a repeated `session_release` again, so a
+  repeat for a remembered session is not sent. That memory is the whole of
+  the channel's "once per session". After 1,024 later acknowledgements the
+  channel has forgotten the session as well and takes its key as a new
+  session's: a repeated release is sent, answered and delivered to the sink
+  again, and a job submitted for it is taken. Holding "at most once" beyond
+  that is the caller's, which knows its sessions.
+- **Each frame goes one way.** A job event is checked by its job's
+  `JobEventSequence` and delivered; one the check refuses fails the job with
+  the refusal in its place when the job has no terminal event yet, and a
+  release the sidecar did report still follows. A fault the codec raises
+  fails the job it names the same way. A refusal that names a job's submit
+  ends the job and releases it at once, since the sidecar never took it. A
+  `session_released` is acknowledged to the sink once the session's last job
+  is released. Anything about a job or session the channel does not hold, or
+  that follows a job's terminal event, is dropped and counted, and a chunk
+  no delivered event carries is released. A frame that is not a job message
+  goes to the waiting exchange; so does an `error_event` naming that
+  exchange's request. The exchange does not match a response to its request,
+  so a caller whose exchange timed out stops the channel before the next
+  one. An unreadable header ends the connection. A sidecar whose jobs an
+  unload has closed refuses a `session_release`; the refusal is counted and
+  the release stays pending until `stop` acknowledges it.
+- **A connection ends once.** End of file, a read error, an unreadable
+  header, a write that fails or takes longer than the write bound, and
+  `stop` all lead the reader out of its loop, where it fails every job that
+  has no terminal event with `unavailable` and `backend_reset`, or with the
+  reason `stop` was given. A writer whose write failed shuts the socket down
+  and leaves, which is what wakes the reader, and its error is then the
+  connection's. A reader that ends the connection itself shuts the socket
+  down too, so a sidecar that is still running reads end of file and a
+  writer inside a frame is woken. `stop` wakes both threads with
+  `shutdown(2)` on the socket's descriptor (the reader out of its wait, the
+  writer out of a write the sidecar is not taking; a writer that waits for a
+  frame is woken by the reader as it leaves), joins the reader, then the
+  writer, and drops what was still queued: the jobs behind those frames
+  have just been failed, and an exchange that ended gets the connection's
+  error. A job is released, and a pending session release acknowledged, only
+  after the caller's reap of the sidecar process has returned.
+
+`test/unit/job_channel_test.cpp` drives it against
+`test/mocks/scripted_sidecar.hpp`, a sidecar played by a thread that keeps
+the runner's rules itself (what a load refuses, what an `error_event`
+answers, the one lock around job messages, the eight-job queue, the write
+stall). Of a submit's input it checks the type and that `payload_length` is
+the payload's length, and it keeps the payload, so a test reads the bytes
+the channel sent; it does not bound the unary requests that wait, and it
+writes a unary answer under its job lock where the runner writes it
+outside. It reports a frame of the adapter's as seen only once it has acted
+on it, a test that plays a message for a job it does not hold fails there,
+and `stop_reading` returns only once its reader has parked: a test that
+waits for "sent" knows the job is admitted, and one that stops the reading
+knows nothing more is read. Both ends' socket buffers are set smaller than
+the largest frame, whatever the host's default. Six golden
+files are replayed whole: the channel writes the recorded adapter frames,
+the scripted sidecar writes the recorded answers, and the sink receives what
+the codec reads from them. `test/integration/job_channel_runner_test.cpp`
+runs the channel against the in-tree runner and its fixture backend. Nothing
+on the wire says that a job is running (`job_accepted` is admission), so
+those tests never assume it: the first job submitted is "held, with no
+terminal event", whether the runner has started it or not, and later jobs
+wait behind it.
 
 ### Job messages in the Python sidecar
 

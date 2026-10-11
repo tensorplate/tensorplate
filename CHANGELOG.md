@@ -165,6 +165,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   frames and the job seam's vectors are replayed through it. The adapter
   does not exchange these messages with a sidecar yet. Additive inside
   protocol 0.1; version constants unchanged. (V030-E04-F03-T01)
+- A job channel for the Python/PyTorch adapter
+  (`runtime/src/adapters/python_pytorch/job_channel.{hpp,cpp}`, internal):
+  one reader thread and one writer thread on a sidecar connection, a bounded
+  table of unreleased jobs that delivers their events to a `JobEventSink`,
+  and a slot for the unary exchange. Submit, cancel and session release only
+  queue, so the adapter keeps reading while it writes; the queue is bounded,
+  and a caller that finds it full is refused, not made to wait. Every way a
+  connection ends fails the open jobs with a typed reason, and they are
+  released only once the sidecar process has been reaped. Nothing starts the
+  channel yet: the session's load does not enable `speech_jobs_v1`.
+  (V030-E04-F03-T01)
 - A measurement client for the streaming path,
   `tools/validation/slice_measure.py`. It runs paced speech-to-text sessions
   and text-to-speech segments over the stream session envelope and takes a

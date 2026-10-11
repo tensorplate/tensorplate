@@ -19,8 +19,6 @@ TEST(JobWire, FeatureFlagDisabled) {
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
-#include <fstream>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -39,45 +37,13 @@ TEST(JobWire, FeatureFlagDisabled) {
 #include "tensorplate/ipc/sidecar_codec.hpp"
 
 #include "job_seam_vectors.hpp"
+#include "speech_job_golden.hpp"
 
 namespace tensorplate::adapters::python_pytorch {
 namespace {
 
-using namespace tensorplate::testing::job_seam;  // NOLINT(google-build-using-namespace)
-
-const std::string kGoldenDirectory = std::string{TP_SOURCE_DIR} + "/protocol/rust/tests/fixtures/";
-const std::string kGoldenPrefix = "python_pytorch_ipc_speech_jobs_";
-const std::string kGoldenSuffix = ".jsonl";
-
-// Every golden file on disk, by the part of its name that tells them apart.
-std::vector<std::string> golden_files() {
-  std::vector<std::string> names;
-  for (const auto& entry : std::filesystem::directory_iterator(kGoldenDirectory)) {
-    const std::string file = entry.path().filename().string();
-    if (file.starts_with(kGoldenPrefix) && file.ends_with(kGoldenSuffix)) {
-      names.push_back(file.substr(kGoldenPrefix.size(),
-                                  file.size() - kGoldenPrefix.size() - kGoldenSuffix.size()));
-    }
-  }
-  std::sort(names.begin(), names.end());
-  return names;
-}
-
-std::vector<Json> golden(const std::string& name) {
-  std::ifstream in(kGoldenDirectory + kGoldenPrefix + name + kGoldenSuffix);
-  EXPECT_TRUE(in.is_open()) << name;
-  std::vector<Json> lines;
-  for (std::string line; std::getline(in, line);) {
-    lines.push_back(Json::parse(line));
-  }
-  return lines;
-}
-
-bool sent_by_adapter(const Json& line) {
-  const auto kind = line.at("kind").get<std::string>();
-  return kind == "job_submit" || kind == "job_cancel" || kind == "session_release" ||
-         kind == "load_model";
-}
+using namespace tensorplate::testing::job_seam;       // NOLINT(google-build-using-namespace)
+using namespace tensorplate::testing::speech_golden;  // NOLINT(google-build-using-namespace)
 
 // -- Test-side renderings of the wire. ------------------------------------------
 

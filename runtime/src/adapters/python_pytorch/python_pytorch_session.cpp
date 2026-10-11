@@ -4,7 +4,6 @@
 
 #include "python_pytorch_session.hpp"
 
-#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -39,6 +38,7 @@
 #include "tensorplate/ipc/unix_socket.hpp"
 
 #include "runner_profile.hpp"
+#include "sidecar_frame_io.hpp"
 #include "sidecar_process.hpp"
 
 namespace tensorplate::adapters::python_pytorch {
@@ -65,15 +65,6 @@ constexpr std::string_view kKindUnloadResponse = "unload_response";
 constexpr std::string_view kKindHealthCheck = "health_check";
 constexpr std::string_view kKindHealthCheckResponse = "health_check_response";
 constexpr std::string_view kKindReadyEvent = "ready_event";
-
-std::atomic<std::uint64_t>& message_seq() noexcept {
-  static std::atomic<std::uint64_t> seq{0};
-  return seq;
-}
-
-std::string next_message_id() {
-  return "tp-msg-" + std::to_string(message_seq().fetch_add(1, std::memory_order_relaxed));
-}
 
 std::string configured_python_exe() {
   for (const char* name :
@@ -153,51 +144,6 @@ ipc::UnixSocket::TimePoint clamped_deadline(const InferRequest& req,
     return dl < fallback ? dl : fallback;
   }
   return fallback;
-}
-
-[[nodiscard]] Result<void> write_frame(ipc::UnixSocket& sock, const ipc::SidecarFrame& frame,
-                                       ipc::UnixSocket::TimePoint deadline) {
-  auto enc = ipc::encode_frame(frame);
-  if (!enc.has_value()) {
-    return unexpected(enc.error());
-  }
-  return sock.write_all(std::span<const std::byte>(enc.value()), deadline);
-}
-
-[[nodiscard]] Result<ipc::SidecarFrame> read_frame(ipc::UnixSocket& sock,
-                                                   ipc::UnixSocket::TimePoint deadline) {
-  std::vector<std::byte> buf(16);
-  if (auto r = sock.read_exact(std::span<std::byte>(buf.data(), buf.size()), deadline);
-      !r.has_value()) {
-    return unexpected(r.error());
-  }
-  const auto* p = buf.data();
-  auto u32 = [&](std::size_t off) {
-    return (static_cast<std::uint32_t>(p[off]) << 24) |
-           (static_cast<std::uint32_t>(p[off + 1]) << 16) |
-           (static_cast<std::uint32_t>(p[off + 2]) << 8) | static_cast<std::uint32_t>(p[off + 3]);
-  };
-  if (u32(0) != ipc::kFrameMagic) {
-    return unexpected(Error::Code::InferenceFailed, "sidecar frame magic mismatch");
-  }
-  if (u32(4) != ipc::kProtocolWireVersion) {
-    return unexpected(Error::Code::InferenceFailed,
-                      "sidecar wire version " + std::to_string(u32(4)) + " unsupported");
-  }
-  const std::uint32_t hdr_len = u32(8);
-  const std::uint32_t pld_len = u32(12);
-  if (hdr_len > ipc::kMaxHeaderLen || pld_len > ipc::kMaxPayloadLen) {
-    return unexpected(Error::Code::InferenceFailed, "sidecar frame size exceeds limit");
-  }
-  buf.resize(16 + hdr_len + pld_len);
-  if (hdr_len + pld_len > 0) {
-    if (auto r =
-            sock.read_exact(std::span<std::byte>(buf.data() + 16, hdr_len + pld_len), deadline);
-        !r.has_value()) {
-      return unexpected(r.error());
-    }
-  }
-  return ipc::decode_frame(buf, nullptr);
 }
 
 [[nodiscard]] Error error_from_response(const json& header, Error::Code default_code) {
