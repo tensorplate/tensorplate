@@ -139,8 +139,9 @@ class JobChannel {
   /// declared `job_classes`. The socket stays the caller's and must outlive
   /// stop(). Jobs are refused until admit_jobs().
   ///
-  /// @return Error::Code::Internal when the channel is already started, or
-  ///   with "job_channel_thread_unavailable" when a thread cannot be created.
+  /// @return Error::Code::Internal when the channel is already started, with
+  ///   "socket_closed" when `socket` is not open, or with
+  ///   "job_channel_thread_unavailable" when a thread cannot be created.
   [[nodiscard]] Result<void> start(ipc::UnixSocket& socket,
                                    const std::vector<JobClass>& job_classes);
 

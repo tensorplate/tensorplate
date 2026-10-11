@@ -112,6 +112,10 @@ Result<void> JobChannel::start(ipc::UnixSocket& socket, const std::vector<JobCla
   if (phase_ != Phase::Idle && phase_ != Phase::Stopped) {
     return unexpected(Error::Code::Internal, "job channel already started");
   }
+  // A reader on no descriptor waits for ever and stop() could not wake it.
+  if (!socket.is_open()) {
+    return refuse(Error::Code::Internal, "socket_closed");
+  }
   job_classes_.clear();
   for (const JobClass job_class : job_classes) {
     if (job_class == JobClass::SttDecode || job_class == JobClass::TtsSynthesis) {

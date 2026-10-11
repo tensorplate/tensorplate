@@ -34,6 +34,7 @@ TEST(JobChannel, FeatureFlagDisabled) {
 #include "tensorplate/core/job_request.hpp"
 #include "tensorplate/core/job_result.hpp"
 #include "tensorplate/ipc/sidecar_codec.hpp"
+#include "tensorplate/ipc/unix_socket.hpp"
 
 #include "adapters/python_pytorch/job_wire.hpp"
 #include "job_channel_harness.hpp"
@@ -347,6 +348,18 @@ TEST(JobChannelAdmission, StoppingAChannelThatNeverStartedOnlyReaps) {
   EXPECT_TRUE(reaped);
   h.channel.stop(kSessionUnloaded, {});  // and with nothing to call, does nothing
   expect_refused(h.channel.submit(h.stt(1, 1)), Error::Code::NotReady, "backend_not_ready");
+}
+
+TEST(JobChannelAdmission, AClosedSocketIsRefusedAtTheStart) {
+  JobChannelHarness h;
+  ipc::UnixSocket closed;
+  expect_refused(h.channel.start(closed, {JobClass::SttDecode}), Error::Code::Internal,
+                 "socket_closed");
+  // Nothing was started, so this stop has no thread to wait for.
+  bool reaped = false;
+  h.channel.stop(kSessionUnloaded, [&] { reaped = true; });
+  EXPECT_TRUE(reaped);
+  EXPECT_EQ(h.unary("prime").error().code, Error::Code::NotReady);
 }
 
 TEST(JobChannelAdmission, WithoutABufferManagerEveryJobIsRefused) {
