@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+import contextlib
 import dataclasses
 import gc
 import inspect
@@ -86,10 +87,10 @@ def play(scenario: Scenario, server: StreamServer | None = None, **options: Any)
     return run(main)
 
 
-def deaf() -> StreamServer:
+def deaf(fault: str = "deaf") -> StreamServer:
     """A server that reads nothing after the Open until `hear()`, serving STEREO."""
     return StreamServer(
-        fault="deaf", formats=((pb.AUDIO_ENCODING_PCM_S16LE, 48000, 2),), max_frame_ms=320
+        fault=fault, formats=((pb.AUDIO_ENCODING_PCM_S16LE, 48000, 2),), max_frame_ms=320
     )
 
 
@@ -115,10 +116,15 @@ async def turns() -> None:
 
 
 async def barrier(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
-    """Return once the server has taken everything the session wrote before this call."""
+    """Return once the server has taken everything the session wrote before this call.
+
+    Also once the server's session has ended, so that a test fails on what
+    the server took and not on a wait.
+    """
     pings = fake.bodies().count("ping")
-    await session._send(pb.ClientEvent(ping=pb.Ping()))
-    await fake.until(lambda: fake.bodies().count("ping") > pings)
+    with contextlib.suppress(speech.SpeechError):
+        await session._send(pb.ClientEvent(ping=pb.Ping()))
+    await fake.until(lambda: fake.bodies().count("ping") > pings or not fake.live)
 
 
 async def held_writer(session: speech.SpeechToTextSession) -> asyncio.Task[None]:
@@ -136,6 +142,58 @@ async def flood(fake: StreamServer, session: speech.SpeechToTextSession) -> None
         fake.partial("x" * 1000)
     # Sixteen fit; the reader holds the seventeenth, which is its eighteenth event.
     while session._received < 18:
+        await asyncio.sleep(0)
+
+
+@contextlib.contextmanager
+def stopped_clock() -> Iterator[Callable[[float], Awaitable[None]]]:
+    """Stop the running loop's clock; the function given moves it on and lets due timers run.
+
+    Nothing inside the block may wait for the server: the bound of `run` is on this clock.
+    """
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+
+    async def advance(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+        await turns()
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(loop, "time", lambda: now)
+        yield advance
+
+
+async def fill(fake: StreamServer, session: speech.SpeechToTextSession) -> list[float | None]:
+    """Have the session hold sixteen 1 KiB events, with its reader held on one of 3 KiB.
+
+    Returns how long the session let each of the seventeen wait for room.
+    """
+    waits: list[float | None] = []
+    put = session._events.put
+
+    async def spy(item: Any, size: int, patience: float | None = None) -> None:
+        waits.append(patience)
+        await put(item, size, patience)
+
+    session._events.put = spy  # type: ignore[method-assign]
+    for size in (*[1000] * 16, 3000):
+        fake.partial("x" * size)
+    while session._received < 18:
+        await asyncio.sleep(0)
+    return waits
+
+
+async def finish(session: speech.SpeechToTextSession) -> None:
+    """Have gRPC finish a call that a refused write ended with messages still unread.
+
+    gRPC keeps such a call until its channel goes, and its end would then
+    reach an event loop that has closed. Reading the messages lets the
+    server's status arrive, in place of the INTERNAL the refused write left.
+    """
+    while await session._call._cython_call.receive_serialized_message() is not grpc.aio.EOF:
+        pass
+    while await session._call.code() is grpc.StatusCode.INTERNAL:
         await asyncio.sleep(0)
 
 
@@ -323,6 +381,107 @@ def test_a_session_the_server_ends_raises_its_cause_from_every_pending_call(
         assert fake.calls == 1
 
     play(scenario, StreamServer(hold_finals=True))
+
+
+@pytest.mark.parametrize(
+    ("reason", "error", "code"),
+    [
+        ("invalid_event", speech.InvalidEventError, ErrorCode.CONFIG_INVALID),
+        ("target_unresolved", speech.PreconditionFailedError, ErrorCode.UNSUPPORTED),
+        ("slow_consumer", speech.ResourceExhaustedError, ErrorCode.RESOURCE_EXHAUSTED),
+        ("idle_timeout", speech.SessionTimeoutError, ErrorCode.TIMEOUT),
+        ("worker_shutdown", speech.ServiceUnavailableError, ErrorCode.UNAVAILABLE),
+        ("client_cancelled", speech.SessionCancelledError, ErrorCode.CANCELLED),
+        # One of the few reasons whose status, FAILED_PRECONDITION, is not its code's.
+        ("illegal_transition", speech.ServiceUnavailableError, ErrorCode.NOT_READY),
+    ],
+)
+def test_a_write_that_races_the_end_of_the_call_raises_the_class_of_the_cause(
+    reason: str, error: type[speech.SpeechError], code: ErrorCode, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
+        await session.open()
+        read = session._call.read
+
+        async def read_once_the_call_has_a_status() -> Any:
+            # The server's status is withheld, so the first the call has is the failed write's.
+            if session._closed is not None:
+                await session._call.code()
+            return await read()
+
+        monkeypatch.setattr(session._call, "read", read_once_the_call_has_a_status)
+        reader = asyncio.create_task(taken(session))
+        # The server ends the session while the transport holds the second frame. gRPC
+        # lets that write return and refuses the third, and reports the call as INTERNAL.
+        sender = await held_writer(session)
+        fake.end(reason)
+        failures = []
+        for pending in (sender, reader, session.close()):
+            with pytest.raises(speech.SpeechError) as caught:
+                await pending
+            failures.append(caught.value)
+        assert [type(failure) for failure in failures] == [error] * 3
+        assert failures[1] is failures[2]
+        for failure in failures:
+            assert (failure.grpc_status, failure.reason) == ("INTERNAL", reason)
+            assert (failure.code, failure.admitted) == (code, True)
+        await finish(session)
+
+    play(scenario, deaf("deaf_status_withheld"), input_format=STEREO)
+
+
+def test_a_write_that_races_the_end_of_the_call_and_loses_its_cause_is_a_server_error() -> None:
+    async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
+        await session.open()
+        # The reader is held by its full buffer, so SessionClosed is still unread when the
+        # refused write ends the call for gRPC, which then gives the reader nothing more.
+        await flood(fake, session)
+        sender = await held_writer(session)
+        fake.end("worker_shutdown")
+        for pending in (sender, session.close()):
+            with pytest.raises(speech.ServerInternalError) as caught:
+                await pending
+            failure = caught.value
+            assert (failure.grpc_status, failure.reason, failure.code) == ("INTERNAL", None, None)
+            assert failure.admitted is True
+        await finish(session)
+
+    play(scenario, deaf(), input_format=STEREO)
+
+
+@pytest.mark.parametrize(
+    ("code", "error"),
+    [
+        (ErrorCode.CONFIG_INVALID, speech.InvalidEventError),
+        (ErrorCode.SHAPE_MISMATCH, speech.InvalidEventError),
+        (ErrorCode.UNSUPPORTED, speech.PreconditionFailedError),
+        (ErrorCode.OOM_ERROR, speech.ResourceExhaustedError),
+        (ErrorCode.RESOURCE_EXHAUSTED, speech.ResourceExhaustedError),
+        (ErrorCode.TIMEOUT, speech.SessionTimeoutError),
+        (ErrorCode.LOAD_FAILED, speech.ServiceUnavailableError),
+        (ErrorCode.NOT_READY, speech.ServiceUnavailableError),
+        (ErrorCode.UNAVAILABLE, speech.ServiceUnavailableError),
+        (ErrorCode.CANCELLED, speech.SessionCancelledError),
+        (ErrorCode.INFERENCE_FAILED, speech.ServerInternalError),
+        (ErrorCode.INTERNAL, speech.ServerInternalError),
+    ],
+)
+def test_the_class_follows_the_causes_code_only_for_internal_after_a_failed_write(
+    code: ErrorCode, error: type[speech.SpeechError]
+) -> None:
+    cause = pb.EndCause(code=pb.ErrorCode.Value(f"ERROR_CODE_{code.name}"))
+    internal, unavailable = grpc.StatusCode.INTERNAL, grpc.StatusCode.UNAVAILABLE
+
+    raced = _session.failure_of(internal, cause, True, write_failed=True)
+    assert type(raced) is error
+    assert (raced.code, raced.grpc_status) == (code, "INTERNAL")
+    # A status the client read stands, and so does INTERNAL when no write failed.
+    assert type(_session.failure_of(internal, cause, True)) is speech.ServerInternalError
+    stated = _session.failure_of(unavailable, cause, True, write_failed=True)
+    assert type(stated) is speech.ServiceUnavailableError
+    assert type(_session.failure_of(internal, None, True, write_failed=True)) is (
+        speech.ServerInternalError
+    )
 
 
 def test_cancel_tells_the_server_and_drops_what_was_not_taken() -> None:
@@ -648,6 +807,8 @@ def test_a_cancelled_finalize_holds_audio_back_until_its_answer() -> None:
             assert finalizing.cancelled()
             sender = asyncio.create_task(session.send_audio(FRAME))
             await turns()
+            # The server holds the answer back and has taken a Ping written after the frame
+            # was given to the session: no audio reached it behind the Finalize.
             await barrier(fake, session)
             assert fake.bodies() == ["open", "audio", "finalize", "ping"]
             assert not sender.done()
@@ -829,17 +990,21 @@ def test_a_reader_cancelled_while_it_is_held_still_ends_the_session() -> None:
     play(scenario)
 
 
-def test_the_documented_example_reads_events_while_it_sends(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def documented(**server: Any) -> tuple[dict[str, Any], StreamServer]:
+    """The example of the SDK's page, and a server for the deployment it names."""
     page = (REPOSITORY / "docs/sdk/python.md").read_text(encoding="utf-8")
     section = page[page.index("## Streaming speech client") :]
     example: dict[str, Any] = {}
     exec(section.split("```python\n", 1)[1].split("```", 1)[0], example)
+    fake = StreamServer(deployment_id="my-deployment", generation=0, descriptor_digest="", **server)
+    return example, fake
+
+
+def test_the_documented_example_reads_events_while_it_sends(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     # Forty frames draw 40 KiB of partial transcripts, more than a session holds unread.
-    fake = StreamServer(
-        deployment_id="my-deployment", generation=0, descriptor_digest="", partial_bytes=1000
-    )
+    example, fake = documented(partial_bytes=1000)
 
     async def main() -> Any:
         async with fake.serving() as endpoint:
@@ -848,6 +1013,21 @@ def test_the_documented_example_reads_events_while_it_sends(
     assert run(main) == "synthetic transcript"
     assert capsys.readouterr().out.count("x" * 1000) == 40
     assert fake.bodies() == ["open", *["audio"] * 40, "finalize"]
+
+
+def test_the_documented_example_takes_its_readers_outcome_when_the_session_fails() -> None:
+    example, fake = documented(hold_finals=True)
+
+    async def main() -> None:
+        async with fake.serving() as endpoint:
+            running = asyncio.create_task(example["transcribe"](endpoint, [FRAME] * 5))
+            await fake.until(lambda: "finalize" in fake.bodies())
+            fake.end("worker_shutdown")
+            with pytest.raises(speech.ServiceUnavailableError):
+                await running
+
+    # `run` fails on a task whose exception nobody took.
+    run(main)
 
 
 def test_a_session_whose_events_are_left_unread_ends_with_a_typed_error() -> None:
@@ -869,6 +1049,64 @@ def test_a_session_whose_events_are_left_unread_ends_with_a_typed_error() -> Non
         await fake.until(lambda: fake.live == 0)
 
     play(scenario, StreamServer(output_stall_timeout_ms=50))
+
+
+def test_the_stall_timer_lasts_what_ready_gives_and_restarts_with_each_event_taken() -> None:
+    async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
+        await session.open()
+        assert session.limits.output_stall_timeout_ms == 8000
+        assert await fill(fake, session) == [8.0] * 17
+        with stopped_clock() as advance:
+            # Taking one event leaves no room for the one the reader holds, and restarts the
+            # timer, here on the stopped clock.
+            for _ in range(2):
+                await anext(session)
+                await turns()
+                await advance(6.0)
+                assert not session._ended
+            await advance(1.9)
+            assert not session._ended
+            await advance(0.2)
+            assert session._ended
+        with pytest.raises(speech.ResourceExhaustedError, match=r"left unread for 8\.0 s"):
+            await session.close()
+
+    play(scenario, StreamServer(output_stall_timeout_ms=8000, heartbeat_interval_ms=0))
+
+
+def test_the_stall_timer_runs_only_while_the_reader_is_held_by_unread_events() -> None:
+    async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
+        async with session:
+            with stopped_clock() as advance:
+                await advance(9.0)
+                assert not session._ended
+            # Events wait to be taken, and the reader still reads: nothing waits on the caller.
+            fake.partial("x" * 1000)
+            while not session._events.used:
+                await asyncio.sleep(0)
+            with stopped_clock() as advance:
+                await advance(9.0)
+                assert not session._ended
+            await session.send_audio(FRAME)
+            assert (await session.finalize()).end_sample_offset == 320
+
+    play(scenario, StreamServer(output_stall_timeout_ms=8000, heartbeat_interval_ms=0))
+
+
+def test_a_ready_without_a_stall_time_means_no_stall_timer() -> None:
+    async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
+        await session.open()
+        assert session.limits.output_stall_timeout_ms == 0
+        assert await fill(fake, session) == [None] * 17
+        with stopped_clock() as advance:
+            await advance(20.0)
+            assert not session._ended
+            await anext(session)
+            await advance(10.0)
+            assert not session._ended
+        await session.cancel()
+
+    play(scenario, StreamServer(output_stall_timeout_ms=0, heartbeat_interval_ms=0))
 
 
 def test_a_sender_waiting_for_credit_raises_the_cause_the_server_ends_the_session_with() -> None:
@@ -1024,16 +1262,42 @@ def test_a_write_grpc_refuses_ends_the_session_with_a_typed_error_past_a_full_bu
     play(scenario)
 
 
-def test_send_audio_takes_any_bytes_like_object() -> None:
+def test_send_audio_takes_bytes_and_contiguous_views_of_bytes() -> None:
     async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
         samples = array.array("h", range(320))
+        frame = samples.tobytes()
+        views = (memoryview(frame), memoryview(samples).cast("B"), memoryview(samples).cast("b"))
         async with session:
-            for data in (samples.tobytes(), bytearray(samples.tobytes()), memoryview(samples)):
+            for data in (frame, bytearray(frame), *views):
                 await session.send_audio(data)
-            assert (await session.finalize()).end_sample_offset == 960
+            assert (await session.finalize()).end_sample_offset == 5 * 320
         sent = [event.audio for event in fake.received if event.HasField("audio")]
-        assert [audio.data for audio in sent] == [samples.tobytes()] * 3
-        assert [audio.sample_count for audio in sent] == [320] * 3
+        assert [audio.data for audio in sent] == [frame] * 5
+        assert [audio.sample_count for audio in sent] == [320] * 5
+
+    play(scenario)
+
+
+def test_send_audio_refuses_what_is_not_a_contiguous_view_of_bytes() -> None:
+    async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
+        samples = array.array("h", range(320))
+        refused: tuple[Any, ...] = (
+            640,
+            [0] * 640,
+            "x" * 640,
+            None,
+            samples,
+            memoryview(samples),
+            memoryview(bytes(1280))[::2],
+        )
+        async with session:
+            for data in refused:
+                with pytest.raises(TypeError, match="audio is a"):
+                    await session.send_audio(data)
+            await barrier(fake, session)
+            assert fake.bodies() == ["open", "ping"]
+            await session.send_audio(bytearray(FRAME))
+            assert (await session.finalize()).end_sample_offset == 320
 
     play(scenario)
 

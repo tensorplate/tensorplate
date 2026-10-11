@@ -49,6 +49,21 @@ _ERROR_OF_STATUS: dict[str, type[SpeechError]] = {
     "CANCELLED": SessionCancelledError,
 }
 
+# The status an error code stands for: the stream listener's rule for a cause whose reason
+# its own mapping does not name (docs/architecture/serving-worker.md, "Final status").
+_STATUS_OF_CODE: dict[ErrorCode, str] = {
+    ErrorCode.CONFIG_INVALID: "INVALID_ARGUMENT",
+    ErrorCode.SHAPE_MISMATCH: "INVALID_ARGUMENT",
+    ErrorCode.UNSUPPORTED: "FAILED_PRECONDITION",
+    ErrorCode.OOM_ERROR: "RESOURCE_EXHAUSTED",
+    ErrorCode.RESOURCE_EXHAUSTED: "RESOURCE_EXHAUSTED",
+    ErrorCode.TIMEOUT: "DEADLINE_EXCEEDED",
+    ErrorCode.LOAD_FAILED: "UNAVAILABLE",
+    ErrorCode.NOT_READY: "UNAVAILABLE",
+    ErrorCode.UNAVAILABLE: "UNAVAILABLE",
+    ErrorCode.CANCELLED: "CANCELLED",
+}
+
 
 def enum_name(enum: object, value: int) -> str:
     """``ENDPOINT_REASON_SILENCE`` as ``silence``; a value this schema lacks as ``unspecified``."""
@@ -70,15 +85,29 @@ def decode_refusal(trailing_metadata: object) -> pb.OpenRefused | None:
 
 
 def failure_of(
-    status: grpc.StatusCode, cause: pb.EndCause | None, admitted: bool | None
+    status: grpc.StatusCode,
+    cause: pb.EndCause | None,
+    admitted: bool | None,
+    *,
+    write_failed: bool = False,
 ) -> SpeechError:
-    """The error for a call that ended with `status`; its class follows the status code alone."""
+    """The error for a call that ended with `status`; its class follows the status code.
+
+    One case takes the class from the cause. A write that reaches gRPC after
+    the server ended the call, and before the client read that end, makes
+    gRPC report ``INTERNAL`` in place of the server's status. So with
+    `write_failed`, ``INTERNAL`` and a cause, the class is the one the
+    cause's error code stands for; ``grpc_status`` stays what gRPC reported.
+    """
     reason = code = None
     if cause is not None:
         reason = enum_name(pb.FailureReason, cause.reason)
         with contextlib.suppress(ValueError):
             code = ErrorCode(enum_name(pb.ErrorCode, cause.code))
-    kind = _ERROR_OF_STATUS.get(status.name, ServerInternalError)
+    name = status.name
+    if write_failed and status is grpc.StatusCode.INTERNAL and code is not None:
+        name = _STATUS_OF_CODE.get(code, name)
+    kind = _ERROR_OF_STATUS.get(name, ServerInternalError)
     return kind(
         f"the session ended with status {status.name}" + (f" ({reason})" if reason else ""),
         reason=reason,
@@ -106,7 +135,9 @@ class Session(Generic[EventT]):
     arrive on, and the session stops reading it once it holds 16 KiB of
     events its caller has not taken. A session left that way for the
     server's output stall time (``limits.output_stall_timeout_ms``) is ended
-    with ``ResourceExhaustedError``.
+    with ``ResourceExhaustedError``. That timer runs only while the session
+    has stopped reading for such events and starts again with each one
+    taken, so it can end a session before the server's own timer would.
 
     A task cancelled inside a method gets its ``CancelledError`` and the
     session stays open; an event it was writing at that moment is still sent.
@@ -145,6 +176,7 @@ class Session(Generic[EventT]):
         self._abort_error: SpeechError | None = None
         self._cancelling = False
         self._half_closed = False
+        self._write_failed = False
         self._credit_used = self._credit_limit = 0
         self._unaccepted: dict[int, int] = {}
         self._last_input = self._accepted = 0
@@ -420,6 +452,7 @@ class Session(Generic[EventT]):
             except _CALL_ENDED:
                 # The reader has the reason, and is let past a full buffer to reach it. The
                 # cancel is for a call that a failed write left open, if gRPC ever does.
+                self._write_failed = True
                 self._events.unbound()
                 self._call.cancel()
                 await self._until_ended()
@@ -608,7 +641,7 @@ class Session(Generic[EventT]):
         elif self._abort_error is not None:
             self._failure = self._abort_error
         elif status is not grpc.StatusCode.OK:
-            self._failure = failure_of(status, cause, admitted)
+            self._failure = failure_of(status, cause, admitted, write_failed=self._write_failed)
         elif closed is None:
             self._failure = self._violation("the call ended with status OK and no SessionClosed")
         elif cause is not None:

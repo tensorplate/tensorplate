@@ -298,10 +298,16 @@ async def transcribe(endpoint: str, frames: list[bytes]) -> str:
         async with session:
             # Events are read while audio is sent, in a task of their own.
             reader = asyncio.create_task(show_partials(session))
-            for frame in frames:  # 20 ms of audio each
-                await session.send_audio(frame)
-            final = await session.finalize()
-        await reader
+            try:
+                for frame in frames:  # 20 ms of audio each
+                    await session.send_audio(frame)
+                final = await session.finalize()
+                await session.close()
+                await reader
+            finally:
+                # A session that fails fails its reader too: take that outcome on every path.
+                reader.cancel()
+                await asyncio.gather(reader, return_exceptions=True)
     return final.text
 
 
@@ -317,11 +323,19 @@ async def show_partials(session: SpeechToTextSession) -> None:
   A session holds up to 16 KiB of events its caller has not taken and then
   reads nothing more from the server, so `send_audio()`, `finalize()` and
   `close()` wait until some are taken. Iterate the session in a task of its
-  own, as above. A session whose held events stay untaken for the server's
-  output stall time (`session.limits.output_stall_timeout_ms`, five seconds
-  by default) is ended by the client with `ResourceExhaustedError`, the
-  error the server's own limit on unread output ends it with; no call waits
-  for ever on events nobody reads. The iteration ends when the session
+  own, as above, and take that task's outcome when the session fails, since
+  the iteration fails with it. A session whose held events stay untaken for
+  the server's output stall time (`session.limits.output_stall_timeout_ms`,
+  five seconds by default) is ended by the client with
+  `ResourceExhaustedError`, the error the server's own limit on unread
+  output ends it with; no call waits for ever on events nobody reads. That
+  timer is the client's own: it runs only while the session has stopped
+  reading because of events its caller has not taken, starts again with
+  each event taken, and never runs for a caller that has nothing to read.
+  It can end a session before the server's timer would, since the server's
+  clock stops once its output is delivered, and the transport's window
+  takes that output before the session reads it. A server that gives no
+  stall time turns the timer off. The iteration ends when the session
   does, and raises the session's error if it failed.
 - **Endpoint and target.** `SpeechClient(endpoint)` takes the `host:port` of
   the worker's stream endpoint, on loopback or forwarded to it, and opens one
@@ -361,8 +375,11 @@ async def show_partials(session: SpeechToTextSession) -> None:
   whose write is cancelled; one it was still waiting to send is not.
 - **Input and credit.** `send_audio(data)` sends one frame in the session's
   input format and waits while the server's input credit does not admit it.
-  `data` is any bytes-like object (`bytes`, `bytearray`, `memoryview`); one
-  that is not `bytes` is copied once. The client takes its credit from the
+  `data` is `bytes` or a contiguous view of bytes (a `bytearray`, a
+  `memoryview` of one), which is copied once. Anything else raises
+  `TypeError` before anything is sent: an integer, a list, and a view of
+  items other than bytes, which `memoryview.cast("B")` turns into one of
+  bytes. The client takes its credit from the
   server's messages only, never from time. A frame outside the session's
   frame bounds raises `ValueError` before anything is sent; a frame shorter
   than the least one is allowed only as the last before `finalize()` or
@@ -403,6 +420,18 @@ exception. Its class follows the final status of the call:
 | `ServerInternalError` | The server failed, or ended the call with a status no other class stands for. `PERMISSION_DENIED` and `UNAUTHENTICATED` land here: the stream listener has no authorization, so no rule of the schema produces them. |
 | `StreamProtocolError` (also a `ProtocolError`) | The server sent something the schema does not allow; the client ended the call. |
 | `SessionClosedError` | The session was used after it ended, opened twice, or its client or channel was closed. |
+
+One case takes the class from the cause instead. A write that reaches gRPC
+after the server ended the call, and before the client read that end, makes
+gRPC report the call as `INTERNAL` in place of the server's status. The
+error's class is then the one the cause's error code stands for, by the rule
+the stream listener applies to a cause whose reason it does not name, and
+`grpc_status` is `"INTERNAL"`. For the few reasons whose status is not
+their error code's, the class is then the code's: `illegal_transition`
+reads as `ServiceUnavailableError`, where its status gives
+`PreconditionFailedError`. Rarely that write also keeps the client from
+reading the server's last event; the error is then a `ServerInternalError`
+with no `reason`.
 
 A `SpeechError` carries `reason` and `code` when the server stated a cause
 (for example `"worker_shutdown"` and `ErrorCode.UNAVAILABLE`), `grpc_status`

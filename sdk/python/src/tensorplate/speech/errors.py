@@ -14,6 +14,14 @@ class SpeechError(TensorPlateError):
     refused open ends today. ``grpc_status`` is the name of the call's final
     status, or ``None`` when the client ended the session itself.
 
+    The class follows that status, with one exception. A write that reaches
+    gRPC after the server ended the call, and before the client read that
+    end, makes gRPC report ``INTERNAL`` in place of the server's status; the
+    class is then the one the cause's error code stands for, and
+    ``grpc_status`` is ``"INTERNAL"``. Rarely that write also keeps the
+    client from reading the server's last event: the error is then a
+    ``ServerInternalError`` with no ``reason``.
+
     ``admitted`` has three states. ``True``: the server reserved a session
     slot, so the call ran and must not be sent again as if it had not.
     ``False``: the server stated that it reserved none. ``None``: unknown.

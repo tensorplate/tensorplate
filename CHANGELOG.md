@@ -70,11 +70,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   gets its cancellation and the session stays open. Closing the client ends
   the sessions made from it. The session sends `Ping` at the interval
   the server gives. Every failure is a typed `SpeechError` whose class
-  follows the call's final status and which says whether the session was
-  admitted, was not, or cannot be known; the client never retries. The
-  client's own channel turns gRPC's bandwidth probe off so that a session
-  that stops reading holds the server back within HTTP/2's window of about
-  64 KiB.
+  follows the call's final status, or the stated cause's error code where
+  a write that raced the end of the call made gRPC report `INTERNAL`, and
+  which says whether the session was admitted, was not, or cannot be
+  known; the client never retries. The client's own channel turns gRPC's
+  bandwidth probe off so that a session that stops reading holds the
+  server back within HTTP/2's window of about 64 KiB.
   Text-to-speech sessions and discovery of the stream endpoint are not in
   the package yet, and the client has been run against an in-process server
   built from the schema, not against a worker. (V030-E04-F02-T03)

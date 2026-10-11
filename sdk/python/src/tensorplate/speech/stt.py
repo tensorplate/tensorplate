@@ -21,6 +21,20 @@ SpeechToTextEvent = PartialTranscript | EndpointDetected | FinalTranscript
 _ENCODINGS = {"pcm_s16le": pb.AUDIO_ENCODING_PCM_S16LE, "mulaw": pb.AUDIO_ENCODING_MULAW}
 
 
+def _frame(data: bytes | bytearray | memoryview) -> bytes:
+    """`data` as the bytes of one frame; ``TypeError`` unless it is bytes or a view of them."""
+    if isinstance(data, bytes):
+        return data
+    try:
+        # bytes() would take an integer as a length and a list as its items.
+        view = memoryview(data)
+    except TypeError:
+        raise TypeError(f"audio is a bytes-like object, not {type(data).__name__}") from None
+    if view.format not in ("B", "b", "c") or not view.contiguous:
+        raise TypeError('audio is a contiguous view of bytes: see memoryview.cast("B")')
+    return bytes(view)
+
+
 class SpeechToTextSession(Session[SpeechToTextEvent]):
     """One speech-to-text session, from ``SpeechClient.transcribe``.
 
@@ -93,17 +107,20 @@ class SpeechToTextSession(Session[SpeechToTextEvent]):
     async def send_audio(self, data: bytes | bytearray | memoryview) -> None:
         """Send one frame of audio in the session's input format.
 
-        `data` is any bytes-like object; one that is not ``bytes`` is copied
-        once. Waits until the session's input credit admits the frame, and
-        until a ``finalize()`` still unanswered has its answer. Both come
-        from the server, so events must be read meanwhile; when the session
-        ends first, this raises its error. A frame outside the session's
-        frame bounds raises ``ValueError`` and sends nothing; a frame
-        shorter than the least one is allowed only as the last before
+        `data` is ``bytes``, or an object that gives a contiguous view of
+        bytes, such as a ``bytearray`` or a ``memoryview`` of one; that is
+        copied once. Anything else raises ``TypeError`` and sends nothing:
+        an integer, a list, a view that is not contiguous, and a view of
+        items other than bytes, which ``memoryview.cast("B")`` turns into
+        one of bytes. Waits until the session's input credit admits the
+        frame, and until a ``finalize()`` still unanswered has its answer.
+        Both come from the server, so events must be read meanwhile; when
+        the session ends first, this raises its error. A frame outside the
+        session's frame bounds raises ``ValueError`` and sends nothing; a
+        frame shorter than the least one is allowed only as the last before
         ``finalize()`` or ``close()``.
         """
-        frame = data if isinstance(data, bytes) else bytes(data)
-        await self._within(self._send_frame(frame), None)
+        await self._within(self._send_frame(_frame(data)), None)
 
     async def _send_frame(self, data: bytes) -> None:
         async with self._input_gate:

@@ -249,7 +249,11 @@ class StreamServer:
         self._tell("end", reason)
 
     def hear(self) -> None:
-        """Let a `deaf` server start reading."""
+        """Let a `deaf` server start reading.
+
+        Until then it takes only the steps a test queues, so `end()` ends
+        a session while the transport still holds what the client wrote.
+        """
         assert self._session is not None, "no session is live"
         self._session.hearing.set()
 
@@ -360,6 +364,8 @@ class _Live:
         await self.emit(accepted=pb.Accepted(accepted_sequence=self.last, input_credit=credit))
 
     async def pump(self) -> None:
+        if self.server.fault.startswith("deaf"):
+            await self.hearing.wait()
         while (event := await self.context.read()) is not grpc.aio.EOF:
             self.inbox.put_nowait(("event", (event,)))
         self.inbox.put_nowait(("half_close", ()))
@@ -377,7 +383,7 @@ class _Live:
         if fault == "no_credit":
             self.ready.status.ClearField("input_credit")
         await self.emit(ready=self.ready)
-        if fault.startswith("deaf"):
+        if fault == "deaf_undecodable":
             await self.hearing.wait()
         if fault == "drop":
             await self.context.abort(Code.UNAVAILABLE, "synthetic connection loss")
@@ -430,6 +436,9 @@ class _Live:
             closed.cause.CopyFrom(end_cause(reason))
         self.server.closed.append(closed)
         await self.emit(session_closed=closed)
+        if self.server.fault == "deaf_status_withheld":
+            # gRPC gives a client its call's status after the messages, and this one stays unread.
+            await self.emit(pong=pb.Pong())
         if reason is not None and self.server.fault != "ok_with_cause":
             await self.context.abort(STATUS[reason], reason)
 
