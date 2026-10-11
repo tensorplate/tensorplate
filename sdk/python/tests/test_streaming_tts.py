@@ -37,6 +37,9 @@ CHUNK = 960
 HELD = 96_000
 # Ten seconds of audio: five hundred chunks.
 LONG = 240_000
+# A stall time no run reaches, for a test that leaves the reader waiting and is not about
+# the stall timer.
+NO_STALL_MS = 3_600_000
 Scenario = Callable[[StreamServer, speech.TextToSpeechSession], Awaitable[Any]]
 
 
@@ -520,6 +523,26 @@ def test_a_reader_that_stops_holds_two_seconds_of_audio_and_holds_the_server_bac
 
     play(scenario, StreamServer(segment_samples=LONG))
     assert PCM.sample_width * PCM.sample_rate_hz * tts.PLAYBACK_BUFFER_MS // 1000 == HELD
+
+
+def test_a_caller_that_takes_on_the_turn_the_reader_stops_is_sent_the_rest_of_the_audio() -> None:
+    async def scenario(fake: StreamServer, session: speech.TextToSpeechSession) -> None:
+        async with session:
+            await session.send_text(TEXT)
+            # The reader has this moment found the buffer full, and no turn of the loop
+            # passes before the takes: none of them waits.
+            await read(session, 104)
+            events = [await anext(session) for _ in range(100)]
+            await turns()
+            # The chunk that waited for room was admitted.
+            assert session._events.audio_used > 0
+            reader = asyncio.create_task(taken(session))
+            totals = await session.close()
+            events += await reader
+        assert [type(event) for event in events].count(speech.AudioChunk) == 500
+        assert totals.output_audio_samples == LONG
+
+    play(scenario, StreamServer(segment_samples=LONG, output_stall_timeout_ms=NO_STALL_MS))
 
 
 def test_the_playback_buffer_is_two_seconds_of_whatever_format_ready_declares() -> None:

@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import math
 from collections import deque
-from typing import Generic, TypeVar
+from collections.abc import Coroutine
+from typing import Any, Generic, TypeVar
 
 T = TypeVar("T")
 
@@ -20,8 +21,14 @@ class Signal:
         self._event.set()
         self._event = asyncio.Event()
 
-    async def wait(self) -> None:
-        await self._event.wait()
+    def wait(self) -> Coroutine[Any, Any, bool]:
+        """The wait for the next ``notify()`` after this call, whenever it is first awaited.
+
+        Not a coroutine function: one would take the event only when first
+        run, and before Python 3.12 ``asyncio.wait_for`` runs what it is
+        given one turn of the loop late, after a ``notify()`` in that turn.
+        """
+        return self._event.wait()
 
 
 class EventBuffer(Generic[T]):

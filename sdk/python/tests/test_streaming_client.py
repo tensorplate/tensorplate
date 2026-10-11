@@ -701,6 +701,28 @@ def test_the_event_buffer_lets_a_held_put_through_once_unbound() -> None:
     run(main)
 
 
+@pytest.mark.parametrize("turns_before_the_take", [0, 1, 2, 3])
+def test_a_take_admits_the_put_that_waits_whichever_turn_its_wait_began_on(
+    turns_before_the_take: int,
+) -> None:
+    # Before Python 3.12 ``asyncio.wait_for`` starts what it is given one turn of the loop
+    # late, so a take on the turn the put found the buffer full comes before that start.
+    async def main() -> None:
+        buffer: EventBuffer[str] = EventBuffer(10)
+        await buffer.put("held", 10)
+        parked = asyncio.create_task(buffer.put("parked", 1, 30))
+        for _ in range(turns_before_the_take):
+            await asyncio.sleep(0)
+        assert await buffer.get() == "held"
+        await turns()
+        admitted = parked.done()
+        parked.cancel()
+        assert admitted
+        assert buffer.used == 1
+
+    run(main)
+
+
 def test_the_recorded_session_is_what_the_client_sends_and_what_it_reads() -> None:
     session_frames = frames("stt_session")
     sent = [(name, encoded) for name, kind, encoded in session_frames if kind == "ClientEvent"]
