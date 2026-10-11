@@ -1475,6 +1475,8 @@ impl WorkerControl for MemberRegistry {
         self.serving(|member| ServingMember {
             member: MemberRef::new(member.deployment_id.clone(), member.generation),
             bundle_digest: member.recipe.bundle_digest.clone(),
+            descriptor_digest: member.recipe.descriptor_digest.clone(),
+            configuration_digest: member.recipe.configuration_digest.clone(),
             serving_url: format!(
                 "http://{}:{}/infer",
                 self.settings.bind_host, member.ports.ports.http

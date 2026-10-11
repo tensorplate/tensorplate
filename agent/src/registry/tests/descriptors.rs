@@ -233,6 +233,36 @@ fn a_handed_generation_is_refused_while_a_member_that_carries_it_is_draining() {
 }
 
 #[test]
+fn the_serving_member_carries_the_digests_of_the_descriptor_it_was_started_from() {
+    let d = described();
+    let started_from = || {
+        let serving = d.registry.serving_member().unwrap().unwrap();
+        (
+            serving.member.generation,
+            serving.descriptor_digest,
+            serving.configuration_digest,
+        )
+    };
+    let of = |descriptor: &DeploymentDescriptor| {
+        (
+            descriptor.generation,
+            Some(descriptor.descriptor_digest.clone()),
+            Some(descriptor.configuration_digest.clone()),
+        )
+    };
+    d.serve(&d.recipe);
+    assert_eq!(started_from(), of(&d.first));
+
+    // A restarted generation serves from what the stamp wrote on `active`.
+    d.stop(1);
+    assert_eq!(d.step(1), restarted(2));
+    d.step(0);
+    let second = d.first.restamp(2).unwrap();
+    assert!(d.records(&second));
+    assert_eq!(started_from(), of(&second));
+}
+
+#[test]
 fn a_running_generation_the_source_gives_again_is_an_internal_error_and_starts_nothing() {
     let f = fixture();
     f.serve("stt");

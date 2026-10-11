@@ -210,6 +210,10 @@ pub struct ServingMember {
     pub member: MemberRef,
     /// The digest of the bundle this generation was started from.
     pub bundle_digest: String,
+    /// The digests of the descriptor this generation was started from; none
+    /// when what it was started from names no descriptor.
+    pub descriptor_digest: Option<String>,
+    pub configuration_digest: Option<String>,
     pub serving_url: String,
 }
 

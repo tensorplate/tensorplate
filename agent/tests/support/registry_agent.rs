@@ -67,6 +67,7 @@ pub struct Worker {
     pub port: u16,
     model: String,
     exited: AtomicBool,
+    uninspectable: AtomicBool,
     loading: AtomicBool,
     contact: Mutex<ControlContact>,
     hold_stop: Mutex<Option<Hold>>,
@@ -78,6 +79,10 @@ impl Worker {
     }
     pub fn running(&self) -> bool {
         !self.exited.load(Ordering::SeqCst)
+    }
+    /// From now on, reading whether the process exited fails.
+    pub fn cannot_be_inspected(&self) {
+        self.uninspectable.store(true, Ordering::SeqCst);
     }
     pub fn finish_loading(&self) {
         self.loading.store(false, Ordering::SeqCst);
@@ -96,6 +101,9 @@ struct Process(Arc<Worker>);
 
 impl MemberProcess for Process {
     fn exited(&mut self) -> AgentResult<bool> {
+        if self.0.uninspectable.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "no child process").into());
+        }
         Ok(!self.0.running())
     }
     fn startup_failure(&mut self) -> AgentError {
@@ -167,6 +175,7 @@ impl ProcessLauncher for Workers {
                 .expect("model_id")
                 .into(),
             exited: AtomicBool::new(false),
+            uninspectable: AtomicBool::new(false),
             loading: AtomicBool::new(self.start_loading.load(Ordering::SeqCst)),
             contact: Mutex::new(ControlContact::Reporting),
             hold_stop: Mutex::new(None),

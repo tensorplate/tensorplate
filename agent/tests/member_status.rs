@@ -122,7 +122,7 @@ fn active_names_the_generation_serving_at_its_url_and_each_deploy_moves_both() {
     assert_eq!(previous.deployment_id, PREDECESSOR.0);
     assert_eq!(
         previous.generation, None,
-        "no process and no record names the generation of a retained deployment"
+        "nothing runs for a retained deployment, and status reads no generation from a record"
     );
 }
 
@@ -216,6 +216,38 @@ fn the_generation_is_withheld_while_another_bundle_serves_under_the_recorded_id(
     assert_ne!(after.bundle_digest, first.bundle_digest);
     assert_eq!(after.generation, Some(2));
     assert_eq!(after.serving_url, Some(url(PORTS[1])));
+}
+
+#[test]
+fn a_redeploy_of_the_recorded_bundle_under_its_id_reads_as_the_recorded_deployment() {
+    let h = Harness::new();
+    let agent = RegistryAgent::start(&h);
+    let bundle = vision_bundle(h.td.path(), "stt");
+    agent.deploy("stt", &bundle).expect("the first deploy");
+    let first = active(&agent);
+    assert_eq!(first.generation, Some(1));
+    let (is_stopping, release) = agent.workers.last().hold_stop();
+
+    std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets what is held end.
+        let release = release;
+        let deploying = scope.spawn(|| agent.deploy("stt", &bundle));
+        is_stopping
+            .recv_timeout(HELD)
+            .expect("the replaced worker is asked to stop");
+
+        // The record is still the first deploy's, and nothing in it tells
+        // the worker that serves now from the one it was written for.
+        let during = active(&agent);
+        assert_eq!(during.promoted_monotonic_ns, first.promoted_monotonic_ns);
+        assert_eq!(during.generation, Some(2));
+        assert_eq!(during.serving_url, Some(url(PORTS[1])));
+
+        release.send(()).unwrap();
+        deploying.join().unwrap().expect("the second deploy");
+    });
+
+    assert_eq!(active(&agent).generation, Some(2));
 }
 
 #[test]
@@ -319,6 +351,31 @@ fn a_member_whose_polls_go_unanswered_is_running_and_out_of_contact() {
             Some(Readiness::Ready),
             Some(false),
             Some(ContactState::OutOfContact),
+        )
+    );
+}
+
+#[test]
+fn a_set_member_whose_process_cannot_be_inspected_reads_running_and_status_answers() {
+    let h = Harness::new();
+    let agent = RegistryAgent::start(&h);
+    agent.deploy_member(&h);
+    agent.workers.last().cannot_be_inspected();
+    assert!(agent.registry.serving_member().is_err());
+    // Beside the singleton record the serving lookup's error is the status's.
+    assert!(agent.coord.status().is_err());
+
+    agent.commit_member_as_a_set(&h);
+
+    // Without an active record nothing is asked of the serving member.
+    assert!(agent.registry.serving_member().is_err());
+    assert_eq!(
+        process(&member(&agent)),
+        (
+            Some(ProcessState::Running),
+            Some(Readiness::Ready),
+            Some(false),
+            Some(ContactState::InContact),
         )
     );
 }

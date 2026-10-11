@@ -84,6 +84,8 @@ fn a_candidate_is_ready_once_a_warm_judged_it_and_serves_once_promoted() {
         Some(ServingMember {
             member: MemberRef::new("stt", 1),
             bundle_digest: candidate("stt").bundle_digest,
+            descriptor_digest: None,
+            configuration_digest: None,
             serving_url: format!("http://127.0.0.1:{ACTIVE_PORT}/infer"),
         })
     );
@@ -303,9 +305,23 @@ fn a_member_that_exited_is_not_running_then_gone_and_its_successor_is_ready_only
 fn a_member_whose_process_cannot_be_inspected_has_not_been_seen_to_exit() {
     let f = fixture();
     let serving = f.serve("stt");
-    serving.uninspectable.store(true, Ordering::SeqCst);
+    f.prepare("tts").unwrap();
+    for held in [&serving, &f.launcher.handle(2)] {
+        held.uninspectable.store(true, Ordering::SeqCst);
+    }
 
-    assert_eq!(view(&f), [live("stt", 1, MemberRole::Serving, ACTIVE_PORT)]);
+    assert_eq!(
+        view(&f),
+        [
+            live("stt", 1, MemberRole::Serving, ACTIVE_PORT),
+            LiveMember {
+                ready: false,
+                ..live("tts", 2, MemberRole::Candidate, CANDIDATE_PORT)
+            },
+        ]
+    );
+    // The lookup of the serving member answers with the error instead.
+    assert!(f.registry.serving_member().is_err());
 }
 
 #[test]

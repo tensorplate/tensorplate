@@ -649,15 +649,19 @@ impl Coordinator {
     /// worker control reports of the processes behind them.
     fn deployments(&self, state: &AgentState) -> AgentResult<Deployments> {
         let mut active = state.active.as_ref().map(deployment_summary);
-        if let (Some(summary), Some(serving)) = (active.as_mut(), self.worker.serving_member()?) {
-            // A worker is promoted before the record that names it is
-            // written, and the worker it replaces is stopped in between:
-            // the member serving may be another deployment's, or another
-            // bundle deployed under the same id.
-            if serves(&serving, summary) {
-                summary.generation = Some(serving.member.generation);
+        // Without an active record nothing is read from the serving member,
+        // so a registry that cannot answer for it does not fail the status.
+        if let (Some(recorded), Some(summary)) = (state.active.as_ref(), active.as_mut()) {
+            if let Some(serving) = self.worker.serving_member()? {
+                // A worker is promoted before the record that names it is
+                // written, and the worker it replaces is stopped in between:
+                // the member serving may be another deployment's, or another
+                // bundle deployed under the same id.
+                if serves(&serving, recorded) {
+                    summary.generation = Some(serving.member.generation);
+                }
+                summary.serving_url = Some(serving.serving_url);
             }
-            summary.serving_url = Some(serving.serving_url);
         }
         let mut previous = state.previous_active.as_ref().map(deployment_summary);
         let live = self.worker.live_members();
@@ -962,10 +966,20 @@ struct Deployments {
 }
 
 /// Whether `serving` is the deployment `recorded` describes: the same id,
-/// started from the same bundle.
-fn serves(serving: &ServingMember, recorded: &DeploymentSummary) -> bool {
+/// started from the same bundle and, when the record names a descriptor,
+/// from that descriptor. A record that names none cannot tell a redeploy
+/// of its own bundle under its own id from the deployment it records.
+fn serves(serving: &ServingMember, recorded: &DeploymentRecord) -> bool {
+    let started_from = |recorded: &Option<String>, started_from: &Option<String>| {
+        recorded.is_none() || recorded == started_from
+    };
     serving.member.deployment_id == recorded.deployment_id
         && crate::bundle::bundle_digests_equal(&serving.bundle_digest, &recorded.bundle_digest)
+        && started_from(&recorded.descriptor_digest, &serving.descriptor_digest)
+        && started_from(
+            &recorded.configuration_digest,
+            &serving.configuration_digest,
+        )
 }
 
 /// The generation a deploy of `deployment_id` has prepared and not promoted.
@@ -1051,8 +1065,8 @@ pub fn now_monotonic_ns() -> u64 {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use super::{prepared_generation, report_process};
-    use crate::worker::{LiveMember, MemberRole};
+    use super::{prepared_generation, report_process, serves};
+    use crate::worker::{LiveMember, MemberRole, ServingMember};
     use tensorplate_protocol::agent_control::{
         MemberStatus, ProcessState, Readiness, ResidentSetStatus,
     };
@@ -1108,6 +1122,50 @@ mod tests {
             (member.process, member.readiness),
             (Some(ProcessState::Running), Some(Readiness::NotReady))
         );
+    }
+
+    #[test]
+    fn a_record_that_names_a_descriptor_is_served_only_by_a_member_started_from_it() {
+        let state = decode_agent_state(include_str!(
+            "../../protocol/rust/tests/fixtures/agent_state_0_2_descriptor_identity.json"
+        ))
+        .expect("fixture decodes");
+        let recorded = state.active.expect("the fixture records one");
+        let (described, configured) = (
+            recorded.descriptor_digest.clone().expect("it names one"),
+            recorded.configuration_digest.clone().expect("it names one"),
+        );
+        let serving = |descriptor: Option<&str>, configuration: Option<&str>| ServingMember {
+            member: MemberRef::new(recorded.deployment_id.clone(), 3),
+            bundle_digest: recorded.bundle_digest.clone(),
+            descriptor_digest: descriptor.map(Into::into),
+            configuration_digest: configuration.map(Into::into),
+            serving_url: String::new(),
+        };
+        let other = "sha256:0000";
+
+        assert!(serves(
+            &serving(Some(&described), Some(&configured)),
+            &recorded
+        ));
+        for (descriptor, configuration) in [
+            (Some(other), Some(configured.as_str())),
+            (Some(described.as_str()), Some(other)),
+            (None, Some(configured.as_str())),
+            (Some(described.as_str()), None),
+        ] {
+            assert!(
+                !serves(&serving(descriptor, configuration), &recorded),
+                "{descriptor:?} {configuration:?}"
+            );
+        }
+
+        // A record that names none cannot tell: the id and the bundle decide.
+        let mut unnamed = recorded.clone();
+        (unnamed.generation, unnamed.descriptor_digest) = (None, None);
+        unnamed.configuration_digest = None;
+        assert!(serves(&serving(Some(other), Some(other)), &unnamed));
+        assert!(serves(&serving(None, None), &unnamed));
     }
 
     #[test]

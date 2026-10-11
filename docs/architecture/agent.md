@@ -716,6 +716,11 @@ its deployment id and generation, whether its process has been seen to
 exit, whether the agent judged it ready, whether its control channel is in
 contact, and the ports it holds.
 
+- **Running** means the process has not been seen to exit. A process the
+  agent cannot inspect has not been, and is reported as running with the
+  readiness it had and the contact its channel reports now: supervision
+  treats it the same way, and keeps a serving member in service until its
+  control channel has gone ten seconds without an answer.
 - **Ready** is the agent's last judgement, not a reading taken for the
   status: `warm` records it for a candidate it found ready, and the
   supervision step records it for a restarted generation. A serving worker
@@ -729,19 +734,35 @@ contact, and the ports it holds.
 
 Agent status uses this in two places. Beside a singleton record,
 `active.generation` is the generation serving at `active.serving_url`, read
-together with the URL. It is attached only when the member serving is the
-recorded active deployment: the same id, started from the same bundle. A
+together with the URL. The serving member is read only when there is an
+active record; a serving process that cannot be inspected fails that
+reading, and the status with it. The generation is attached only when the
+member serving is the recorded active deployment: the same id, started from
+the same bundle and, when the record names a descriptor, from the
+descriptor whose descriptor and configuration digests the record carries. A
 worker is promoted before the record that names it is written, and the
 worker it replaces is stopped in between, so for up to the stop deadline
 (ten seconds) the member serving is not the recorded one; `active` then
-carries the new worker's URL and, unless the same bundle was redeployed
-under the same id, no generation. Both are absent while
-nothing serves: the worker stopped, a restart is waiting or loading, or the
-member is failed. `candidate.generation` is the generation a deploy has
-prepared and not promoted; a worker an earlier deploy abandoned is not
-named. `previous_active.generation` is absent: nothing
-runs for a retained deployment, and the agent does not yet write a
-generation into a deployment record.
+carries the new worker's URL and no generation. A record that names no
+descriptor, which is every record a deploy writes today, cannot tell a
+redeploy of its own bundle under its own id from the deployment it
+records: for the stop of the replaced worker `active` then carries the new
+worker's generation and URL beside the replaced deployment's promotion
+time. Both are absent while nothing serves: the worker stopped, a restart
+is waiting or loading, or the member is failed. `candidate.generation` is
+the generation a deploy has prepared and not promoted; a worker an earlier
+deploy abandoned is not named.
+
+Status reads no generation from a singleton record. A record can carry
+one: the [restart stamp](#deployment-descriptor-documents) writes the new
+generation and its digests into `active` when the record names a
+descriptor, and leaves a record that names none as it is. No deploy records
+a descriptor yet, so no record of a deployed agent carries a generation.
+Where `active` carries one, `active.generation` is still the registry's:
+the stamp writes the record before the new generation starts, so the field
+is absent while that generation loads and is the record's generation once
+it serves. `previous_active.generation` is absent in every case: nothing
+runs for a retained deployment.
 
 For a resident set, each member is matched to the registry by deployment id
 and generation. A committed generation the registry holds no running
