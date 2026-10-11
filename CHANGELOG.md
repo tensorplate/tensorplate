@@ -211,6 +211,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The hosted workflows select Clang 14 and say so. They installed Clang 15
+  and registered it as an alternative at the priority the runner image gives
+  its own Clang 14, so the existing choice stayed and every published amd64
+  build was compiled with Clang 14.0.0 while the workflows read as if they
+  used 15. `tools/ci/select-clang.sh` now selects Clang 14, the image's
+  default, whose binary both dependency caches are keyed on, in every job
+  that compiles C++, and fails with a message when `clang` or `clang++`
+  reports another major version. The release job runs it again in its
+  toolchain step, before the dependency cache is restored. No cache key and
+  no compiler changes. The ARM64 release job builds with GCC and is
+  untouched; the devcontainer still builds with Clang 15.
+
 - The synthetic session dispatch leaves the runtime library. It is now
   `test/mocks/synthetic_session_dispatch.{hpp,cpp}` in namespace
   `tensorplate::testing`, built as the static test library
