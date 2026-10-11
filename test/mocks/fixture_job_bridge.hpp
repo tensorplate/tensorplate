@@ -68,8 +68,6 @@ class FixtureJobBridge final : public BoundedJobBridge {
  public:
   /// Jobs that wait behind the running one.
   static constexpr std::size_t kWaitingJobs = 8;
-  /// Jobs held unreleased before submit() refuses.
-  static constexpr std::size_t kUnreleasedJobs = 16;
 
   /// What a job that ran returns; an error fails the job with it.
   using ResultFunction = std::function<Result<JobResult>(const JobRequest&, BufferManager&)>;
@@ -96,7 +94,8 @@ class FixtureJobBridge final : public BoundedJobBridge {
 
   // -- The session's side. -----------------------------------------------------
 
-  /// The backend runs jobs from here on; also after an unload.
+  /// The backend runs jobs from here on. Does nothing once the backend was
+  /// lost or the session unloaded.
   void prime();
   /// The backend is gone and the session does not know: every unfinished job
   /// fails with `backend_reset` and stays unreleased until unload().

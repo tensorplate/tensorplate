@@ -298,6 +298,7 @@ TEST_P(BoundedJobBridgeConformance, ANullSinkAndASecondSinkAreRefused) {
 // "event_sink_missing": no sink registered", ahead of "backend_not_ready".
 // release_session: "or Error::Code::NotReady, "event_sink_missing"".
 TEST_P(BoundedJobBridgeConformance, WithoutASinkSubmitAndReleaseAreRefused) {
+  ASSERT_FALSE(bridge().set_event_sink(nullptr).has_value());
   expect_refused(resubmit(decode(1, 5)), Error::Code::NotReady, "event_sink_missing");
   expect_refused(release(5), Error::Code::NotReady, "event_sink_missing");
   under->prime();
@@ -538,6 +539,9 @@ TEST_P(BoundedJobBridgeConformance, AReleaseEndsTheSessionsJobsAndIsAcknowledged
             (std::vector<std::pair<std::uint64_t, std::uint64_t>>{{5, kGeneration}}));
   EXPECT_TRUE(sink->sequence(1).value().released());
   EXPECT_EQ(count(1, Failed) + count(1, Completed), 1U);
+  if (count(1, Failed) == 1) {
+    expect_failed(1, Error::Code::Cancelled);
+  }
   EXPECT_TRUE(wait_kinds(3, {Accepted, Completed, Released}));
 }
 
