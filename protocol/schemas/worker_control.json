@@ -140,6 +140,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["deployment_id", "staged_path", "bundle_digest", "backend_hint", "model_class"],
+      "description": "A verified, staged candidate. `generation`, `descriptor_digest` and `configuration_digest` name the deployment descriptor verified for the candidate's generation (`deployment_descriptor.json`), in the form `agent_state.json` gives a resident-set member; a candidate carries all three or none.",
       "properties": {
         "deployment_id": {"type": "string", "minLength": 1},
         "staged_path": {"type": "string", "minLength": 1},
@@ -148,7 +149,15 @@
         "model_class": {"type": "string"},
         "bundle_name": {"type": "string"},
         "bundle_version": {"type": "string"},
-        "artifact_relative_path": {"type": "string"}
+        "artifact_relative_path": {"type": "string"},
+        "generation": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "descriptor_digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"},
+        "configuration_digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"}
+      },
+      "dependencies": {
+        "generation": ["descriptor_digest", "configuration_digest"],
+        "descriptor_digest": ["generation", "configuration_digest"],
+        "configuration_digest": ["generation", "descriptor_digest"]
       }
     },
     "Response": {

@@ -112,10 +112,44 @@ rules, requires the text to be exactly what the decoded descriptor
 serializes to (every budget line and stage `observable` written out, no
 default filled in), and only then compares both digests. The
 cross-language fixtures are
-`protocol/fixtures/deployment_descriptor_{stt,stt_restart,tts}.json`: the
-two speech bundles under `test/models/bundles/v0_2/`, with the restart
-fixture keeping the first's `configuration_digest` under a new generation
-and `descriptor_digest`.
+`protocol/fixtures/deployment_descriptor_{stt,stt_restamp,stt_restart,tts}.json`:
+the two speech bundles under `test/models/bundles/v0_2/`, with the restamp
+and restart fixtures keeping the first's `configuration_digest` under a new
+generation and `descriptor_digest`.
+
+### Naming a descriptor
+
+A durable record or a candidate reference names a descriptor by three
+fields, the ones a resident-set member already carries, with the same
+shapes: `generation`, `descriptor_digest` and `configuration_digest`
+(`tensorplate_protocol::DescriptorIdentity`). They are optional on the
+agent state's singleton deployment records and in-flight transaction
+(`agent_state.json`) and on the candidate reference (`worker_control.json`),
+and they travel together: a record or reference that carries one or two of
+the three is refused. A state file that carries any of them is state
+version `0.2`, and a generation a record names is below the file's
+`next_generation`. A deployment with no descriptor carries none of the
+three and is read and written as before. The agent does not record an
+identity yet.
+
+### Re-stamping
+
+A descriptor belongs to one generation. When the same deployment starts at
+a later generation without being verified again (a restart, a recovery or a
+rollback), its descriptor is re-stamped, never derived again:
+`DeploymentDescriptor::restamp` takes a descriptor and a newer generation
+and returns the descriptor for it. The generation and `descriptor_digest`
+are new; the configuration, `configuration_digest`, `deployment_id`,
+`admission_mode`, `staged_path` and `runner_environment` are the original's.
+It reads no manifest and no installed profile, so a profile that changed
+since the bundle was verified cannot enter the descriptor unnoticed. The
+input is verified first: a descriptor changed after it was read fails its
+digest check and is refused instead of receiving a fresh digest, and a
+generation that is not newer is refused.
+`deployment_descriptor_stt_restamp.json` is the first fixture re-stamped
+from generation 3 to 4, written by the reference implementation. The
+restart fixture is a different case: it also stages the new generation
+under another root, so it is a derived descriptor, not a re-stamped one.
 
 ---
 

@@ -39,6 +39,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A deployment record, the in-flight transaction and a candidate reference
+  can name the deployment descriptor of their generation. Three optional
+  fields, `generation`, `descriptor_digest` and `configuration_digest`,
+  with the names and shapes of a resident-set member's, are added to
+  `DeploymentRecord` and `TransactionRecord` in
+  `protocol/schemas/agent_state.json` and to `CandidateRef` in
+  `protocol/schemas/worker_control.json`, with their Rust mirrors and
+  `tensorplate_protocol::DescriptorIdentity`. They travel together: a
+  record or reference carrying one or two of the three is refused by the
+  schemas and by the decoders with a typed error, and a generation a state
+  record names must be below the file's `next_generation`. A state file
+  that carries any of them is state version `0.2`; the `0.1` layout forbids
+  them, and a state without them is read and written byte for byte as
+  before. No state version is added: the `0.2` layout is amended before
+  any final release writes it, so a 0.3.1 release candidate built before
+  this change refuses a state file that carries the new keys as corrupt
+  state, the refusal any downgrade across a state change gets.
+  `DeploymentDescriptor::restamp` returns a verified descriptor at a newer
+  generation with a new `descriptor_digest` and nothing else changed, for a
+  restart, recovery or rollback that must not derive the descriptor again;
+  it refuses a descriptor that was altered after it was read. Nothing in
+  the agent records an identity or calls the re-stamp yet. Additive inside
+  protocol 0.1; the version constants are unchanged. (V030-E02-F01-T04)
+
 - The agent leases its serving workers' ports. A worker generation holds
   its ports from its start until its process has been reaped, so a worker
   that is still draining, and the restart owed to one that stopped, keep

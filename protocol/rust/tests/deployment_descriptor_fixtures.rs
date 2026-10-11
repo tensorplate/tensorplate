@@ -36,6 +36,7 @@ fn read_json(relative: &str) -> Value {
 }
 
 const STT: &str = "protocol/fixtures/deployment_descriptor_stt.json";
+const STT_RESTAMP: &str = "protocol/fixtures/deployment_descriptor_stt_restamp.json";
 const STT_RESTART: &str = "protocol/fixtures/deployment_descriptor_stt_restart.json";
 const TTS: &str = "protocol/fixtures/deployment_descriptor_tts.json";
 
@@ -192,7 +193,7 @@ fn the_standard_library_reference_writes_the_committed_fixtures() {
 
 #[test]
 fn committed_descriptors_validate_and_read_back_verified() {
-    for fixture in [STT, STT_RESTART, TTS] {
+    for fixture in [STT, STT_RESTAMP, STT_RESTART, TTS] {
         let text = read(fixture);
         let doc: Value = serde_json::from_str(&text).expect("JSON");
         assert!(validator().is_valid(&doc), "{fixture} must validate");
@@ -291,6 +292,127 @@ fn an_equivalent_restart_keeps_the_configuration_and_changes_the_instance() {
     assert_ne!(first.generation, restart.generation);
     assert_ne!(first.descriptor_digest, restart.descriptor_digest);
     assert_eq!(first.member().deployment_id, restart.member().deployment_id);
+}
+
+fn committed(fixture: &str) -> DeploymentDescriptor {
+    DeploymentDescriptor::from_json(&read(fixture)).unwrap_or_else(|e| panic!("{fixture}: {e}"))
+}
+
+#[test]
+fn a_restamp_moves_the_generation_and_the_instance_digest_and_nothing_else() {
+    let first = committed(STT);
+    let restamped = first.restamp(4).expect("restamp");
+    // The reference wrote this document without the code under test.
+    assert_eq!(restamped, committed(STT_RESTAMP));
+    let before = serde_json::to_value(&first).expect("serialize");
+    let after = serde_json::to_value(&restamped).expect("serialize");
+    assert_eq!(after, read_json(STT_RESTAMP));
+    let moved: BTreeSet<&str> = before
+        .as_object()
+        .expect("object")
+        .iter()
+        .filter(|(key, value)| after[key.as_str()] != **value)
+        .map(|(key, _)| key.as_str())
+        .collect();
+    assert_eq!(moved, BTreeSet::from(["descriptor_digest", "generation"]));
+    assert_eq!(restamped.generation, 4);
+    assert_eq!(
+        restamped.identity().configuration_digest,
+        first.identity().configuration_digest
+    );
+    restamped
+        .verify()
+        .expect("the restamped descriptor verifies");
+    assert_eq!(
+        restamped.restamp(9).expect("again"),
+        first.restamp(9).expect("directly")
+    );
+    // The restart fixture stages its generation under another root, which a
+    // restamp never does: that descriptor is derived, not restamped.
+    let restart = committed(STT_RESTART);
+    assert_eq!(restart.generation, restamped.generation);
+    assert_ne!(restart.staged_path, restamped.staged_path);
+    assert_ne!(restart.descriptor_digest, restamped.descriptor_digest);
+}
+
+#[test]
+fn a_restamp_refuses_a_descriptor_changed_since_it_was_verified() {
+    type Change = fn(&mut DeploymentDescriptor);
+    let cases: [(&str, Change, &str); 10] = [
+        (
+            "deployment id",
+            |d| d.deployment_id = "speech-other".into(),
+            "DescriptorDigest",
+        ),
+        ("generation", |d| d.generation = 2, "DescriptorDigest"),
+        (
+            "admission mode",
+            |d| d.admission_mode = AdmissionMode::Production,
+            "DescriptorDigest",
+        ),
+        (
+            "staged root",
+            |d| d.staged_path = "/srv/staging/speech-stt/3".into(),
+            "DescriptorDigest",
+        ),
+        (
+            "runner environment",
+            |d| {
+                let environment = d.runner_environment.as_mut().expect("environment");
+                let extra = format!("{}/lib-extra", environment.environment_root);
+                environment.library_search_paths.push(extra);
+            },
+            "DescriptorDigest",
+        ),
+        (
+            "descriptor digest",
+            |d| d.descriptor_digest = committed(TTS).descriptor_digest,
+            "DescriptorDigest",
+        ),
+        (
+            "runtime version",
+            |d| d.configuration.runtime_version = "0.3.2".into(),
+            "ConfigurationDigest",
+        ),
+        (
+            "quota",
+            |d| d.configuration.quota.session_count = 2,
+            "ConfigurationDigest",
+        ),
+        (
+            "bundle digest",
+            |d| {
+                d.configuration.bundle.bundle_digest =
+                    committed(TTS).configuration.bundle.bundle_digest;
+            },
+            "ConfigurationDigest",
+        ),
+        (
+            "configuration digest",
+            |d| d.configuration_digest = committed(TTS).configuration_digest,
+            "ConfigurationDigest",
+        ),
+    ];
+    let first = committed(STT);
+    for (name, change, refusal) in cases {
+        let mut changed = first.clone();
+        change(&mut changed);
+        assert_ne!(changed, first, "{name}");
+        let err = changed.restamp(4).expect_err(name);
+        assert_eq!(refusal_of(&err), refusal, "{name}");
+    }
+}
+
+#[test]
+fn a_restamp_takes_only_a_newer_generation() {
+    let first = committed(STT);
+    for generation in [0, 2, first.generation, 1 << 53] {
+        let err = first.restamp(generation).expect_err("refused");
+        assert_eq!(refusal_of(&err), "Invalid(generation)", "{generation}");
+    }
+    // No state can name this generation, so a re-stamp to it is accepted but
+    // can never be started.
+    first.restamp((1 << 53) - 1).expect("the last generation");
 }
 
 type InputsEdit = fn(&mut DescriptorInputs<'_>);

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Standard-library reference for canonical JSON version 1.
 
-Writes protocol/fixtures/canonical_json.json and the three
+Writes protocol/fixtures/canonical_json.json and the
 deployment_descriptor_*.json fixtures without the Rust implementation, so
 their expected texts and digests do not come from the code they test.
 With --check it compares the committed files instead of writing them.
@@ -251,12 +251,23 @@ def descriptor(bundle: str, deployment_id: str, generation: int, mode: str, quot
     return document
 
 
+def restamp(document: dict[str, Any], generation: int) -> dict[str, Any]:
+    # The same descriptor at a later generation: nothing but the generation
+    # and the instance digest moves.
+    restamped = {k: v for k, v in document.items() if k != "descriptor_digest"}
+    restamped["generation"] = generation
+    restamped["descriptor_digest"] = sha256(canonical_bytes(restamped))
+    return restamped
+
+
 def outputs() -> dict[str, Any]:
     stt_quota = {"session_count": 1, "domain_bytes": {"guest_ram": 33554432, "device_vram": 67108864}}
     tts_quota = {"session_count": 1, "domain_bytes": {"guest_ram": 16777216, "device_vram": 33554432}}
+    stt = descriptor("speech_stt_streaming", "speech-stt", 3, "qualification", stt_quota)
     return {
         "canonical_json.json": vectors(),
-        "deployment_descriptor_stt.json": descriptor("speech_stt_streaming", "speech-stt", 3, "qualification", stt_quota),
+        "deployment_descriptor_stt.json": stt,
+        "deployment_descriptor_stt_restamp.json": restamp(stt, 4),
         "deployment_descriptor_stt_restart.json": descriptor(
             "speech_stt_streaming", "speech-stt", 4, "qualification", stt_quota
         ),

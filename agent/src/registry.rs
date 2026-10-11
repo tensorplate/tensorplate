@@ -313,7 +313,7 @@ enum Restart {
     #[default]
     Idle,
     /// The serving generation stopped; its successor starts once `due` passes.
-    Due { owed: Owed, due: Instant },
+    Due { owed: Box<Owed>, due: Instant },
     /// The supervision step is working on the member outside the lock.
     InHand { deployment_id: String },
     /// The successor holds the serving slot and has until `deadline` to be
@@ -986,7 +986,7 @@ impl MemberRegistry {
             members.restart = Restart::InHand {
                 deployment_id: owed.recipe.deployment_id.clone(),
             };
-            owed
+            *owed
         };
         let Some(staged) = self.staged_for_restart(&owed.recipe, events) else {
             return;
@@ -1031,12 +1031,18 @@ impl MemberRegistry {
                 // generation was starting: it yields and is not counted.
                 Ok((_, member)) => {
                     if in_hand {
-                        members.restart = Restart::Due { owed, due: now };
+                        members.restart = Restart::Due {
+                            owed: Box::new(owed),
+                            due: now,
+                        };
                     }
                     yielded = Some(member);
                 }
                 Err(failed) if in_hand && failed.held_by_a_deploy => {
-                    members.restart = Restart::Due { owed, due: now };
+                    members.restart = Restart::Due {
+                        owed: Box::new(owed),
+                        due: now,
+                    };
                 }
                 Err(failed) if in_hand => {
                     members.restarts.push_back(now);
@@ -1084,7 +1090,7 @@ fn owe_restart(
     let deployment_id = owed.recipe.deployment_id.clone();
     if let Some(&after) = RESTART_DELAYS.get(members.restarts.len()) {
         members.restart = Restart::Due {
-            owed,
+            owed: Box::new(owed),
             due: later(now, after),
         };
         return Some(MemberEvent::RestartDue {

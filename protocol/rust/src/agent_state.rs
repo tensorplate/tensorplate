@@ -9,13 +9,15 @@
 //
 // The state file has its own version track. `schema_version` "0.1" is the
 // singleton layout every agent through 0.2.x reads; "0.2" adds the durable
-// generation counter and the resident set. Both are decoded by
+// generation counter, the resident set and the descriptor identity on the
+// singleton records and the in-flight transaction. Both are decoded by
 // [`decode_agent_state`], not by the protocol-wide
 // [`crate::decode_with_version_check`], whose `SCHEMA_VERSION` stays "0.1"
 // for every other payload and does not move these versions. A writer stamps
 // the oldest version whose readers decode the state without loss
 // ([`AgentState::required_schema_version`]), so an agent that never
-// allocates a generation keeps writing files an older agent reads, and one
+// allocates a generation (and so records no descriptor identity, which
+// names one) keeps writing files an older agent reads, and one
 // that has is refused by an older agent with its typed unsupported-version
 // error instead of being misread.
 
@@ -24,6 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::deploy_transaction::DeployState;
+use crate::descriptor_identity::{DescriptorIdentity, DescriptorIdentityError};
 use crate::error::ErrorCode;
 use crate::resident_set::{ResidentSet, ResidentSetError, MAX_STATE_COUNTER};
 use crate::serde_shape::{deserialize_some, deserialize_some_map_only};
@@ -35,7 +38,8 @@ use crate::{DecodeError, ValidatePayload};
 /// protocol version must not move what those agents read.
 pub const AGENT_STATE_SCHEMA_VERSION_LEGACY: &str = "0.1";
 
-/// State version that adds `next_generation` and `resident_set`.
+/// State version that adds `next_generation`, `resident_set` and the
+/// descriptor identity of the singleton records.
 pub const AGENT_STATE_SCHEMA_VERSION_RESIDENT_SET: &str = "0.2";
 
 /// Every state version [`decode_agent_state`] accepts.
@@ -68,7 +72,7 @@ pub const AGENT_STATE_ROOT_KEYS: [&str; 10] = [
 /// resident-set records refuse unknown keys through serde; these records
 /// keep serde's leniency for "0.1" files, so [`decode_agent_state`] checks
 /// them by name in a "0.2" file, after requiring each to be a JSON object.
-pub const DEPLOYMENT_RECORD_KEYS: [&str; 9] = [
+pub const DEPLOYMENT_RECORD_KEYS: [&str; 12] = [
     "deployment_id",
     "bundle_digest",
     "bundle_name",
@@ -78,10 +82,13 @@ pub const DEPLOYMENT_RECORD_KEYS: [&str; 9] = [
     "staged_path",
     "promoted_monotonic_ns",
     "labels",
+    "generation",
+    "descriptor_digest",
+    "configuration_digest",
 ];
 
 /// See [`DEPLOYMENT_RECORD_KEYS`].
-pub const TRANSACTION_RECORD_KEYS: [&str; 10] = [
+pub const TRANSACTION_RECORD_KEYS: [&str; 13] = [
     "transaction_id",
     "deployment_id",
     "phase",
@@ -92,6 +99,9 @@ pub const TRANSACTION_RECORD_KEYS: [&str; 10] = [
     "started_monotonic_ns",
     "last_transition_monotonic_ns",
     "failure",
+    "generation",
+    "descriptor_digest",
+    "configuration_digest",
 ];
 
 /// See [`DEPLOYMENT_RECORD_KEYS`].
@@ -131,6 +141,46 @@ pub struct DeploymentRecord {
     pub promoted_monotonic_ns: Option<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
+    /// With `descriptor_digest` and `configuration_digest`, the deployment
+    /// descriptor of the generation this record was last started at; all
+    /// three or none. Last, so a "0.1" record read in field order keeps its
+    /// positions.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub generation: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub descriptor_digest: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub configuration_digest: Option<String>,
+}
+
+impl DeploymentRecord {
+    /// The descriptor identity this record carries, if any.
+    ///
+    /// # Errors
+    ///
+    /// [`DescriptorIdentityError`] when it carries only part of one, or a
+    /// field of it is malformed.
+    pub fn descriptor_identity(
+        &self,
+    ) -> Result<Option<DescriptorIdentity<'_>>, DescriptorIdentityError> {
+        DescriptorIdentity::from_fields(
+            self.generation,
+            self.descriptor_digest.as_deref(),
+            self.configuration_digest.as_deref(),
+        )
+    }
 }
 
 /// Persistable typed error attached to a failed/quarantined transaction.
@@ -192,6 +242,45 @@ pub struct TransactionRecord {
     pub last_transition_monotonic_ns: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<ErrorRecord>,
+    /// With `descriptor_digest` and `configuration_digest`, the deployment
+    /// descriptor of the candidate's generation; all three or none. Last,
+    /// so a "0.1" record read in field order keeps its positions.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub generation: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub descriptor_digest: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub configuration_digest: Option<String>,
+}
+
+impl TransactionRecord {
+    /// The descriptor identity this transaction carries, if any.
+    ///
+    /// # Errors
+    ///
+    /// [`DescriptorIdentityError`] when it carries only part of one, or a
+    /// field of it is malformed.
+    pub fn descriptor_identity(
+        &self,
+    ) -> Result<Option<DescriptorIdentity<'_>>, DescriptorIdentityError> {
+        DescriptorIdentity::from_fields(
+            self.generation,
+            self.descriptor_digest.as_deref(),
+            self.configuration_digest.as_deref(),
+        )
+    }
 }
 
 /// One quarantine entry persisted outside the active/previous/candidate slots.
@@ -257,8 +346,9 @@ impl AgentState {
     }
 
     /// The oldest state version whose readers decode this state without
-    /// loss: "0.2" once the state carries the generation counter or a
-    /// resident set, "0.1" otherwise. A value outside the v0.2.1 error,
+    /// loss: "0.2" once the state carries the generation counter, a
+    /// resident set or any field of a descriptor identity, "0.1" otherwise.
+    /// A value outside the v0.2.1 error,
     /// phase or transaction-kind vocabulary also rules out "0.1"; no such
     /// value exists today, and one added after a release has written "0.2"
     /// takes a new state version (see the classification functions below).
@@ -266,12 +356,44 @@ impl AgentState {
     pub fn required_schema_version(&self) -> &'static str {
         if self.next_generation.is_some()
             || self.resident_set.is_some()
+            || self.names_a_descriptor()
             || !self.uses_only_legacy_vocabulary()
         {
             AGENT_STATE_SCHEMA_VERSION_RESIDENT_SET
         } else {
             AGENT_STATE_SCHEMA_VERSION_LEGACY
         }
+    }
+
+    /// Whether any record carries a field of a descriptor identity, whole
+    /// or not: an agent through 0.2.x would drop it on its next write.
+    fn names_a_descriptor(&self) -> bool {
+        self.descriptor_identities()
+            .any(|(_, identity)| identity != Ok(None))
+    }
+
+    /// Each record that may carry a descriptor identity, with what it
+    /// carries.
+    fn descriptor_identities(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &'static str,
+            Result<Option<DescriptorIdentity<'_>>, DescriptorIdentityError>,
+        ),
+    > {
+        [
+            ("active", &self.active),
+            ("previous_active", &self.previous_active),
+            ("candidate", &self.candidate),
+        ]
+        .into_iter()
+        .filter_map(|(slot, record)| Some((slot, record.as_ref()?.descriptor_identity())))
+        .chain(
+            self.in_flight_transaction
+                .as_ref()
+                .map(|tx| ("in_flight_transaction", tx.descriptor_identity())),
+        )
     }
 
     fn uses_only_legacy_vocabulary(&self) -> bool {
@@ -395,6 +517,21 @@ impl AgentState {
                 return Err(AgentStateError::NextGenerationOutOfRange(counter));
             }
         }
+        for (record, identity) in self.descriptor_identities() {
+            let identity = identity
+                .map_err(|source| AgentStateError::DescriptorIdentity { record, source })?;
+            // Every generation a record names was handed out by the counter.
+            if let Some(generation) = identity
+                .map(|identity| identity.generation)
+                .filter(|generation| *generation >= self.next_generation.unwrap_or(1))
+            {
+                return Err(AgentStateError::RecordGenerationNotAllocated {
+                    record,
+                    generation,
+                    next_generation: self.next_generation,
+                });
+            }
+        }
         if let Some(set) = self.resident_set.as_ref() {
             let counter = self
                 .next_generation
@@ -472,7 +609,7 @@ pub enum AgentStateError {
     )]
     UnsupportedStateVersion(String),
     #[error(
-        "a state stamped schema_version 0.1 carries content an agent through 0.2.x cannot read (the generation counter, a resident set, or a newer error code, phase or transaction kind)"
+        "a state stamped schema_version 0.1 carries content an agent through 0.2.x cannot read (the generation counter, a resident set, a record's descriptor identity, or a newer error code, phase or transaction kind)"
     )]
     LegacyVersionCarriesNewContent,
     #[error("unknown top-level field `{0}` in a schema_version 0.2 state")]
@@ -483,6 +620,20 @@ pub enum AgentStateError {
     RecordNotAnObject(String),
     #[error("next_generation {0} is outside [1, 2^53)")]
     NextGenerationOutOfRange(u64),
+    #[error("`{record}` {source}")]
+    DescriptorIdentity {
+        record: &'static str,
+        source: DescriptorIdentityError,
+    },
+    #[error(
+        "`{record}` generation {generation} was never allocated ({})",
+        describe_counter(*.next_generation)
+    )]
+    RecordGenerationNotAllocated {
+        record: &'static str,
+        generation: u64,
+        next_generation: Option<u64>,
+    },
     #[error("resident_set requires next_generation")]
     ResidentSetWithoutCounter,
     #[error("the singleton `{0}` slot must be absent when a resident_set is present")]
@@ -505,6 +656,13 @@ pub enum AgentStateError {
         "generation {generation} joins the resident set below generation {newest}, which it already names"
     )]
     GenerationReissued { generation: u64, newest: u64 },
+}
+
+fn describe_counter(next_generation: Option<u64>) -> String {
+    next_generation.map_or_else(
+        || "the state has no next_generation".to_owned(),
+        |next| format!("next_generation is {next}"),
+    )
 }
 
 impl ValidatePayload for AgentState {
@@ -641,6 +799,9 @@ mod tests {
         DeploymentRecord {
             deployment_id: "deploy-1".into(),
             bundle_digest: "sha256:cafe".into(),
+            generation: None,
+            descriptor_digest: None,
+            configuration_digest: None,
             bundle_name: "yolov8n".into(),
             bundle_version: "1.0.0".into(),
             backend_hint: "tensorrt".into(),
@@ -739,6 +900,9 @@ mod tests {
                 phase: DeployState::Warmed,
                 kind: TransactionKind::Deploy,
                 bundle_digest: Some("sha256:cafe".into()),
+                generation: None,
+                descriptor_digest: None,
+                configuration_digest: None,
                 bundle_path: Some("/bundles/deploy-1".into()),
                 correlation_id: Some("corr-1".into()),
                 started_monotonic_ns: Some(1),
@@ -882,6 +1046,66 @@ mod tests {
     }
 
     #[test]
+    fn any_field_of_a_descriptor_identity_is_0_2_content() {
+        type Name = fn(&mut AgentState);
+        fn transaction(s: &mut AgentState) -> &mut TransactionRecord {
+            s.in_flight_transaction.as_mut().expect("transaction")
+        }
+        const DIGEST: &str = "sha256:d0";
+        let named: [Name; 6] = [
+            |s| s.active.as_mut().expect("active").generation = Some(1),
+            |s| {
+                let previous = s.previous_active.as_mut().expect("previous");
+                previous.descriptor_digest = Some(DIGEST.into());
+            },
+            |s| {
+                let candidate = s.candidate.as_mut().expect("candidate");
+                candidate.configuration_digest = Some(DIGEST.into());
+            },
+            |s| transaction(s).generation = Some(1),
+            |s| transaction(s).descriptor_digest = Some(DIGEST.into()),
+            |s| transaction(s).configuration_digest = Some(DIGEST.into()),
+        ];
+        let base = AgentState {
+            active: Some(sample_deployment()),
+            previous_active: Some(sample_deployment()),
+            candidate: Some(sample_deployment()),
+            in_flight_transaction: Some(TransactionRecord {
+                transaction_id: "tx-1".into(),
+                deployment_id: "deploy-1".into(),
+                phase: DeployState::Staged,
+                kind: TransactionKind::Deploy,
+                bundle_digest: None,
+                bundle_path: None,
+                correlation_id: None,
+                started_monotonic_ns: None,
+                last_transition_monotonic_ns: None,
+                failure: None,
+                generation: None,
+                descriptor_digest: None,
+                configuration_digest: None,
+            }),
+            ..AgentState::fresh()
+        };
+        assert_eq!(
+            base.required_schema_version(),
+            AGENT_STATE_SCHEMA_VERSION_LEGACY
+        );
+        for name in named {
+            let mut s = base.clone();
+            name(&mut s);
+            assert_eq!(
+                s.required_schema_version(),
+                AGENT_STATE_SCHEMA_VERSION_RESIDENT_SET
+            );
+            assert_eq!(
+                invalid(&s),
+                AgentStateError::LegacyVersionCarriesNewContent.to_string()
+            );
+        }
+    }
+
+    #[test]
     fn a_0_2_stamp_may_carry_only_the_counter() {
         let mut s = AgentState::fresh();
         s.schema_version = AGENT_STATE_SCHEMA_VERSION_RESIDENT_SET.into();
@@ -970,6 +1194,9 @@ mod tests {
             phase: DeployState::Received,
             kind: TransactionKind::Deploy,
             bundle_digest: None,
+            generation: None,
+            descriptor_digest: None,
+            configuration_digest: None,
             bundle_path: None,
             correlation_id: None,
             started_monotonic_ns: None,
@@ -1203,5 +1430,14 @@ mod tests {
             .replace("\"0.2\"", "\"0.1\"")
             .replace(",\"next_generation\":1", "");
         decode_agent_state(&legacy).expect("0.1 reads the array form as before");
+        // The same holds for an array-form `active` record: the three
+        // identity fields come after every field a 0.1 writer knew.
+        let active = r#"{"schema_version":"0.1","store_version":1,"active":["d","sha256:aa","n","v","b","m","/s",5,{}]}"#;
+        let decoded = decode_agent_state(active).expect("0.1 reads the array-form record");
+        let record = decoded.active.expect("active");
+        assert_eq!(record.deployment_id, "d");
+        assert_eq!(record.staged_path, "/s");
+        assert_eq!(record.promoted_monotonic_ns, Some(5));
+        assert_eq!(record.descriptor_identity(), Ok(None));
     }
 }

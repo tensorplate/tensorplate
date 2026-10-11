@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_control::is_valid_deployment_id;
 use crate::correlation_id::validate_correlation_id;
+use crate::descriptor_identity::{DescriptorIdentity, DescriptorIdentityError};
 use crate::error::ErrorCode;
 use crate::member_quota::{MemberQuota, MAX_MEMBER_SESSIONS};
 use crate::resident_set::MAX_STATE_COUNTER;
@@ -272,6 +273,11 @@ impl LedgerStatus {
 
 /// Reference to a verified, staged candidate the agent asks the worker to
 /// load and warm.
+///
+/// The three descriptor identity fields are all or none. That is checked in
+/// the request payload's validation and in [`CandidateRef::descriptor_identity`];
+/// a reference built in process is not checked until its consumer calls the
+/// latter. A consumer must call it before using any of the three fields.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateRef {
@@ -298,6 +304,44 @@ pub struct CandidateRef {
         deserialize_with = "deserialize_some"
     )]
     pub artifact_relative_path: Option<String>,
+    /// With `descriptor_digest` and `configuration_digest`, the deployment
+    /// descriptor of the candidate's generation; all three or none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub generation: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub descriptor_digest: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_some"
+    )]
+    pub configuration_digest: Option<String>,
+}
+
+impl CandidateRef {
+    /// The descriptor identity this reference carries, if any.
+    ///
+    /// # Errors
+    ///
+    /// [`DescriptorIdentityError`] when it carries only part of one, or a
+    /// field of it is malformed.
+    pub fn descriptor_identity(
+        &self,
+    ) -> Result<Option<DescriptorIdentity<'_>>, DescriptorIdentityError> {
+        DescriptorIdentity::from_fields(
+            self.generation,
+            self.descriptor_digest.as_deref(),
+            self.configuration_digest.as_deref(),
+        )
+    }
 }
 
 /// Outgoing agent -> worker request envelope.
@@ -566,6 +610,8 @@ pub enum WorkerControlRequestError {
     EmptyTransactionId,
     #[error("worker control op `{0}` requires a candidate payload")]
     MissingCandidate(WorkerOp),
+    #[error("candidate {0}")]
+    InvalidCandidate(DescriptorIdentityError),
     #[error("legacy worker control op `{0}` carries a runtime-operation field")]
     RuntimeFieldOnLegacyOp(WorkerOp),
     #[error("runtime op `{0}` requires a correlation_id")]
@@ -615,6 +661,11 @@ impl ValidatePayload for WorkerControlRequest {
             return Err(invalid(WorkerControlRequestError::RuntimeFieldOnLegacyOp(
                 self.op,
             )));
+        }
+        if let Some(candidate) = &self.candidate {
+            candidate
+                .descriptor_identity()
+                .map_err(|e| invalid(WorkerControlRequestError::InvalidCandidate(e)))?;
         }
         match self.op {
             WorkerOp::Prepare | WorkerOp::CapacityCheck | WorkerOp::Warm | WorkerOp::Promote => {
@@ -1028,6 +1079,9 @@ mod tests {
             deployment_id: "deploy-1".into(),
             staged_path: "/var/lib/tensorplate/staging/deploy-1".into(),
             bundle_digest: "sha256:cafe".into(),
+            generation: None,
+            descriptor_digest: None,
+            configuration_digest: None,
             backend_hint: "tensorrt".into(),
             model_class: "vision".into(),
             bundle_name: Some("yolov8n".into()),

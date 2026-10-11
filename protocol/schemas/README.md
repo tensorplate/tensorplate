@@ -44,8 +44,9 @@ same `Unsupported` code.
 One document has its own version track: `agent_state.json`, the agent's
 durable state file, which no other process reads. Its `schema_version` is a
 state version, `"0.1"` (the singleton layout) or `"0.2"` (adds the
-deployment generation counter and the resident set), listed as an `enum` at
-the schema's root. It is decoded by `tensorplate_protocol::decode_agent_state`,
+deployment generation counter, the resident set and the descriptor identity
+on the singleton records and the in-flight transaction), listed as an
+`enum` at the schema's root. It is decoded by `tensorplate_protocol::decode_agent_state`,
 which accepts exactly those versions and rejects any other with the same
 typed error. Moving the protocol version does not move the state versions,
 though the schema's `$id` follows the protocol version like every other
@@ -118,13 +119,24 @@ golden frames and to the typed job seam's vectors.
 The two digests in `deployment_descriptor.json` are SHA-256 over canonical
 JSON version 1, specified in
 [`docs/bundles/integrity.md`](../../docs/bundles/integrity.md#canonical-json-version-1).
-`protocol/fixtures/canonical_json.json` and the three
+`protocol/fixtures/canonical_json.json` and the four
 `protocol/fixtures/deployment_descriptor_*.json` documents are
 cross-language vectors that every implementation replays;
 `protocol/fixtures/canonical_json_reference.py` writes them, and
 `protocol/rust/tests/deployment_descriptor_fixtures.rs` replays them for
 the Rust crate. Validating the descriptor needs the four schemas it
 references registered beside it.
+
+A record or reference names a descriptor by `generation`,
+`descriptor_digest` and `configuration_digest`, all three or none
+([`docs/bundles/integrity.md`](../../docs/bundles/integrity.md#naming-a-descriptor)).
+`agent_state.json` carries them on `DeploymentRecord` and
+`TransactionRecord`, and `worker_control.json` on `CandidateRef`. The
+candidate reference belongs to the legacy operations, which never cross the
+control channel, so it has a Rust mirror only and no golden frame:
+`protocol/rust/tests/fixtures/candidate_ref_{with,without}_descriptor.json`
+are two `prepare` documents that `worker_control_frames.rs` validates
+against the schema and the decoder.
 
 ## Adding a new payload
 

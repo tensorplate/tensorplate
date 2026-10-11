@@ -473,7 +473,12 @@ state directory, passes one more than the highest of them, getting the
 typed exhausted-counter error when no generation remains above it)
 and the resident set (members at their generations, retained
 previous generations, and the committed endpoint map; the singleton
-`active`, `previous_active` and `candidate` slots are absent beside it). The
+`active`, `previous_active` and `candidate` slots are absent beside it). It
+also lets a singleton record and the in-flight transaction name the
+deployment descriptor of their generation by `generation`,
+`descriptor_digest` and `configuration_digest`, all three or none; the
+agent does not write them yet
+([`integrity.md`](../bundles/integrity.md#naming-a-descriptor)). The
 agent stamps the oldest state version whose readers decode the file without
 loss: `0.2` from the first generation it allocates, `0.1` until then. An
 agent through 0.2.x refuses a `0.2` file with its typed unsupported-version

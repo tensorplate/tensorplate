@@ -1,0 +1,20 @@
+{
+  "schema_version": "0.1",
+  "transaction_id": "tx-00000000-0000-4000-8000-000000000003",
+  "candidate_deployment_id": "speech-stt",
+  "op": "prepare",
+  "candidate": {
+    "deployment_id": "speech-stt",
+    "staged_path": "/var/lib/tensorplate/bundles/staging/speech-stt/3",
+    "bundle_digest": "sha256:1b92187c5834ea34102b73e798e3d23dd1368e88a17b41575fafccaf438de7c7",
+    "backend_hint": "python_pytorch",
+    "model_class": "speech",
+    "bundle_name": "speech-stt-streaming",
+    "bundle_version": "0.2.0",
+    "artifact_relative_path": "entry.json",
+    "generation": 3,
+    "descriptor_digest": "sha256:f0859d3ed80535ae615803058c926913a495854c5e34e035721be6a119fa6985",
+    "configuration_digest": "sha256:6eafccdcd19c9df08cb81cadc708245ea9d135995762375958bc864ac105bafa"
+  },
+  "timeout_ms": 30000
+}
