@@ -73,31 +73,62 @@ pub struct BackendCapability {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortRange {
-    #[serde(deserialize_with = "deserialize_port")]
+    #[serde(deserialize_with = "deserialize_integer")]
     pub first: u16,
-    #[serde(deserialize_with = "deserialize_port")]
+    #[serde(deserialize_with = "deserialize_integer")]
     pub last: u16,
 }
 
-/// A port as the schema's draft-07 `integer` reads one: a number with a
-/// zero fraction (`18100.0`) is that integer.
+/// An integer key as the schema's draft-07 `integer` reads it: a number
+/// with a zero fraction (`18100.0`) is that integer. Refuses a fraction, a
+/// negative, a value outside `T` and anything that is not a number.
+pub(crate) fn deserialize_integer<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: TryFrom<u64>,
+{
+    integer_from_number(&serde_json::Number::deserialize(deserializer)?)
+}
+
+/// [`deserialize_integer`] for an optional key: absent or `null` is `None`.
+pub(crate) fn deserialize_optional_integer<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: TryFrom<u64>,
+{
+    Option::<serde_json::Number>::deserialize(deserializer)?
+        .map(|number| integer_from_number(&number))
+        .transpose()
+}
+
+/// [`deserialize_integer`] for an optional key that, once present, must be
+/// a number: absent is `None`, `null` is refused.
+pub(crate) fn deserialize_some_integer<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: TryFrom<u64>,
+{
+    deserialize_integer(deserializer).map(Some)
+}
+
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn deserialize_port<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
-    let number = serde_json::Number::deserialize(deserializer)?;
+fn integer_from_number<T: TryFrom<u64>, E: serde::de::Error>(
+    number: &serde_json::Number,
+) -> Result<T, E> {
+    // 2^64, exactly representable.
+    const U64_LIMIT: f64 = 18_446_744_073_709_551_616.0;
     let whole = number.as_u64().or_else(|| {
-        // Integral and no larger than a port, so the cast is exact.
         number
             .as_f64()
-            .filter(|float| (0.0..=f64::from(u16::MAX)).contains(float) && float.fract() == 0.0)
+            .filter(|float| (0.0..U64_LIMIT).contains(float) && float.fract() == 0.0)
+            // Integral and below 2^64, so the cast is exact.
             .map(|float| float as u64)
     });
     whole
-        .and_then(|port| u16::try_from(port).ok())
-        .ok_or_else(|| {
-            serde::de::Error::custom(format!(
-                "a port is an integer from 0 to 65535, got {number}"
-            ))
-        })
+        .and_then(|value| T::try_from(value).ok())
+        .ok_or_else(|| E::custom(format!("expected an integer in range, got {number}")))
 }
 
 impl PortRange {
@@ -119,9 +150,15 @@ pub struct WorkerConfig {
     pub serving_binary_path: Option<PathBuf>,
     #[serde(default = "default_serving_bind_host")]
     pub serving_bind_host: String,
-    #[serde(default = "default_serving_bind_port")]
+    #[serde(
+        default = "default_serving_bind_port",
+        deserialize_with = "deserialize_integer"
+    )]
     pub serving_bind_port: u16,
-    #[serde(default = "default_serving_candidate_bind_port")]
+    #[serde(
+        default = "default_serving_candidate_bind_port",
+        deserialize_with = "deserialize_integer"
+    )]
     pub serving_candidate_bind_port: u16,
     /// The pool the workers' ports are leased from; absent, the two ports
     /// above are the pool.
@@ -135,11 +172,20 @@ pub struct WorkerConfig {
     pub serving_use_mock_session: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serving_config_dir: Option<PathBuf>,
-    #[serde(default = "default_warm_timeout_ms")]
+    #[serde(
+        default = "default_warm_timeout_ms",
+        deserialize_with = "deserialize_integer"
+    )]
     pub warm_timeout_ms: u64,
-    #[serde(default = "default_prepare_timeout_ms")]
+    #[serde(
+        default = "default_prepare_timeout_ms",
+        deserialize_with = "deserialize_integer"
+    )]
     pub prepare_timeout_ms: u64,
-    #[serde(default = "default_status_poll_interval_ms")]
+    #[serde(
+        default = "default_status_poll_interval_ms",
+        deserialize_with = "deserialize_integer"
+    )]
     pub status_poll_interval_ms: u64,
 }
 
@@ -191,7 +237,7 @@ pub struct AgentConfig {
     pub socket_path: Option<PathBuf>,
     #[serde(default = "default_tcp_host")]
     pub tcp_bind_host: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_integer")]
     pub tcp_bind_port: u16,
     pub state_dir: PathBuf,
     pub staging_dir: PathBuf,
@@ -205,7 +251,7 @@ pub struct AgentConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub memory_admission: Option<crate::memory_admission::MemoryAdmissionConfig>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_integer")]
     pub device_memory_bytes: Option<u64>,
     #[serde(default)]
     pub device_family: DeviceFamily,
@@ -493,6 +539,25 @@ mod tests {
     )]
     use super::{AgentConfig, ControlTransport, WorkerControlMode};
     use std::path::PathBuf;
+
+    #[test]
+    fn an_integral_number_is_an_integer_only_below_two_to_the_sixty_fourth() {
+        let read = |text: &str| serde_json::from_str::<super::WorkerConfig>(text);
+        assert_eq!(
+            read(r#"{"warm_timeout_ms": 1e19}"#)
+                .unwrap()
+                .warm_timeout_ms,
+            10_000_000_000_000_000_000
+        );
+        for text in [
+            r#"{"warm_timeout_ms": 18446744073709551616.0}"#,
+            r#"{"warm_timeout_ms": 1e30}"#,
+            r#"{"warm_timeout_ms": -0.5}"#,
+            r#"{"warm_timeout_ms": null}"#,
+        ] {
+            assert!(read(text).is_err(), "{text}");
+        }
+    }
 
     fn minimal() -> AgentConfig {
         AgentConfig {

@@ -5,9 +5,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use tensorplate_protocol::serde_shape::{
-    deserialize_map_only, deserialize_some, is_canonical_identifier,
-};
+use tensorplate_protocol::serde_shape::{deserialize_map_only, is_canonical_identifier};
 use tensorplate_protocol::{json_numbers::MAX_SAFE_BYTES, BudgetDomainName};
 
 use crate::error::{AgentError, AgentResult};
@@ -18,10 +16,11 @@ use crate::error::{AgentError, AgentResult};
 pub struct MemoryDomainConfig {
     #[serde(
         default,
-        deserialize_with = "deserialize_some",
+        deserialize_with = "crate::config::deserialize_some_integer",
         skip_serializing_if = "Option::is_none"
     )]
     pub cap_bytes: Option<u64>,
+    #[serde(deserialize_with = "crate::config::deserialize_integer")]
     pub reserve_bytes: u64,
 }
 

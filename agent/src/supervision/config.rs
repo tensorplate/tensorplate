@@ -40,20 +40,38 @@ pub enum RestartPolicyKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackoffConfig {
-    #[serde(default = "default_initial_delay_ms")]
+    #[serde(
+        default = "default_initial_delay_ms",
+        deserialize_with = "crate::config::deserialize_integer"
+    )]
     pub initial_delay_ms: u64,
-    #[serde(default = "default_multiplier_hundredths")]
+    #[serde(
+        default = "default_multiplier_hundredths",
+        deserialize_with = "crate::config::deserialize_integer"
+    )]
     pub multiplier_hundredths: u32,
-    #[serde(default = "default_max_delay_ms")]
+    #[serde(
+        default = "default_max_delay_ms",
+        deserialize_with = "crate::config::deserialize_integer"
+    )]
     pub max_delay_ms: u64,
     /// Rolling window inside which restart attempts accumulate toward the
     /// crash-loop threshold. Counters reset after `stable_reset_ms` of
     /// uninterrupted ready uptime.
-    #[serde(default = "default_window_ms")]
+    #[serde(
+        default = "default_window_ms",
+        deserialize_with = "crate::config::deserialize_integer"
+    )]
     pub window_ms: u64,
-    #[serde(default = "default_threshold")]
+    #[serde(
+        default = "default_threshold",
+        deserialize_with = "crate::config::deserialize_integer"
+    )]
     pub threshold: u32,
-    #[serde(default = "default_stable_reset_ms")]
+    #[serde(
+        default = "default_stable_reset_ms",
+        deserialize_with = "crate::config::deserialize_integer"
+    )]
     pub stable_reset_ms: u64,
 }
 
@@ -129,7 +147,10 @@ pub struct EventSinkConfig {
     /// drops the oldest. The supervisor records the bounded drop count
     /// in status and emits a typed log line, but it never blocks
     /// supervision decisions waiting for a slow consumer.
-    #[serde(default = "default_event_queue_capacity")]
+    #[serde(
+        default = "default_event_queue_capacity",
+        deserialize_with = "crate::config::deserialize_integer"
+    )]
     pub queue_capacity: u32,
     /// Optional Unix domain socket the observability service listens on.
     /// `None` (the v0.1.0 default) keeps the in-process channel only;
@@ -178,6 +199,7 @@ pub struct SupervisorConfig {
     pub control_host: String,
     /// Loopback port the worker binds its `/health` and `/infer` endpoints
     /// to.
+    #[serde(deserialize_with = "crate::config::deserialize_integer")]
     pub control_port: u16,
     /// Stdout/stderr capture mode.
     #[serde(default)]
@@ -185,20 +207,32 @@ pub struct SupervisorConfig {
     /// Time the supervisor waits for the worker to report `ready` after
     /// launch. Hitting this timeout counts as a not-ready failure
     /// against the restart policy (V01-E09-F02 / F03).
-    #[serde(default = "default_startup_timeout_ms")]
+    #[serde(
+        default = "default_startup_timeout_ms",
+        deserialize_with = "crate::config::deserialize_integer"
+    )]
     pub startup_timeout_ms: u64,
     /// Time the supervisor waits for a graceful shutdown before
     /// escalating to forced termination.
-    #[serde(default = "default_graceful_stop_timeout_ms")]
+    #[serde(
+        default = "default_graceful_stop_timeout_ms",
+        deserialize_with = "crate::config::deserialize_integer"
+    )]
     pub graceful_stop_timeout_ms: u64,
     /// Hard upper bound after forced-termination escalation. The
     /// supervisor reports a typed `WorkerControl` error if the process
     /// still has not exited.
-    #[serde(default = "default_kill_timeout_ms")]
+    #[serde(
+        default = "default_kill_timeout_ms",
+        deserialize_with = "crate::config::deserialize_integer"
+    )]
     pub kill_timeout_ms: u64,
     /// How often the supervisor polls the worker for actual-state during
     /// steady-state operation.
-    #[serde(default = "default_status_poll_interval_ms")]
+    #[serde(
+        default = "default_status_poll_interval_ms",
+        deserialize_with = "crate::config::deserialize_integer"
+    )]
     pub status_poll_interval_ms: u64,
     /// Restart policy.
     #[serde(default)]
