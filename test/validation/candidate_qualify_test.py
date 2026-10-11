@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT / "sdk/python/src"))
 import candidate_audio as audio  # noqa: E402
 import candidate_record as record_mod  # noqa: E402
 import jsonschema  # noqa: E402
+import vram_ballast as ballast_mod  # noqa: E402
 
 VOLATILE_KEYS = {
     "recorded_at_utc",
@@ -575,6 +576,157 @@ def check_filed_record_guard(schema: dict) -> None:
         raise AssertionError("an evidence tree with no filed record passed")
 
 
+def check_ballast_script(harness: Harness) -> None:
+    """The fake ballast is the real script on a fake device: one usage, one report line."""
+    script = str(ROOT / "tools/validation/vram_ballast.py")
+    for bad in (
+        [],
+        ["0"],
+        ["-5"],
+        ["1e3"],
+        ["5", "6"],
+        ["--leave-free"],
+        ["--leave-free", "0"],
+        ["--leave-free", "x"],
+        ["--leave-free=5"],
+        ["--leave-free", "5", "6"],
+        ["5", "--leave-free", "5"],
+        ["--hold", "5"],
+    ):
+        answers = [
+            subprocess.run(
+                [program, script, *bad], capture_output=True, text=True, env=harness.env()
+            )
+            for program in (sys.executable, str(harness.ballast))
+        ]
+        for done in answers:
+            assert (done.returncode, done.stdout, done.stderr) == (2, "", ballast_mod.USAGE), bad
+        assert not harness.oom_marker.exists(), bad
+    for rule, count in ((ballast_mod.BYTES, 1024), (ballast_mod.LEAVE_FREE, 4000)):
+        arguments = ballast_mod.command_arguments(rule, count)
+        assert ballast_mod.parse_rule(arguments) == (rule, count), arguments
+    report = ballast_mod.parse_report
+    assert report("held 6000 free 10000 left 3984\n") == {"held": 6000, "free": 10000, "left": 3984}
+    assert report("held 5 free unknown left unknown\n") == {"held": 5, "free": None, "left": None}
+    assert report("refused free 10000\n") == {"held": None, "free": 10000, "left": None}
+    assert report("refused free unknown\n") == {"held": None, "free": None, "left": None}
+    for line in (
+        "",
+        "held 5\n",
+        "held 5 free 9 left 4",
+        "held 5 free 9 left 4 \n",
+        "held -5 free 9 left 4\n",
+        "held 5 free 9\n",
+        "held unknown free 9 left 4\n",
+        "refused\n",
+        "refused free 9 left 4\n",
+        "note: held 5 free 9 left 4\n",
+    ):
+        assert report(line) is None, line
+
+
+def check_ballast_rules(harness: Harness, schema: dict) -> None:
+    """The out-of-memory case on the fake device: 10,000 bytes free, an allocator that
+    takes blocks of 64, and a second load of the candidate that needs 9,500."""
+
+    def case(*sizing: str, sampler: bool = False, **device: str) -> tuple[int, dict, dict]:
+        completed, record, evidence = harness.run(
+            "stt",
+            "--oom-ballast-python",
+            str(harness.ballast),
+            *sizing,
+            oom=False,
+            sampler=sampler,
+            env=harness.env(**device),
+        )
+        assert record is not None, completed.stderr
+        check_schema(record, schema)
+        assert not harness.oom_marker.exists(), "the ballast was not terminated"
+        oom = next(n for n in record["negatives"] if n["case"] == "oom_at_load")
+        return completed.returncode, record, oom
+
+    def figures(rule: str, requested: int, free, held, left, reason=None) -> dict:
+        return {
+            "rule": rule,
+            "requested_bytes": requested,
+            "free_bytes": free,
+            "held_bytes": held,
+            "left_bytes": left,
+            "reason": reason,
+        }
+
+    not_run = "negative case oom_at_load did not run"
+    code, record, oom = case("--oom-ballast-leave-free", "4000", sampler=True)
+    assert code == 0 and record["result"] == {"status": "pass", "reasons": []}, record["result"]
+    assert (oom["status"], oom["observed"]["code"]) == ("matched", "oom_error"), oom
+    # What was left is what the device reported while the ballast held, not the 4,000 asked for.
+    assert oom["ballast"] == figures("leave_free", 4000, 10000, 6000, 3984), oom["ballast"]
+
+    # Leaving as much as the load needs: it fits, as it did on a device with too small a ballast.
+    code, record, oom = case("--oom-ballast-leave-free", "9600")
+    assert code == 2 and record["result"]["status"] == "fail", record["result"]
+    assert (oom["status"], oom["reason"]) == ("mismatched", "the request succeeded"), oom
+    assert oom["observed_outcome"] == "deployed as qualify-stt-oom"
+    assert oom["ballast"] == figures("leave_free", 9600, 10000, 400, 9552), oom["ballast"]
+
+    # Leaving less than the allocator takes beyond what it is asked for: the device refuses.
+    reason = "the ballast was refused its allocation by the device (exit 4)"
+    code, record, oom = case("--oom-ballast-leave-free", "10")
+    assert code == 3 and not_run in record["result"]["reasons"], record["result"]
+    assert (oom["status"], oom["reason"], oom["observed"]) == ("not_run", reason, None), oom
+    assert oom["ballast"] == figures("leave_free", 10, 10000, None, None, reason), oom["ballast"]
+
+    # Free memory not above what is to be left: nothing is held and no size is guessed.
+    for asked in (10000, 20000):
+        reason = (
+            f"the ballast held nothing: 10000 bytes were free, not more than the {asked} "
+            "to leave free (exit 6)"
+        )
+        code, record, oom = case("--oom-ballast-leave-free", str(asked))
+        assert code == 3 and not_run in record["result"]["reasons"], record["result"]
+        assert (oom["status"], oom["reason"], oom["observed"]) == ("not_run", reason, None), oom
+        assert oom["ballast"] == figures("leave_free", asked, 10000, None, None, reason)
+    code, record, oom = case("--oom-ballast-leave-free", "9999")
+    assert oom["status"] == "mismatched" and oom["ballast"]["held_bytes"] == 1, oom
+
+    reason = "the ballast could not read the device's free memory (exit 5)"
+    code, record, oom = case("--oom-ballast-leave-free", "4000", TP_FAKE_DEVICE_UNREADABLE="1")
+    assert code == 3 and not_run in record["result"]["reasons"], record["result"]
+    assert (oom["status"], oom["reason"], oom["observed"]) == ("not_run", reason, None), oom
+    assert oom["ballast"] == figures("leave_free", 4000, None, None, None, reason), oom["ballast"]
+
+    # A byte count needs no free figure; the figures it could not read are absent with why.
+    code, record, oom = case("--oom-ballast-bytes", "1024", TP_FAKE_DEVICE_UNREADABLE="1")
+    assert (oom["status"], oom["reason"]) == ("matched", None), oom
+    reason = "the ballast could not read the device's free memory"
+    assert oom["ballast"] == figures("bytes", 1024, None, 1024, None, reason), oom["ballast"]
+    broken = json.loads(json.dumps(record))
+    next(n for n in broken["negatives"] if n["case"] == "oom_at_load")["ballast"]["reason"] = None
+    for validate in (
+        lambda v: jsonschema.validate(v, schema),
+        lambda v: record_mod.validate_record(v, schema),
+    ):
+        try:
+            validate(broken)
+        except (jsonschema.ValidationError, record_mod.RecordError):
+            continue
+        raise AssertionError("a ballast figure absent with no reason passed validation")
+
+    # A byte count the device has no room for is refused by the device, as before.
+    reason = "the ballast was refused its allocation by the device (exit 4)"
+    code, record, oom = case("--oom-ballast-bytes", "10001")
+    assert (oom["status"], oom["reason"]) == ("not_run", reason), oom
+    assert oom["ballast"] == figures("bytes", 10001, 10000, None, None, reason), oom["ballast"]
+
+    for sizing, needle in (
+        (("--oom-ballast-bytes", "1024", "--oom-ballast-leave-free", "4000"), "not allowed with"),
+        (("--oom-ballast-leave-free", "-1"), "must be positive"),
+    ):
+        completed, record, _ = harness.run("stt", *sizing, oom=False, sampler=False)
+        assert completed.returncode == 2 and record is None, (sizing, completed.returncode)
+        assert needle in completed.stderr, completed.stderr
+
+
 def main() -> int:
     schema = record_mod.load_schema()
     if sys.argv[1:2] == ["--filed-records"]:
@@ -613,6 +765,8 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="tp-candidate-qualify-") as tmp:
         harness = Harness(Path(tmp))
+        check_ballast_rules(harness, schema)
+        check_ballast_script(harness)
 
         completed, record, evidence = harness.run("stt")
         assert completed.returncode == 0, completed.stderr
@@ -704,6 +858,14 @@ def main() -> int:
         )
         assert record["device_facts"]["cli_version"] == "0.3.1"
         assert not harness.oom_marker.exists(), "the ballast was not terminated"
+        assert record["negatives"][5]["ballast"] == {
+            "rule": "bytes",
+            "requested_bytes": 1024,
+            "free_bytes": 10000,
+            "held_bytes": 1024,
+            "left_bytes": 8976,
+            "reason": None,
+        }
         for name in (
             "predecessor_idle-device_vram.jsonl",
             "candidate_load-guest_ram.jsonl",
@@ -735,7 +897,7 @@ def main() -> int:
             "observed": None,
             "observed_outcome": None,
             "status": "not_run",
-            "reason": "no --oom-ballast-bytes given",
+            "reason": "no --oom-ballast-bytes or --oom-ballast-leave-free given",
         }
         assert record["result"]["reasons"] == ["negative case oom_at_load did not run"]
 

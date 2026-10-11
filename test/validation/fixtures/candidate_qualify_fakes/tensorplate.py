@@ -17,6 +17,10 @@ was, and the next rollback finds the agent `busy`, exit 5. Above the warm timeou
 answers with the runner's typed code, the behaviour the recipe expects; the first 0.3.1
 candidate answered `inference_failed` there. TP_FAKE_CLI_BUSY_ROLLBACKS makes the first N
 rollbacks busy, and TP_FAKE_CLI_SLOW_ROLLBACK_MS is how long a restore takes.
+
+A load needs TP_FAKE_LOAD_NEEDS_BYTES of device memory. While the fake ballast holds
+memory its marker file carries the bytes left free, and a load that needs more than
+that answers `oom_error`; one that fits deploys, as it does on a real device.
 """
 
 import hashlib
@@ -38,6 +42,7 @@ state = (
     }
 )
 WARM_TIMEOUT_MS = int(os.environ.get("TP_FAKE_AGENT_WARM_TIMEOUT_MS", "30000"))
+LOAD_NEEDS_BYTES = int(os.environ.get("TP_FAKE_LOAD_NEEDS_BYTES", "9500"))
 BUSY = {"code": "not_ready", "message": "agent is busy with an in-flight transaction"}
 
 
@@ -177,7 +182,8 @@ if command == "deploy":
             fail("load_failed", "bundle integrity: digest mismatch")
         if art["role"] == "model":
             entry = json.loads(data)
-    if Path(os.environ["TP_FAKE_OOM_MARKER"]).exists():
+    held = Path(os.environ["TP_FAKE_OOM_MARKER"])
+    if held.exists() and int(held.read_text()) < LOAD_NEEDS_BYTES:
         fail("oom_error", "the device is out of memory", at_load=True)
     if manifest["name"] == os.environ.get("TP_FAKE_CLI_FAIL_CANDIDATE"):
         fail("load_failed", "the sidecar did not become ready", at_load=True)

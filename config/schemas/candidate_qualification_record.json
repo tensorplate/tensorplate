@@ -459,8 +459,50 @@
         "observed": { "$ref": "#/definitions/ObservedError" },
         "observed_outcome": { "type": ["string", "null"] },
         "status": { "type": "string", "enum": ["matched", "mismatched", "recorded", "not_run"] },
-        "reason": { "type": ["string", "null"] }
+        "reason": { "type": ["string", "null"] },
+        "ballast": { "$ref": "#/definitions/Ballast" }
       }
+    },
+    "Ballast": {
+      "description": "How the out-of-memory case sized the device memory it held, as the ballast process reported it. Absent when no ballast was asked for.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule", "requested_bytes", "free_bytes", "held_bytes", "left_bytes", "reason"],
+      "properties": {
+        "rule": {
+          "type": "string",
+          "enum": ["bytes", "leave_free"],
+          "description": "`bytes`: hold `requested_bytes`. `leave_free`: hold the device's free memory less `requested_bytes`."
+        },
+        "requested_bytes": { "type": "integer", "minimum": 1 },
+        "free_bytes": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Free device memory the ballast read before it held anything, its own device context already made."
+        },
+        "held_bytes": { "type": ["integer", "null"], "minimum": 1 },
+        "left_bytes": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Free device memory the ballast read while holding: an observation, not `requested_bytes` repeated."
+        },
+        "reason": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "Why a figure is null. Null only when all three figures were observed."
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "free_bytes": { "type": "integer" },
+            "held_bytes": { "type": "integer" },
+            "left_bytes": { "type": "integer" },
+            "reason": { "type": "null" }
+          }
+        },
+        { "properties": { "reason": { "type": "string" } } }
+      ]
     }
   }
 }
