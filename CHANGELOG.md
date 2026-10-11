@@ -39,6 +39,35 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A gRPC stream listener in the serving worker that binds and refuses every
+  `Open`: the worker does not serve stream sessions yet. In builds with
+  `TP_ENABLE_STREAMING_GRPC` and with `streaming.enabled`, the worker binds
+  the draft stream envelope's `SessionService` on `bind.host` and the new
+  `streaming.port` (0 for an ephemeral port, logged), under the HTTP bind's
+  loopback rule (`localhost` is the IPv4 loopback, never resolved). The
+  worker builds no speech dispatch yet, so its listener refuses every `Open`
+  with `backend_unsupported_capability`; a worker with
+  `deployment.generation` refuses `streaming.enabled` as `unsupported`.
+  Given a dispatch, which only tests do so far, the listener admits one
+  session at a time and answers `Open` with `Ready` (the deployment's limits
+  and the session's initial credit, with no generation or descriptor digest:
+  the worker is addressed by its deployment alone), `Ping` with `Pong`, and a
+  half-close by draining and closing the session; every other client event
+  fails the session with `backend_unsupported_capability`. A session's typed
+  outcome is its `SessionClosed`; the call then ends with status OK only when
+  the session closed without a cause, and otherwise with the status code of
+  the cause's reason (a session drained by shutdown ends `UNAVAILABLE`). A
+  refused `Open` ends the call with a status code chosen by its reason and a
+  message naming it; how the status will carry the typed refusal is not
+  decided, and it carries none yet. Shutdown closes admission and drains
+  live sessions with `worker_shutdown` inside the drain deadline before the
+  gRPC server stops. A call that never sends `Open` is not bounded yet, and
+  the open handshake timeout, the limit on unadmitted calls and the refusal
+  of compression are not enforced yet. A build without the feature compiles
+  no listener. The stream schema's comments now state how a worker without a
+  generation is addressed (comments only; no field changes).
+  (V030-E04-F02-T02)
+
 - The Python SDK's wheel carries the modules of the stream session schema,
   `tensorplate.stream.v1.session_pb2` (with a `.pyi` stub) and
   `session_pb2_grpc`. The SDK's build generates them from
@@ -314,6 +343,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   protocol 0.1; version constants unchanged. (V030-E05-F04-T01)
 
 ### Changed
+
+- The native code absence check
+  (`tools/release/check-native-code-absence.py`) also checks single archive
+  members: `--member PORT:MEMBER` fails when the fresh worker's GNU ld map
+  extracts that member from the port's archive, or names a member the
+  archive does not hold, and the report lists `absent_members`. The serving
+  worker now links gRPC, OpenSSL and zlib's deflate and inflate objects
+  through the stream listener, so the supply-chain native job no longer
+  asserts that those ports are absent; it asserts, for the amd64 release
+  profile, that zlib's `gzwrite.c.o` is not linked. The zlib advisory still
+  disposed of as not affected names code that zlib 1.3.2 defines only in that
+  object, which the disposition states and the job does not check. A
+  disposition grounded on absent members declares
+  `requires_absent_members`, and is honoured only while that check reports
+  every named member absent. (V030-E04-F02-T02)
 
 - The validation pass gives each candidate its own out-of-memory ballast and
   checks its predecessor before anything is deployed. `--oom-ballast
