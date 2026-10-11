@@ -1017,6 +1017,96 @@ def test_send_audio_takes_any_bytes_like_object() -> None:
     play(scenario)
 
 
+def test_closing_the_client_ends_the_sessions_made_from_it() -> None:
+    async def main() -> None:
+        fake = StreamServer(heartbeat_interval_ms=10)
+        async with fake.serving() as endpoint:
+            async with speech.SpeechClient(endpoint) as stream:
+                options: dict[str, Any] = {"language": "en", "input_format": PCM}
+                finished = stream.transcribe(TARGET, **options)
+                async with finished:
+                    await finished.send_audio(FRAME)
+                session = stream.transcribe(TARGET, **options)
+                unopened = stream.transcribe(TARGET, **options)
+                await session.open()
+                await fake.until(lambda: "ping" in fake.bodies())
+                waiting = asyncio.create_task(taken(session))
+            await fake.until(lambda: fake.live == 0)
+            assert session._pinger is not None
+            assert session._pinger.done()
+            assert await waiting == []
+            for closed in (session, unopened):
+                calls = (closed.open(), closed.send_audio(FRAME), closed.finalize(), closed.close())
+                for call in calls:
+                    with pytest.raises(speech.SessionClosedError):
+                        await call
+                with pytest.raises(speech.SessionClosedError):
+                    async with closed:
+                        pass
+                await closed.cancel()
+                assert await taken(closed) == []
+            with pytest.raises(speech.SessionClosedError):
+                stream.transcribe(TARGET, **options)
+            await stream.aclose()
+            # A session that had ended keeps its events and its totals.
+            assert len(await taken(finished)) == 2
+            assert await finished.close() == speech.SessionTotals(320, 0, 0, 1, 0)
+
+    run(main)
+
+
+def test_closing_the_client_waits_for_a_session_no_longer_than_its_cancel_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def main() -> None:
+        async with StreamServer().serving() as endpoint:
+            stream = speech.SpeechClient(endpoint)
+            session = stream.transcribe(
+                TARGET, language="en", input_format=PCM, cancel_timeout=0.05
+            )
+            await session.open()
+            monkeypatch.setattr(session, "_until_ended", lambda: asyncio.Event().wait())
+            await stream.aclose()
+
+    run(main)
+
+
+def test_a_channel_the_caller_passes_is_used_and_left_open() -> None:
+    async def main() -> None:
+        fake = StreamServer()
+        options: dict[str, Any] = {"language": "en", "input_format": PCM}
+        async with fake.serving() as endpoint:
+            channel = grpc.aio.insecure_channel(endpoint, options=client.CHANNEL_OPTIONS)
+            for _ in range(2):
+                stream = speech.SpeechClient(channel=channel)
+                async with stream, stream.transcribe(TARGET, **options) as session:
+                    await session.send_audio(FRAME)
+            assert fake.calls == 2
+            # Closing the client ends its sessions before it returns, open or not.
+            stream = speech.SpeechClient(channel=channel)
+            session, unopened = (stream.transcribe(TARGET, **options) for _ in range(2))
+            await session.open()
+            await stream.aclose()
+            assert session._ended
+            with pytest.raises(speech.SessionClosedError):
+                await unopened.open()
+            assert unopened._call is None
+            # A channel its owner closed: no error of gRPC's reaches the caller.
+            session = speech.SpeechClient(channel=channel).transcribe(TARGET, **options)
+            await channel.close()
+            for call in (session.open(), session.open(), session.send_audio(FRAME)):
+                with pytest.raises(speech.SessionClosedError):
+                    await call
+            await session.cancel()
+            assert await taken(session) == []
+
+    run(main)
+    both: dict[str, Any] = {"endpoint": "127.0.0.1:1", "channel": object()}
+    for arguments in ({}, both):
+        with pytest.raises(ValueError, match="an endpoint or a channel"):
+            speech.SpeechClient(**arguments)
+
+
 def test_a_closed_session_raises_the_closed_session_error_and_repeats_its_totals() -> None:
     async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
         async with session:
