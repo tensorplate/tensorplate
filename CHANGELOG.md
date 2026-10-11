@@ -39,6 +39,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The agent leases its serving workers' ports. A worker generation holds
+  its ports from its start until its process has been reaped, so a worker
+  that is still draining, and the restart owed to one that stopped, keep
+  theirs; a candidate is given the first ports nothing holds, waits up to
+  `worker.prepare_timeout_ms` for one when none is free, and is then
+  refused with `resource_exhausted`. The optional
+  `worker.serving_port_range` (`first`, `last`) names a pool of port
+  pairs, an HTTP port and the port after it for the worker's stream
+  listener; only the HTTP port is rendered into the worker's config so
+  far. Without a range the pool is the two existing ports
+  (`serving_bind_port`, `serving_candidate_bind_port`) and no stream port
+  is held, so every packaged configuration behaves as before. The member
+  registry can be built with a restart stamp, called for each generation
+  a restart starts; the agent installs none yet. (V030-E03-F01-T03)
+
 - The validation pass runs the streaming measurement client when
   `--streaming-arg` names a stream endpoint (`--stt-endpoint` or
   `--tts-endpoint`), through `--streaming-python`. The pass sets the
