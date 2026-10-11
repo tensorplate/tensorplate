@@ -404,6 +404,10 @@ stays occupied until the caller finishes the segment
 has been delivered or discarded, not when synthesis ends: at most three
 accepted segments exist at once. A release the credit cannot match is a
 defect in the caller and fails the session.
+Every transition the sink is shown carries, beside its status, how many
+text segments wait against the two that may (`waiting_segments`), taken
+in the same step. With the credit bytes of the status it is the input
+credit a stream reports; the public status type does not carry it.
 
 **Output queue.** Every server message of a stream passes through its
 `BoundedOutputQueue`, which the manager creates at open and hands to the

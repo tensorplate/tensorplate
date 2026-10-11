@@ -121,6 +121,10 @@ class InputCredit {
   /// Bytes held against the input credit: unconsumed audio, or waiting text.
   [[nodiscard]] LogicalSessionUsage usage() const;
 
+  /// Text segments accepted and not yet started, against the count that may
+  /// wait. No use of a zero budget for audio.
+  [[nodiscard]] LogicalSessionUsage waiting_segments() const;
+
  private:
   SessionBudgets budgets_;
   std::uint64_t held_bytes_ = 0;

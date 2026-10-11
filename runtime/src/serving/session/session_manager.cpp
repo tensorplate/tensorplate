@@ -218,8 +218,14 @@ std::optional<ManagedSessionTransition> SessionManager::apply_locked(std::uint64
   if (effects->contains(LogicalSessionEffect::SuppressOutput)) {
     entry.output->suppress();
   }
-  const auto status = status_of(entry);
-  return ManagedSessionTransition{key, event, after, *effects, entry.cause, status, entry.output};
+  return ManagedSessionTransition{key,
+                                  event,
+                                  after,
+                                  *effects,
+                                  entry.cause,
+                                  status_of(entry),
+                                  entry.credit.waiting_segments(),
+                                  entry.output};
 }
 
 Result<ManagedSessionTransition> SessionManager::apply(std::uint64_t session_key,
@@ -511,8 +517,9 @@ Result<LogicalSessionStatus> SessionManager::update_credit(std::uint64_t session
       defect = updated.error();
       failed = apply_locked(session_key, entry, LogicalSessionEvent::Fail, defect);
     }
-    returned = ManagedSessionTransition{session_key, std::nullopt,     entry.machine.state(), {},
-                                        entry.cause, status_of(entry), entry.output};
+    returned = ManagedSessionTransition{
+        session_key, std::nullopt,     entry.machine.state(),           {},
+        entry.cause, status_of(entry), entry.credit.waiting_segments(), entry.output};
   }
   if (failed) {
     cv_.notify_one();
