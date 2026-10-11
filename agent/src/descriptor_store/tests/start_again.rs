@@ -6,7 +6,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use tensorplate_protocol::agent_control::RecoveryAction;
-use tensorplate_protocol::agent_state::{ErrorRecord, TransactionKind, TransactionRecord};
+use tensorplate_protocol::agent_state::{
+    ErrorRecord, QuarantineRecord, TransactionKind, TransactionRecord,
+};
 use tensorplate_protocol::deploy_transaction::DeployState;
 
 use crate::coordinator::Coordinator;
@@ -164,6 +166,14 @@ impl Agent {
         let state = self.store.snapshot().unwrap();
         [state.active.unwrap(), state.previous_active.unwrap()]
     }
+    /// The state writes of a rollback to the previous record, `stt`, up to
+    /// the one that records `phase`, and none after.
+    fn rollback_up_to(&self, phase: DeployState) {
+        let [_, previous] = self.records();
+        self.in_flight(TransactionKind::Rollback, "tx", "stt");
+        self.again(&previous, Start::Rollback("tx")).unwrap();
+        self.store.record_phase("tx", phase, 1).unwrap();
+    }
 }
 
 /// Where the agent of a test keeps its state and its staged bundles.
@@ -257,6 +267,16 @@ impl Host {
     fn last_error(&self) -> Option<ErrorRecord> {
         let read = StateStore::open(self.state_dir()).unwrap();
         read.snapshot().unwrap().last_error
+    }
+    /// The quarantined transactions, as `tx@Promoted`, and whether the last
+    /// error is that of the latest one.
+    fn quarantined(&self) -> (String, bool) {
+        let read = StateStore::open(self.state_dir()).unwrap();
+        let state = read.snapshot().unwrap();
+        let show = |q: &QuarantineRecord| format!("{}@{:?}", q.transaction_id, q.phase);
+        let shown: Vec<_> = state.quarantined.iter().map(show).collect();
+        let latest = state.quarantined.last().map(|q| &q.error);
+        (shown.join(" "), latest == state.last_error.as_ref())
     }
     /// The documents in the state directory, as `stt-1 tts-2`.
     fn documents(&self) -> String {
@@ -508,12 +528,7 @@ fn a_rollback_killed_after_it_named_the_generation_starts_over_from_the_previous
 fn a_rollback_killed_after_its_swap_is_finalized_with_the_identity_the_swap_recorded() {
     let host = host();
     let (agent, _) = host.rolling_back(Worker::default());
-    // The writes of a rollback up to its swap, and none after.
-    let [_, previous] = agent.records();
-    agent.in_flight(TransactionKind::Rollback, "tx", "stt");
-    agent.again(&previous, Start::Rollback("tx")).unwrap();
-    let promoted = DeployState::Promoted;
-    agent.store.record_phase("tx", promoted, 1).unwrap();
+    agent.rollback_up_to(DeployState::Promoted);
     agent.store.swap_active_with_previous(2).unwrap();
     assert_eq!(host.view(), ["stt@3", "tts@2", "stt@3", "4"]);
 
@@ -525,6 +540,65 @@ fn a_rollback_killed_after_its_swap_is_finalized_with_the_identity_the_swap_reco
     assert_eq!(summary.action, RecoveryAction::FinalizePromotion);
     assert_eq!(host.view(), ["stt@3", "tts@2", "-", "4"]);
     assert!(next.never_asked());
+}
+
+#[test]
+fn a_rollback_killed_after_its_swap_is_quarantined_by_a_start_that_finds_nothing_serving() {
+    let host = host();
+    let (agent, first) = host.rolling_back(Worker::default());
+    agent.rollback_up_to(DeployState::Promoted);
+    agent.store.swap_active_with_previous(2).unwrap();
+    assert_eq!(host.view(), ["stt@3", "tts@2", "stt@3", "4"]);
+
+    // A worker control reports nothing active when the agent starts. The
+    // start removes the document the rollback replaced, quarantines the
+    // transaction and restores nothing.
+    let (next, pruned) = host.start(Worker::default());
+    assert_eq!((pruned, host.documents().as_str()), (1, "stt-3 tts-2"));
+    let summary = apply_startup(&next.coordinator).unwrap();
+    assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
+    assert_eq!(host.view(), ["stt@3", "tts@2", "-", "4"]);
+    assert_eq!(host.quarantined(), ("tx@Promoted".to_owned(), true));
+    assert!(next.never_asked() && host.documents() == "stt-3 tts-2");
+
+    // The start after it restores the swapped record at the next generation.
+    let (after, pruned) = host.start(Worker::default());
+    assert_eq!((pruned, host.documents().as_str()), (0, "stt-3 tts-2"));
+    let summary = apply_startup(&after.coordinator).unwrap();
+    assert_eq!(summary.action, RecoveryAction::RestoreActive);
+    assert_eq!(after.asked().resolved, Some(first.restamp(4).unwrap()));
+    assert_eq!(host.view(), ["stt@4", "tts@2", "-", "5"]);
+    assert_eq!(host.last_error(), None);
+    assert_eq!(host.documents(), "stt-3 stt-4 tts-2");
+}
+
+#[test]
+fn a_rollback_killed_before_its_swap_keeps_its_document_until_the_start_after_its_quarantine() {
+    use DeployState::{Prepared, Promoted, Warmed};
+    for phase in [Prepared, Warmed, Promoted] {
+        let host = host();
+        let (agent, _) = host.rolling_back(Worker::default());
+        agent.rollback_up_to(phase);
+        assert_eq!(host.view(), ["tts@2", "stt@1", "stt@3", "4"]);
+
+        // Every document is named, so the next start removes none. It
+        // quarantines the transaction, and the document it named stays.
+        let (next, pruned) = host.start(Worker::default());
+        assert_eq!(pruned, 0, "{phase:?}");
+        let summary = apply_startup(&next.coordinator).unwrap();
+        assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
+        assert_eq!(host.view(), ["tts@2", "stt@1", "-", "4"]);
+        assert_eq!(host.quarantined(), (format!("tx@{phase:?}"), true));
+        assert!(next.never_asked() && host.documents() == "stt-1 stt-3 tts-2");
+
+        // No record names it now: the start after that removes it, and
+        // restores the active record.
+        let (after, pruned) = host.start(Worker::default());
+        assert_eq!((pruned, host.documents().as_str()), (1, "stt-1 tts-2"));
+        apply_startup(&after.coordinator).unwrap();
+        assert_eq!(host.view(), ["tts@4", "stt@1", "-", "5"]);
+        assert_eq!(host.documents(), "stt-1 tts-2 tts-4");
+    }
 }
 
 #[test]

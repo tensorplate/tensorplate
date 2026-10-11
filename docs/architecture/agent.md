@@ -581,10 +581,13 @@ before the first document is written.
   its own document (resumed, the rollback takes another generation). The
   descriptor is re-stamped as recorded, as by the restart stamp. Between a
   rollback's update and its `prepare`, a restart of the serving member can
-  take a newer generation; the registry then refuses the rollback's
+  take a newer generation. Either the registry refuses the rollback's
   reference, the rollback fails with nothing else changed, and it can be
-  asked for again. A record that names no descriptor gets the reference it
-  got before, and nothing is written.
+  asked for again; or that restart, still starting, yields to the rollback,
+  which is promoted, and the swap leaves `previous_active` at a higher
+  generation than `active`. That is harmless: a later rollback takes a
+  generation above both. A record that names no descriptor gets the
+  reference it got before, and nothing is written.
 - **Restart stamp.** For a member whose recipe names a descriptor, the stamp
   a `process`-mode agent installs reads the stopped generation's document,
   [re-stamps](../bundles/integrity.md#re-stamping) it, writes the new

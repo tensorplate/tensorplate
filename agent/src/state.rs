@@ -535,7 +535,10 @@ impl StateStore {
 /// Give `previous`, which a rollback puts back as active, the descriptor
 /// identity its transaction names: a later generation of the configuration
 /// the record names. Under its old one it would name a generation that is
-/// not serving.
+/// not serving. A rollback's transaction is named only by `start_again`,
+/// always with such a generation, so nothing reaches the refusal; it would
+/// leave the transaction in flight at `Promoted` while the worker serves
+/// the previous record.
 fn take_rollback_identity(
     previous: &mut DeploymentRecord,
     transaction: Option<&TransactionRecord>,
