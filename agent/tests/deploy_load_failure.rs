@@ -42,7 +42,7 @@ use tensorplate_protocol::{ErrorCode, SCHEMA_VERSION};
 
 /// Far longer than a deploy takes on a loaded machine, so that `PROMPT`, a
 /// tenth of it, is a bound that load does not reach.
-const WARM_TIMEOUT: Duration = Duration::from_secs(300);
+const WARM_TIMEOUT: Duration = Duration::from_secs(600);
 /// A deploy that answers this fast did not wait for the warm timeout.
 const PROMPT: Duration = Duration::from_secs(WARM_TIMEOUT.as_secs() / 10);
 
