@@ -100,8 +100,10 @@ The default install does **not** open any non-loopback port.
   Homebrew. The reserved alternative `loopback_tcp` transport binds to
   `127.0.0.1` only and rejects any other host in config validation.
 - Serving worker: loopback bind (`127.0.0.1`) on a fixed port owned by
-  the agent. The agent rejects non-loopback `serving_bind_host` values
-  in process mode.
+  the agent: one of `worker.serving_bind_port` and
+  `worker.serving_candidate_bind_port` as packaged, or a port of
+  `worker.serving_port_range` in a configuration that sets one. The agent
+  rejects non-loopback `serving_bind_host` values in process mode.
 - Observability: in-process transport by default. The reserved
   `unix_socket` listener stays within the platform runtime directory when
   enabled in a future release.

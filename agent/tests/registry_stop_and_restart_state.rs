@@ -19,8 +19,8 @@ use tensorplate_agent::coordinator::Coordinator;
 use tensorplate_agent::error::{AgentError, AgentResult};
 use tensorplate_agent::recovery;
 use tensorplate_agent::registry::{
-    durable_generations, ControlContact, HealthProbe, LaunchSpec, MemberProcess, MemberRegistry,
-    ProcessLauncher, RegistrySettings,
+    durable_generations, ControlContact, HealthProbe, LaunchSpec, MemberPorts, MemberProcess,
+    MemberRegistry, ProcessLauncher, RegistrySettings,
 };
 use tensorplate_agent::state::StateStore;
 use tensorplate_agent::supervision::FakeClock;
@@ -130,8 +130,9 @@ fn start_agent(h: &Harness) -> Agent {
     let clock = Arc::new(FakeClock::new());
     let settings = RegistrySettings {
         bind_host: "127.0.0.1".into(),
-        active_port: 41_180,
-        candidate_port: 41_181,
+        ports: [41_180, 41_181]
+            .map(|http| MemberPorts { http, stream: None })
+            .to_vec(),
         config_dir: h.td.path().join("worker-configs"),
         use_mock_session: true,
         status_poll_interval: Duration::from_millis(1),

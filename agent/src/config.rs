@@ -69,6 +69,46 @@ pub struct BackendCapability {
     pub supported_artifact_kinds: Vec<String>,
 }
 
+/// Loopback ports `first` to `last`, inclusive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortRange {
+    #[serde(deserialize_with = "deserialize_port")]
+    pub first: u16,
+    #[serde(deserialize_with = "deserialize_port")]
+    pub last: u16,
+}
+
+/// A port as the schema's draft-07 `integer` reads one: a number with a
+/// zero fraction (`18100.0`) is that integer.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn deserialize_port<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let number = serde_json::Number::deserialize(deserializer)?;
+    let whole = number.as_u64().or_else(|| {
+        // Integral and no larger than a port, so the cast is exact.
+        number
+            .as_f64()
+            .filter(|float| (0.0..=f64::from(u16::MAX)).contains(float) && float.fract() == 0.0)
+            .map(|float| float as u64)
+    });
+    whole
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "a port is an integer from 0 to 65535, got {number}"
+            ))
+        })
+}
+
+impl PortRange {
+    /// The (HTTP, stream) pairs the range holds, in order from `first`.
+    pub fn pairs(self) -> impl Iterator<Item = (u16, u16)> {
+        (self.first..=self.last)
+            .step_by(2)
+            .filter_map(move |http| Some((http, http.checked_add(1).filter(|s| *s <= self.last)?)))
+    }
+}
+
 /// Worker-control bounded-timeout knobs.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -83,6 +123,14 @@ pub struct WorkerConfig {
     pub serving_bind_port: u16,
     #[serde(default = "default_serving_candidate_bind_port")]
     pub serving_candidate_bind_port: u16,
+    /// The pool the workers' ports are leased from; absent, the two ports
+    /// above are the pool.
+    #[serde(
+        default,
+        deserialize_with = "tensorplate_protocol::serde_shape::deserialize_some_map_only",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub serving_port_range: Option<PortRange>,
     #[serde(default)]
     pub serving_use_mock_session: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,6 +151,7 @@ impl Default for WorkerConfig {
             serving_bind_host: default_serving_bind_host(),
             serving_bind_port: default_serving_bind_port(),
             serving_candidate_bind_port: default_serving_candidate_bind_port(),
+            serving_port_range: None,
             serving_use_mock_session: false,
             serving_config_dir: None,
             warm_timeout_ms: default_warm_timeout_ms(),
@@ -406,6 +455,19 @@ fn validate_process_worker_config(
         return Err(AgentError::Config(
             "worker serving active and candidate ports must differ".into(),
         ));
+    }
+    if let Some(range) = worker.serving_port_range {
+        if range.first == 0 {
+            return Err(AgentError::Config(
+                "worker.serving_port_range must start above port 0 in process mode".into(),
+            ));
+        }
+        if range.pairs().count() < 2 {
+            return Err(AgentError::Config(format!(
+                "worker.serving_port_range {} to {} must hold at least two pairs of ports, `first` to `last` inclusive: a serving worker and its replacement are alive together",
+                range.first, range.last
+            )));
+        }
     }
     if worker.serving_config_dir.is_none() {
         worker.serving_config_dir = Some(state_dir.join("worker-configs"));

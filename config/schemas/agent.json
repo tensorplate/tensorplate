@@ -220,7 +220,12 @@
               "serving_config_dir": {"pattern": "^/"},
               "serving_bind_host": {"enum": ["127.0.0.1", "::1", "localhost"]},
               "serving_bind_port": {"minimum": 1},
-              "serving_candidate_bind_port": {"minimum": 1}
+              "serving_candidate_bind_port": {"minimum": 1},
+              "serving_port_range": {
+                "properties": {
+                  "first": {"minimum": 1}
+                }
+              }
             }
           }
         }
@@ -254,6 +259,16 @@
           "maximum": 65535,
           "default": 18081,
           "description": "Alternate loopback port used while warming a replacement candidate."
+        },
+        "serving_port_range": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["first", "last"],
+          "description": "Loopback ports the process-backed workers are given, `first` to `last` inclusive. Each worker generation holds a pair from it, an HTTP port and the port after it for its stream listener, from its start until its process has been reaped; pairs are taken in order from `first`, and a port left over by an odd count is not used. When this is set, `serving_bind_port` and `serving_candidate_bind_port` are not used, though still checked. When it is absent those two ports are the pool, one worker each, and no stream port is held. Rule the agent enforces beyond this schema in process mode: the range holds at least two pairs, which a range that runs backwards does not.",
+          "properties": {
+            "first": {"type": "integer", "minimum": 0, "maximum": 65535},
+            "last": {"type": "integer", "minimum": 0, "maximum": 65535}
+          }
         },
         "serving_use_mock_session": {
           "type": "boolean",

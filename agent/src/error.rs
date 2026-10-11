@@ -182,6 +182,10 @@ pub enum AgentError {
     #[error("worker reported candidate is not ready")]
     WorkerNotReady,
 
+    /// Every configured serving port is held by a worker.
+    #[error("no serving port is free: {0}")]
+    NoFreePort(String),
+
     /// The agent was told to stop: it starts no worker, and a transaction
     /// this interrupts is left as it stands for the next start's recovery.
     #[error("the agent is stopping")]
@@ -224,6 +228,7 @@ impl AgentError {
             AgentError::Busy(_) | AgentError::WorkerNotReady => (ErrorCode::NotReady, true),
             AgentError::WorkerControl(_) => (ErrorCode::InferenceFailed, true),
             AgentError::Stopping => (ErrorCode::Unavailable, true),
+            AgentError::NoFreePort(_) => (ErrorCode::ResourceExhausted, true),
             AgentError::WorkerStartupFailed { code, .. } => (
                 *code,
                 !matches!(

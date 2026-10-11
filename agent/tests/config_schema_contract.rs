@@ -368,6 +368,47 @@ const AGREEMENT_CASES: &[(&str, &str)] = &[
         r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b"},"supervision":{"binary_path":"/b","working_dir":"/w","serving_config_path":"/c","control_port":18090}}"#,
     ),
     (
+        "process worker with a port range",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":{"first":18100,"last":18107}}}"#,
+    ),
+    (
+        "process worker, range from port zero",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":{"first":0,"last":7}}}"#,
+    ),
+    (
+        "mock worker, unused range from port zero",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"mock","serving_port_range":{"first":0,"last":0}}}"#,
+    ),
+    (
+        "range without its last port",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":{"first":18100}}}"#,
+    ),
+    (
+        "range with an unknown key",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"mock","serving_port_range":{"first":18100,"last":18107,"step":2}}}"#,
+    ),
+    (
+        "range past the last port number",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"mock","serving_port_range":{"first":18100,"last":65536}}}"#,
+    ),
+    (
+        "range written as an array",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":[18100,18107]}}"#,
+    ),
+    (
+        "range written as null",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":null}}"#,
+    ),
+    // Draft-07 reads a number with a zero fraction as an integer.
+    (
+        "range bound with a zero fraction",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":{"first":18100.0,"last":18107}}}"#,
+    ),
+    (
+        "range bound with a fraction",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":{"first":18100.5,"last":18107}}}"#,
+    ),
+    (
         "default policy, zero backoff",
         r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","supervision":{"binary_path":"/b","working_dir":"/w","serving_config_path":"/c","control_port":18080,"restart_policy":{"backoff":{"initial_delay_ms":0}}}}"#,
     ),
@@ -386,6 +427,18 @@ const RUNTIME_ONLY_RULES: &[(&str, &str)] = &[
         r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_bind_port":18080,"serving_candidate_bind_port":18080}}"#,
     ),
     (
+        "port range that runs backwards",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":{"first":18107,"last":18100}}}"#,
+    ),
+    (
+        "port range that ends at port zero",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":{"first":18100,"last":0}}}"#,
+    ),
+    (
+        "port range with one pair",
+        r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","worker":{"mode":"process","serving_binary_path":"/b","serving_port_range":{"first":18100,"last":18102}}}"#,
+    ),
+    (
         "backoff max below initial",
         r#"{"schema_version":"0.1","state_dir":"/v","staging_dir":"/s","socket_path":"/k","supervision":{"binary_path":"/b","working_dir":"/w","serving_config_path":"/c","control_port":18080,"restart_policy":{"kind":"bounded_backoff","backoff":{"initial_delay_ms":500,"max_delay_ms":100}}}}"#,
     ),
@@ -399,7 +452,7 @@ fn the_schema_and_the_runtime_agree_on_every_divergence_found_so_far() {
     // removes the only cover it has. Both outcomes must stay represented,
     // so dropping every rejecting case is caught too.
     assert!(
-        AGREEMENT_CASES.len() >= 24,
+        AGREEMENT_CASES.len() >= 34,
         "cases were removed from the table; each is a reproduced divergence"
     );
     let mut agreed_valid = 0_usize;

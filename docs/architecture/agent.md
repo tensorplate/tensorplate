@@ -582,9 +582,37 @@ that since 0.2.1; a recorded active deployment from an earlier release whose
 id breaks it is not restored at start. The agent comes up without a worker
 and with the reason in `last_error`.
 
-The registry keeps the two configured ports (`serving_bind_port`,
-`serving_candidate_bind_port`): a candidate binds the one the serving member,
-or the restart owed to it, is not on. The registry writes no resident set.
+**Ports.** Every member generation holds ports from the agent's pool, from
+its start until its process has been reaped; a member that is draining
+after a promotion or a yield still holds them, and so does the restart owed
+to a member that stopped, whose successor starts on the same ports. A new
+candidate is given the first ports nothing holds. When none is free its
+`prepare` waits, up to `worker.prepare_timeout_ms`, for a draining worker to
+be reaped, and then fails with `resource_exhausted`. A failed or unloaded
+member gives its ports back. The agent does not check that a port it
+leases is free on the host: when another process listens on one, the worker
+given it does not start, so every deploy onto it fails with the worker's
+startup error, and a restart, which keeps its ports, fails until its three
+restarts are used up and the member is failed.
+
+The pool is `worker.serving_port_range` when the configuration has one:
+pairs taken in order from `first`, an HTTP port and the port after it, kept
+for the member's stream listener (an odd port left over is not used; the
+range must hold at least two pairs). Without a range, which is how every
+packaged configuration ships, the pool is the two ports
+`serving_bind_port` and `serving_candidate_bind_port`, one worker each, and
+no stream port is held. Only the HTTP port is rendered into a worker's
+config today: the serving config has no key for the stream listener's port
+yet, so a range reserves the stream ports and nothing binds them.
+
+A restart can be stamped: a registry built with a restart stamp calls it
+for each generation a restart starts, after the staged bundle check and
+before the config is rendered, with what the stopped generation was started
+from, the generation that was last stamped or started, and the new one. The
+new generation is started from what the stamp returns, and so is the
+restart after it; a stamp that fails is a restart that could not be
+launched and counts as one. The agent installs no stamp yet, and a restart
+without one is unchanged. The registry writes no resident set.
 `WorkerSupervisor` is a separate process manager that no packaged
 configuration enables; a configuration that enables `supervision` beside
 `worker.mode: process` is refused at start, since each would start its own
