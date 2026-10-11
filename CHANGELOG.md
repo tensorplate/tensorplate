@@ -53,6 +53,49 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The serving worker's stream listener serves the remaining client events of
+  the draft stream envelope, still behind a dispatch the worker does not
+  build: a worker refuses every `Open` as before, and only tests give the
+  listener a dispatch. With one, a client can now send `Audio`,
+  `TextSegment`, `Finalize`, `Cancel` and `StatusRequest` besides `Open` and
+  `Ping`, and no client event of the schema is refused as unsupported. Each
+  `Audio` and `TextSegment` is checked against the terms the session was
+  granted and what it accepted before (frame size, length and sample offset;
+  segment id, size, and the text limit counted from the last Finalize);
+  a failed check fails the session with `invalid_event` and names itself in
+  the cause's detail, and input without content with `empty_input`. A frame
+  shorter than the smallest granted is accepted as the last before a
+  Finalize or a half-close, and audio after it fails the session, also when
+  an automatic endpoint came between. `Accepted` reports each accepted input
+  and each return of credit, with the credit the session manager showed for
+  that step; a `StatusRequest` is answered by `SessionStatus`; a `Cancel` by
+  `CancelAccepted` and a session closed with `client_cancelled`, status
+  `CANCELLED`. A `Finalize` is handed to the dispatch with its sequence and
+  answered by the `FinalTranscript` or `SynthesisCompleted` that carries it.
+  Task output is written as `EndpointDetected`, `FinalTranscript`,
+  `AudioChunk`, `SegmentCompleted` and `SynthesisCompleted`, and
+  `SessionClosed` carries the last accepted sequence and the session's
+  totals. A session still live when its call has ended is failed rather
+  than left to a timer. The no-progress limit counts from the completion of
+  a write, so it trails a reader that has stopped by the receive window that
+  client's channel announced: the HTTP/2 default window for a client channel
+  with `grpc.http2.bdp_probe=0`, and a wider one for a default channel. A
+  call whose session has ended is given the no-progress limit again, from
+  the end and from each write that completes after it, and is cancelled when
+  it outruns it, so a reader that never resumes no longer holds its call
+  open; its call ends `CANCELLED` without `SessionClosed`. The worker's
+  stream drain and HTTP drain take their end from one shared window, which
+  the worker logs as `drain_ends_ns` on both. The open handshake timeout,
+  the limit on unadmitted calls, the bound on a call that never sends `Open`
+  and the refusal of compression are still not enforced; a client event
+  that does not decode closes its session as a half-close does instead of
+  failing it, and one over the 64 KiB receive limit ends its call with a
+  transport status and no `SessionClosed`. Two comments of the stream
+  schema are corrected: an utterance that reaches the longest length granted
+  is ended there, not split, and input is refused only while a session is
+  finalizing for a `Finalize`, which can end shortly before the answer is
+  written (comments only; no field changes). (V030-E04-F02-T02)
+
 - Conformance cases for the job bridge and an in-process fixture bridge to
   run them against, both test-only. The cases
   (`test/contract/bounded_job_bridge_conformance.hpp`) hold what the bridge
@@ -115,8 +158,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   session at a time and answers `Open` with `Ready` (the deployment's limits
   and the session's initial credit, with no generation or descriptor digest:
   the worker is addressed by its deployment alone), `Ping` with `Pong`, and a
-  half-close by draining and closing the session; every other client event
-  fails the session with `backend_unsupported_capability`. A session's typed
+  half-close by draining and closing the session. A session's typed
   outcome is its `SessionClosed`; the call then ends with status OK only when
   the session closed without a cause, and otherwise with the status code of
   the cause's reason (a session drained by shutdown ends `UNAVAILABLE`). A
