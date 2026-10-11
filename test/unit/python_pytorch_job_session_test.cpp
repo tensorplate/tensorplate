@@ -20,7 +20,6 @@ TEST(JobSession, FeatureFlagDisabled) {
 #include <chrono>
 #include <cstdint>
 #include <nlohmann/json.hpp>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -37,6 +36,7 @@ TEST(JobSession, FeatureFlagDisabled) {
 #include "tensorplate/core/result.hpp"
 
 #include "adapters/python_pytorch/job_channel.hpp"
+#include "adapters/python_pytorch/sidecar_process.hpp"
 #include "job_session_harness.hpp"
 #include "scripted_sidecar.hpp"
 #include "speech_job_golden.hpp"
@@ -44,6 +44,7 @@ TEST(JobSession, FeatureFlagDisabled) {
 namespace tensorplate::adapters::python_pytorch {
 namespace {
 
+using testing::failure_of;
 using testing::JobSessionHarness;
 using testing::ScriptedSidecar;
 using testing::speech_golden::golden;
@@ -90,16 +91,6 @@ void expect_refused(const Result<void>& result, Error::Code code, std::string_vi
   ASSERT_FALSE(result.has_value()) << reason;
   EXPECT_EQ(result.error().code, code) << reason;
   EXPECT_EQ(result.error().context.value_or(""), reason);
-}
-
-// The error of the job's `failed` event, when it has one.
-std::optional<Error> failure_of(const JobSessionHarness& h, std::uint64_t job_id) {
-  for (const JobEvent& event : h.sink->events()) {
-    if (event.identity().job_id == job_id && event.kind() == Failed) {
-      return event.error();
-    }
-  }
-  return std::nullopt;
 }
 
 // -- The recorded negotiation. ---------------------------------------------------
@@ -170,6 +161,51 @@ TEST(JobSessionNegotiation, ASessionNotBuiltForJobsLoadsOnASidecarThatListsNothi
   JobSessionHarness h(without_jobs(), peer.launcher());
   ASSERT_TRUE(h.session->load(recorded_spec()).has_value());
   EXPECT_TRUE(h.session->prime().has_value());
+}
+
+TEST(JobSessionNegotiation, ASessionNotBuiltForJobsTakesAnAnswerUnderAnotherMessageId) {
+  // The socket path reads the next frame and has never compared ids.
+  ScriptedSidecar peer(
+      ScriptedSidecar::Options{.load_response_overrides = Json{{"message_id", "tp-msg-another"}}});
+  JobSessionHarness h(without_jobs(), peer.launcher());
+  EXPECT_TRUE(h.session->load(recorded_spec()).has_value());
+}
+
+TEST(JobSessionNegotiation, ASessionBuiltForJobsWithoutABufferManagerIsRefusedBeforeItsSidecar) {
+  ScriptedSidecar peer;
+  int launches = 0;
+  const SidecarLauncher launch = peer.launcher();
+  JobSessionHarness h(
+      with_jobs(),
+      [&](const SidecarLaunchRequest& request) {
+        ++launches;
+        return launch(request);
+      },
+      /*with_manager=*/false);
+  const auto loaded = h.session->load(recorded_spec());
+  ASSERT_FALSE(loaded.has_value());
+  EXPECT_EQ(loaded.error().code, Error::Code::ConfigInvalid);
+  EXPECT_EQ(launches, 0);
+}
+
+TEST(JobSessionNegotiation, ASessionNotBuiltForJobsLoadsWithoutABufferManager) {
+  // Its tensor path asks for the buffer manager when a request arrives.
+  ScriptedSidecar peer;
+  JobSessionHarness h(without_jobs(), peer.launcher(), /*with_manager=*/false);
+  EXPECT_TRUE(h.session->load(recorded_spec()).has_value());
+}
+
+TEST(JobSessionNegotiation, ASidecarWhoseReadyEventHasNoCapabilityListIsNotAskedToLoad) {
+  // A runner older than the list.
+  ScriptedSidecar peer(ScriptedSidecar::Options{.lists_capabilities = false});
+  JobSessionHarness h(with_jobs(), peer.launcher());
+  expect_refused(h.session->load(recorded_spec()), Error::Code::Unsupported,
+                 "speech_jobs_not_offered");
+  EXPECT_TRUE(peer.reaped());
+  EXPECT_TRUE(peer.sent("load_model", 0).empty());
+  const auto written = peer.written();
+  ASSERT_EQ(written.size(), 1U);
+  EXPECT_FALSE(written.at(0).contains("capabilities"));
 }
 
 TEST(JobSessionNegotiation, ASidecarThatDoesNotListTheCapabilityIsNotAskedToLoad) {
@@ -424,6 +460,51 @@ TEST(JobSessionFailure, AnExchangeThatTimesOutStopsTheChannelAndReapsTheSidecar)
   // A late answer has no connection to arrive on.
   EXPECT_TRUE(peer.reaped());
   expect_refused(h.channel->submit(JobSessionHarness::tts(1, 1)), Error::Code::Unavailable,
+                 "backend_unavailable");
+}
+
+TEST(JobSessionFailure, AnUnloadARunningJobOutlastsTimesOutAndResetsTheBackend) {
+  // Declared before the harness: its destructor can still deliver.
+  std::atomic<bool> released_before_the_reap{false};
+  ScriptedSidecar peer;
+  PythonPytorchConfig config = with_jobs();
+  // One bound serves load, prime and unload, and the session has no clock to
+  // inject: the unload below waits one real second. The sidecar answers the
+  // first two at once and never ends the job, so only the unload reaches
+  // the bound; a wait on either other bound would hang.
+  config.startup_timeout = std::chrono::seconds{1};
+  config.health_timeout = std::chrono::hours{1};
+  config.infer_timeout = std::chrono::hours{1};
+  JobSessionHarness h(config, peer.launcher());
+  h.on_event = [&](const JobEvent& event) {
+    if (event.kind() == Released && !peer.reaped()) {
+      released_before_the_reap = true;
+    }
+  };
+  // A machine too slow for the bound fails here, not as a wrong unload.
+  const auto loaded = h.session->load(recorded_spec());
+  ASSERT_TRUE(loaded.has_value()) << "the load did not answer within the test's one-second bound: "
+                                  << loaded.error().message;
+  const auto primed = h.session->prime();
+  ASSERT_TRUE(primed.has_value()) << "prime did not answer within the test's one-second bound: "
+                                  << primed.error().message;
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_EQ(peer.take_job(), 1U);
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
+
+  const auto unloaded = h.session->unload();
+  ASSERT_FALSE(unloaded.has_value());
+  EXPECT_EQ(unloaded.error().code, Error::Code::Timeout);
+  // The sidecar had the unload and held its answer behind the job.
+  EXPECT_EQ(peer.sent("unload", 1).size(), 1U);
+  for (const Json& frame : peer.written()) {
+    EXPECT_NE(frame.value("kind", ""), "unload_response");
+  }
+  EXPECT_TRUE(peer.reaped());
+  EXPECT_FALSE(released_before_the_reap);
+  ASSERT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kBackendReset) << "not the unload's reason";
+  expect_refused(h.channel->submit(JobSessionHarness::tts(2, 1)), Error::Code::Unavailable,
                  "backend_unavailable");
 }
 

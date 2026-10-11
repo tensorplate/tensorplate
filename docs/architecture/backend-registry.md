@@ -369,12 +369,14 @@ the runner's rules itself (what a load refuses, what an `error_event`
 answers, the one lock around job messages, the eight-job queue, the write
 stall). Of a submit's input it checks the type and that `payload_length` is
 the payload's length, and it keeps the payload, so a test reads the bytes
-the channel sent; it does not bound the unary requests that wait, and it
+the channel sent; it does not bound the unary requests that wait, it
 writes a unary answer under its job lock where the runner writes it
-outside. It holds every frame of the adapter's to the runner's envelope
-rules (`schema_version` "0.1", a `message_id`, a `kind`) and refuses one
-that breaks them as the runner does. It reports a frame of the adapter's as
-seen only once it has acted
+outside, and it declares the job classes a test gives it, where the runner
+declares only those a lane runs (four tests rest on that; the head of the
+file names them). It holds every frame of the adapter's to the runner's
+envelope rules (`schema_version` "0.1", a `message_id`, a `kind`) and
+refuses one that breaks them as the runner does. It reports a frame of the
+adapter's as seen only once it has acted
 on it, a test that plays a message for a job it does not hold fails there,
 and `stop_reading` returns only once its reader has parked: a test that
 waits for "sent" knows the job is admitted, and one that stops the reading
@@ -408,19 +410,27 @@ and releases, and never starts or stops.
   carries `capabilities: ["speech_jobs_v1"]`, the response's `job_classes`
   are read, and the channel is started on the socket. Any failure on the way
   fails the load and ends the sidecar. A session not built for jobs enables
-  nothing, whatever the sidecar lists.
+  nothing, whatever the sidecar lists. A session built for jobs without a
+  buffer manager is refused at load (`config_invalid`), before a sidecar is
+  started: the channel would refuse every job for good, and the tensor path
+  refuses a request without one the same way.
 - **One slot.** From the load on, the channel's reader owns the socket and
   the session's `prime`, health check and `unload` go through the channel's
   one exchange slot. The slot hands over the next frame that is not a job
   message, so the session compares the response's `message_id` with its
-  request's and treats another as a failed connection. `infer` is refused on
+  request's and treats another as a failed connection. On the socket, which
+  carries every exchange of a session without jobs and the load of one with
+  them, ids are not compared, as before. `infer` is refused on
   such a session (`unsupported`, `tensor_inference_unsupported`) and nothing
   is sent: a tensor request would hold the slot against the lifecycle, and
   its response could exceed what the reader takes.
 - **Admission.** Jobs are admitted once `prime` has returned and its health
   check has passed, not before. `unload` closes admission before it sends
   the unload, because the sidecar fails the jobs that wait when the unload
-  arrives; it then stops the channel with `session_unloaded`.
+  arrives; it then stops the channel with `session_unloaded`. It cancels
+  nothing: the sidecar answers the unload once the job it is running has
+  ended, and the session waits for that answer up to its startup timeout
+  (15 seconds by default).
 - **Every end is a stop.** `unload`, the destructor and every failed
   exchange end the connection through the channel's `stop`, with
   `session_unloaded` or `backend_reset` as the reason open jobs fail with,
@@ -442,6 +452,11 @@ assume:
   returned. Today that call blocks until the sidecar process has been
   waited for; it reports no result, and the channel releases whatever the
   reap did.
+- `unload` does not end a running job. It waits behind it for up to the
+  startup timeout; a job that outlasts the bound makes the unload fail with
+  `timeout`, the open jobs fail with `backend_reset`, not
+  `session_unloaded`, and the sidecar is ended. A holder that wants its jobs
+  to end as unloaded ends or cancels them before it unloads.
 - Nothing announces that the connection ended. Open jobs fail at once; a
   session with none learns of it at its next exchange, which fails and
   stops the channel: with the connection's error, or with `sidecar process
@@ -469,7 +484,11 @@ submit is still refused, a health check that answers not ready, the unload
 held behind a running job while a submit is already refused and the slot
 is taken, the reap observed only after the open job has failed, a sidecar
 that dies, a connection that ends under a live process, an answer to
-another request, an exchange that times out.
+another request, an exchange that times out, an unload that times out
+behind a job the sidecar never ends. It also loads a session built for jobs
+on a sidecar whose `ready_event` has no `capabilities` key and one without
+a buffer manager, and a session not built for jobs on an answer that
+carries another request's id.
 `test/integration/python_pytorch_job_session_test.cpp` runs both speech
 classes on a channel the session started against the in-tree runner.
 

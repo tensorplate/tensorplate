@@ -33,8 +33,12 @@
 //     and keeps the payload for the test to read;
 //   - it has no bound on the unary requests that wait, and it writes a unary
 //     answer under the job lock, where the runner writes it outside;
-//   - it declares the job classes it is given, so a load whose runner has no
-//     class a lane runs is answered where the runner refuses it;
+//   - it declares the job classes it is given, where the runner declares
+//     only those a lane runs and refuses a load that leaves none. Four tests
+//     rest on that: the session's replay of the recorded negotiation, whose
+//     answer declares a pair no runner writes (`stt_decode`, `vad_frames`),
+//     the channel's "only the classes the load declared", and the "no class
+//     a lane runs" test of the channel and of the session;
 //   - an id of its own for a frame without one is the next `s<n>`, where the
 //     runner draws a random one, and a `message_id` that is not a string
 //     counts as none, where the runner echoes it;
@@ -103,6 +107,9 @@ class ScriptedSidecar {
 
   struct Options {
     std::vector<std::string> capabilities{"speech_jobs_v1"};
+    /// False plays a runner older than the list: its `ready_event` has no
+    /// `capabilities` key, and it lists nothing a load could enable.
+    bool lists_capabilities = true;
     /// The job classes of the loaded "runner"; none refuses a load with jobs.
     std::vector<std::string> job_classes{"stt_decode", "tts_synthesis"};
     std::chrono::milliseconds write_stall{std::chrono::seconds{5}};
@@ -145,7 +152,10 @@ class ScriptedSidecar {
       // whatever the host's default is.
       const int held = kSocketBufferBytes;
       (void)::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &held, sizeof(held));
-      Json ready = originated("ready_event", {{"capabilities", options_.capabilities}});
+      Json ready = originated("ready_event", Json::object());
+      if (options_.lists_capabilities) {
+        ready["capabilities"] = options_.capabilities;
+      }
       ready.update(options_.ready_overrides);
       write_frame(ready, 0);
       reader_ = std::thread([this] { read_loop(); });
@@ -630,7 +640,7 @@ class ScriptedSidecar {
       return refused("config_invalid");
     }
     const auto listed = [this](const Json& name) {
-      return name.is_string() &&
+      return options_.lists_capabilities && name.is_string() &&
              std::find(options_.capabilities.begin(), options_.capabilities.end(),
                        name.get<std::string>()) != options_.capabilities.end();
     };

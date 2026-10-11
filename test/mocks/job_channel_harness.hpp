@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -182,6 +183,16 @@ class JobBench {
   std::mutex mutex_;
   std::condition_variable changed_;
 };
+
+/// The error of the job's `failed` event, when it has one.
+[[nodiscard]] inline std::optional<Error> failure_of(const JobBench& bench, std::uint64_t job_id) {
+  for (const JobEvent& event : bench.sink->events()) {
+    if (event.identity().job_id == job_id && event.kind() == JobEventKind::Failed) {
+      return event.error();
+    }
+  }
+  return std::nullopt;
+}
 
 /// A channel the test starts and stops itself, as a session would.
 class JobChannelHarness : public JobBench {

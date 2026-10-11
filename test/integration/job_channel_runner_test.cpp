@@ -41,6 +41,7 @@ TEST(JobChannelRunner, FeatureFlagDisabled) {
 namespace tensorplate::adapters::python_pytorch {
 namespace {
 
+using testing::failure_of;
 using testing::JobChannelHarness;
 using Json = nlohmann::json;
 using Kinds = JobChannelHarness::Kinds;
@@ -162,8 +163,7 @@ TEST_F(JobChannelRunner, BehindAHeldJobHealthIsAnsweredAndWaitingJobsEndWhenCanc
 
   h.stop(kSessionUnloaded);
   ASSERT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
-  EXPECT_EQ(h.sink->events().at(h.sink->events().size() - 2).error()->context.value_or(""),
-            kSessionUnloaded);
+  EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kSessionUnloaded);
 }
 
 TEST_F(JobChannelRunner, StoppingWithAJobOpenFailsItAndReleasesItOnceTheRunnerIsGone) {
@@ -178,7 +178,7 @@ TEST_F(JobChannelRunner, StoppingWithAJobOpenFailsItAndReleasesItOnceTheRunnerIs
 
   h.stop(kBackendReset);
   ASSERT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
-  const Error failure = *h.sink->events().at(1).error();
+  const Error failure = *failure_of(h, 1);
   EXPECT_EQ(failure.code, Error::Code::Unavailable);
   EXPECT_EQ(failure.context.value_or(""), kBackendReset);
   EXPECT_FALSE(released_before_the_reap);

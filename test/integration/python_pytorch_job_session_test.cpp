@@ -44,6 +44,7 @@ TEST(JobSessionRunner, FeatureFlagDisabled) {
 namespace tensorplate::adapters::python_pytorch {
 namespace {
 
+using testing::failure_of;
 using testing::JobSessionHarness;
 using Json = nlohmann::json;
 using Kinds = JobSessionHarness::Kinds;
@@ -154,7 +155,7 @@ TEST_F(JobSessionRunner, DestroyingTheSessionWithAJobOpenFailsItAndReleasesIt) {
   ASSERT_TRUE(h->wait_kinds(1, {Accepted}));
   h->session.reset();
   ASSERT_EQ(h->sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
-  const Error failure = *h->sink->events().at(1).error();
+  const Error failure = *failure_of(*h, 1);
   EXPECT_EQ(failure.code, Error::Code::Unavailable);
   EXPECT_EQ(failure.context.value_or(""), kSessionUnloaded);
 }

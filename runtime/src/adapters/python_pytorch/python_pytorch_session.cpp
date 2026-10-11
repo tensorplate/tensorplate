@@ -199,6 +199,11 @@ ipc::UnixSocket::TimePoint clamped_deadline(const InferRequest& req,
   return TensorView::create(*dtype, std::move(shape));
 }
 
+[[nodiscard]] Unexpected buffer_manager_missing() {
+  return unexpected(Error::Code::ConfigInvalid,
+                    "python_pytorch adapter requires a BufferManager hook");
+}
+
 [[nodiscard]] json model_spec_to_json(const ModelSpec& spec) {
   json out;
   out["schema_version"] = std::string(kSchemaVersion);
@@ -260,6 +265,10 @@ class PythonPytorchSession final : public ExecutionSession {
   Result<void> do_load(const ModelSpec& spec) override {
     if (process_) {
       return unexpected(Error::Code::Internal, "python_pytorch session already loaded");
+    }
+    if (config_.speech_jobs && manager_ == nullptr) {
+      // The channel would refuse every job for good.
+      return buffer_manager_missing();
     }
     auto req = launch_request(spec);
     if (!req.has_value()) {
@@ -615,8 +624,7 @@ class PythonPytorchSession final : public ExecutionSession {
       return unexpected(Error::Code::NotReady, "sidecar not started");
     }
     if (manager_ == nullptr) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "python_pytorch adapter requires a BufferManager hook");
+      return buffer_manager_missing();
     }
 
     json hdr;

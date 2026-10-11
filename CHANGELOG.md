@@ -246,12 +246,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   channel before the sidecar process is ended, so an open job fails with
   `session_unloaded` or `backend_reset` and is released afterwards. Such a
   session refuses a tensor `infer` (`unsupported`,
-  `tensor_inference_unsupported`). The channel does not start for a load
-  that declared no job class a lane runs (`unsupported`,
-  `job_class_unsupported`), and its reader takes no frame that declares a
-  payload larger than the longest synthesized segment: the body of such a
-  frame is neither allocated nor read. Additive inside protocol 0.1;
-  version constants unchanged. (V030-E04-F03-T01)
+  `tensor_inference_unsupported`), and its load is refused without a buffer
+  manager (`config_invalid`). Unload cancels nothing: it waits behind a
+  running job for the sidecar's answer, up to the startup timeout, and a job
+  that outlasts the bound fails `backend_reset` with the unload timing out.
+  The channel does not start for a load that declared no job class a lane
+  runs (`unsupported`, `job_class_unsupported`), and its reader takes no
+  frame that declares a payload larger than the longest synthesized segment:
+  the body of such a frame is neither allocated nor read. Additive inside
+  protocol 0.1; version constants unchanged. (V030-E04-F03-T01)
 - A measurement client for the streaming path,
   `tools/validation/slice_measure.py`. It runs paced speech-to-text sessions
   and text-to-speech segments over the stream session envelope and takes a

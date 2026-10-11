@@ -22,10 +22,11 @@ namespace tensorplate::testing {
 
 class JobSessionHarness : public JobBench {
  public:
+  /// @param with_manager  false builds the session without a buffer manager.
   JobSessionHarness(adapters::python_pytorch::PythonPytorchConfig config,
-                    adapters::python_pytorch::SidecarLauncher launcher) {
+                    adapters::python_pytorch::SidecarLauncher launcher, bool with_manager = true) {
     ExecutionSessionRuntimeHooks hooks{};
-    hooks.buffer_manager = manager.get();
+    hooks.buffer_manager = with_manager ? manager.get() : nullptr;
     auto built = adapters::python_pytorch::make_python_pytorch_session_with_channel(
         hooks, std::move(config), std::move(launcher));
     session = std::move(built.session);

@@ -21,7 +21,6 @@ TEST(JobChannel, FeatureFlagDisabled) {
 #include <cstdint>
 #include <memory>
 #include <nlohmann/json.hpp>
-#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -44,6 +43,7 @@ TEST(JobChannel, FeatureFlagDisabled) {
 namespace tensorplate::adapters::python_pytorch {
 namespace {
 
+using testing::failure_of;
 using testing::JobChannelHarness;
 using testing::ScriptedSidecar;
 using testing::speech_golden::golden;
@@ -71,16 +71,6 @@ void expect_refused(const Result<void>& result, Error::Code code, std::string_vi
   ASSERT_FALSE(result.has_value()) << reason;
   EXPECT_EQ(result.error().code, code) << reason;
   EXPECT_EQ(result.error().context.value_or(""), reason);
-}
-
-// The error of the job's `failed` event, when it has one.
-std::optional<Error> failure_of(const JobChannelHarness& h, std::uint64_t job_id) {
-  for (const JobEvent& event : h.sink->events()) {
-    if (event.identity().job_id == job_id && event.kind() == Failed) {
-      return event.error();
-    }
-  }
-  return std::nullopt;
 }
 
 class JobChannelTest : public ::testing::Test {
@@ -965,17 +955,25 @@ TEST_F(JobChannelTest, AnEndTheReaderDecidesIsEndOfFileForTheSidecarBeforeAnySto
   ASSERT_TRUE(h.wait_kinds(1, {Accepted, Failed}));
 }
 
-TEST_F(JobChannelTest, AFrameThatDeclaresMoreThanAnAudioChunkEndsTheConnection) {
-  up();
+TEST_F(JobChannelTest, AFrameOfTheLargestChunkIsTakenAndOneByteMoreEndsTheConnection) {
+  ASSERT_NO_FATAL_FAILURE(up());
   ASSERT_TRUE(h.submit(JobChannelHarness::tts(1, 1)).has_value());
   ASSERT_EQ(peer.take_job(), 1U);
-  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
-  const std::size_t beyond = kMaxJobFramePayloadBytes + 2;
-  peer.emit("job_completed", 1, {{"result", audio(beyond)}}, beyond);
+  peer.complete(1, audio(kMaxJobFramePayloadBytes), kMaxJobFramePayloadBytes);
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted, Completed, Released}));
+  const std::vector<JobEvent> events = h.sink->events();
+  EXPECT_EQ(std::get<AudioChunkResult>(events.at(1).result()->payload()).pcm.byte_size,
+            kMaxJobFramePayloadBytes);
+
+  ASSERT_TRUE(h.submit(JobChannelHarness::tts(2, 1)).has_value());
+  ASSERT_EQ(peer.take_job(), 2U);
+  ASSERT_TRUE(h.wait_kinds(2, {Accepted}));
+  const std::size_t beyond = kMaxJobFramePayloadBytes + 1;
+  peer.emit("job_completed", 2, {{"result", audio(beyond)}}, beyond);
   // Read whole, the frame would fault the job for its size and leave the
   // connection up.
-  ASSERT_TRUE(h.wait_kinds(1, {Accepted, Failed}));
-  EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kBackendReset);
+  ASSERT_TRUE(h.wait_kinds(2, {Accepted, Failed}));
+  EXPECT_EQ(failure_of(h, 2)->context.value_or(""), kBackendReset);
   const auto health = h.unary("health_check");
   ASSERT_FALSE(health.has_value());
   EXPECT_EQ(health.error().code, Error::Code::InferenceFailed);
@@ -1018,7 +1016,7 @@ TEST_F(JobChannelTest, TheScriptedSidecarRefusesAFrameTheRunnerWouldNotRead) {
 }
 
 TEST_F(JobChannelTest, TheScriptedSidecarEndsTheConnectionOnAHeaderThatIsNotAnObject) {
-  up();
+  ASSERT_NO_FATAL_FAILURE(up());
   ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
   ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
   // The runner ends the connection on such a frame, and so does this

@@ -62,12 +62,21 @@ struct PythonPytorchConfig {
 /// channel when it unloads, is destroyed or loses the connection. A holder of
 /// `channel` sets the sink and submits, cancels and releases; it never
 /// starts or stops. Without `config.speech_jobs` the channel is never
-/// started and refuses every job.
+/// started and refuses every job. With it, a load without a buffer manager
+/// in `hooks` is refused (Error::Code::ConfigInvalid) before a sidecar is
+/// started.
 ///
 /// A stop waits for a running sink callback and delivers on the calling
 /// thread, and prime, unload and the destructor can all stop: none of them
 /// is called from a sink callback or while holding a lock a callback takes.
 /// The buffer manager of `hooks` outlives `channel`.
+///
+/// unload() cancels nothing. The sidecar answers an unload only once the job
+/// it is running has ended, so the call waits behind that job for up to
+/// `config.startup_timeout`. A job that outlasts the bound makes the unload
+/// fail with Error::Code::Timeout: open jobs then fail with kBackendReset,
+/// not kSessionUnloaded, and the sidecar is ended. Ending or cancelling open
+/// jobs before an unload is the holder's.
 struct SessionWithJobChannel {
   std::unique_ptr<ExecutionSession> session;
   std::shared_ptr<JobChannel> channel;
