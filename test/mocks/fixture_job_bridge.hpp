@@ -16,21 +16,40 @@
 //   - a cancellation is acknowledged at once; a waiting job ends then, the
 //     running one when its work returns, each `failed` with
 //     Error::Code::Cancelled;
-//   - a session release cancels the session's unfinished jobs;
+//   - a session release cancels the session's unfinished jobs, the running
+//     one included;
 //   - a lost backend fails its jobs (`backend_reset`) and releases nothing
 //     until the session unloads.
 //
-// Where it differs from the runner: a job starts at its submit when nothing
-// runs, so the eight that wait are exact; a job's work runs with the bridge's
-// lock held, so a cancel reaches a running job only while a test holds it;
-// an unload fails every unfinished job with `session_unloaded` at once, where
-// the runner fails the waiting ones itself and lets the running one end; and
-// the wrapped fake refuses a submit while 64 jobs are unreleased.
+// Two answers are its own, where the bridge header leaves them open: before
+// the prime a session release is taken and acknowledged, and a backend lost
+// or a session unloaded before the prime answers `backend_unavailable`, not
+// `backend_not_ready`. FixtureJobBridgeOptions turns two of the rules above
+// into the other outcome the bridge header allows.
+//
+// It differs from the adapter with a real sidecar in six ways:
+//
+//   - a job starts at its submit when nothing runs, so the eight that wait
+//     are exact; the runner counts a job its backend thread has not taken yet
+//     among them;
+//   - a job's work runs in one step with the bridge's lock held: a
+//     cancellation finds a started job before its work, which then does not
+//     run, or after its end, never in between. It comes before the work for
+//     certain while a test holds the jobs, and for a job cancelled by the
+//     callback that submitted it;
+//   - an unload fails every unfinished job with `session_unloaded` at once,
+//     where the runner fails the waiting ones itself and lets the running
+//     one end;
+//   - the wrapped fake refuses a submit while 64 jobs are unreleased;
+//   - a prime after an unload or a loss does not reopen it: there is no
+//     second load of one session;
+//   - release_session on a lost or unloaded backend answers
+//     `backend_unavailable` before it looks at the sink or the arguments.
 //
 // One thread runs the jobs and makes the callbacks while the backend lives.
 // unload() returns once every callback owed has run, on its caller's thread
 // or on that one. prime(), lose_backend(), unload() and the destructor stand
-// for the session's side: never call them from a sink callback or while
+// for the session's side: one at a time, never from a sink callback or while
 // holding a lock one takes.
 
 #pragma once
@@ -72,6 +91,17 @@ inline constexpr std::size_t kFixtureSpeechBytesPerTextByte = 160;
 [[nodiscard]] Result<JobResult> fixture_job_result(const JobRequest& request,
                                                    BufferManager& buffers);
 
+/// Where the bridge header allows a backend two outcomes: which one the
+/// fixture produces. The defaults are the runner's.
+struct FixtureJobBridgeOptions {
+  /// submit() refuses a job (`job_capacity_exhausted`) while 1 + kWaitingJobs
+  /// are unreleased, as the adapter's job table does; none is failed for it.
+  bool submit_refuses_at_capacity = false;
+  /// A cancellation comes too late for its job, started or not: the job runs
+  /// to its end and completes, with no `cancel_acknowledged`.
+  bool cancels_arrive_late = false;
+};
+
 class FixtureJobBridge final : public BoundedJobBridge {
  public:
   /// Jobs that wait behind the running one.
@@ -83,7 +113,8 @@ class FixtureJobBridge final : public BoundedJobBridge {
 
   /// @param buffers  where a synthesis result is published; outlives the
   ///                 bridge.
-  explicit FixtureJobBridge(BufferManager& buffers, ResultFunction result = fixture_job_result);
+  explicit FixtureJobBridge(BufferManager& buffers, ResultFunction result = fixture_job_result,
+                            FixtureJobBridgeOptions options = {});
   /// Unloads first, as a session's destructor does.
   ~FixtureJobBridge() override;
 
@@ -123,11 +154,11 @@ class FixtureJobBridge final : public BoundedJobBridge {
   /// What health() answers while the backend runs jobs.
   void set_health(Result<void> health);
   /// True once everything submitted so far was worked through and every
-  /// callback owed for it has run, as far as a held job allows; false when
-  /// that takes longer than `patience`.
+  /// callback owed for it has returned, an unload's on another thread too, as
+  /// far as a held job allows; false when that takes longer than `patience`.
   [[nodiscard]] bool settled(std::chrono::milliseconds patience);
   /// Events of its own backend that a job's event order refused. Empty unless
-  /// the fixture itself is wrong.
+  /// the fixture is wrong or the test's result function returns a wrong result.
   [[nodiscard]] std::vector<Error> refusals() const;
 
  private:
@@ -146,6 +177,7 @@ class FixtureJobBridge final : public BoundedJobBridge {
 
   BufferManager& buffers_;
   const ResultFunction result_;
+  const FixtureJobBridgeOptions options_;
   FakeBoundedJobBridge rules_;
 
   std::mutex mutex_;
@@ -158,6 +190,8 @@ class FixtureJobBridge final : public BoundedJobBridge {
   /// Events wait for the thread to deliver them.
   bool pending_ = false;
   bool delivering_ = false;
+  /// An unload is delivering on its caller's thread.
+  bool unloading_ = false;
   /// Jobs without a terminal event: the running one and those in lane_.
   std::map<std::uint64_t, OpenJob> open_;
   std::deque<std::uint64_t> lane_;

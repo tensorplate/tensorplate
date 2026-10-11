@@ -10,10 +10,12 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -72,44 +74,95 @@ class FixtureBridgeUnderTest final : public BridgeUnderTest {
   FixtureJobBridge bridge_{*buffers_};
 };
 
-// The lane depth of the runner's job table (GPU_LANE_QUEUE_DEPTH in jobs.py).
+// The depth of the runner's job queue (GPU_LANE_QUEUE_DEPTH in jobs.py).
 static_assert(FixtureJobBridge::kWaitingJobs == 8);
 
 // -- The fixture's own rules, which the cases leave open. -------------------------
 
 constexpr std::chrono::seconds kPatience{30};
+constexpr std::uint64_t kGeneration = 3;
 
 JobRequest synthesis(std::uint64_t job_id, std::string text = "hello there.",
                      std::uint32_t progress_limit = 0) {
   return JobRequest::create(
-             JobIdentity{job_id, 5, 3}, JobClass::TtsSynthesis, TextSegment{std::move(text)},
+             JobIdentity{job_id, 5, kGeneration}, JobClass::TtsSynthesis,
+             TextSegment{std::move(text)},
              JobOptions{.language = "en-US", .voice = "af_heart", .speed_milli = 1000},
              progress_limit)
       .value();
 }
 
-JobRequest decode(std::uint64_t job_id, BufferManager& buffers, std::uint32_t progress_limit = 0) {
+JobRequest decode(std::uint64_t job_id, BufferManager& buffers, std::uint32_t progress_limit = 0,
+                  std::uint64_t session_key = 5) {
   const BufferRef buffer = buffers.allocate(3'200).value();
-  return JobRequest::create(JobIdentity{job_id, 5, 3}, JobClass::SttDecode,
+  return JobRequest::create(JobIdentity{job_id, session_key, kGeneration}, JobClass::SttDecode,
                             AudioFrames{kJobInputAudioFormat, PcmWindow{buffer, 0, 3'200}, 0},
                             JobOptions{.language = "en"}, progress_limit)
       .value();
 }
 
+/// Opens once, for a callback and the test body to wait on each other. A wait
+/// is bounded: a fixture that never gets there fails the test.
+class Gate {
+ public:
+  void open() {
+    {
+      const std::lock_guard<std::mutex> lock(mutex_);
+      open_ = true;
+    }
+    opened_.notify_all();
+  }
+
+  /// False when the gate did not open in time.
+  [[nodiscard]] bool wait() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return opened_.wait_for(lock, kPatience, [this] { return open_; });
+  }
+
+ private:
+  std::mutex mutex_;
+  std::condition_variable opened_;
+  bool open_ = false;
+};
+
+/// Opens a gate when the test body ends, however it ends, so that the bench
+/// declared before it does not unload around a callback that still waits.
+struct OpensAtExit {
+  Gate& gate;
+  ~OpensAtExit() { gate.open(); }
+};
+
 struct Bench {
   explicit Bench(std::unique_ptr<BufferManager> pool = make_buffers(),
-                 FixtureJobBridge::ResultFunction result = fixture_job_result)
-      : buffers(std::move(pool)), bridge(*buffers, std::move(result)) {
+                 FixtureJobBridge::ResultFunction result = fixture_job_result,
+                 FixtureJobBridgeOptions options = {}, bool primed = true)
+      : buffers(std::move(pool)), bridge(*buffers, std::move(result), options) {
     EXPECT_TRUE(bridge.set_event_sink(sink).has_value());
-    bridge.prime();
+    if (primed) {
+      bridge.prime();
+    }
   }
   Bench(const Bench&) = delete;
   Bench& operator=(const Bench&) = delete;
-  ~Bench() { EXPECT_EQ(bridge.refusals().size(), refusals_expected); }
+  // After the unload: what it delivers is checked too.
+  ~Bench() {
+    bridge.unload();
+    EXPECT_EQ(bridge.refusals().size(), refusals_expected);
+  }
 
   [[nodiscard]] Result<void> submit(const JobRequest& request) {
     sink->expect_job(request);
     return bridge.submit(request);
+  }
+
+  [[nodiscard]] Result<void> cancel(std::uint64_t job_id) {
+    sink->expect_cancel(job_id);
+    return bridge.cancel(job_id);
+  }
+
+  [[nodiscard]] Result<void> release(std::uint64_t session_key) {
+    sink->expect_session_release(session_key);
+    return bridge.release_session(session_key, kGeneration);
   }
 
   /// The job's event of `kind`, once the bridge has settled.
@@ -132,7 +185,12 @@ struct Bench {
 };
 
 using Kinds = std::vector<JobEventKind>;
+using Sessions = std::vector<std::pair<std::uint64_t, std::uint64_t>>;
 using enum JobEventKind;
+
+std::string reason_of(const Result<void>& refused) {
+  return refused.has_value() ? "" : refused.error().context.value_or("");
+}
 
 // Against the golden frames of the sidecar's job messages
 // (protocol/rust/tests/fixtures/python_pytorch_ipc_speech_jobs_*.jsonl): the
@@ -186,6 +244,7 @@ TEST(FixtureJobBridge, AJobAllowedProgressDeliversNone) {
 }
 
 TEST(FixtureJobBridge, TheTenthJobIsFailedUnacceptedAndTheNineRunInSubmissionOrder) {
+  // Declared before the bench: the result function writes it until the unload.
   std::vector<std::uint64_t> ran;
   Bench bench(make_buffers(), [&ran](const JobRequest& request, BufferManager& buffers) {
     ran.push_back(request.identity().job_id);
@@ -206,6 +265,29 @@ TEST(FixtureJobBridge, TheTenthJobIsFailedUnacceptedAndTheNineRunInSubmissionOrd
   EXPECT_EQ(ran, (std::vector<std::uint64_t>{1, 2, 3, 4, 5, 6, 7, 8, 9}));
 }
 
+// FixtureJobBridgeOptions::submit_refuses_at_capacity: the other way the
+// header lets a full backend turn a job away.
+TEST(FixtureJobBridge, SubmitRefusesTheTenthUnreleasedJobWhenToldTo) {
+  Bench bench(make_buffers(), fixture_job_result, {.submit_refuses_at_capacity = true});
+  bench.bridge.hold_jobs();
+  for (std::uint64_t job_id = 1; job_id <= 9; ++job_id) {
+    ASSERT_TRUE(bench.submit(decode(job_id, *bench.buffers)).has_value()) << job_id;
+  }
+  const Result<void> tenth = bench.bridge.submit(decode(10, *bench.buffers));
+  ASSERT_FALSE(tenth.has_value());
+  EXPECT_EQ(tenth.error().code, Error::Code::ResourceExhausted);
+  EXPECT_EQ(reason_of(tenth), "job_capacity_exhausted");
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_TRUE(bench.sink->kinds_for(10).empty());
+
+  bench.bridge.release_jobs();
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(9), (Kinds{Accepted, Completed, Released}));
+  ASSERT_TRUE(bench.submit(decode(10, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(10), (Kinds{Accepted, Completed, Released}));
+}
+
 // jobs.py: a cancellation is acknowledged when it arrives; a waiting job ends
 // then, the running one when its work returns, both cancelled and no reason.
 TEST(FixtureJobBridge, ACancelIsAcknowledgedAtOnceAndEndsTheJobCancelled) {
@@ -214,8 +296,7 @@ TEST(FixtureJobBridge, ACancelIsAcknowledgedAtOnceAndEndsTheJobCancelled) {
   ASSERT_TRUE(bench.submit(decode(1, *bench.buffers)).has_value());
   ASSERT_TRUE(bench.submit(decode(2, *bench.buffers)).has_value());
   for (const std::uint64_t job_id : {1U, 2U}) {
-    bench.sink->expect_cancel(job_id);
-    ASSERT_TRUE(bench.bridge.cancel(job_id).has_value());
+    ASSERT_TRUE(bench.cancel(job_id).has_value());
   }
   ASSERT_TRUE(bench.bridge.settled(kPatience));
   EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, CancelAcknowledged}));
@@ -229,6 +310,54 @@ TEST(FixtureJobBridge, ACancelIsAcknowledgedAtOnceAndEndsTheJobCancelled) {
     EXPECT_EQ(ended.code, Error::Code::Cancelled) << job_id;
     EXPECT_FALSE(ended.context.has_value()) << job_id;
   }
+  EXPECT_TRUE(bench.sink->violations().empty());
+}
+
+// FixtureJobBridgeOptions::cancels_arrive_late: the other end job_event.hpp
+// gives a cancelled job, for a running job and for a waiting one.
+TEST(FixtureJobBridge, ACancelledJobCompletesUnacknowledgedWhenCancelsArriveLate) {
+  Bench bench(make_buffers(), fixture_job_result, {.cancels_arrive_late = true});
+  bench.bridge.hold_jobs();
+  ASSERT_TRUE(bench.submit(decode(1, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.submit(decode(2, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.submit(decode(3, *bench.buffers, 0, /*session_key=*/6)).has_value());
+  ASSERT_TRUE(bench.cancel(1).has_value());
+  ASSERT_TRUE(bench.cancel(2).has_value());
+  ASSERT_TRUE(bench.release(6).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  for (const std::uint64_t job_id : {1U, 2U, 3U}) {
+    EXPECT_EQ(bench.sink->kinds_for(job_id), Kinds{Accepted}) << job_id;
+  }
+  EXPECT_TRUE(bench.sink->session_releases().empty());
+
+  bench.bridge.release_jobs();
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  for (const std::uint64_t job_id : {1U, 2U, 3U}) {
+    EXPECT_EQ(bench.sink->kinds_for(job_id), (Kinds{Accepted, Completed, Released})) << job_id;
+  }
+  EXPECT_EQ(bench.sink->session_releases(), (Sessions{{6, kGeneration}}));
+  EXPECT_TRUE(bench.sink->violations().empty());
+}
+
+TEST(FixtureJobBridge, ASessionReleaseCancelsItsRunningJobAndItsWaitingOne) {
+  Bench bench;
+  bench.bridge.hold_jobs();
+  ASSERT_TRUE(bench.submit(decode(1, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.submit(decode(2, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.submit(decode(3, *bench.buffers, 0, /*session_key=*/6)).has_value());
+  ASSERT_TRUE(bench.release(5).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, CancelAcknowledged}));
+  EXPECT_EQ(bench.sink->kinds_for(2), (Kinds{Accepted, CancelAcknowledged, Failed, Released}));
+  EXPECT_EQ(bench.sink->kinds_for(3), Kinds{Accepted});
+  EXPECT_TRUE(bench.sink->session_releases().empty());
+
+  bench.bridge.release_jobs();
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, CancelAcknowledged, Failed, Released}));
+  EXPECT_EQ(bench.event_of(1, Failed).error().value().code, Error::Code::Cancelled);
+  EXPECT_EQ(bench.sink->kinds_for(3), (Kinds{Accepted, Completed, Released}));
+  EXPECT_EQ(bench.sink->session_releases(), (Sessions{{5, kGeneration}}));
   EXPECT_TRUE(bench.sink->violations().empty());
 }
 
@@ -293,6 +422,28 @@ TEST(FixtureJobBridge, HealthAnswersWhatItWasSetToWhileTheBackendRunsJobs) {
   EXPECT_EQ(bench.bridge.health().error().context.value_or(""), "backend_unavailable");
 }
 
+// Where the header's order of refusals leaves it open: a backend that is gone
+// before its prime is unavailable, not "not ready".
+TEST(FixtureJobBridge, BeforeItsPrimeALostOrAnUnloadedBackendIsUnavailable) {
+  Bench lost(make_buffers(), fixture_job_result, {}, /*primed=*/false);
+  lost.bridge.lose_backend();
+  EXPECT_EQ(reason_of(lost.bridge.submit(synthesis(1))), "backend_unavailable");
+  EXPECT_EQ(reason_of(lost.bridge.health()), "backend_unavailable");
+  Bench unloaded(make_buffers(), fixture_job_result, {}, /*primed=*/false);
+  unloaded.bridge.unload();
+  EXPECT_EQ(reason_of(unloaded.bridge.submit(synthesis(1))), "backend_unavailable");
+  EXPECT_EQ(reason_of(unloaded.bridge.health()), "backend_unavailable");
+}
+
+TEST(FixtureJobBridge, BeforeItsPrimeASessionReleaseIsTakenAndAcknowledged) {
+  Bench bench(make_buffers(), fixture_job_result, {}, /*primed=*/false);
+  ASSERT_TRUE(bench.release(5).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->session_releases(), (Sessions{{5, kGeneration}}));
+  bench.bridge.prime();
+  EXPECT_EQ(reason_of(bench.bridge.submit(synthesis(1))), "session_releasing");
+}
+
 TEST(FixtureJobBridge, APrimeDoesNotReopenALostOrAnUnloadedBackend) {
   Bench lost;
   lost.bridge.lose_backend();
@@ -305,27 +456,46 @@ TEST(FixtureJobBridge, APrimeDoesNotReopenALostOrAnUnloadedBackend) {
   EXPECT_FALSE(unloaded.submit(synthesis(1)).has_value());
 }
 
+// The cancellation was acknowledged before the backend went: the job still
+// fails as reset. It is the bench's unload that releases it.
+TEST(FixtureJobBridge, ALostBackendFailsACancelledRunningJobAsReset) {
+  Bench bench;
+  bench.bridge.hold_jobs();
+  ASSERT_TRUE(bench.submit(decode(1, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.cancel(1).has_value());
+  bench.bridge.lose_backend();
+  EXPECT_EQ(bench.event_of(1, Failed).error().value().context.value_or(""), "backend_reset");
+  EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, CancelAcknowledged, Failed}));
+}
+
+// Without a bench, whose own unload would come first.
 TEST(FixtureJobBridge, ItsDestructionUnloads) {
-  std::shared_ptr<RecordingJobEventSink> sink;
+  const std::unique_ptr<BufferManager> buffers = make_buffers();
+  const auto sink = std::make_shared<RecordingJobEventSink>();
   {
-    Bench bench;
-    sink = bench.sink;
-    bench.bridge.hold_jobs();
-    ASSERT_TRUE(bench.submit(synthesis(1)).has_value());
-    ASSERT_TRUE(bench.bridge.settled(kPatience));
+    FixtureJobBridge bridge(*buffers);
+    ASSERT_TRUE(bridge.set_event_sink(sink).has_value());
+    bridge.prime();
+    bridge.hold_jobs();
+    const JobRequest request = synthesis(1);
+    sink->expect_job(request);
+    ASSERT_TRUE(bridge.submit(request).has_value());
+    ASSERT_TRUE(bridge.settled(kPatience));
   }
   ASSERT_EQ(sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
   EXPECT_EQ(sink->events()[1].error().value().context.value_or(""), "session_unloaded");
+  EXPECT_TRUE(sink->violations().empty());
 }
 
 TEST(FixtureJobBridge, IsNotSettledWhileACallbackRuns) {
-  std::promise<void> inside;
-  std::promise<void> leave;
+  Gate inside;
+  Gate leave;
   Bench bench;
-  bench.sink->set_callback_hook([&, waiting = leave.get_future().share()](const JobEvent& event) {
+  const OpensAtExit opens{leave};
+  bench.sink->set_callback_hook([&inside, &leave](const JobEvent& event) {
     if (event.kind() == Completed) {
-      inside.set_value();
-      waiting.wait();
+      inside.open();
+      EXPECT_TRUE(leave.wait());
     }
   });
   bench.bridge.hold_jobs();
@@ -334,36 +504,65 @@ TEST(FixtureJobBridge, IsNotSettledWhileACallbackRuns) {
   EXPECT_EQ(bench.sink->kinds_for(1), Kinds{Accepted});
 
   bench.bridge.release_jobs();
-  inside.get_future().wait();
+  ASSERT_TRUE(inside.wait());
   EXPECT_FALSE(bench.bridge.settled(std::chrono::milliseconds{0}));
-  leave.set_value();
+  leave.open();
   ASSERT_TRUE(bench.bridge.settled(kPatience));
   EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, Completed, Released}));
+}
+
+// The unload makes its callbacks on its caller's thread: the thread that runs
+// the jobs is idle while this one is inside `failed`.
+TEST(FixtureJobBridge, IsNotSettledWhileAnUnloadOnAnotherThreadIsInACallback) {
+  Gate inside;
+  Gate leave;
+  Bench bench;
+  std::future<void> unloaded;
+  const OpensAtExit opens{leave};
+  bench.sink->set_callback_hook([&inside, &leave](const JobEvent& event) {
+    if (event.kind() == Failed) {
+      inside.open();
+      EXPECT_TRUE(leave.wait());
+    }
+  });
+  bench.bridge.hold_jobs();
+  ASSERT_TRUE(bench.submit(decode(1, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+
+  unloaded = std::async(std::launch::async, [&bench] { bench.bridge.unload(); });
+  ASSERT_TRUE(inside.wait());
+  EXPECT_FALSE(bench.bridge.settled(std::chrono::milliseconds{0}));
+  leave.open();
+  ASSERT_EQ(unloaded.wait_for(kPatience), std::future_status::ready);
+  EXPECT_TRUE(bench.bridge.settled(std::chrono::milliseconds{0}));
+  EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
 }
 
 // The callback of job 1 starts job 2, which is held, and then blocks: the
 // unload finds a job to fail while a callback is running on the other thread.
 TEST(FixtureJobBridge, AnUnloadWaitsForARunningCallbackAndLeavesNothingOwed) {
-  std::promise<void> inside;
-  std::promise<void> leave;
+  // What the callback and the unloading thread write outlives the bench.
+  Gate inside;
+  Gate leave;
   std::atomic<bool> left{false};
+  bool left_at_return = false;
+  Kinds second_at_return;
   Bench bench;
-  const JobRequest second = decode(2, *bench.buffers);
-  bench.sink->set_callback_hook([&, waiting = leave.get_future().share()](const JobEvent& event) {
+  std::future<void> unloaded;
+  const OpensAtExit opens{leave};
+  bench.sink->set_callback_hook([&, second = decode(2, *bench.buffers)](const JobEvent& event) {
     if (event.identity().job_id == 1 && event.kind() == Completed) {
       bench.bridge.hold_jobs();
       EXPECT_TRUE(bench.submit(second).has_value());
-      inside.set_value();
-      waiting.wait();
+      inside.open();
+      EXPECT_TRUE(leave.wait());
       left = true;
     }
   });
   ASSERT_TRUE(bench.submit(decode(1, *bench.buffers)).has_value());
-  inside.get_future().wait();
+  ASSERT_TRUE(inside.wait());
 
-  bool left_at_return = false;
-  Kinds second_at_return;
-  std::thread unloader([&] {
+  unloaded = std::async(std::launch::async, [&] {
     bench.bridge.unload();
     left_at_return = left.load();
     second_at_return = bench.sink->kinds_for(2);
@@ -374,8 +573,8 @@ TEST(FixtureJobBridge, AnUnloadWaitsForARunningCallbackAndLeavesNothingOwed) {
     std::this_thread::yield();
   }
   EXPECT_FALSE(bench.bridge.health().has_value());
-  leave.set_value();
-  unloader.join();
+  leave.open();
+  ASSERT_EQ(unloaded.wait_for(kPatience), std::future_status::ready);
 
   EXPECT_TRUE(left_at_return);
   EXPECT_EQ(second_at_return, (Kinds{Accepted, Failed, Released}));

@@ -37,6 +37,10 @@ Error cancelled() {
   return Error::make(Error::Code::Cancelled, "the job was cancelled");
 }
 
+// Unreleased jobs the wrapped fake takes when kWaitingJobs is the bound that
+// turns a job away.
+constexpr std::size_t kUnreleasedJobs = 64;
+
 }  // namespace
 
 TranscriptResult fixture_transcript(const AudioFrames& audio) {
@@ -60,10 +64,13 @@ Result<JobResult> fixture_job_result(const JobRequest& request, BufferManager& b
       AudioChunkResult{kJobOutputAudioFormat, PcmWindow{buffer.value(), 0, bytes}, 0});
 }
 
-FixtureJobBridge::FixtureJobBridge(BufferManager& buffers, ResultFunction result)
+FixtureJobBridge::FixtureJobBridge(BufferManager& buffers, ResultFunction result,
+                                   FixtureJobBridgeOptions options)
     : buffers_(buffers),
       result_(std::move(result)),
-      rules_({JobClass::SttDecode, JobClass::TtsSynthesis}),
+      options_(options),
+      rules_({JobClass::SttDecode, JobClass::TtsSynthesis},
+             options.submit_refuses_at_capacity ? 1 + kWaitingJobs : kUnreleasedJobs),
       thread_(&FixtureJobBridge::run, this) {}
 
 FixtureJobBridge::~FixtureJobBridge() {
@@ -194,9 +201,15 @@ void FixtureJobBridge::unload() {
     lane_.clear();
     unreleased_.clear();
     running_ = 0;
+    unloading_ = true;
   }
   // On this thread, so that nothing is owed once the unload has returned.
   (void)rules_.deliver();
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    unloading_ = false;
+  }
+  settled_.notify_all();
 }
 
 // -- The test's hold on the backend. ---------------------------------------------
@@ -224,7 +237,8 @@ void FixtureJobBridge::set_health(Result<void> health) {
 
 bool FixtureJobBridge::settled(std::chrono::milliseconds patience) {
   std::unique_lock<std::mutex> lock(mutex_);
-  return settled_.wait_for(lock, patience, [this] { return !pending_ && !delivering_; });
+  return settled_.wait_for(lock, patience,
+                           [this] { return !pending_ && !delivering_ && !unloading_; });
 }
 
 std::vector<Error> FixtureJobBridge::refusals() const {
@@ -279,6 +293,9 @@ void FixtureJobBridge::end_running_locked() {
 }
 
 void FixtureJobBridge::cancel_locked(std::map<std::uint64_t, OpenJob>::iterator job) {
+  if (options_.cancels_arrive_late) {
+    return;
+  }
   const std::uint64_t job_id = job->first;
   job->second.cancelled = true;
   rules_.queue_cancel_acknowledged(job_id);
