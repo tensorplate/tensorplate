@@ -578,9 +578,10 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   [descriptor](#deployment-descriptor-documents) hands over its generation
   instead: the launch is that generation and takes none from the counter.
   A handed generation must be above every generation the registry holds,
-  its members' and the one a restart is owed for, or the candidate is
-  refused with `load_failed`. A restart always takes a new one, whatever
-  its recipe names.
+  its members', those of workers it has asked to stop and not yet reaped,
+  and the one a restart is owed for, or the candidate is refused with
+  `load_failed`. A restart always takes a new one, whatever its recipe
+  names.
 - **Start.** The registry renders the serving config with
   `deployment.generation` and `deployment.endpoint` set to the deployment id,
   hands the worker its control socket on fd 0 in the same launch, and starts

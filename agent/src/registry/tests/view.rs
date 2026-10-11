@@ -34,15 +34,6 @@ fn live(id: &str, generation: u64, role: MemberRole, http_port: u16) -> LiveMemb
     }
 }
 
-/// Holds `handle`'s stop; returns what tells that it began and what lets
-/// it finish.
-fn hold_stop(handle: &Handle) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
-    let (started, has_started) = mpsc::channel();
-    let (release, released) = mpsc::channel();
-    *handle.hold_terminate.lock().unwrap() = Some((started, released));
-    (has_started, release)
-}
-
 #[test]
 fn nothing_is_listed_before_a_member_is_started() {
     let f = fixture();

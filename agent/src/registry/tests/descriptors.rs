@@ -202,6 +202,37 @@ fn a_handed_generation_is_refused_unless_it_is_above_every_generation_the_regist
 }
 
 #[test]
+fn a_handed_generation_is_refused_while_a_member_that_carries_it_is_draining() {
+    let d = described();
+    d.serve(&d.recipe);
+    let (is_stopping, release) = hold_stop(&d.launcher.handle(1));
+
+    std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets what is held end.
+        let release = release;
+        let unloading = scope.spawn(|| d.registry.unload("stt"));
+        is_stopping
+            .recv_timeout(GRACE)
+            .expect("the member is asked to stop");
+
+        // Generation 1 has left the table and has not been reaped.
+        let error = d.registry.prepare("tx", &d.recipe, WARM).unwrap_err();
+        let record = error.to_record();
+        assert!(
+            matches!(error, AgentError::DeploymentDescriptor { .. }),
+            "{error}"
+        );
+        assert!(record.code == ErrorCode::LoadFailed && !record.recoverable);
+        let says = "of `stt` generation 1 is not started: the registry holds generation 1";
+        assert!(record.message.contains(says), "{record:?}");
+        assert_eq!(d.launcher.count(), 1);
+
+        release.send(()).unwrap();
+        unloading.join().unwrap();
+    });
+}
+
+#[test]
 fn a_running_generation_the_source_gives_again_is_an_internal_error_and_starts_nothing() {
     let f = fixture();
     f.serve("stt");

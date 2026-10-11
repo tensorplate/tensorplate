@@ -352,6 +352,11 @@ mod leaving {
             }
         }
 
+        pub(super) fn newest(&self) -> Option<u64> {
+            let set = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            set.keys().next_back().copied()
+        }
+
         /// Oldest generation first.
         pub(super) fn listed(&self) -> Vec<(u64, Draining)> {
             let set = self.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -528,8 +533,8 @@ impl Members {
 
     /// Whether a launch may start `deployment_id` as `generation`: one
     /// `handed` to the registry must be above every generation it holds, a
-    /// member's or the one a restart is owed for; an allocated one must not
-    /// be running.
+    /// member's, one that is draining or the one a restart is owed for; an
+    /// allocated one must not be running.
     fn admissible(&self, deployment_id: &str, generation: u64, handed: bool) -> AgentResult<()> {
         if !handed {
             if self.by_generation.contains_key(&generation) {
@@ -543,7 +548,8 @@ impl Members {
             Restart::Due { owed, .. } => Some(owed.stamped),
             _ => None,
         };
-        let newest = self.by_generation.keys().next_back().copied().max(owed);
+        let live = self.by_generation.keys().next_back().copied();
+        let newest = live.max(owed).max(self.draining.newest());
         match newest.filter(|held| generation <= *held) {
             Some(held) => Err(AgentError::DeploymentDescriptor {
                 code: ErrorCode::LoadFailed,
