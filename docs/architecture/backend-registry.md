@@ -230,19 +230,51 @@ not as buffer handles.
 
 `test/contract/bounded_job_bridge_conformance.hpp` holds what the bridge
 header promises the caller of a bridge whose backend runs `stt_decode` and
-`tts_synthesis`, as one parameterised suite: twenty-two cases, each under
-the sentence it holds. A binding (`BridgeUnderTest`) supplies the bridge
+`tts_synthesis`, as one parameterised suite: thirty-seven cases, each under
+the header text it holds. A binding (`BridgeUnderTest`) supplies the bridge
 with its backend, the session's side of it (prime, unload, a backend that
 is lost) and a hold on started jobs; the cases force every order they need
-with that hold and never wait on the clock. Where the header leaves a
-backend a choice, the binding's contract says which the cases rely on: no
-third job class, `accepted` when a job is taken in, a job that has not
-started ending as soon as it is cancelled, nothing owed when the unload
-returns. They do not hold `job_not_permitted`, `health_timeout`, the
-`failed` that replaces a backend event a job's order refuses, calls from
-several threads at once, or the destruction of the session. A test binary
-includes the header in one source file and instantiates the suite with the
-bridges it builds.
+with that hold and never wait on the clock. A test binary includes the
+header in one source file and instantiates the suite with the bridges it
+builds.
+
+Where the header leaves a backend a choice, the binding states what its
+backend does (`BridgeUnderTest::Choices`), and the comment above a case
+names each choice the case relies on:
+
+| Choice | For a binding that does not state it |
+| ------ | ------------------------------------ |
+| `holds_started_jobs`: a job that has started gets no terminal event while the binding holds its backend | the cases that need an open job are skipped |
+| `refuses_vad_frames`: the backend does not run `vad_frames` | the cases that submit a class the backend refuses are skipped |
+| `runs_one_job_at_a_time`: a job submitted while a started one is held has not started | the second job may be running: it may end only with the first, and an unload may let it complete |
+| `ends_a_waiting_job_at_its_cancel`: a job that has not started ends as soon as it is cancelled | the job may end only once the held one was released |
+| `fails_a_held_job_that_was_cancelled`: a job cancelled while it is held ends `failed` with `cancelled` | the job may end `completed` |
+| `open_jobs`: how many jobs the held backend has open at once | the two cases at the backend's bound are skipped |
+
+The binding's unload returns with nothing owed and its lost backend
+releases nothing before the unload; either ends a held job. Where the
+header allows two outcomes the cases accept both: a cancelled job ends
+`failed` (`cancelled`) or `completed`, with or without
+`cancel_acknowledged`; a job that fails may do so without `accepted`; a job
+beyond the bound is refused by `submit` or ended by `failed`; a session
+release before the prime succeeds or answers `backend_unavailable`; a
+backend that is gone before its prime answers `backend_not_ready` or
+`backend_unavailable`. Which of them a backend produces is for its
+binding's own tests.
+
+The order of `submit`'s refusals is held one pair at a time, with two
+entries of the header's list applying at once: a missing sink ahead of a
+backend that is not ready; a backend that is not ready, and one that is
+unavailable, ahead of a class it does not run; that class ahead of a
+releasing session; a releasing session ahead of a duplicate job id; a
+duplicate job id ahead of exhausted capacity.
+
+Not held here, because a binding has no hook for them, and left to the
+adapter's binding and its own tests: `job_not_permitted` and its place in
+that order, `health_timeout`, the `failed` that replaces a backend event a
+job's order refuses, a late or foreign event being dropped, bridge calls
+beside a running lifecycle call, and calls from several threads at once.
+The destruction of the session is for a binding's own tests.
 
 `FixtureJobBridge` (`test/mocks/fixture_job_bridge.hpp`, the test library
 `tp::fixture_job_bridge`) is the one binding today: a bridge with a
@@ -253,28 +285,50 @@ backend by the in-tree sidecar runner's rules: one job runs and eight wait
 in submission order; one more ends with `failed`
 (`job_capacity_exhausted`) without `accepted`; a job is `accepted` when it
 is taken in; a cancellation is acknowledged at once and ends a waiting job
-then, the running one when its work returns, both as `cancelled`; a lost
-backend fails its jobs with `backend_reset` and releases them only at the
-unload. Its results are those of the runner's fixture backend (the word
-`hello` ending a quarter of the payload's bytes after the window's start;
-160 bytes of silence for each byte of text) unless the test passes a
-result function, which receives the request and runs with the bridge's
-lock held. One thread runs the jobs and makes the callbacks while the
-backend lives; the unload returns once every callback owed has run, on its
-caller's thread or on that one, so `prime`, `lose_backend`, `unload` and
-the destructor are never called from a sink callback. A test can hold
-started jobs, fail the next one, set what `health` answers, ask whether
-everything submitted so far was worked through (`settled`), and read the
+then, the running one when its work returns, both as `cancelled`; a session
+release cancels the session's unfinished jobs, the running one included; a
+lost backend fails its jobs with `backend_reset` and releases them only at
+the unload. Before the prime it takes a session release and acknowledges
+it, and a backend lost or a session unloaded before the prime answers
+`backend_unavailable`. Its results are those of the runner's fixture
+backend (the word `hello` ending a quarter of the payload's bytes after the
+window's start; 160 bytes of silence for each byte of text) unless the test
+passes a result function, which receives the request and runs with the
+bridge's lock held.
+
+Two options (`FixtureJobBridgeOptions`) make it produce the other outcome
+the header allows, so that what is developed against it meets both:
+`submit_refuses_at_capacity` has `submit` itself refuse a job while nine
+are unreleased, as the adapter's job table refuses one beyond its bound,
+and `cancels_arrive_late` lets a cancelled job, started or not, run to its
+end and complete with no `cancel_acknowledged`. The T1 binary runs the
+suite against the fixture four times: as it is; refusing at capacity; with
+late cancels, stating no choice but its hold and the class it refuses, so
+that the cases pass on the header alone; and without its hold.
+
+One thread runs the jobs and makes the callbacks while the backend lives;
+the unload returns once every callback owed has run, on its caller's
+thread or on that one, so `prime`, `lose_backend`, `unload` and the
+destructor are never called from a sink callback. A test can hold started
+jobs, fail the next one, set what `health` answers, ask whether everything
+submitted so far was worked through and every callback for it has
+returned, an unload's on another thread included (`settled`), and read the
 events of the fixture's own backend that a job's order refused, which are
 none unless the fixture is wrong.
 
-It differs from the runner in four ways. A job starts at its submit when
-nothing runs, so the eight that wait are exact. A job's work runs with the
-bridge's lock held, so a cancellation reaches a running job only while a
-test holds it. An unload fails every unfinished job with `session_unloaded`
-at once, where the runner fails the waiting ones itself and lets the
-running one end. And the fake it wraps refuses a submit while 64 jobs are
-unreleased.
+It differs from the adapter with a real sidecar in six ways. A job starts
+at its submit when nothing runs, so the eight that wait are exact, where
+the runner counts a job its backend thread has not taken yet among them. A
+job's work runs in one step with the bridge's lock held: a cancellation
+finds a started job before its work, which then does not run, or after its
+end, never in between; it comes before the work for certain while a test
+holds the jobs, and for a job cancelled by the callback that submitted it.
+An unload fails every unfinished job with `session_unloaded` at once, where
+the runner fails the waiting ones itself and lets the running one end. The
+fake it wraps refuses a submit while 64 jobs are unreleased. A prime after
+an unload or a loss does not reopen it: there is no second load of one
+session. And `release_session` on a lost or unloaded backend answers
+`backend_unavailable` before it looks at the sink or the arguments.
 
 The fixture's results are held to the golden frames of the sidecar's job
 messages and its other rules by its own tests, both in
