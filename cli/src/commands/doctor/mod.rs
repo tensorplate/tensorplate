@@ -41,6 +41,28 @@ pub mod finding;
 pub mod install;
 mod runner_profiles;
 
+#[cfg(test)]
+mod test_script {
+    #![allow(clippy::unwrap_used)]
+
+    use std::path::Path;
+
+    /// Puts `script` at `path` for a test to execute, as `<path>.body` run by
+    /// a link to a checked-in script. A file a test writes and then executes
+    /// fails with "Text file busy" when another test thread forks in between.
+    pub(super) fn stage(path: &Path, script: &str) {
+        std::os::unix::fs::symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/doctor_runner_profiles/run-body.sh"),
+            path,
+        )
+        .unwrap();
+        let mut body = path.as_os_str().to_owned();
+        body.push(".body");
+        std::fs::write(body, format!("{script}\n")).unwrap();
+    }
+}
+
 use finding::{Finding, FindingId, FindingStatus, Severity};
 
 /// Run the `doctor` command.
