@@ -681,7 +681,6 @@ impl MemberRegistry {
         port: u16,
         runner_profile: Option<&str>,
     ) -> AgentResult<PathBuf> {
-        // A candidate that names a descriptor is rendered from its document.
         let descriptor =
             descriptor_store::resolve(self.descriptors.as_deref(), candidate, generation)?;
         let runner_profile = descriptor.as_ref().map_or(runner_profile, |described| {
