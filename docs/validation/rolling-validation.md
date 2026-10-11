@@ -32,8 +32,8 @@ tools/validation/validation-pass.py run \
   --predecessor-bundle /opt/tensorplate-validation/x86_cuda_smoke \
   --sampler target/release/examples/memory_sample \
   --oom-ballast-python <an interpreter that imports the runtime's torch> \
-  --oom-ballast stt-whisper=headroom:<bytes> \
-  --oom-ballast tts-kokoro=headroom:<bytes> \
+  --oom-ballast stt-whisper=leave-free:<bytes> \
+  --oom-ballast tts-kokoro=leave-free:<bytes> \
   --session "<the session's name>" --row ubuntu2404-x86-l4-g2s8 \
   --machine "g2-standard-8, one NVIDIA L4" --build "<branch and commit>" \
   --out-dir ~/pass --confirm RESET-TENSORPLATE
@@ -43,9 +43,10 @@ A candidate's subject is its index subject and names its directories, so it
 is lower-case letters, digits and hyphens, and not `lifecycle`, `doctor`,
 `logs` or `streaming-latency`. `--predecessor-bundle`, `--sampler`,
 `--oom-ballast-python` and each `--qualify-arg` go to the recipe unchanged,
-and `--oom-ballast` becomes the recipe's `--oom-ballast-bytes` for the one
-candidate it names. A `--qualify-arg` that sets `--oom-ballast-bytes`,
-`--predecessor-bundle` or `--sampler`, or abbreviates one of them, is refused:
+and `--oom-ballast` becomes the recipe's `--oom-ballast-bytes` or
+`--oom-ballast-leave-free` for the one candidate it names. A `--qualify-arg`
+that sets either of those, `--predecessor-bundle` or `--sampler`, or
+abbreviates one of them, is refused:
 the report would no longer say what ran, and a sampler given that way would go
 around the predecessor check below.
 
@@ -100,20 +101,30 @@ candidate is given its own with `--oom-ballast SUBJECT=RULE`, repeatable:
 | --- | --- |
 | `bytes:N` | N bytes |
 | `headroom:N` | the memory `nvidia-smi --id=0 --query-gpu=memory.total` reports for device 0 on this machine, less N bytes |
+| `leave-free:N` | the memory that is free on the device at the moment the ballast is taken, less N bytes |
 | `none` | none: the candidate's out-of-memory case is skipped on purpose |
 
 The pass does not know how much memory a candidate needs or how much the
-ballast process takes beside its allocation: choose N from a run of the
-recipe by hand on the same machine type, and expect to adjust it. A headroom
-is subtracted from the device's total memory, so N has to cover the
-candidate's own resident memory and the ballast process's overhead, and a
-figure sized on one build can stop fitting on the next. The pass does not
-size a ballast from the memory that is free at the moment the ballast is
-taken. A `headroom` rule is read with `nvidia-smi` (`--nvidia-smi` names
+ballast process takes beside its allocation. Under `bytes` and `headroom`
+the operator works that out: a headroom is subtracted from the device's
+total memory, so N has to cover the active candidate's resident memory and
+the ballast process's overhead as well as what is to be left, and a figure
+sized on one build can stop fitting on the next. Under `leave-free` the pass
+sizes nothing. It hands N to the recipe, whose ballast reads the free memory
+itself once the active candidate and everything else are resident, so N is
+only what is to be left: smaller than a second load of the candidate needs,
+larger than the ballast allocator's own slack, as
+[the recipe's page](speech-candidate-recipes.md#the-out-of-memory-ballast)
+states the rule. No value is a default. The rule has run against the
+test's fake device only; its first run on a GPU is the next pass that names
+it.
+
+A `headroom` rule is read with `nvidia-smi` (`--nvidia-smi` names
 another program) and evaluated in preflight, so a machine that reports no
 single figure for device 0 is refused there; so is a headroom that leaves no
 ballast and, where the machine reports a figure, a ballast that does not fit
-the device. A `bytes` or `headroom` rule needs `--oom-ballast-python`, the
+the device or a `leave-free` count that is not below the device's memory.
+Every rule but `none` needs `--oom-ballast-python`, the
 interpreter that holds the ballast, and the pass refuses to start without
 the option. The interpreter itself need not exist at preflight: it is usually
 the speech runtime family's, which the lifecycle harness purges and the pass
@@ -131,10 +142,14 @@ refused, and the report says its case will not run.
 `pass-report.json` records what was used. `device_memory` holds the figure in
 bytes, or null with the reason: what `nvidia-smi` answered, that the pass has
 no candidate and so did not ask, or that preflight ended before it.
-`oom_ballast` holds, for each candidate, the rule (`bytes`, `headroom`, `none`
-or null), the resulting `bytes` (null when none), the `headroom_bytes` of a
-headroom rule, and for a candidate without a ballast the reason, which says
-that its out-of-memory case will not run.
+`oom_ballast` holds, for each candidate, the rule (`bytes`, `headroom`,
+`leave-free`, `none` or null), the resulting `bytes`, the `headroom_bytes` of
+a headroom rule, the `leave_free_bytes` of a leave-free rule, and for a
+candidate without a ballast the reason, which says that its out-of-memory
+case will not run. `bytes` is null without a ballast and under `leave-free`,
+where the size exists only once the ballast is taken: the recipe's record
+then carries the free figure, the bytes held and the figure left, in the
+`ballast` object of its `oom_at_load` case.
 
 `--staging-dir` is where the recipe writes the bundles of its negative cases,
 which the agent has to read. The agent's unit runs with `ProtectHome` and

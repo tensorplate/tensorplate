@@ -377,6 +377,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   observations at or below 600 and 1500 ms. Additive change inside
   protocol 0.1; version constants unchanged. (V030-E05-F04-T01)
 
+- The candidate qualification tool can size its out-of-memory ballast from
+  the device memory that is free at the moment the ballast is taken.
+  `candidate-qualify.py --oom-ballast-leave-free N` (exclusive with
+  `--oom-ballast-bytes`) has `vram_ballast.py --leave-free N` read the free
+  figure itself and hold all of it but N bytes, and the validation pass
+  takes `--oom-ballast SUBJECT=leave-free:N` beside `bytes:N`, `headroom:N`
+  and `none`. A byte count or a headroom had to be worked out from the
+  active candidate, the ballast process and every other tenant of the
+  device, and stopped fitting when a footprint moved; N is only what is to
+  be left, smaller than a second load of the candidate needs and larger
+  than the allocator's slack, and neither page gives a default. The
+  record's `oom_at_load` case gains an optional `ballast` object under
+  either rule: the rule, the count it was given, the free memory read
+  before and while holding, and the bytes held, with a null figure
+  explained by its `reason`; no required field changes, so filed records
+  stay valid and index lines do not change. The case is `not_run`, with
+  nothing held, when the free figure cannot be read under the new rule or
+  is not above N. The ballast's report line now carries the three figures,
+  the tool's reason for a ballast that held nothing names what its exit
+  status means, and the pass report's `oom_ballast` entries gain
+  `leave_free_bytes`. The new rule has run against the test's fake device
+  only. (V030-E06-F02-T01)
+
 ### Changed
 
 - The hosted format and tidy jobs state and assert the version of their tool.
