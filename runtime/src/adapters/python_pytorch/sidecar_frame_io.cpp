@@ -30,7 +30,8 @@ Result<void> write_frame(ipc::UnixSocket& sock, const ipc::SidecarFrame& frame,
   return sock.write_all(std::span<const std::byte>(enc.value()), deadline);
 }
 
-Result<ipc::SidecarFrame> read_frame(ipc::UnixSocket& sock, ipc::UnixSocket::TimePoint deadline) {
+Result<ipc::SidecarFrame> read_frame(ipc::UnixSocket& sock, ipc::UnixSocket::TimePoint deadline,
+                                     std::size_t max_payload_bytes) {
   std::vector<std::byte> buf(16);
   if (auto r = sock.read_exact(std::span<std::byte>(buf.data(), buf.size()), deadline);
       !r.has_value()) {
@@ -51,7 +52,8 @@ Result<ipc::SidecarFrame> read_frame(ipc::UnixSocket& sock, ipc::UnixSocket::Tim
   }
   const std::uint32_t hdr_len = u32(8);
   const std::uint32_t pld_len = u32(12);
-  if (hdr_len > ipc::kMaxHeaderLen || pld_len > ipc::kMaxPayloadLen) {
+  if (hdr_len > ipc::kMaxHeaderLen || pld_len > ipc::kMaxPayloadLen ||
+      pld_len > max_payload_bytes) {
     return unexpected(Error::Code::InferenceFailed, "sidecar frame size exceeds limit");
   }
   buf.resize(16 + hdr_len + pld_len);

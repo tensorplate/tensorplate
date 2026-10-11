@@ -8,6 +8,9 @@
 //
 //   - `ready_event` first; a unary answer carries the request's `message_id`,
 //     a message of its own the next `s<n>`;
+//   - a frame whose `schema_version` is not "0.1" is refused `unsupported`,
+//     and one without a `message_id` or a `kind` `config_invalid` under an id
+//     of this sidecar's own, both in arrival order behind what waits;
 //   - a load is refused as the runner refuses it (an empty `capabilities`
 //     list, a capability it did not list, a runner with no job class);
 //   - `health_check` is answered at once; any other unary request and every
@@ -29,8 +32,9 @@
 // under the job lock, where the runner writes it outside.
 //
 // The test is the backend: it takes the job at the head of the FIFO and says
-// how it ends. emit(), refuse() and stop_reading() step outside the runner's
-// behaviour for what the adapter has to survive.
+// how it ends. emit(), refuse(), stop_reading(), stop_reading_after() and the
+// overrides in Options step outside the runner's behaviour for what the
+// adapter has to survive.
 
 #pragma once
 
@@ -54,6 +58,7 @@
 #include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -78,6 +83,13 @@ class ScriptedSidecar {
     /// The job classes of the loaded "runner"; none refuses a load with jobs.
     std::vector<std::string> job_classes{"stt_decode", "tts_synthesis"};
     std::chrono::milliseconds write_stall{std::chrono::seconds{5}};
+    /// The texts of the error a load this sidecar refuses is answered with.
+    std::string load_refusal_message = "m";
+    std::optional<std::string> load_refusal_context;
+    /// Laid over the `ready_event`, and over the answer to a load this
+    /// sidecar takes: field values no runner sends.
+    Json ready_overrides = Json::object();
+    Json load_response_overrides = Json::object();
   };
 
   /// How long a test waits for the other side before it fails.
@@ -110,11 +122,16 @@ class ScriptedSidecar {
       // whatever the host's default is.
       const int held = kSocketBufferBytes;
       (void)::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &held, sizeof(held));
-      write_frame(originated("ready_event", {{"capabilities", options_.capabilities}}), 0);
+      Json ready = originated("ready_event", {{"capabilities", options_.capabilities}});
+      ready.update(options_.ready_overrides);
+      write_frame(ready, 0);
       reader_ = std::thread([this] { read_loop(); });
       return adapters::python_pytorch::SidecarHandle::make(
           0,
           [this](adapters::python_pytorch::SidecarHandle&) {
+            if (on_terminate) {
+              on_terminate();
+            }
             finish();
             std::lock_guard<std::mutex> lock(log_mutex_);
             reaped_ = true;
@@ -178,7 +195,7 @@ class ScriptedSidecar {
     log_changed_.wait_for(lock, kPatience, [&] {
       of_kind.clear();
       for (const Json& header : sent_) {
-        if (header.value("kind", "") == kind) {
+        if (text_of(header, "kind") == kind) {
           of_kind.push_back(header);
         }
       }
@@ -191,7 +208,7 @@ class ScriptedSidecar {
   [[nodiscard]] std::vector<std::byte> payload(const std::string& kind, std::size_t index) const {
     std::lock_guard<std::mutex> lock(log_mutex_);
     for (std::size_t i = 0; i < sent_.size(); ++i) {
-      if (sent_[i].value("kind", "") == kind && index-- == 0) {
+      if (text_of(sent_[i], "kind") == kind && index-- == 0) {
         return payloads_[i];
       }
     }
@@ -274,12 +291,36 @@ class ScriptedSidecar {
     EXPECT_TRUE(log_changed_.wait_for(lock, kPatience, [this] { return parked_; }));
   }
 
+  /// Once this sidecar has answered the next `kind` request from its FIFO it
+  /// reads nothing more until resume_reading(): what the adapter sends next
+  /// waits unread.
+  void stop_reading_after(const std::string& kind) {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    stop_after_ = kind;
+  }
+
+  /// Waits until the reader has parked.
+  [[nodiscard]] bool parked() {
+    std::unique_lock<std::mutex> lock(log_mutex_);
+    return log_changed_.wait_for(lock, kPatience, [this] { return parked_; });
+  }
+
+  void resume_reading() {
+    reading_ = true;
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    parked_ = false;
+  }
+
   /// Ends the connection, as a sidecar that died does.
   void close() {
     if (fd_ >= 0) {
       (void)::shutdown(fd_, SHUT_RDWR);
     }
   }
+
+  /// Runs when the SidecarProcess terminates this "process", before this
+  /// sidecar closes its end of the socket. Set before the launch.
+  std::function<void()> on_terminate;
 
  private:
   struct Job {
@@ -320,9 +361,29 @@ class ScriptedSidecar {
     return error;
   }
 
+  // A string field of a header the adapter sent; empty when it has none.
+  static std::string text_of(const Json& header, const char* name) {
+    if (!header.is_object()) {
+      return {};
+    }
+    const auto field = header.find(name);
+    return field != header.end() && field->is_string() ? field->get<std::string>() : std::string{};
+  }
+
+  // The kind the runner answers a request of `kind` with.
+  static std::string response_kind(const std::string& kind) {
+    for (const char* unary :
+         {"load_model", "prime", "infer", "infer_async", "cancel", "unload", "health_check"}) {
+      if (kind == unary) {
+        return kind + "_response";
+      }
+    }
+    return "error_event";
+  }
+
   static Json answer(const Json& request, const std::string& kind) {
     return Json{{"schema_version", "0.1"},
-                {"message_id", request.value("message_id", "")},
+                {"message_id", text_of(request, "message_id")},
                 {"kind", kind},
                 {"status", "ok"}};
   }
@@ -386,7 +447,7 @@ class ScriptedSidecar {
       if (!reading_) {
         {
           std::lock_guard<std::mutex> lock(log_mutex_);
-          parked_ = true;
+          parked_ = !reading_;
         }
         log_changed_.notify_all();
         std::this_thread::sleep_for(std::chrono::milliseconds{5});
@@ -428,7 +489,15 @@ class ScriptedSidecar {
   }
 
   void act_on(const Json& header, std::size_t payload_bytes) {
-    const std::string kind = header.value("kind", "");
+    const std::string kind = text_of(header, "kind");
+    if (text_of(header, "schema_version") != "0.1" || text_of(header, "message_id").empty() ||
+        kind.empty()) {
+      // The serving thread refuses it, in arrival order.
+      std::lock_guard<std::mutex> lock(table_mutex_);
+      lane_.emplace_back(header);
+      pump_locked();
+      return;
+    }
     if (kind == "health_check") {
       Json response = answer(header, "health_check_response");
       response["health"] = {{"ready", loaded_.load()}};
@@ -473,12 +542,28 @@ class ScriptedSidecar {
       const Json request = std::get<Json>(lane_.front());
       lane_.pop_front();
       write_frame(unary_locked(request), 0);
+      std::lock_guard<std::mutex> lock(log_mutex_);
+      if (!stop_after_.empty() && text_of(request, "kind") == stop_after_) {
+        stop_after_.clear();
+        reading_ = false;
+      }
     }
     work_.notify_all();
   }
 
   Json unary_locked(const Json& request) {
-    const std::string kind = request.value("kind", "");
+    const std::string kind = text_of(request, "kind");
+    if (text_of(request, "schema_version") != "0.1") {
+      return refusal(request, response_kind(kind), "unsupported", nullptr);
+    }
+    if (text_of(request, "message_id").empty()) {
+      Json unnamed = request.is_object() ? request : Json::object();
+      unnamed["message_id"] = "s" + std::to_string(++originated_);
+      return refusal(unnamed, response_kind(kind), "config_invalid", nullptr);
+    }
+    if (kind.empty()) {
+      return refusal(request, "error_event", "config_invalid", nullptr);
+    }
     if (kind == "prime") {
       return answer(request, "prime_response");
     }
@@ -489,9 +574,17 @@ class ScriptedSidecar {
     if (kind != "load_model") {
       return refusal(request, "error_event", "unsupported", nullptr);
     }
+    const auto refused = [&](const std::string& code) {
+      Json header = refusal(request, "load_model_response", code, nullptr);
+      header["error"]["message"] = options_.load_refusal_message;
+      if (options_.load_refusal_context.has_value()) {
+        header["error"]["context"] = *options_.load_refusal_context;
+      }
+      return header;
+    };
     const Json enabled = request.value("capabilities", Json::array());
     if (request.contains("capabilities") && enabled.empty()) {
-      return refusal(request, "load_model_response", "config_invalid", nullptr);
+      return refused("config_invalid");
     }
     const auto listed = [this](const Json& name) {
       return name.is_string() &&
@@ -499,12 +592,12 @@ class ScriptedSidecar {
                        name.get<std::string>()) != options_.capabilities.end();
     };
     if (!enabled.is_array() || !std::all_of(enabled.begin(), enabled.end(), listed)) {
-      return refusal(request, "load_model_response", "unsupported", nullptr);
+      return refused("unsupported");
     }
     const bool with_jobs =
         std::find(enabled.begin(), enabled.end(), "speech_jobs_v1") != enabled.end();
     if (with_jobs && options_.job_classes.empty()) {
-      return refusal(request, "load_model_response", "unsupported", nullptr);
+      return refused("unsupported");
     }
     loaded_ = true;
     Json response = answer(request, "load_model_response");
@@ -512,6 +605,7 @@ class ScriptedSidecar {
       jobs_open_ = true;
       response["job_classes"] = options_.job_classes;
     }
+    response.update(options_.load_response_overrides);
     return response;
   }
 
@@ -673,6 +767,7 @@ class ScriptedSidecar {
   std::vector<std::vector<std::byte>> payloads_;
   std::vector<Json> written_;
   std::string writing_kind_;
+  std::string stop_after_;
   bool reaped_ = false;
   bool gave_up_ = false;
   bool parked_ = false;

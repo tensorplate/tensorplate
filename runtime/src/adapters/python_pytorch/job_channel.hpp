@@ -71,6 +71,7 @@
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/job_event.hpp"
 #include "tensorplate/core/job_request.hpp"
+#include "tensorplate/core/job_result.hpp"
 #include "tensorplate/core/result.hpp"
 #include "tensorplate/ipc/sidecar_codec.hpp"
 #include "tensorplate/ipc/unix_socket.hpp"
@@ -99,6 +100,12 @@ inline constexpr std::size_t kMaxQueuedFrames = 2 * kMaxOpenJobs + kMaxPendingSe
 /// answered and delivered again, and a job submitted for it is taken. Holding
 /// "at most once" beyond the memory is the caller's, which knows its sessions.
 inline constexpr std::size_t kMaxRememberedSessions = 1'024;
+
+/// Largest payload of a frame the reader takes: the longest synthesized
+/// segment a job returns (kMaxAudioChunkBytes), which no frame the sidecar
+/// sends a started channel exceeds. A frame that declares more ends the
+/// connection, as an unreadable header does, before anything is allocated.
+inline constexpr std::size_t kMaxJobFramePayloadBytes = kMaxAudioChunkBytes;
 
 /// Error::context of the `failed` a job gets when its connection ends.
 inline constexpr std::string_view kBackendReset = "backend_reset";
@@ -144,7 +151,9 @@ class JobChannel {
   ///
   /// @return Error::Code::Internal when the channel is already started, with
   ///   "socket_closed" when `socket` is not open, or with
-  ///   "job_channel_thread_unavailable" when a thread cannot be created.
+  ///   "job_channel_thread_unavailable" when a thread cannot be created;
+  ///   Error::Code::Unsupported, "job_class_unsupported" when `job_classes`
+  ///   holds neither class a lane runs (`stt_decode`, `tts_synthesis`).
   [[nodiscard]] Result<void> start(ipc::UnixSocket& socket,
                                    const std::vector<JobClass>& job_classes);
 
