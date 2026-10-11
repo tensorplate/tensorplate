@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -72,6 +73,9 @@ inline constexpr std::string_view kJobMessageMalformed = "job_message_malformed"
 
 // -- Negotiation. ------------------------------------------------------------
 
+/// Most names a load response's `job_classes` holds: the schema's bound.
+inline constexpr std::size_t kMaxDeclaredJobClasses = 3;
+
 /// Whether a `ready_event` header lists kSpeechJobsCapability. A header
 /// without `capabilities` lists nothing, and a capability this adapter does
 /// not know is ignored.
@@ -86,8 +90,8 @@ inline constexpr std::string_view kJobMessageMalformed = "job_message_malformed"
 /// knows none of them.
 ///
 /// @return Error::Code::InferenceFailed with reason "job_classes_malformed"
-///   when the field is absent, empty, not an array of strings or repeats a
-///   name.
+///   when the field is absent, empty, longer than kMaxDeclaredJobClasses,
+///   not an array of strings or repeats a name.
 [[nodiscard]] Result<std::vector<JobClass>> declared_job_classes(
     std::string_view load_model_response_header);
 
@@ -95,16 +99,29 @@ inline constexpr std::string_view kJobMessageMalformed = "job_message_malformed"
 
 /// Publishes the PCM of one `audio_chunk` into a buffer the receiver of the
 /// event releases. Called at most once per frame, after every other check of
-/// the message passed. A handle it returns that is released or smaller than
-/// the chunk faults the job with Error::Code::Internal,
-/// "pcm_publisher_handle_unusable", and stays the publisher's to release.
+/// the message passed. The span is the frame's payload region: it is valid
+/// during the call only.
+///
+/// A handle it returns that is released or smaller than the chunk faults the
+/// job with Error::Code::Internal, "pcm_publisher_handle_unusable". No event
+/// carries that handle, so it stays with the publisher's owner: a caller
+/// that is handed a JobMessageFault after its publisher ran releases what
+/// the publisher returned.
 using PcmPublisher = std::function<Result<BufferRef>(std::span<const std::byte>)>;
 
-/// A frame the job channel does not own: a unary response, a `ready_event`
-/// or a `metric_event`, an `error_event` without a readable `message_id` and
-/// error, or a header that is not a JSON object with a `kind`.
+/// A frame the job channel does not own, with a header it can read: a unary
+/// response, a `ready_event`, a `metric_event`, a `session_*` kind other
+/// than `session_released` and `session_release`, or an `error_event`
+/// without a readable `message_id`. The unary exchange judges it.
 struct NotJobMessage {
   friend bool operator==(const NotJobMessage&, const NotJobMessage&) noexcept = default;
+};
+
+/// A frame whose header is not a JSON object with a string `kind`. Nothing
+/// says whom it was for, so its reader ends the connection, as the unary
+/// exchange does for a response it cannot parse.
+struct UnreadableHeader {
+  friend bool operator==(const UnreadableHeader&, const UnreadableHeader&) noexcept = default;
 };
 
 /// A `session_released`.
@@ -114,9 +131,13 @@ struct SessionReleased {
   friend bool operator==(const SessionReleased&, const SessionReleased&) noexcept = default;
 };
 
-/// An `error_event`: the sidecar refused the message named `message_id`,
-/// one the adapter sent. The sidecar names no job in it. Texts longer than
-/// kMaxJobErrorTextBytes are cut at a character boundary.
+/// An `error_event` with a readable, non-empty `message_id`: the sidecar
+/// refused the message of that id, one the adapter sent. The sidecar names no
+/// job in it. Texts longer than kMaxJobErrorTextBytes are cut at a character
+/// boundary. An event whose `schema_version` is not this protocol's, or whose
+/// error object cannot be read, still names its message: `error` is then
+/// Error::Code::Internal with kJobMessageMalformed, so the job behind the
+/// message ends.
 struct MessageRefused {
   std::string message_id;
   Error error;
@@ -124,19 +145,24 @@ struct MessageRefused {
 };
 
 /// A job or session message that cannot be delivered as it stands, a `job_*`
-/// or `session_*` kind the sidecar does not send among them. `error` is
-/// Error::Code::InferenceFailed with, in Error::context, the reason the job
-/// value objects give or kJobMessageMalformed, except for the publisher
+/// kind the sidecar does not send and a `session_release` among them. `error`
+/// is Error::Code::InferenceFailed with, in Error::context, the reason the
+/// job value objects give or kJobMessageMalformed, except for the publisher
 /// faults named at PcmPublisher and decode_sidecar_message; a publisher's own
-/// error is passed on unchanged. `job_id` is zero when the message names no readable job.
+/// error is passed on unchanged. Error::message names the message's kind and,
+/// for kJobMessageMalformed, the field.
 struct JobMessageFault {
+  /// Zero when the message names no readable job.
   std::uint64_t job_id = 0;
   Error error;
+  /// The session a faulty `session_released` names, when its key and
+  /// generation are both readable and nonzero.
+  std::optional<SessionReleased> session;
   friend bool operator==(const JobMessageFault&, const JobMessageFault&) noexcept = default;
 };
 
-using SidecarJobMessage =
-    std::variant<NotJobMessage, JobEvent, SessionReleased, MessageRefused, JobMessageFault>;
+using SidecarJobMessage = std::variant<NotJobMessage, JobEvent, SessionReleased, MessageRefused,
+                                       JobMessageFault, UnreadableHeader>;
 
 /// Reads one frame from the sidecar. A `job_failed` error's texts are cut to
 /// kMaxJobErrorTextBytes at a character boundary, and an error code this

@@ -74,21 +74,38 @@ json format_object(const AudioFormat& format) {
 
 // -- Decoding. ---------------------------------------------------------------
 
-JobMessageFault fault(std::uint64_t job_id, std::string_view reason, std::string message) {
-  return JobMessageFault{
-      job_id, Error::make(Error::Code::InferenceFailed, std::move(message), std::string(reason))};
+// What a fault is about: the message's kind and the job it names, zero for
+// none.
+struct Subject {
+  std::string_view kind;
+  std::uint64_t job_id = 0;
+};
+
+std::string about(std::string_view kind, std::string_view what) {
+  return "sidecar " + std::string(kind) + ": " + std::string(what);
 }
 
-JobMessageFault malformed(std::uint64_t job_id, std::string_view field) {
-  return fault(job_id, kJobMessageMalformed,
-               "sidecar job message field '" + std::string(field) + "' is missing or malformed");
+std::string unreadable_field(std::string_view field) {
+  return "field '" + std::string(field) + "' is missing or malformed";
+}
+
+JobMessageFault fault(const Subject& subject, std::string_view reason, std::string_view what) {
+  return JobMessageFault{
+      subject.job_id,
+      Error::make(Error::Code::InferenceFailed, about(subject.kind, what), std::string(reason)),
+      std::nullopt};
+}
+
+JobMessageFault malformed(const Subject& subject, std::string_view field) {
+  return fault(subject, kJobMessageMalformed, unreadable_field(field));
 }
 
 // The refusal of a job value object, as the fault of the job it would have
 // reached.
-JobMessageFault refused_by_seam(std::uint64_t job_id, Error error) {
+JobMessageFault refused_by_seam(const Subject& subject, Error error) {
   error.code = Error::Code::InferenceFailed;
-  return JobMessageFault{job_id, std::move(error)};
+  error.message = about(subject.kind, error.message);
+  return JobMessageFault{subject.job_id, std::move(error), std::nullopt};
 }
 
 // A non-negative JSON integer of at most `maximum`; never a boolean or a
@@ -250,27 +267,28 @@ ReadResult read_vad(const json& result) {
 // The JobResult of a `job_progress` or `job_completed`, or the fault of its job.
 std::variant<JobResult, JobMessageFault> read_result(const json& header,
                                                      const ipc::SidecarFrame& frame,
-                                                     std::uint64_t job_id,
+                                                     const Subject& subject,
                                                      const PcmPublisher& publish_pcm) {
+  const std::uint64_t job_id = subject.job_id;
   const json* result = member(header, "result", json::value_t::object);
   if (result == nullptr) {
-    return malformed(job_id, "result");
+    return malformed(subject, "result");
   }
   const auto kind = job_result_kind_from_string(wire_text(*result, "type").value_or(""));
   if (!kind.has_value()) {
-    return malformed(job_id, "result.type");
+    return malformed(subject, "result.type");
   }
   const std::size_t payload_bytes = frame.payload.size();
   if (*kind != JobResultKind::AudioChunk && payload_bytes != 0) {
-    return malformed(job_id, "payload region");
+    return malformed(subject, "payload region");
   }
   const auto create = [&](ReadResult read) -> std::variant<JobResult, JobMessageFault> {
     if (const auto* field = std::get_if<const char*>(&read)) {
-      return malformed(job_id, *field);
+      return malformed(subject, *field);
     }
     auto created = JobResult::create(std::get<JobResultPayload>(std::move(read)));
     if (!created.has_value()) {
-      return refused_by_seam(job_id, std::move(created).error());
+      return refused_by_seam(subject, std::move(created).error());
     }
     return std::move(created).value();
   };
@@ -285,68 +303,99 @@ std::variant<JobResult, JobMessageFault> read_result(const json& header,
   const auto probe =
       BufferRef::create(1, std::max<std::size_t>(payload_bytes, 1), BufferOwnership::Borrowed);
   if (!probe.has_value()) {
-    return JobMessageFault{job_id, probe.error()};
+    return JobMessageFault{job_id, probe.error(), std::nullopt};
   }
   auto judged = create(read_audio_chunk(*result, probe.value(), payload_bytes));
   if (std::holds_alternative<JobMessageFault>(judged)) {
     return judged;
   }
   if (!publish_pcm) {
-    return JobMessageFault{job_id, Error::make(Error::Code::NotReady,
-                                               "no buffer manager to publish an audio chunk into",
-                                               "backend_not_ready")};
+    return JobMessageFault{
+        job_id,
+        Error::make(Error::Code::NotReady, "no buffer manager to publish an audio chunk into",
+                    "backend_not_ready"),
+        std::nullopt};
   }
   auto published = publish_pcm(frame.payload);
   if (!published.has_value()) {
-    return JobMessageFault{job_id, std::move(published).error()};
+    return JobMessageFault{job_id, std::move(published).error(), std::nullopt};
   }
-  // An empty handle has no bytes, so the size judges that too.
-  if (published.value().size_bytes() < payload_bytes) {
+  // A released handle keeps its size, and an empty one has no bytes.
+  if (!published.value().is_valid() || published.value().size_bytes() < payload_bytes) {
     return JobMessageFault{
-        job_id, Error::make(Error::Code::Internal, "the published buffer cannot hold the chunk",
-                            "pcm_publisher_handle_unusable")};
+        job_id,
+        Error::make(Error::Code::Internal, "the published buffer cannot hold the chunk",
+                    "pcm_publisher_handle_unusable"),
+        std::nullopt};
   }
   return create(read_audio_chunk(*result, published.value(), payload_bytes));
 }
 
 SidecarJobMessage read_session_released(const json& header, const ipc::SidecarFrame& frame) {
-  const auto session_key = wire_integer(header, "session_key");
-  const auto generation = wire_integer(header, "generation");
+  const Subject subject{"session_released"};
+  const auto wire_key = wire_integer(header, "session_key");
+  const auto wire_generation = wire_integer(header, "generation");
+  const SessionReleased session{wire_key.value_or(0), wire_generation.value_or(0)};
+  std::optional<JobMessageFault> failed;
   if (wire_text(header, "schema_version") != kSchemaVersion) {
-    return malformed(0, "schema_version");
+    failed = malformed(subject, "schema_version");
+  } else if (!wire_key.has_value()) {
+    failed = malformed(subject, "session_key");
+  } else if (!wire_generation.has_value()) {
+    failed = malformed(subject, "generation");
+  } else if (!frame.payload.empty()) {
+    failed = malformed(subject, "payload region");
+  } else if (session.session_key == 0) {
+    failed = fault(subject, "session_key_zero", "session key is zero");
+  } else if (session.generation == 0) {
+    failed = fault(subject, "generation_zero", "generation is zero");
   }
-  if (!session_key.has_value()) {
-    return malformed(0, "session_key");
+  if (!failed.has_value()) {
+    return session;
   }
-  if (!generation.has_value()) {
-    return malformed(0, "generation");
+  if (session.session_key != 0 && session.generation != 0) {
+    failed->session = session;
   }
-  if (!frame.payload.empty()) {
-    return malformed(0, "payload region");
+  return std::move(*failed);
+}
+
+// An `error_event` that names a message. One it cannot read otherwise still
+// ends whatever waits behind that message.
+SidecarJobMessage read_error_event(const json& header) {
+  auto message_id = wire_text(header, "message_id");
+  if (!message_id.has_value() || message_id->empty()) {
+    return NotJobMessage{};
   }
-  if (*session_key == 0) {
-    return fault(0, "session_key_zero", "session_released names session key zero");
+  const auto unreadable = [&](std::string_view field) {
+    return MessageRefused{
+        std::move(*message_id),
+        Error::make(Error::Code::Internal, about("error_event", unreadable_field(field)),
+                    std::string(kJobMessageMalformed))};
+  };
+  if (wire_text(header, "schema_version") != kSchemaVersion) {
+    return unreadable("schema_version");
   }
-  if (*generation == 0) {
-    return fault(0, "generation_zero", "session_released names generation zero");
+  auto error = read_error(header);
+  if (!error.has_value()) {
+    return unreadable("error");
   }
-  return SessionReleased{*session_key, *generation};
+  return MessageRefused{std::move(*message_id), std::move(*error)};
 }
 
 // The sequence of a `job_progress`, judged before the result is read so that
 // no chunk is published for a message it faults.
 std::variant<std::uint32_t, JobMessageFault> read_progress_sequence(const json& header,
-                                                                    std::uint64_t job_id) {
+                                                                    const Subject& subject) {
   const auto wide = wire_integer(header, "progress_sequence");
   if (!wide.has_value()) {
-    return malformed(job_id, "progress_sequence");
+    return malformed(subject, "progress_sequence");
   }
   if (*wide == 0) {
-    return fault(job_id, "progress_sequence_zero", "job_progress has sequence zero");
+    return fault(subject, "progress_sequence_zero", "the progress sequence is zero");
   }
   if (*wide > kMaxJobProgressEvents) {
-    return fault(job_id, "progress_sequence_too_large",
-                 "job_progress sequence exceeds the progress ceiling");
+    return fault(subject, "progress_sequence_too_large",
+                 "the progress sequence exceeds the progress ceiling");
   }
   return static_cast<std::uint32_t>(*wide);
 }
@@ -355,34 +404,34 @@ SidecarJobMessage read_job_message(const json& header, std::string_view kind,
                                    const ipc::SidecarFrame& frame,
                                    const PcmPublisher& publish_pcm) {
   const auto wire_job_id = wire_integer(header, "job_id");
-  const std::uint64_t job_id = wire_job_id.value_or(0);
+  const Subject subject{kind, wire_job_id.value_or(0)};
   const auto event_kind = job_event_kind_from_string(kind.substr(kJobKindPrefix.size()));
   if (!event_kind.has_value()) {
-    return malformed(job_id, "kind");
+    return malformed(subject, "kind");
   }
   if (wire_text(header, "schema_version") != kSchemaVersion) {
-    return malformed(job_id, "schema_version");
+    return malformed(subject, "schema_version");
   }
   const auto session_key = wire_integer(header, "session_key");
   const auto generation = wire_integer(header, "generation");
   if (!wire_job_id.has_value()) {
-    return malformed(0, "job_id");
+    return malformed(subject, "job_id");
   }
   if (!session_key.has_value()) {
-    return malformed(job_id, "session_key");
+    return malformed(subject, "session_key");
   }
   if (!generation.has_value()) {
-    return malformed(job_id, "generation");
+    return malformed(subject, "generation");
   }
-  const JobIdentity identity{job_id, *session_key, *generation};
+  const JobIdentity identity{subject.job_id, *session_key, *generation};
   // Every event factory refuses a zero identity field with the same reason.
   if (auto named = JobEvent::accepted(identity); !named.has_value()) {
-    return refused_by_seam(job_id, std::move(named).error());
+    return refused_by_seam(subject, std::move(named).error());
   }
   const bool carries_result =
       *event_kind == JobEventKind::Progress || *event_kind == JobEventKind::Completed;
   if (!carries_result && !frame.payload.empty()) {
-    return malformed(job_id, "payload region");
+    return malformed(subject, "payload region");
   }
 
   Result<JobEvent> event = unexpected(Error::Code::Internal, "unhandled job event kind");
@@ -399,7 +448,7 @@ SidecarJobMessage read_job_message(const json& header, std::string_view kind,
     case JobEventKind::Failed: {
       auto error = read_error(header);
       if (!error.has_value()) {
-        return malformed(job_id, "error");
+        return malformed(subject, "error");
       }
       event = JobEvent::failed(identity, std::move(*error));
       break;
@@ -408,13 +457,13 @@ SidecarJobMessage read_job_message(const json& header, std::string_view kind,
     case JobEventKind::Completed: {
       std::uint32_t sequence = 0;
       if (*event_kind == JobEventKind::Progress) {
-        auto read = read_progress_sequence(header, job_id);
+        auto read = read_progress_sequence(header, subject);
         if (auto* failed = std::get_if<JobMessageFault>(&read)) {
           return std::move(*failed);
         }
         sequence = std::get<std::uint32_t>(read);
       }
-      auto result = read_result(header, frame, job_id, publish_pcm);
+      auto result = read_result(header, frame, subject, publish_pcm);
       if (auto* failed = std::get_if<JobMessageFault>(&result)) {
         return std::move(*failed);
       }
@@ -425,7 +474,7 @@ SidecarJobMessage read_job_message(const json& header, std::string_view kind,
     }
   }
   if (!event.has_value()) {
-    return refused_by_seam(job_id, std::move(event).error());
+    return refused_by_seam(subject, std::move(event).error());
   }
   return std::move(event).value();
 }
@@ -564,6 +613,9 @@ Result<std::vector<JobClass>> declared_job_classes(std::string_view load_model_r
   if (listed->empty()) {
     return violation(kReason, "sidecar load response declares no job class");
   }
+  if (listed->size() > kMaxDeclaredJobClasses) {
+    return violation(kReason, "sidecar load response declares more job classes than exist");
+  }
   std::vector<JobClass> classes;
   for (auto it = listed->begin(); it != listed->end(); ++it) {
     if (std::find(listed->begin(), it, *it) != it) {
@@ -582,21 +634,16 @@ SidecarJobMessage decode_sidecar_message(const ipc::SidecarFrame& frame,
   // A header that is not a JSON object has no `kind` either.
   const auto kind = wire_text(header, "kind");
   if (!kind.has_value()) {
-    return NotJobMessage{};
+    return UnreadableHeader{};
   }
   if (*kind == "error_event") {
-    auto message_id = wire_text(header, "message_id");
-    auto error = read_error(header);
-    if (!message_id.has_value() || message_id->empty() || !error.has_value()) {
-      return NotJobMessage{};
-    }
-    return MessageRefused{std::move(*message_id), std::move(*error)};
+    return read_error_event(header);
   }
   if (*kind == "session_released") {
     return read_session_released(header, frame);
   }
   if (*kind == "session_release") {
-    return malformed(0, "kind");
+    return malformed(Subject{*kind}, "kind");
   }
   if (kind->starts_with(kJobKindPrefix)) {
     return read_job_message(header, *kind, frame, publish_pcm);

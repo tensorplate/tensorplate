@@ -15,9 +15,11 @@ TEST(JobWire, FeatureFlagDisabled) {
 }
 #else
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <nlohmann/json.hpp>
@@ -43,14 +45,26 @@ namespace {
 
 using namespace tensorplate::testing::job_seam;  // NOLINT(google-build-using-namespace)
 
-const std::vector<std::string> kGoldenFiles{
-    "cancel",          "interleaved_progress", "negotiation",   "negotiation_refused", "refused",
-    "session_release", "stt_decode",           "tts_synthesis", "vad_frames"};
+const std::string kGoldenDirectory = std::string{TP_SOURCE_DIR} + "/protocol/rust/tests/fixtures/";
+const std::string kGoldenPrefix = "python_pytorch_ipc_speech_jobs_";
+const std::string kGoldenSuffix = ".jsonl";
+
+// Every golden file on disk, by the part of its name that tells them apart.
+std::vector<std::string> golden_files() {
+  std::vector<std::string> names;
+  for (const auto& entry : std::filesystem::directory_iterator(kGoldenDirectory)) {
+    const std::string file = entry.path().filename().string();
+    if (file.starts_with(kGoldenPrefix) && file.ends_with(kGoldenSuffix)) {
+      names.push_back(file.substr(kGoldenPrefix.size(),
+                                  file.size() - kGoldenPrefix.size() - kGoldenSuffix.size()));
+    }
+  }
+  std::sort(names.begin(), names.end());
+  return names;
+}
 
 std::vector<Json> golden(const std::string& name) {
-  std::ifstream in(std::string{TP_SOURCE_DIR} +
-                   "/protocol/rust/tests/fixtures/python_pytorch_ipc_speech_jobs_" + name +
-                   ".jsonl");
+  std::ifstream in(kGoldenDirectory + kGoldenPrefix + name + kGoldenSuffix);
   EXPECT_TRUE(in.is_open()) << name;
   std::vector<Json> lines;
   for (std::string line; std::getline(in, line);) {
@@ -237,21 +251,43 @@ SidecarJobMessage decode(const Json& header, std::size_t payload_bytes = 0) {
   return decode_sidecar_message(frame_of(header, payload_bytes), published.publisher());
 }
 
+std::uint64_t job_of(const Json& line) {
+  return line.value("job_id", std::uint64_t{0});
+}
+
+// The fault of a message of `kind`, which its text names first.
 void expect_fault(const SidecarJobMessage& message, std::uint64_t job_id, std::string_view reason,
-                  const std::string& name) {
+                  const std::string& name, std::string_view kind = {}) {
   const auto* fault = std::get_if<JobMessageFault>(&message);
   ASSERT_NE(fault, nullptr) << name << ": alternative " << message.index();
   EXPECT_EQ(fault->job_id, job_id) << name;
   EXPECT_EQ(fault->error.code, Error::Code::InferenceFailed) << name;
   EXPECT_EQ(fault->error.context.value_or("<none>"), reason)
       << name << ": " << fault->error.message;
+  if (!kind.empty()) {
+    EXPECT_TRUE(fault->error.message.starts_with("sidecar " + std::string(kind) + ": "))
+        << name << ": " << fault->error.message;
+  }
+}
+
+std::string malformed_text(const std::string& kind, const std::string& field) {
+  return "sidecar " + kind + ": field '" + field + "' is missing or malformed";
+}
+
+// A malformed message's fault names the message's kind and the field.
+void expect_malformed(const SidecarJobMessage& message, std::uint64_t job_id,
+                      const std::string& kind, const std::string& field, const std::string& name) {
+  expect_fault(message, job_id, kJobMessageMalformed, name);
+  if (const auto* fault = std::get_if<JobMessageFault>(&message)) {
+    EXPECT_EQ(fault->error.message, malformed_text(kind, field)) << name;
+  }
 }
 
 // -- Golden frames. -------------------------------------------------------------
 
 TEST(JobWireGolden, TheAdapterMessagesAreEncodedAsRecorded) {
   std::map<std::string, int> encoded;
-  for (const std::string& file : kGoldenFiles) {
+  for (const std::string& file : golden_files()) {
     for (const Json& line : golden(file)) {
       const auto kind = line.at("kind").get<std::string>();
       const auto id = line.at("message_id").get<std::string>();
@@ -279,7 +315,7 @@ TEST(JobWireGolden, TheAdapterMessagesAreEncodedAsRecorded) {
 
 TEST(JobWireGolden, TheSidecarMessagesDecodeToTheRecordedEventsInAnOrderTheSeamAccepts) {
   std::map<std::string, int> decoded;
-  for (const std::string& file : kGoldenFiles) {
+  for (const std::string& file : golden_files()) {
     if (file.starts_with("negotiation")) {
       continue;
     }
@@ -309,7 +345,9 @@ TEST(JobWireGolden, TheSidecarMessagesDecodeToTheRecordedEventsInAnOrderTheSeamA
       ++decoded[kind];
       if (kind == "session_released") {
         ASSERT_TRUE(std::holds_alternative<SessionReleased>(message)) << where;
-        EXPECT_EQ(std::get<SessionReleased>(message), (SessionReleased{1, 1})) << where;
+        EXPECT_EQ(std::get<SessionReleased>(message),
+                  (SessionReleased{line.at("session_key"), line.at("generation")}))
+            << where;
         continue;
       }
       ASSERT_TRUE(std::holds_alternative<JobEvent>(message))
@@ -556,89 +594,113 @@ TEST(JobWireDecode, AMessageWithAFieldOfTheWrongShapeFaultsItsJob) {
     Json base;
     const char* pointer;
     Json value;
-    std::uint64_t job_id;
+    const char* field;
   };
   const Json accepted = golden("stt_decode").at(1);
   const Json progress = golden("interleaved_progress").at(4);
   const Json failed = golden("cancel").at(4);
   const Json vad = golden("vad_frames").at(2);
+  const Json transcript = completed_transcript();
+  const Json audio = completed_audio();
   const std::vector<Case> cases{
-      {"job_id text", accepted, "/job_id", "1", 0},
-      {"job_id fraction", accepted, "/job_id", 1.5, 0},
-      {"job_id negative", accepted, "/job_id", -1, 0},
-      {"job_id above 2^53-1", accepted, "/job_id", kMaxWireInteger + 1, 0},
-      {"job_id true", accepted, "/job_id", true, 0},
-      {"session_key text", accepted, "/session_key", "1", 1},
-      {"generation above 2^53-1", accepted, "/generation", kMaxWireInteger + 1, 1},
-      {"schema_version 0.2", accepted, "/schema_version", "0.2", 1},
-      {"progress_sequence text", progress, "/progress_sequence", "1", 1},
-      {"result is not an object", progress, "/result", 7, 1},
-      {"result type unknown", progress, "/result/type", "embedding", 1},
-      {"text is a number", progress, "/result/text", 7, 1},
-      {"tokens is an object", progress, "/result/tokens", Json::object(), 1},
-      {"a token is text", progress, "/result/tokens/0", "1", 1},
-      {"a token is negative", progress, "/result/tokens/0", -1, 1},
-      {"a token is a fraction", progress, "/result/tokens/0", 1.5, 1},
-      {"a token above 2^32-1", progress, "/result/tokens/0", std::uint64_t{1} << 32U, 1},
-      {"words is text", progress, "/result/words", "w", 1},
-      {"a word is a number", completed_transcript(), "/result/words/0", 7, 1},
-      {"a word's text is a number", completed_transcript(), "/result/words/0/text", 7, 1},
-      {"a word's token_end is text", completed_transcript(), "/result/words/0/token_end", "1", 1},
-      {"a word's end_sample is negative", completed_transcript(), "/result/words/0/end_sample", -1,
-       1},
-      {"probabilities is a number", vad, "/result/probabilities", 0.5, 1},
-      {"a probability is text", vad, "/result/probabilities/1", "0.9", 1},
-      {"error is text", failed, "/error", "cancelled", 1},
-      {"error code is a number", failed, "/error/code", 9, 1},
-      {"error message is a number", failed, "/error/message", 9, 1},
-      {"error context is a number", failed, "/error/context", 9, 1},
-      {"format is text", completed_audio(), "/result/format", "pcm", 1},
-      {"sample rate is text", completed_audio(), "/result/format/sample_rate_hz", "24000", 1},
-      {"channels above 16 bits", completed_audio(), "/result/format/channels", 65537, 1},
-      {"clipped_samples is negative", completed_audio(), "/result/clipped_samples", -1, 1},
-      {"payload_length is not the payload's", completed_audio(), "/result/payload_length", 1918, 1},
+      {"job_id text", accepted, "/job_id", "1", "job_id"},
+      {"job_id fraction", accepted, "/job_id", 1.5, "job_id"},
+      {"job_id negative", accepted, "/job_id", -1, "job_id"},
+      {"job_id above 2^53-1", accepted, "/job_id", kMaxWireInteger + 1, "job_id"},
+      {"job_id true", accepted, "/job_id", true, "job_id"},
+      {"session_key text", accepted, "/session_key", "1", "session_key"},
+      {"generation above 2^53-1", accepted, "/generation", kMaxWireInteger + 1, "generation"},
+      {"schema_version 0.2", accepted, "/schema_version", "0.2", "schema_version"},
+      {"progress_sequence text", progress, "/progress_sequence", "1", "progress_sequence"},
+      {"result is not an object", progress, "/result", 7, "result"},
+      {"result type unknown", progress, "/result/type", "embedding", "result.type"},
+      {"text is a number", progress, "/result/text", 7, "result.text"},
+      {"tokens is an object", progress, "/result/tokens", Json::object(), "result.tokens"},
+      {"a token is text", progress, "/result/tokens/0", "1", "result.tokens"},
+      {"a token is negative", progress, "/result/tokens/0", -1, "result.tokens"},
+      {"a token is a fraction", progress, "/result/tokens/0", 1.5, "result.tokens"},
+      {"a token above 2^32-1", progress, "/result/tokens/0", std::uint64_t{1} << 32U,
+       "result.tokens"},
+      {"words is text", progress, "/result/words", "w", "result.words"},
+      {"a word is a number", transcript, "/result/words/0", 7, "result.words"},
+      {"a word's text is a number", transcript, "/result/words/0/text", 7, "result.words"},
+      {"a word's token_end is text", transcript, "/result/words/0/token_end", "1", "result.words"},
+      {"a word's start_sample is text", transcript, "/result/words/0/start_sample", "0",
+       "result.words"},
+      {"a word's end_sample is negative", transcript, "/result/words/0/end_sample", -1,
+       "result.words"},
+      {"probabilities is a number", vad, "/result/probabilities", 0.5, "result.probabilities"},
+      {"a probability is text", vad, "/result/probabilities/1", "0.9", "result.probabilities"},
+      {"error is text", failed, "/error", "cancelled", "error"},
+      {"error code is a number", failed, "/error/code", 9, "error"},
+      {"error message is a number", failed, "/error/message", 9, "error"},
+      {"error context is a number", failed, "/error/context", 9, "error"},
+      {"format is text", audio, "/result/format", "pcm", "result.format"},
+      {"encoding is a number", audio, "/result/format/encoding", 7, "result.format"},
+      {"sample rate is text", audio, "/result/format/sample_rate_hz", "24000", "result.format"},
+      {"channels above 16 bits", audio, "/result/format/channels", 65537, "result.format"},
+      {"clipped_samples is negative", audio, "/result/clipped_samples", -1,
+       "result.clipped_samples"},
+      {"payload_length is not the payload's", audio, "/result/payload_length", 1918,
+       "result.payload_length"},
   };
   for (const Case& c : cases) {
     Json header = c.base;
     header[Json::json_pointer(c.pointer)] = c.value;
-    expect_fault(decode(header, recorded_payload(c.base)), c.job_id, kJobMessageMalformed, c.name);
+    // A message whose job id cannot be read names no job.
+    const std::uint64_t job_id = std::string_view{c.field} == "job_id" ? 0 : job_of(c.base);
+    expect_malformed(decode(header, recorded_payload(c.base)), job_id, c.base.at("kind"), c.field,
+                     c.name);
   }
-  for (const char* missing :
-       {"/session_key", "/generation", "/result", "/result/type", "/result/text", "/result/tokens",
-        "/result/words", "/result/words/0/token_begin"}) {
-    Json header = completed_transcript();
-    const Json::json_pointer pointer(missing);
+  const std::vector<std::pair<const char*, const char*>> missing{
+      {"/session_key", "session_key"},
+      {"/generation", "generation"},
+      {"/result", "result"},
+      {"/result/type", "result.type"},
+      {"/result/text", "result.text"},
+      {"/result/tokens", "result.tokens"},
+      {"/result/words", "result.words"},
+      {"/result/words/0/token_begin", "result.words"}};
+  for (const auto& [path, field] : missing) {
+    Json header = transcript;
+    const Json::json_pointer pointer(path);
     header.at(pointer.parent_pointer()).erase(pointer.back());
-    expect_fault(decode(header), 1, kJobMessageMalformed, missing);
+    expect_malformed(decode(header), job_of(transcript), "job_completed", field, path);
   }
   Json no_error = failed;
   no_error.erase("error");
-  expect_fault(decode(no_error), 1, kJobMessageMalformed, "job_failed without error");
+  expect_malformed(decode(no_error), job_of(failed), "job_failed", "error", "no error");
   Json no_sequence = progress;
   no_sequence.erase("progress_sequence");
-  expect_fault(decode(no_sequence), 1, kJobMessageMalformed, "job_progress without sequence");
+  expect_malformed(decode(no_sequence), job_of(progress), "job_progress", "progress_sequence",
+                   "no sequence");
 }
 
 TEST(JobWireDecode, ThePayloadRegionBelongsToAnAudioChunkOnly) {
   for (const std::string file : {"stt_decode", "cancel", "vad_frames", "session_release"}) {
     for (const Json& line : golden(file)) {
       if (!sent_by_adapter(line)) {
-        const bool names_job = line.contains("job_id");
-        expect_fault(decode(line, 2), names_job ? 1 : 0, kJobMessageMalformed, line.dump());
+        expect_malformed(decode(line, 2), job_of(line), line.at("kind"), "payload region",
+                         line.dump());
       }
     }
   }
-  expect_fault(decode(completed_audio(), 1918), 1, kJobMessageMalformed, "short payload");
-  expect_fault(decode(completed_audio(), 0), 1, kJobMessageMalformed, "no payload");
+  const Json audio = completed_audio();
+  for (const std::size_t bytes : {std::size_t{1918}, std::size_t{0}}) {
+    expect_malformed(decode(audio, bytes), job_of(audio), "job_completed", "result.payload_length",
+                     std::to_string(bytes));
+  }
 }
 
 TEST(JobWireDecode, AProgressSequenceOutsideTheSeamsRangeIsNamedByTheSeam) {
   Json progress = golden("interleaved_progress").at(4);
+  const std::uint64_t job_id = job_of(progress);
   progress["progress_sequence"] = 0;
-  expect_fault(decode(progress), 1, "progress_sequence_zero", "0");
+  expect_fault(decode(progress), job_id, "progress_sequence_zero", "0", "job_progress");
   for (const std::uint64_t above : {std::uint64_t{1501}, std::uint64_t{1} << 32U}) {
     progress["progress_sequence"] = above;
-    expect_fault(decode(progress), 1, "progress_sequence_too_large", std::to_string(above));
+    expect_fault(decode(progress), job_id, "progress_sequence_too_large", std::to_string(above),
+                 "job_progress");
   }
 }
 
@@ -646,7 +708,8 @@ TEST(JobWireDecode, AProbabilityNoFloatHoldsIsOutOfRange) {
   Json vad = golden("vad_frames").at(2);
   for (const double beyond : {1e300, -1e300, 1.00000000001, -1e-50}) {
     vad["result"]["probabilities"][1] = beyond;
-    expect_fault(decode(vad), 1, "vad_probability_out_of_range", std::to_string(beyond));
+    expect_fault(decode(vad), job_of(vad), "vad_probability_out_of_range", std::to_string(beyond),
+                 "job_completed");
   }
 }
 
@@ -671,17 +734,16 @@ TEST(JobWireDecode, AnAudioChunkTheCodecFaultsIsNeverPublished) {
   struct Case {
     const char* pointer;
     Json value;
-    std::uint64_t job_id;
     std::string_view reason;
   };
   const std::vector<Case> cases{
-      {"/progress_sequence", 0, 1, "progress_sequence_zero"},
-      {"/progress_sequence", 1501, 1, "progress_sequence_too_large"},
-      {"/session_key", 0, 1, "session_key_zero"},
-      {"/generation", 0, 1, "generation_zero"},
-      {"/job_id", 0, 0, "job_id_zero"},
-      {"/result/format/encoding", "opus", 1, "audio_format_unsupported"},
-      {"/result/format/channels", 2, 1, "audio_format_unsupported"},
+      {"/progress_sequence", 0, "progress_sequence_zero"},
+      {"/progress_sequence", 1501, "progress_sequence_too_large"},
+      {"/session_key", 0, "session_key_zero"},
+      {"/generation", 0, "generation_zero"},
+      {"/job_id", 0, "job_id_zero"},
+      {"/result/format/encoding", "opus", "audio_format_unsupported"},
+      {"/result/format/channels", 2, "audio_format_unsupported"},
   };
   for (const Case& c : cases) {
     Json header = progress;
@@ -689,7 +751,7 @@ TEST(JobWireDecode, AnAudioChunkTheCodecFaultsIsNeverPublished) {
     header[Json::json_pointer(c.pointer)] = c.value;
     Published published;
     const auto message = decode_sidecar_message(frame_of(header, 1920), published.publisher());
-    expect_fault(message, c.job_id, c.reason, c.pointer);
+    expect_fault(message, job_of(header), c.reason, c.pointer, "job_progress");
     EXPECT_TRUE(published.chunks.empty()) << c.pointer;
   }
   Json first = progress;
@@ -702,31 +764,40 @@ TEST(JobWireDecode, AnAudioChunkTheCodecFaultsIsNeverPublished) {
 }
 
 TEST(JobWireDecode, AnAudioChunkWithoutAPublisherOrWithAFailingOneFaultsItsJob) {
-  const ipc::SidecarFrame frame = frame_of(completed_audio(), 1920);
+  const Json audio = completed_audio();
+  const std::uint64_t job_id = job_of(audio);
+  const ipc::SidecarFrame frame = frame_of(audio, 1920);
   const auto none = decode_sidecar_message(frame, PcmPublisher{});
   ASSERT_TRUE(std::holds_alternative<JobMessageFault>(none));
   EXPECT_EQ(std::get<JobMessageFault>(none),
-            (JobMessageFault{1, Error::make(Error::Code::NotReady,
-                                            "no buffer manager to publish an audio chunk into",
-                                            "backend_not_ready")}));
+            (JobMessageFault{job_id,
+                             Error::make(Error::Code::NotReady,
+                                         "no buffer manager to publish an audio chunk into",
+                                         "backend_not_ready"),
+                             std::nullopt}));
 
   const Error full = Error::make(Error::Code::OOMError, "pool exhausted", "buffer_pool");
   const auto failing = decode_sidecar_message(
       frame, [&](std::span<const std::byte>) -> Result<BufferRef> { return unexpected(full); });
   ASSERT_TRUE(std::holds_alternative<JobMessageFault>(failing));
-  EXPECT_EQ(std::get<JobMessageFault>(failing), (JobMessageFault{1, full}));
+  EXPECT_EQ(std::get<JobMessageFault>(failing), (JobMessageFault{job_id, full, std::nullopt}));
 
-  // A handle that cannot hold the chunk is the publisher's fault and stays its
-  // to release.
+  // A handle that cannot hold the chunk, or that was released, is the
+  // publisher's fault, not the sidecar's, and stays its owner's to release.
+  BufferRef released = BufferRef::create(9, 1920, BufferOwnership::Owned).value();
+  released.mark_released();
   for (const BufferRef& unusable :
-       {BufferRef{}, BufferRef::create(9, 1918, BufferOwnership::Owned).value()}) {
+       {BufferRef{}, BufferRef::create(9, 1918, BufferOwnership::Owned).value(), released}) {
     const auto refused = decode_sidecar_message(
         frame, [&](std::span<const std::byte>) { return Result<BufferRef>{unusable}; });
     ASSERT_TRUE(std::holds_alternative<JobMessageFault>(refused));
-    const JobMessageFault& fault = std::get<JobMessageFault>(refused);
-    EXPECT_EQ(fault.job_id, 1U);
-    EXPECT_EQ(fault.error.code, Error::Code::Internal);
-    EXPECT_EQ(fault.error.context.value_or(""), "pcm_publisher_handle_unusable");
+    EXPECT_EQ(std::get<JobMessageFault>(refused),
+              (JobMessageFault{
+                  job_id,
+                  Error::make(Error::Code::Internal, "the published buffer cannot hold the chunk",
+                              "pcm_publisher_handle_unusable"),
+                  std::nullopt}))
+        << unusable.size_bytes();
   }
 }
 
@@ -736,7 +807,7 @@ TEST(JobWireDecode, FieldsTheAdapterDoesNotReadAreIgnored) {
   accepted["result"] = "not read on job_accepted";
   const auto message = decode(accepted);
   ASSERT_TRUE(std::holds_alternative<JobEvent>(message));
-  EXPECT_EQ(std::get<JobEvent>(message), JobEvent::accepted(JobIdentity{1, 1, 1}).value());
+  EXPECT_EQ(std::get<JobEvent>(message), JobEvent::accepted(identity_of(accepted)).value());
 
   Json transcript = completed_transcript();
   transcript["result"]["language_probability"] = 0.9;
@@ -796,50 +867,111 @@ TEST(JobWireDecode, AnErrorEventNamesTheRefusedMessageAndNoJob) {
   EXPECT_EQ(std::get<MessageRefused>(message).error,
             Error::make(Error::Code::ConfigInvalid, std::string(kMaxJobErrorTextBytes, 'm')));
 
-  // Without a readable message id or error it answers nothing the channel sent.
-  for (const char* field : {"message_id", "error"}) {
+  // Without a readable message id it names nothing the channel sent, whatever
+  // else is wrong with it.
+  for (const Json& id : {Json(nullptr), Json(7), Json("")}) {
     Json anonymous = refusal;
-    anonymous.erase(field);
-    EXPECT_TRUE(std::holds_alternative<NotJobMessage>(decode(anonymous))) << field;
-    anonymous[field] = 7;
-    EXPECT_TRUE(std::holds_alternative<NotJobMessage>(decode(anonymous))) << field;
+    anonymous["message_id"] = id;
+    EXPECT_TRUE(std::holds_alternative<NotJobMessage>(decode(anonymous))) << id;
+    anonymous["schema_version"] = "0.2";
+    anonymous.erase("error");
+    EXPECT_TRUE(std::holds_alternative<NotJobMessage>(decode(anonymous))) << id;
   }
-  Json empty_id = refusal;
-  empty_id["message_id"] = "";
-  EXPECT_TRUE(std::holds_alternative<NotJobMessage>(decode(empty_id)));
+  Json no_id = refusal;
+  no_id.erase("message_id");
+  EXPECT_TRUE(std::holds_alternative<NotJobMessage>(decode(no_id)));
+}
+
+TEST(JobWireDecode, AnErrorEventItCannotReadStillRefusesTheMessageItNames) {
+  const Json refusal{{"schema_version", "0.1"},
+                     {"message_id", "a4"},
+                     {"kind", "error_event"},
+                     {"status", "error"},
+                     {"error", {{"code", "config_invalid"}, {"message", "m"}}}};
+  struct Case {
+    const char* pointer;
+    Json value;
+    const char* field;
+  };
+  const std::vector<Case> cases{
+      {"/schema_version", "0.2", "schema_version"},
+      {"/schema_version", 7, "schema_version"},
+      {"/error", "config_invalid", "error"},
+      {"/error/code", 9, "error"},
+      {"/error/message", 9, "error"},
+      {"/error/context", 9, "error"},
+  };
+  const auto expect_unreadable = [](const Json& header, const std::string& field) {
+    const auto message = decode(header);
+    ASSERT_TRUE(std::holds_alternative<MessageRefused>(message))
+        << header << ": alternative " << message.index();
+    EXPECT_EQ(std::get<MessageRefused>(message),
+              (MessageRefused{
+                  "a4", Error::make(Error::Code::Internal, malformed_text("error_event", field),
+                                    std::string(kJobMessageMalformed))}))
+        << header;
+  };
+  for (const Case& c : cases) {
+    Json header = refusal;
+    header[Json::json_pointer(c.pointer)] = c.value;
+    expect_unreadable(header, c.field);
+  }
+  for (const char* field : {"schema_version", "error"}) {
+    Json header = refusal;
+    header.erase(field);
+    expect_unreadable(header, field);
+  }
 }
 
 TEST(JobWireDecode, AFrameThatIsNotAJobMessageIsLeftToTheUnaryExchange) {
-  for (const char* kind :
-       {"load_model_response", "prime_response", "infer_response", "health_check_response",
-        "unload_response", "ready_event", "metric_event", "a_kind_of_a_later_release"}) {
+  for (const char* kind : {"load_model_response", "prime_response", "infer_response",
+                           "health_check_response", "unload_response", "ready_event",
+                           "metric_event", "session_opened", "", "a_kind_of_a_later_release"}) {
     const Json header{
         {"schema_version", "0.1"}, {"message_id", "a1"}, {"kind", kind}, {"status", "ok"}};
     EXPECT_TRUE(std::holds_alternative<NotJobMessage>(decode(header, 4))) << kind;
   }
-  for (const char* text : {"", "{", "[]", "7", "{\"kind\":7}", "{\"message_id\":\"a1\"}",
+}
+
+TEST(JobWireDecode, AHeaderThatIsNotAnObjectWithAKindIsUnreadable) {
+  for (const char* text : {"", "{", "[]", "7", "\"job_accepted\"", "{\"kind\":7}",
+                           "{\"message_id\":\"a1\"}", "{\"kind\":null,\"job_id\":1}",
                            "{\"kind\":\"job_accepted\",\"job_id\":1,\"kind\":\"\xFF\"}"}) {
     const auto message = decode_sidecar_message(ipc::SidecarFrame{text, {}}, PcmPublisher{});
-    EXPECT_TRUE(std::holds_alternative<NotJobMessage>(message)) << text;
+    EXPECT_TRUE(std::holds_alternative<UnreadableHeader>(message))
+        << text << ": alternative " << message.index();
   }
 }
 
 TEST(JobWireDecode, AMessageOnlyTheAdapterSendsFaultsTheJobItNames) {
-  expect_fault(decode(golden("stt_decode").at(0)), 1, kJobMessageMalformed, "job_submit");
-  expect_fault(decode(golden("cancel").at(2)), 1, kJobMessageMalformed, "job_cancel");
-  expect_fault(decode(golden("session_release").at(2)), 0, kJobMessageMalformed, "session_release");
+  for (const Json& line :
+       {golden("stt_decode").at(0), golden("cancel").at(2), golden("session_release").at(2)}) {
+    ASSERT_TRUE(sent_by_adapter(line)) << line;
+    const std::string kind = line.at("kind");
+    expect_malformed(decode(line), job_of(line), kind, "kind", kind);
+  }
+  Json unknown = golden("stt_decode").at(1);
+  unknown["kind"] = "job_of_a_later_release";
+  expect_malformed(decode(unknown), job_of(unknown), "job_of_a_later_release", "kind", "unknown");
 }
 
 TEST(JobWireDecode, ASessionReleasedNeedsItsKeyAndGeneration) {
   const Json released = golden("session_release").at(6);
+  const auto session_of = [](const SidecarJobMessage& message) {
+    const auto* fault = std::get_if<JobMessageFault>(&message);
+    return fault != nullptr ? fault->session : std::nullopt;
+  };
   for (const char* field : {"session_key", "generation"}) {
     Json header = released;
     header[field] = 0;
-    expect_fault(decode(header), 0, std::string(field) + "_zero", field);
+    expect_fault(decode(header), 0, std::string(field) + "_zero", field, "session_released");
+    EXPECT_EQ(session_of(decode(header)), std::nullopt) << field;
     header[field] = "1";
-    expect_fault(decode(header), 0, kJobMessageMalformed, field);
+    expect_malformed(decode(header), 0, "session_released", field, field);
+    EXPECT_EQ(session_of(decode(header)), std::nullopt) << field;
     header.erase(field);
-    expect_fault(decode(header), 0, kJobMessageMalformed, field);
+    expect_malformed(decode(header), 0, "session_released", field, field);
+    EXPECT_EQ(session_of(decode(header)), std::nullopt) << field;
   }
   Json other = released;
   other["session_key"] = 7;
@@ -847,9 +979,19 @@ TEST(JobWireDecode, ASessionReleasedNeedsItsKeyAndGeneration) {
   const auto message = decode(other);
   ASSERT_TRUE(std::holds_alternative<SessionReleased>(message));
   EXPECT_EQ(std::get<SessionReleased>(message), (SessionReleased{7, 3}));
-  Json versioned = released;
+
+  // A fault names the session when the message does.
+  Json versioned = other;
   versioned["schema_version"] = "1.0";
-  expect_fault(decode(versioned), 0, kJobMessageMalformed, "schema_version");
+  expect_malformed(decode(versioned), 0, "session_released", "schema_version", "version");
+  EXPECT_EQ(session_of(decode(versioned)), (SessionReleased{7, 3}));
+  expect_malformed(decode(other, 2), 0, "session_released", "payload region", "payload");
+  EXPECT_EQ(session_of(decode(other, 2)), (SessionReleased{7, 3}));
+  versioned["generation"] = 0;
+  EXPECT_EQ(session_of(decode(versioned)), std::nullopt);
+  versioned["generation"] = 3;
+  versioned["session_key"] = 0;
+  EXPECT_EQ(session_of(decode(versioned)), std::nullopt);
 }
 
 void expect_refused(const Result<std::string>& header, std::string_view reason) {
@@ -954,9 +1096,12 @@ TEST(JobWireNegotiation, JobClassesAreReadByNameAndHeldToTheirShape) {
   EXPECT_EQ(
       classes(Json::array({"vad_frames", "a_class_of_a_later_release", "stt_decode"})).value(),
       (std::vector<JobClass>{JobClass::VadFrames, JobClass::SttDecode}));
+  EXPECT_EQ(classes(Json::array({"vad_frames", "tts_synthesis", "stt_decode"})).value().size(),
+            kMaxDeclaredJobClasses);
   for (const Json& malformed :
        {Json(nullptr), Json::array(), Json("stt_decode"), Json::array({"stt_decode", 7}),
-        Json::array({"stt_decode", "stt_decode"})}) {
+        Json::array({"stt_decode", "stt_decode"}),
+        Json::array({"stt_decode", "tts_synthesis", "vad_frames", "a_class_of_a_later_release"})}) {
     const auto refused = classes(malformed);
     ASSERT_FALSE(refused.has_value()) << malformed;
     EXPECT_EQ(refused.error().code, Error::Code::InferenceFailed);
