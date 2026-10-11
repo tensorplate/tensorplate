@@ -180,3 +180,37 @@ fn homebrew_agent_config_uses_prefix_local_paths() {
     assert_eq!(cfg.available_backends, ["python_pytorch"]);
     assert!(cfg.supervision.is_none());
 }
+
+/// `TimeoutStopSec` of the packaged agent unit.
+#[cfg(unix)]
+fn unit_stop_timeout() -> std::time::Duration {
+    let unit = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("packaging")
+        .join("debian")
+        .join("tensorplate-agent.service");
+    let text = fs::read_to_string(unit).expect("read the agent unit");
+    let values: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("TimeoutStopSec="))
+        .collect();
+    let [seconds] = values[..] else {
+        panic!("the unit sets TimeoutStopSec once, as plain seconds: {values:?}");
+    };
+    std::time::Duration::from_secs(seconds.trim().parse().expect("plain seconds"))
+}
+
+/// The service manager kills the control group when the unit's stop timeout
+/// ends, so the timeout has to outlast the longest stop the agent makes.
+#[cfg(unix)]
+#[test]
+fn the_unit_waits_out_the_agents_longest_stop_before_it_kills_the_agent() {
+    use tensorplate_agent::registry::AGENT_STOP_BOUND;
+
+    let unit = unit_stop_timeout();
+
+    assert!(
+        unit > AGENT_STOP_BOUND,
+        "TimeoutStopSec {unit:?} is not above the {AGENT_STOP_BOUND:?} the agent may take to stop its workers"
+    );
+}

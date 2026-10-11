@@ -19,9 +19,15 @@
 mod common;
 
 use common::{vision_bundle, write_bundle, BundleSpec, Harness};
-use tensorplate_agent::error::AgentError;
-use tensorplate_agent::worker::{AgentErrorKind, MockBehavior};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tensorplate_agent::coordinator::Coordinator;
+use tensorplate_agent::error::{AgentError, AgentResult};
+use tensorplate_agent::worker::{
+    AgentErrorKind, MockBehavior, MockWorkerControl, WorkerControl, WorkerReadiness,
+};
 use tensorplate_protocol::deploy_transaction::DeployState;
+use tensorplate_protocol::worker_control::CandidateRef;
 
 fn deploy_should_fail(h: &Harness, deployment: &str, bundle: &std::path::Path) -> AgentError {
     h.coord
@@ -258,4 +264,63 @@ fn speech_runtime_floor_precedes_staging_and_preserves_active_deployment() {
             }
         }
     }
+}
+
+/// Records the candidates the coordinator gives up on.
+struct Abandons {
+    inner: MockWorkerControl,
+    abandoned: Mutex<Vec<String>>,
+}
+
+impl WorkerControl for Abandons {
+    fn prepare(&self, tx: &str, candidate: &CandidateRef, timeout: Duration) -> AgentResult<()> {
+        self.inner.prepare(tx, candidate, timeout)
+    }
+    fn warm(
+        &self,
+        tx: &str,
+        candidate: &CandidateRef,
+        timeout: Duration,
+    ) -> AgentResult<WorkerReadiness> {
+        self.inner.warm(tx, candidate, timeout)
+    }
+    fn promote(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        self.inner.promote(tx, candidate)
+    }
+    fn abandon(&self, candidate: &CandidateRef) {
+        let mut abandoned = self.abandoned.lock().expect("abandoned");
+        abandoned.push(candidate.deployment_id.clone());
+    }
+    fn unload(&self, deployment_id: &str) {
+        self.inner.unload(deployment_id);
+    }
+    fn active_deployment_id(&self) -> AgentResult<Option<String>> {
+        self.inner.active_deployment_id()
+    }
+}
+
+#[test]
+fn a_candidate_is_abandoned_only_when_its_transaction_ends_without_promoting_it() {
+    let h = Harness::new();
+    let worker = Arc::new(Abandons {
+        inner: MockWorkerControl::with_behavior(MockBehavior {
+            fail_warm: Some(AgentErrorKind::Timeout),
+            ..Default::default()
+        }),
+        abandoned: Mutex::new(Vec::new()),
+    });
+    let coord = Coordinator::new(h.config.clone(), h.store.clone(), worker.clone());
+    let deploy = |id: &str| {
+        let bundle = vision_bundle(h.td.path(), id);
+        coord.deploy(id, &bundle, Default::default(), None, None)
+    };
+    let abandoned = || worker.abandoned.lock().expect("abandoned").clone();
+
+    deploy("d1").expect_err("the warm fails once");
+    assert_eq!(abandoned(), ["d1"]);
+
+    deploy("d1").expect("deploy");
+    deploy("d2").expect("deploy");
+    coord.rollback(None).expect("rollback");
+    assert_eq!(abandoned(), ["d1"]);
 }

@@ -26,7 +26,8 @@ use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tensorplate_protocol::worker_control::CandidateRef;
+use tensorplate_protocol::agent_state::ErrorRecord;
+use tensorplate_protocol::worker_control::{CandidateRef, MemberRef};
 use tensorplate_protocol::ErrorCode;
 
 use crate::config::{AgentConfig, WorkerControlMode};
@@ -142,6 +143,11 @@ pub trait WorkerControl: Send + Sync {
     /// Returns [`AgentError::WorkerControl`] for adapter/IPC failures.
     fn promote(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()>;
 
+    /// The transaction that prepared `candidate` ended without promoting
+    /// it: the candidate no longer keeps the serving member from being
+    /// restarted.
+    fn abandon(&self, _candidate: &CandidateRef) {}
+
     /// Unload `deployment_id` (the previous active) from the worker.
     /// Best-effort: a failure here is logged but never replaces the
     /// current active deployment.
@@ -164,6 +170,59 @@ pub trait WorkerControl: Send + Sync {
     fn active_serving_url(&self) -> AgentResult<Option<String>> {
         Ok(None)
     }
+
+    /// Look after the serving member: replace a generation that stopped
+    /// running. The agent calls this on every turn of its loop.
+    fn supervise(&self) -> Vec<MemberEvent> {
+        Vec::new()
+    }
+
+    /// Why nothing serves the deployment that was serving, once its
+    /// restarts are used up.
+    fn member_failure(&self) -> Option<ErrorRecord> {
+        None
+    }
+
+    /// Stop every worker and start no other. When this returns no worker
+    /// process is running and none can be started, unless the wait for
+    /// another thread's launch or stop was given up, which is logged.
+    fn shutdown(&self) {}
+
+    /// Whether [`Self::shutdown`] has begun.
+    fn stopping(&self) -> bool {
+        false
+    }
+}
+
+/// What one supervision step did about the serving member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MemberEvent {
+    /// The serving generation stopped running: it exited, lost its control
+    /// channel, or was restarted and not ready in time.
+    Stopped {
+        member: MemberRef,
+        error: ErrorRecord,
+    },
+    /// The next generation of `deployment_id` starts after `after`.
+    RestartDue {
+        deployment_id: String,
+        after: Duration,
+    },
+    /// A new generation was started in place of the one that stopped.
+    Restarted { member: MemberRef },
+    /// The next generation could not be started.
+    LaunchFailed {
+        deployment_id: String,
+        error: ErrorRecord,
+    },
+    /// The restarted generation is ready and serving.
+    Serving { member: MemberRef },
+    /// Restarts are used up: nothing serves `deployment_id` until it is
+    /// deployed or rolled back to again.
+    Failed {
+        deployment_id: String,
+        error: ErrorRecord,
+    },
 }
 
 /// Build the configured worker-control implementation. Process mode is the
@@ -203,7 +262,7 @@ pub type WorkerStderrSink = Arc<dyn Fn(&[u8]) + Send + Sync>;
 const MAX_STDERR_LINE_BYTES: u64 = 16 * 1024;
 
 /// How long an exited candidate's stderr is given to finish arriving.
-const STDERR_DRAIN_WAIT: Duration = Duration::from_secs(1);
+pub(crate) const STDERR_DRAIN_WAIT: Duration = Duration::from_secs(1);
 
 /// The `message` of the record a serving worker ends its stderr with when
 /// it cannot start; `serving_worker/src/main.cpp` writes it.

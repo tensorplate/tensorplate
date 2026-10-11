@@ -18,6 +18,11 @@ V01-E09 makes `tensorplate-agent` the owner of the
 This document is the single source of truth for the supervisor's
 contract with `Coordinator`, the observability service, and the CLI.
 
+The supervisor runs only where a configuration enables `supervision`, and
+no packaged configuration does. The workers of a `worker.mode: process`
+agent are restarted and stopped by its member registry instead; see
+[Supervision by the member registry](#supervision-by-the-member-registry).
+
 ## Device pinning
 
 `DesiredWorker.device_index` optionally selects one accelerator for a
@@ -246,6 +251,49 @@ Integration tests under `agent/tests/`:
 All supervision tests use `FakeClock` so backoff / crash-loop windows
 fire deterministically with no real sleeps.
 
+## Supervision by the member registry
+
+In `worker.mode: process` the member registry supervises the workers it
+starts: the agent's loop runs its supervision step every 100 ms and logs
+what it did. `docs/architecture/agent.md` ("Member registry") is the full
+account. The restart policy above does not apply to it; the registry
+reuses this module's clock trait and nothing else.
+
+A serving worker is taken out of service when its process exits, when its
+control channel has failed (ten seconds without an answered ledger poll,
+see below), or, if a restart started it, when it is not ready within
+`worker.warm_timeout_ms`. Nothing else stops one: a slow `/health` answer
+or slow inference does not, and `/health` is not polled once the worker is
+ready.
+
+Its successor is a new generation on the same port, started 1, 2 and 4
+seconds after the stop for the first, second and third restart inside a
+sliding five-minute window. A member that stops with three restarts inside
+the last five minutes is failed: nothing is started for it until a deploy
+or a rollback is promoted, and status reports the failure as `last_error`
+with `agent_state: degraded`.
+
+The failed state is not written to the state file. An agent restart starts
+the recorded deployment again with all three restarts available, and
+status reports the member as failed until then.
+
+Before a restart the registry compares the digest of the staged manifest
+with the bundle digest the member was started under; when they differ the
+member is failed at once and nothing is started. A staged manifest that
+cannot be read counts as a restart that could not be launched.
+
+No restart starts while a deploy holds the member, from the moment its
+`prepare` begins until its candidate is promoted or fails, its `warm`
+gives up, or its transaction returns without promoting it. A promoted
+generation is therefore never older than the one it replaces.
+
+On SIGTERM or SIGINT the agent asks every worker, serving and candidate, to
+drain, kills what is still running at the one 10-second stop deadline they
+share, stops its listener and exits 0. No worker is started once the stop
+has begun, and a deploy in flight is left in flight for the next start's
+recovery; its caller is answered status `error` with the code
+`unavailable`. A second signal during the stop does nothing.
+
 ## Runtime control client
 
 `agent::control_channel::ControlChannel` takes an owned Unix socket and a
@@ -303,4 +351,5 @@ The serving worker's side is described in
 `docs/architecture/serving-worker.md` ("Control channel"); descriptor isolation
 between sibling workers remains an integration check. The synthetic peer tests exercise the published golden
 frames and a blocked backend; `agent/tests/deploy_load_failure.rs` carries an
-opt-in test of the registry against a built `tensorplate-serving`.
+opt-in test of the registry against a built `tensorplate-serving`, and
+tests that restart a killed stand-in worker and stop the agent with SIGTERM.

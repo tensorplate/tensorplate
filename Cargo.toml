@@ -38,6 +38,7 @@ uuid = { version = "=1.10.0", features = ["v4"] }
 tempfile = "=3.10.1"
 jsonschema = { version = "=0.17.1", default-features = false }
 libc = "0.2"
+signal-hook = { version = "=0.4.4", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -8,10 +8,19 @@ use std::sync::mpsc;
 use std::time::Instant;
 use tempfile::TempDir;
 
+use crate::supervision::FakeClock;
+use crate::worker::MemberEvent;
+
+mod restart;
+
 const ACTIVE_PORT: u16 = 41_080;
 const CANDIDATE_PORT: u16 = 41_081;
 const DRAIN: Duration = Duration::from_millis(60);
 const WARM: Duration = Duration::from_millis(40);
+/// On the fake clock: no test waits it out in real time.
+const RESTART_WARM: Duration = Duration::from_secs(30);
+/// Longer than any launch a test holds.
+const GRACE: Duration = Duration::from_secs(10);
 
 /// What a test sees and steers of one launched process.
 struct Handle {
@@ -21,6 +30,10 @@ struct Handle {
     exited: AtomicBool,
     obeys_terminate: AtomicBool,
     contact: Mutex<ControlContact>,
+    /// `startup_failure` says it has begun, then waits to be let finish.
+    hold_failure: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    /// The same for `terminate`.
+    hold_terminate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
 }
 
 impl Handle {
@@ -39,6 +52,11 @@ impl MemberProcess for FakeProcess {
         Ok(self.0.exited.load(Ordering::SeqCst))
     }
     fn startup_failure(&mut self) -> AgentError {
+        let held = self.0.hold_failure.lock().unwrap().take();
+        if let Some((started, release)) = held {
+            started.send(()).unwrap();
+            release.recv().unwrap();
+        }
         AgentError::WorkerExited(format!("generation {}", self.0.spec.member.generation))
     }
     fn control(&self) -> ControlContact {
@@ -46,6 +64,11 @@ impl MemberProcess for FakeProcess {
     }
     fn terminate(&mut self) {
         self.0.calls.lock().unwrap().push("terminate");
+        let held = self.0.hold_terminate.lock().unwrap().take();
+        if let Some((started, release)) = held {
+            started.send(()).unwrap();
+            release.recv().unwrap();
+        }
         if self.0.obeys_terminate.load(Ordering::SeqCst) {
             self.0.exited.store(true, Ordering::SeqCst);
         }
@@ -60,6 +83,8 @@ impl MemberProcess for FakeProcess {
 struct FakeLauncher {
     launched: Mutex<Vec<Arc<Handle>>>,
     refuse: AtomicBool,
+    /// Processes launched from now on ignore a request to stop.
+    stubborn: AtomicBool,
     /// The first launch says it has started, then waits to be let finish.
     hold_first: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
 }
@@ -95,8 +120,10 @@ impl ProcessLauncher for FakeLauncher {
             config,
             calls: Mutex::new(Vec::new()),
             exited: AtomicBool::new(false),
-            obeys_terminate: AtomicBool::new(true),
+            obeys_terminate: AtomicBool::new(!self.stubborn.load(Ordering::SeqCst)),
             contact: Mutex::new(ControlContact::Reporting),
+            hold_failure: Mutex::new(None),
+            hold_terminate: Mutex::new(None),
         });
         self.launched.lock().unwrap().push(handle.clone());
         Ok(Box::new(FakeProcess(handle)))
@@ -129,6 +156,7 @@ struct Fixture {
     launcher: Arc<FakeLauncher>,
     probe: Arc<FakeProbe>,
     next_generation: Arc<AtomicU64>,
+    clock: Arc<FakeClock>,
     registry: MemberRegistry,
 }
 
@@ -142,6 +170,8 @@ fn settings(dir: &std::path::Path) -> RegistrySettings {
         status_poll_interval: Duration::from_millis(1),
         worker_drain: DRAIN / 2,
         stop_deadline: DRAIN,
+        launch_grace: GRACE,
+        restart_warm_timeout: RESTART_WARM,
     }
 }
 
@@ -151,17 +181,20 @@ fn fixture() -> Fixture {
     let probe = Arc::new(FakeProbe::default());
     let next_generation = Arc::new(AtomicU64::new(1));
     let counter = next_generation.clone();
+    let clock = Arc::new(FakeClock::new());
     let registry = MemberRegistry::new(
         settings(td.path()),
         launcher.clone(),
         probe.clone(),
         Arc::new(move || Ok(counter.fetch_add(1, Ordering::SeqCst))),
-    );
+    )
+    .with_clock(clock.clone());
     Fixture {
         td,
         launcher,
         probe,
         next_generation,
+        clock,
         registry,
     }
 }
@@ -175,10 +208,16 @@ fn bundle_fixture(bundle: &str) -> String {
 }
 
 fn candidate(id: &str) -> CandidateRef {
+    candidate_staged_at(id, &bundle_fixture("v0_1/x86_fixture_smoke"))
+}
+
+/// A candidate recorded with the digest of the bundle at `staged_path`.
+fn candidate_staged_at(id: &str, staged_path: &str) -> CandidateRef {
+    let staged = tensorplate_protocol::bundle::parse_bundle(std::path::Path::new(staged_path));
     CandidateRef {
         deployment_id: id.into(),
-        staged_path: bundle_fixture("v0_1/x86_fixture_smoke"),
-        bundle_digest: "sha256:cafe".into(),
+        staged_path: staged_path.into(),
+        bundle_digest: staged.expect("the staged bundle parses").manifest_digest,
         backend_hint: "mock".into(),
         model_class: "vision".into(),
         bundle_name: Some("m".into()),
@@ -420,6 +459,7 @@ fn a_serving_member_that_exited_is_no_longer_active() {
 
     assert_eq!(f.registry.active_deployment_id().unwrap(), None);
     assert_eq!(f.registry.active_serving_url().unwrap(), None);
+    f.registry.supervise();
     assert_eq!(f.configs(), 0);
 }
 
@@ -651,7 +691,9 @@ fn the_worker_is_told_a_drain_that_ends_before_the_registry_would_kill_it() {
     let registry = agents_registry(&td, &td.path().join("worker-configs"));
     assert_eq!(registry.settings.worker_drain, WORKER_DRAIN);
     assert_eq!(registry.settings.stop_deadline, STOP_DEADLINE);
-    let rendered = registry.render_config(&candidate("stt"), 1, 18080).unwrap();
+    let rendered = registry
+        .render_config(&candidate("stt"), 1, 18080, None)
+        .unwrap();
     let rendered: serde_json::Value =
         serde_json::from_slice(&std::fs::read(rendered).unwrap()).unwrap();
     let drain_ms = rendered["shutdown"]["drain_deadline_ms"].as_u64().unwrap();

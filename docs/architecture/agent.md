@@ -354,14 +354,30 @@ pub trait WorkerControl: Send + Sync {
     fn prepare(&self, transaction_id, candidate, timeout) -> Result;
     fn warm(&self, transaction_id, candidate, timeout) -> Result<WorkerReadiness>;
     fn promote(&self, transaction_id, candidate) -> Result;
+    fn abandon(&self, candidate);
     fn unload(&self, deployment_id);
     fn active_deployment_id(&self) -> Result<Option<String>>;
+    fn supervise(&self) -> Vec<MemberEvent>;
+    fn member_failure(&self) -> Option<ErrorRecord>;
+    fn shutdown(&self);
+    fn stopping(&self) -> bool;
 }
 ```
 
 `promote` is the only call that mutates the worker's active deployment.
 `unload` is best-effort (failure is logged but never undoes a successful
-promotion).
+promotion). `abandon` tells the worker control that the transaction
+which prepared a candidate returned without promoting it; the coordinator
+calls it on every such return, a failed state write included, and it does
+nothing by default. `supervise`, `member_failure` and `shutdown` do nothing by
+default; the [member registry](#member-registry) implements them to
+restart a serving worker that stops, to report one it no longer restarts,
+and to stop every worker when the agent is told to stop. `stopping` is
+false by default and true once the registry's `shutdown` has begun; the
+coordinator reads it to begin no transaction and record no failure from
+then on. A registry whose lock is poisoned answers false: that is not a
+stop, and the next call that needs the lock reports it as an internal
+error.
 
 The process-backed implementation is selected with
 `worker.mode = "process"` and requires an absolute
@@ -488,7 +504,8 @@ for framing, deadlines, ownership and loss-of-contact behavior.
 - **Generation.** Before a worker starts, the registry takes the next
   generation from the durable state's counter in a committed write, so a
   generation is never used twice, including across agent restarts and by a
-  start that then fails. The first allocation moves the state file to state
+  start that then fails. A restart takes one too, in a write of its own before
+  its launch. The first allocation moves the state file to state
   version `0.2` (see [durable state](#durable-state-store-v01-e08-f02)); startup
   recovery relaunches the recorded active deployment through the same path,
   so it happens on the first start that has a deployment to restore.
@@ -509,10 +526,55 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   sessions for 5 seconds (`shutdown.drain_deadline_ms`), so its own drain
   ends before the registry would kill it. The signal goes to the worker's
   process id only: a worker that has to be killed leaves its sidecar to
-  exit when it sees its peer closed.
+  exit when it sees its peer closed. Every member is stopped this way when
+  the agent itself is told to stop.
 - **Promotion.** A candidate that exited after it was warmed is not
   promoted: the deploy fails with the worker's failure and the serving
   member stays.
+- **Supervision.** The agent's loop runs the registry's supervision step
+  (`WorkerControl::supervise`) every 100 ms and logs what it did. The step
+  takes the serving generation out of service when its process has exited,
+  when its control channel has failed (10 seconds without an answered
+  ledger poll), or, for a generation started by a restart, when it is not
+  ready within `worker.warm_timeout_ms`; in the last two cases the worker
+  is killed. Nothing else stops a serving member: a slow `/health` answer
+  or slow inference does not, and `/health` is not polled once a
+  generation is ready.
+- **Restart.** The successor is a new generation: a new generation number
+  and serving config, on the same port, from the member's staged root. It
+  starts 1, 2 and 4 seconds after the stop for the first, second and third
+  restart inside a sliding five-minute window; a restart that cannot be
+  launched counts as one. From the stop until the new generation is ready,
+  by the candidate's rule, status carries no `active.serving_url`.
+- **Staged bundle check.** The staged root is `staging_dir/<deployment_id>`,
+  and a deploy of the same id that fails after staging leaves its own
+  bundle there. Before a restart the registry therefore reads the staged
+  manifest and compares its digest with the bundle digest the member was
+  started under. When they differ, nothing is started and the member is
+  failed at once, without using a restart, with a `load_failed` error that
+  names both digests. A staged manifest that cannot be read counts as a
+  restart that could not be launched. The manifest's digest covers each
+  artifact's digest; artifact bytes are not hashed again. Startup recovery
+  and a rollback start the recorded deployment from the same root without
+  this check.
+- **Failure.** A member that stops with three restarts inside the last five
+  minutes is failed: nothing is started for it until a deployment is
+  promoted, by a deploy or a rollback. Status then reports
+  `agent_state: degraded` and the failure as `last_error`, ahead of the
+  last transaction's error, and `active` has no `serving_url`.
+
+A failed member is held in the agent's memory only; neither it nor its
+error is written to the state file, and status reads it from the registry.
+An agent restart therefore starts the recorded deployment again with all
+three restarts available; until then status reports the member as failed.
+
+A restart never starts while a deploy holds the member: from the moment
+`prepare` begins until its candidate is promoted or fails, its `warm`
+gives up, or the transaction returns without promoting it for any other
+reason, such as a state write that failed. A promoted generation is therefore never older than the one it
+replaces, and a promotion drops the restart that was owed and gives the
+member its three restarts back. A candidate whose `warm` gave up is left
+where it was, as before, but is not promoted afterwards.
 
 A member's name is its deployment id, and the serving worker accepts only 1
 to 128 of ASCII letters, digits, `-`, `_` and `.`. Deploys have been held to
@@ -521,15 +583,77 @@ id breaks it is not restored at start. The agent comes up without a worker
 and with the reason in `last_error`.
 
 The registry keeps the two configured ports (`serving_bind_port`,
-`serving_candidate_bind_port`): a candidate binds the one the serving member
-is not on. It does not restart a member that exits or loses contact after
-promotion, and it writes no resident set. `WorkerSupervisor` is a separate
-process manager that no packaged configuration enables; a configuration that
-enables `supervision` beside `worker.mode: process` is refused at start,
-since each would start its own worker.
+`serving_candidate_bind_port`): a candidate binds the one the serving member,
+or the restart owed to it, is not on. The registry writes no resident set.
+`WorkerSupervisor` is a separate process manager that no packaged
+configuration enables; a configuration that enables `supervision` beside
+`worker.mode: process` is refused at start, since each would start its own
+worker. The registry reuses that module's clock trait and nothing else: its
+backoff scheduler does not time these restarts.
 
-The agent installs no termination handler, so when the agent itself is
-stopped the registry's stop does not run. What ends the workers then is the
-service manager: under the packaged systemd unit every process in the
-unit's control group, workers and sidecars included, is sent SIGTERM and
-whatever remains after the unit's stop timeout is killed.
+The agent installs a handler for SIGTERM and SIGINT after startup recovery,
+just before its listener opens, so the handler is in place by the time the
+agent logs that it is listening. Before that a signal ends the agent at
+once. The handler only stores a flag, so a second signal during the stop
+does nothing: it neither hurries the stop nor ends the agent. The agent's loop
+then stops the registry, which sets its stopping flag before it stops the
+first member: every worker, serving and candidate, is sent SIGTERM, all
+share the one 10-second stop deadline, and what is left is killed and
+reaped. From the flag on no launch begins. Requests are answered on threads
+that are not joined, so the registry also waits for a worker one of them
+was starting or stopping when the flag was set: that thread stops it,
+within a stop deadline counted from when it began to. That wait ends 12
+seconds after the flag (the stop deadline and 2 seconds more) whether or
+not those threads are done, and the registry logs how many were not. The
+case it is there for is a launch held in the state write that allocates its
+generation; when such a write returns, the launch starts nothing. Otherwise,
+when the registry's stop returns, no worker process is running and none can
+be started. The listener stops and the agent exits 0.
+
+A deploy or rollback in flight at that moment is not recorded as failed.
+Its caller is answered with status `error` and the error code
+`unavailable` (message `the agent is stopping`), if the answer is sent
+before the agent exits. The status is not `unavailable`: that status is
+the refusal of an operation that cannot apply, carries the code
+`unsupported`, and makes the CLI exit 6; this answer is a retryable
+error, and the CLI exits 3 with the code `unavailable`. The transaction stays in the state file at the last phase
+it wrote, exactly as an agent that was killed leaves it, and the next
+start's recovery treats it as it treats that:
+
+- Interrupted before its candidate was prepared, a deploy is run again
+  from its bundle path, and a rollback is run again. The caller that was
+  answered the `unavailable` error finds it completed.
+- Interrupted while its candidate was prepared or warming, the candidate
+  is quarantined and that start launches nothing: status is degraded with
+  the recovery's reason in `last_error`, and the deployment that was
+  serving comes back at the start after that. An agent killed during a
+  deploy behaved this way before it handled the signal. Nothing makes
+  that second start happen: the agent exited 0, which the packaged unit's
+  `Restart=on-failure` does not restart, so after
+  `systemctl restart tensorplate-agent` during a deploy's warm the node
+  serves nothing until the agent is started once more or a deployment is
+  deployed.
+
+A failure the deploy met just before the stop began is not recorded
+either. A deploy or rollback that arrives after the flag is refused with
+the same `unavailable` error before it writes anything; one that passes that check as
+the flag is set is left in flight like the others.
+
+The longest the agent takes to stop its workers is 23 seconds: a
+supervision step that was stopping a successor which yielded to a deploy
+(the stop deadline) and reading a stopped worker's last stderr (1 second),
+then the registry's stop (12 seconds). The packaged systemd unit keeps the
+default control-group kill and `TimeoutStopSec=30`, which a test holds
+above that bound.
+Under systemd the workers therefore receive the service manager's SIGTERM
+as well as the registry's, which is harmless: a worker ignores a second
+request while it drains. Whatever remains in the unit's control group after
+the stop timeout, sidecars included, is killed by the service manager.
+
+The Homebrew launchd job sets no `ExitTimeOut`, so launchd's own default
+bounds the stop there. Apple documents that default as system-defined (20
+seconds in earlier editions of `launchd.plist(5)`), which can be shorter
+than the bound above; an agent launchd kills before its stop ends leaves
+what any killed agent leaves, and the next start's recovery reads it the
+same way. The job does not set `AbandonProcessGroup` either, so launchd
+kills what is left of the agent's process group when the agent exits.

@@ -39,7 +39,7 @@ use tensorplate_agent::{
         ensure_supervisor_directories, DesiredWorker, HttpReadinessProbe, MonotonicClock,
         RingEventSink, SystemMonotonicClock, SystemWorkerProcess, TickOutcome, WorkerSupervisor,
     },
-    worker,
+    worker::{self, MemberEvent},
 };
 use tensorplate_platform::{
     identify_platform, AdmissionPosture, HostSources, MachineTypeSource, NvidiaSmiProbe,
@@ -881,6 +881,7 @@ fn main() -> ExitCode {
         }
     }
 
+    let stop = stop_on_termination();
     let mut server = match Server::start(&cfg, coordinator) {
         Ok(s) => s,
         Err(err) => {
@@ -890,15 +891,36 @@ fn main() -> ExitCode {
     };
     eprintln!("tensorplate-agent listening on {}", server.address);
 
-    // v0.1.0 agent process model: rely on systemd / supervisor to deliver
-    // SIGTERM. Without an installed handler the default action is process
-    // termination, which is safe because every durable mutation lands
-    // through `StateStore::update`'s atomic-replace path before each
-    // phase advances. The `stop` flag lets tests request a clean exit;
-    // production termination is still owned by the process manager.
+    run_until_stopped(&mut server, supervisor.as_ref(), &stop);
+    ExitCode::SUCCESS
+}
+
+/// The flag SIGTERM and SIGINT set from here on. The handler stores it and
+/// does nothing else; until it is installed a signal ends the agent at once.
+fn stop_on_termination() -> Arc<AtomicBool> {
     let stop = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        if let Err(err) = signal_hook::flag::register(signal, stop.clone()) {
+            eprintln!("no handler for signal {signal}: {err}; the agent ends on it without stopping its workers");
+        }
+    }
+    stop
+}
+
+/// Supervise the serving workers until `stop` is set, then stop them and
+/// the listener.
+fn run_until_stopped(
+    server: &mut Server,
+    supervisor: Option<&Arc<WorkerSupervisor>>,
+    stop: &AtomicBool,
+) {
+    let worker = server.coordinator().worker_client().clone();
     while !stop.load(Ordering::Relaxed) {
-        if let Some(supervisor) = supervisor.as_ref() {
+        for event in worker.supervise() {
+            log_member_event(&event);
+        }
+        if let Some(supervisor) = supervisor {
             match supervisor.tick() {
                 Ok(TickOutcome::Continue) => {}
                 Ok(TickOutcome::Fault(fault)) => {
@@ -917,8 +939,47 @@ fn main() -> ExitCode {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    eprintln!("tensorplate-agent stopping: asking the serving workers to drain");
+    // Requests are answered on threads of their own, which nothing joins:
+    // from here none of them can start a worker, and a deploy one of them
+    // was running is left in flight for the next start's recovery.
+    worker.shutdown();
     server.shutdown();
-    ExitCode::SUCCESS
+    eprintln!("tensorplate-agent stopped");
+}
+
+fn log_member_event(event: &MemberEvent) {
+    match event {
+        MemberEvent::Stopped { member, error } => eprintln!(
+            "serving worker `{}` generation {} stopped: {}",
+            member.deployment_id, member.generation, error.message
+        ),
+        MemberEvent::RestartDue {
+            deployment_id,
+            after,
+        } => eprintln!(
+            "serving worker `{deployment_id}` restarts in {} ms",
+            after.as_millis()
+        ),
+        MemberEvent::Restarted { member } => eprintln!(
+            "serving worker `{}` restarted as generation {}",
+            member.deployment_id, member.generation
+        ),
+        MemberEvent::LaunchFailed {
+            deployment_id,
+            error,
+        } => eprintln!(
+            "serving worker `{deployment_id}` could not be restarted: {}",
+            error.message
+        ),
+        MemberEvent::Serving { member } => eprintln!(
+            "serving worker `{}` generation {} is serving",
+            member.deployment_id, member.generation
+        ),
+        MemberEvent::Failed { error, .. } => {
+            eprintln!("serving worker failed: {}", error.message);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2057,6 +2118,98 @@ mod tests {
             ),
             "a Compute Engine instance with no live answer and no record is \
              exactly the failure the retry exists for"
+        );
+    }
+
+    /// Records what the agent's loop asks of its worker control, and sets
+    /// the loop's stop flag at the third supervision step.
+    struct RecordingWorkers {
+        inner: tensorplate_agent::MockWorkerControl,
+        calls: std::sync::Mutex<Vec<&'static str>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl tensorplate_agent::WorkerControl for RecordingWorkers {
+        fn prepare(
+            &self,
+            tx: &str,
+            candidate: &tensorplate_protocol::worker_control::CandidateRef,
+            timeout: Duration,
+        ) -> tensorplate_agent::AgentResult<()> {
+            self.inner.prepare(tx, candidate, timeout)
+        }
+        fn warm(
+            &self,
+            tx: &str,
+            candidate: &tensorplate_protocol::worker_control::CandidateRef,
+            timeout: Duration,
+        ) -> tensorplate_agent::AgentResult<tensorplate_agent::worker::WorkerReadiness> {
+            self.inner.warm(tx, candidate, timeout)
+        }
+        fn promote(
+            &self,
+            tx: &str,
+            candidate: &tensorplate_protocol::worker_control::CandidateRef,
+        ) -> tensorplate_agent::AgentResult<()> {
+            self.inner.promote(tx, candidate)
+        }
+        fn unload(&self, deployment_id: &str) {
+            self.inner.unload(deployment_id);
+        }
+        fn active_deployment_id(&self) -> tensorplate_agent::AgentResult<Option<String>> {
+            self.inner.active_deployment_id()
+        }
+        fn supervise(&self) -> Vec<tensorplate_agent::worker::MemberEvent> {
+            let mut calls = self.calls.lock().expect("calls");
+            calls.push("supervise");
+            if calls.len() == 3 {
+                self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            Vec::new()
+        }
+        fn shutdown(&self) {
+            self.calls.lock().expect("calls").push("shutdown");
+        }
+    }
+
+    #[test]
+    fn the_loop_supervises_the_workers_until_it_is_told_to_stop_and_then_stops_them() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let td = tempfile::TempDir::new().expect("temp dir");
+        let mut config = shipped_config();
+        config.socket_path = Some(td.path().join("agent.sock"));
+        config.state_dir = td.path().join("state");
+        let stop = Arc::new(AtomicBool::new(false));
+        let workers = Arc::new(RecordingWorkers {
+            inner: tensorplate_agent::MockWorkerControl::new(),
+            calls: Mutex::new(Vec::new()),
+            stop: stop.clone(),
+        });
+        let store = Arc::new(
+            tensorplate_agent::StateStore::open(&config.state_dir).expect("open the state"),
+        );
+        let coordinator = Arc::new(tensorplate_agent::Coordinator::new(
+            config.clone(),
+            store,
+            workers.clone(),
+        ));
+        let mut server =
+            tensorplate_agent::Server::start(&config, coordinator).expect("start the listener");
+        // Ends the loop if it never supervises, so the test fails instead
+        // of hanging.
+        let watchdog = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(10));
+            watchdog.store(true, Ordering::Relaxed);
+        });
+
+        super::run_until_stopped(&mut server, None, &stop);
+
+        assert_eq!(
+            *workers.calls.lock().expect("calls"),
+            ["supervise", "supervise", "supervise", "shutdown"]
         );
     }
 }

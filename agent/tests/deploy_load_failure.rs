@@ -685,3 +685,287 @@ fn real_worker_and_sidecar_report_an_undeclared_voice_as_unsupported() {
         "deploy took {elapsed:?} of a {warm_timeout:?} warm timeout"
     );
 }
+
+// A serving worker that stops after its promotion, and an agent that is told
+// to stop: the registry's restart and shutdown with real processes.
+
+fn pid_recording_worker() -> PathBuf {
+    fixture_dir().join("pid-recording-worker.sh")
+}
+
+/// The process id `pid-recording-worker.sh` left for the worker of `config`.
+fn recorded_pid(config: &Path) -> Option<rustix::process::Pid> {
+    let recorded = std::fs::read_to_string(config.with_extension("json.pid")).ok()?;
+    rustix::process::Pid::from_raw(recorded.trim().parse().ok()?)
+}
+
+fn is_gone(pid: rustix::process::Pid) -> bool {
+    rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH)
+}
+
+/// The names of the serving configs in `dir`, without the pid files.
+fn serving_configs(dir: &Path) -> Vec<std::ffi::OsString> {
+    std::fs::read_dir(dir)
+        .expect("read_dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .filter(|name| Path::new(name).extension().is_some_and(|ext| ext == "json"))
+        .collect()
+}
+
+/// Polls until `done` holds; panics with `context` once `limit` has passed.
+fn wait_for(limit: Duration, context: impl Fn() -> String, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + limit;
+    while !done() {
+        assert!(
+            Instant::now() < deadline,
+            "not within {limit:?}: {}",
+            context()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_killed_serving_worker_is_restarted_as_a_new_generation() {
+    use rustix::process::{kill_process, Signal};
+    use tensorplate_agent::worker::MemberEvent;
+    use tensorplate_protocol::worker_control::MemberRef;
+
+    let health = HealthPort::listen();
+    health.serve("good-a");
+    let h = ProcessHarness::build_with(
+        pid_recording_worker(),
+        health.port,
+        unused_port(),
+        WARM_TIMEOUT,
+        None,
+    );
+    let configs = h.td.path().join("worker-configs");
+    let deployed = h.deploy("good-a");
+    assert_eq!(deployed.status, ResponseStatus::Ok, "{:?}", deployed.error);
+    let serving_url = || {
+        let active = h.coord.status().expect("status").active.expect("active");
+        active.serving_url
+    };
+    let url = Some(format!("http://127.0.0.1:{}/infer", health.port));
+    assert_eq!(serving_url(), url);
+
+    let first = recorded_pid(&configs.join("serving-good-a-1.json")).expect("pid file");
+    kill_process(first, Signal::Kill).expect("kill the worker");
+    let killed = Instant::now();
+
+    let mut events = Vec::new();
+    while !matches!(events.last(), Some(MemberEvent::Serving { .. })) {
+        assert!(
+            killed.elapsed() < Duration::from_secs(15),
+            "no restarted generation is serving: {events:?}"
+        );
+        events.extend(h.coord.worker_client().supervise());
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let [MemberEvent::Stopped { error, .. }, ..] = &events[..] else {
+        panic!("{events:?}");
+    };
+    let restarted = MemberRef::new("good-a", 2);
+    let expected = [
+        MemberEvent::Stopped {
+            member: MemberRef::new("good-a", 1),
+            error: error.clone(),
+        },
+        MemberEvent::RestartDue {
+            deployment_id: "good-a".into(),
+            after: Duration::from_secs(1),
+        },
+        MemberEvent::Restarted {
+            member: restarted.clone(),
+        },
+        MemberEvent::Serving { member: restarted },
+    ];
+    assert_eq!(events, expected);
+    assert!(killed.elapsed() >= Duration::from_secs(1));
+    assert_eq!(serving_url(), url);
+    assert_eq!(serving_configs(&configs), ["serving-good-a-2.json"]);
+    assert_eq!(
+        h.store.snapshot().expect("snapshot").next_generation,
+        Some(3)
+    );
+}
+
+/// Ends the agent, and the worker it started, however the test ends.
+struct StartedAgent {
+    agent: std::process::Child,
+    /// The serving config of its worker, until the worker is seen to be gone.
+    worker_config: Option<PathBuf>,
+}
+
+impl Drop for StartedAgent {
+    fn drop(&mut self) {
+        let _ = self.agent.kill();
+        let _ = self.agent.wait();
+        if let Some(worker) = self.worker_config.as_deref().and_then(recorded_pid) {
+            let _ = rustix::process::kill_process(worker, rustix::process::Signal::Kill);
+        }
+    }
+}
+
+/// Start the agent binary on `config`, its stderr going to `log`.
+fn start_agent_binary(config: &AgentConfig, dir: &Path, log: &Path) -> std::process::Child {
+    std::process::Command::new(env!("CARGO_BIN_EXE_tensorplate-agent"))
+        .arg("--config-json")
+        .arg(serde_json::to_string(config).expect("config"))
+        // Without a platform registry the start does not depend on the host.
+        .env("TP_PLATFORM_REGISTRY_DIR", dir.join("no-registry"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(log).expect("log"))
+        .spawn()
+        .expect("start the agent")
+}
+
+fn status_over(socket: &Path) -> ControlResponse {
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("read timeout");
+    let mut request =
+        serde_json::to_vec(&ControlRequest::status(None, Default::default())).expect("encode");
+    request.push(b'\n');
+    stream.write_all(&request).expect("write request");
+    let mut answer = String::new();
+    stream.read_to_string(&mut answer).expect("read answer");
+    serde_json::from_str(&answer).expect("decode answer")
+}
+
+#[test]
+fn an_agent_sent_sigterm_drains_its_serving_worker_and_exits_0() {
+    a_signalled_agent_restarts_a_killed_worker_then_drains_it_and_exits_0(
+        rustix::process::Signal::Term,
+    );
+}
+
+#[test]
+fn an_agent_sent_sigint_drains_its_serving_worker_and_exits_0() {
+    a_signalled_agent_restarts_a_killed_worker_then_drains_it_and_exits_0(
+        rustix::process::Signal::Int,
+    );
+}
+
+/// The agent binary restores a deployment that an earlier agent process
+/// recorded: a deploy through it needs a platform the test host may not be.
+fn a_signalled_agent_restarts_a_killed_worker_then_drains_it_and_exits_0(
+    signal: rustix::process::Signal,
+) {
+    use rustix::process::{kill_process, Pid, Signal};
+    use tensorplate_agent::registry::STOP_DEADLINE;
+
+    let health = HealthPort::listen();
+    health.serve("good-a");
+    let earlier = ProcessHarness::build_with(
+        pid_recording_worker(),
+        health.port,
+        unused_port(),
+        WARM_TIMEOUT,
+        None,
+    );
+    let deployed = earlier.deploy("good-a");
+    assert_eq!(deployed.status, ResponseStatus::Ok, "{:?}", deployed.error);
+    let mut config = earlier.coord.config().clone();
+    let ProcessHarness { td, store, coord } = earlier;
+    let earlier_worker = recorded_pid(&td.path().join("worker-configs/serving-good-a-1.json"));
+    drop((coord, store));
+    assert!(is_gone(earlier_worker.expect("pid file")));
+
+    let configs = td.path().join("agent-worker-configs");
+    let restored_config = configs.join("serving-good-a-2.json");
+    let worker_config = configs.join("serving-good-a-3.json");
+    config.worker.serving_config_dir = Some(configs.clone());
+    let log = td.path().join("agent.stderr");
+    let mut started = StartedAgent {
+        agent: start_agent_binary(&config, td.path(), &log),
+        worker_config: Some(restored_config.clone()),
+    };
+    let stderr = || std::fs::read_to_string(&log).unwrap_or_default();
+    wait_for(Duration::from_secs(30), stderr, || {
+        let exited = started.agent.try_wait().expect("wait");
+        assert!(exited.is_none(), "the agent exited: {}", stderr());
+        stderr().contains("tensorplate-agent listening on ")
+    });
+    // Only the agent's own loop can replace the worker it restored.
+    let restored = recorded_pid(&restored_config).expect("pid file");
+    kill_process(restored, Signal::Kill).expect("kill the worker");
+    started.worker_config = Some(worker_config.clone());
+    wait_for(Duration::from_secs(15), stderr, || {
+        stderr().contains("serving worker `good-a` generation 3 is serving")
+    });
+    assert!(is_gone(restored));
+    let worker = recorded_pid(&worker_config).expect("pid file");
+    let status = status_over(&config.socket_path.expect("socket path")).agent_status;
+    let active = status.expect("agent status").active.expect("active");
+    assert_eq!(
+        active.serving_url,
+        Some(format!("http://127.0.0.1:{}/infer", health.port))
+    );
+    // The handlers were installed before the listening line was written.
+    kill_process(Pid::from_child(&started.agent), signal).expect("signal the agent");
+    let mut exit = None;
+    wait_for(STOP_DEADLINE + Duration::from_secs(5), stderr, || {
+        exit = started.agent.try_wait().expect("wait");
+        exit.is_some()
+    });
+
+    let stderr = stderr();
+    assert_eq!(exit.and_then(|status| status.code()), Some(0), "{stderr}");
+    let stopping = stderr
+        .lines()
+        .position(|line| line.starts_with("tensorplate-agent stopping"));
+    let stopped = stderr
+        .lines()
+        .position(|line| line == "tensorplate-agent stopped");
+    assert!(stopping.is_some() && stopping < stopped, "{stderr}");
+    assert!(is_gone(worker), "the worker outlived the agent");
+    started.worker_config = None;
+    // Written by the worker on SIGTERM; a kill would leave none.
+    assert!(configs.join("good-a.terminated").is_file());
+}
+
+/// The handlers are in place before the agent says it is listening: a
+/// signal sent as soon as that line is written stops the agent, where an
+/// agent without them would be killed by it.
+#[test]
+fn an_agent_signalled_as_soon_as_it_says_it_is_listening_stops_and_exits_0() {
+    use rustix::process::{kill_process, Pid, Signal};
+
+    let h = ProcessHarness::build_with(
+        pid_recording_worker(),
+        unused_port(),
+        unused_port(),
+        WARM_TIMEOUT,
+        None,
+    );
+    let config = h.coord.config().clone();
+    let ProcessHarness { td, store, coord } = h;
+    drop((coord, store));
+    let log = td.path().join("agent.stderr");
+    let mut started = StartedAgent {
+        agent: start_agent_binary(&config, td.path(), &log),
+        worker_config: None,
+    };
+    let stderr = || std::fs::read_to_string(&log).unwrap_or_default();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !stderr().contains("tensorplate-agent listening on ") {
+        assert!(Instant::now() < deadline, "never listening: {}", stderr());
+        std::thread::yield_now();
+    }
+
+    kill_process(Pid::from_child(&started.agent), Signal::Term).expect("signal the agent");
+
+    let mut exit = None;
+    wait_for(Duration::from_secs(15), stderr, || {
+        exit = started.agent.try_wait().expect("wait");
+        exit.is_some()
+    });
+    let stderr = stderr();
+    assert_eq!(exit.and_then(|status| status.code()), Some(0), "{stderr}");
+    assert!(stderr.ends_with("tensorplate-agent stopped\n"), "{stderr}");
+}

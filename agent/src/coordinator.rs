@@ -188,7 +188,8 @@ impl Coordinator {
         &self.config
     }
 
-    /// Read-only handle on the worker client. Reserved for tests.
+    /// The worker client: the agent's loop supervises and stops the serving
+    /// workers through it.
     #[must_use]
     pub fn worker_client(&self) -> &Arc<dyn WorkerControl> {
         &self.worker
@@ -216,6 +217,7 @@ impl Coordinator {
             ));
         }
 
+        self.refuse_while_stopping()?;
         let transaction_id = new_transaction_id();
         let tx_record = TransactionRecord {
             transaction_id: transaction_id.clone(),
@@ -351,6 +353,7 @@ impl Coordinator {
                 err,
             );
         }
+        let mut prepared = Prepared::new(self.worker.as_ref(), &candidate_ref);
         self.advance(
             &transaction_id,
             DeployState::CapacityChecked,
@@ -405,6 +408,7 @@ impl Coordinator {
             });
             return self.fail(&transaction_id, deployment_id, DeployState::Warmed, err);
         }
+        prepared.promoted = true;
         self.advance(&transaction_id, DeployState::Warmed, DeployState::Promoted)?;
         let monotonic_ns = now_monotonic_ns();
         self.store.promote_candidate(monotonic_ns)?;
@@ -457,6 +461,7 @@ impl Coordinator {
     /// and the typed [`AgentError`] of whichever phase fails otherwise.
     #[allow(clippy::too_many_lines)]
     pub fn rollback(&self, correlation_id: Option<String>) -> AgentResult<DeployOutcome> {
+        self.refuse_while_stopping()?;
         let prev = {
             let s = self.store.snapshot()?;
             s.previous_active
@@ -536,6 +541,7 @@ impl Coordinator {
         {
             return self.fail_rollback(&transaction_id, &prev.deployment_id, err);
         }
+        let mut prepared = Prepared::new(self.worker.as_ref(), &candidate_ref);
         self.advance(
             &transaction_id,
             DeployState::CapacityChecked,
@@ -574,6 +580,7 @@ impl Coordinator {
         if let Err(err) = self.worker.promote(&transaction_id, &candidate_ref) {
             return self.fail_rollback(&transaction_id, &prev.deployment_id, err);
         }
+        prepared.promoted = true;
         self.advance(&transaction_id, DeployState::Warmed, DeployState::Promoted)?;
         let monotonic_ns = now_monotonic_ns();
         self.store.swap_active_with_previous(monotonic_ns)?;
@@ -625,7 +632,13 @@ impl Coordinator {
     /// [`Self::status`] accounts for a store that refuses writes.
     fn durable_status(&self) -> AgentResult<AgentStatus> {
         let s = self.store.snapshot()?;
-        let mut agent_state = if s.last_error.is_some() {
+        // A member whose restarts are used up is why nothing serves, so it
+        // is reported ahead of the last transaction's error.
+        let last_error = self
+            .worker
+            .member_failure()
+            .or_else(|| s.last_error.clone());
+        let mut agent_state = if last_error.is_some() {
             AgentRunState::Degraded
         } else {
             AgentRunState::Ready
@@ -665,10 +678,10 @@ impl Coordinator {
                 recoverable: f.recoverable,
             }),
         });
-        let last_error = s.last_error.as_ref().map(|e| ResponseError {
+        let last_error = last_error.map(|e| ResponseError {
             code: e.code,
-            message: e.message.clone(),
-            context: e.context.clone(),
+            message: e.message,
+            context: e.context,
         });
         let quarantined = s
             .quarantined
@@ -725,6 +738,16 @@ impl Coordinator {
         })
     }
 
+    /// Once the agent is stopping no transaction begins and none is
+    /// recorded failed: one in flight stays so, as after a kill, and the
+    /// next start's recovery decides it.
+    fn refuse_while_stopping(&self) -> AgentResult<()> {
+        if self.worker.stopping() {
+            return Err(AgentError::Stopping);
+        }
+        Ok(())
+    }
+
     fn advance(&self, tx: &str, from: DeployState, to: DeployState) -> AgentResult<()> {
         if !is_permitted(from, to) {
             return Err(AgentError::InvalidTransition(format!("{from:?} -> {to:?}")));
@@ -739,6 +762,7 @@ impl Coordinator {
         last_successful: DeployState,
         err: AgentError,
     ) -> AgentResult<DeployOutcome> {
+        self.refuse_while_stopping()?;
         let record = err.to_record();
         // Stamp the in-flight transaction with the last-successful phase
         // so the quarantine record reflects how far the candidate got
@@ -767,6 +791,7 @@ impl Coordinator {
         deployment_id: &str,
         err: AgentError,
     ) -> AgentResult<DeployOutcome> {
+        self.refuse_while_stopping()?;
         let record = err.to_record();
         let _ = self.store.update(|s| {
             if let Some(tx) = s.in_flight_transaction.as_mut() {
@@ -834,6 +859,32 @@ impl Coordinator {
         };
         let _ = sup.set_desired_active(Some(desired));
         let _ = sup.recover_after_operator_action();
+    }
+}
+
+/// A candidate the worker control prepared. Unless it is promoted, it is
+/// abandoned when the transaction returns, whichever way it returns.
+struct Prepared<'a> {
+    worker: &'a dyn WorkerControl,
+    candidate: &'a CandidateRef,
+    promoted: bool,
+}
+
+impl<'a> Prepared<'a> {
+    fn new(worker: &'a dyn WorkerControl, candidate: &'a CandidateRef) -> Self {
+        Self {
+            worker,
+            candidate,
+            promoted: false,
+        }
+    }
+}
+
+impl Drop for Prepared<'_> {
+    fn drop(&mut self) {
+        if !self.promoted {
+            self.worker.abandon(self.candidate);
+        }
     }
 }
 

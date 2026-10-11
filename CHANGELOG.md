@@ -148,6 +148,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   rules. Not judged yet: quotas shared between members, a warmup required
   by a row's benchmark profile, and the resolution of a Production request
   to evidence. (V030-E02-F01-T02)
+
+- The agent restarts a serving worker that exits, loses its control
+  channel or, after a restart, is not ready within the warm timeout: as a
+  new generation, 1, 2 and 4 seconds after the stop, at most three times
+  in five minutes. A member that stops again after that is failed until a
+  deploy or a rollback is promoted, and `status` reports the failure as
+  `last_error` with `agent_state: degraded`. The failure is held in the
+  agent's memory, so an agent restart starts the recorded deployment again
+  with all three restarts available. A restart is not started when the
+  staged manifest's digest is no longer the member's bundle digest, as
+  after a failed deploy of the same id; the member is failed with
+  `load_failed` instead. On SIGTERM or SIGINT the agent asks its workers
+  to drain, kills what is left 10 seconds later and exits 0. No worker is
+  started once the stop has begun; a deploy or rollback in flight is
+  answered status `error` with the code `unavailable` (the CLI exits 3)
+  and left in flight for the next start's recovery,
+  as after a kill: one interrupted before its candidate was prepared is
+  run again, and one interrupted while its candidate warmed is quarantined
+  by a start that launches nothing, the deployment that was serving coming
+  back at the start after that. A deploy or rollback that returns without
+  promoting its candidate, a failed state write included, no longer keeps
+  the serving member from being restarted. `signal-hook` is a new pinned dependency.
+  (V030-E03-F01-T03)
+
 - The Python sidecar acts on the `speech_jobs_v1` job and session messages.
   Its `ready_event` lists the capability, and a `load_model` that enables it
   is answered with the `job_classes` the loaded runner runs, or with
@@ -362,8 +386,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   id. Serving config files are named
   `serving-<deployment>-<generation>.json`. A `/health` read that times
   out now counts as not ready instead of failing the deploy as
-  `internal`. A crashed worker is still not restarted, and the two
-  configured serving ports are unchanged. (V030-E03-F01-T03)
+  `internal`. The two configured serving ports are unchanged.
+  (V030-E03-F01-T03)
 
 ## [0.3.1] - 2026-10-01
 
