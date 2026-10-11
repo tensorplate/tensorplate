@@ -289,6 +289,9 @@ fn member(
         effective_quota: None,
         staged_bytes: None,
         contact: Some(contact),
+        process: None,
+        readiness: None,
+        draining: None,
     }
 }
 

@@ -1437,6 +1437,7 @@ mod tests {
         if active {
             status.active = Some(DeploymentSummary {
                 deployment_id: "d-1".into(),
+                generation: None,
                 bundle_digest: "sha256:abc".into(),
                 bundle_name: Some("yolov8".into()),
                 bundle_version: Some("0.0.1".into()),
@@ -1634,6 +1635,9 @@ mod tests {
             effective_quota: None,
             staged_bytes: None,
             contact: None,
+            process: None,
+            readiness: None,
+            draining: None,
         };
         if let Some(status) = response.agent_status.as_mut() {
             status.resident_set = Some(tensorplate_protocol::ResidentSetStatus {
@@ -1699,6 +1703,9 @@ mod tests {
             effective_quota: None,
             staged_bytes: None,
             contact,
+            process: None,
+            readiness: None,
+            draining: None,
         }
     }
 

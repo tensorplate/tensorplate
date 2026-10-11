@@ -25,8 +25,8 @@ use tensorplate_protocol::agent_control::{
 use tensorplate_protocol::agent_state::decode_agent_state;
 use tensorplate_protocol::resident_set::{MemberState, ResidentSet};
 use tensorplate_protocol::{
-    decode_with_version_check, AdmissionMode, ContactState, DecodeError, FEATURE_MEMBER_ROLLBACK,
-    FEATURE_SET_OPERATION_ADD, MAX_MEMBER_SESSIONS,
+    decode_with_version_check, AdmissionMode, ContactState, DecodeError, ProcessState, Readiness,
+    FEATURE_MEMBER_ROLLBACK, FEATURE_SET_OPERATION_ADD, MAX_MEMBER_SESSIONS,
 };
 
 const GOLDEN: &str = "agent_control_singleton_lifecycle.jsonl";
@@ -256,6 +256,26 @@ fn schema_enums_match_the_mirror() {
     assert_eq!(
         defs["MemberStatus"]["properties"]["contact"]["enum"],
         Value::Array(contact.into_iter().map(spelling).collect())
+    );
+    let process = [ProcessState::Running, ProcessState::Stopped];
+    for state in process {
+        match state {
+            ProcessState::Running | ProcessState::Stopped => {}
+        }
+    }
+    assert_eq!(
+        defs["MemberStatus"]["properties"]["process"]["enum"],
+        Value::Array(process.into_iter().map(spelling).collect())
+    );
+    let readiness = [Readiness::Ready, Readiness::NotReady];
+    for state in readiness {
+        match state {
+            Readiness::Ready | Readiness::NotReady => {}
+        }
+    }
+    assert_eq!(
+        defs["MemberStatus"]["properties"]["readiness"]["enum"],
+        Value::Array(readiness.into_iter().map(spelling).collect())
     );
 }
 
@@ -900,7 +920,11 @@ fn a_two_member_set_projects_every_member_and_no_singleton() {
         assert_eq!(member.stream_api_version, None);
         assert_eq!(member.effective_quota, None);
         assert_eq!(member.staged_bytes, None);
+        // The committed record says nothing of a process.
         assert_eq!(member.contact, None);
+        assert_eq!(member.process, None);
+        assert_eq!(member.readiness, None);
+        assert_eq!(member.draining, None);
     }
     assert_eq!(singleton_slots(&set), (None, None));
     let response = json!({
@@ -932,6 +956,9 @@ fn a_size_one_set_projects_into_the_singleton_slots() {
     let previous = previous.expect("the retained generation is previous_active");
     assert_eq!(previous.deployment_id, retained.deployment_id);
     assert_eq!(previous.serving_url, None);
+    assert_ne!(member.generation, retained.generation);
+    assert_eq!(active.generation, Some(member.generation));
+    assert_eq!(previous.generation, Some(retained.generation));
     let response = json!({
         "schema_version": "0.1", "status": "ok",
         "agent_status": {
@@ -1007,4 +1034,106 @@ fn a_quarantined_only_member_projects_no_singleton() {
     let status = ResidentSetStatus::from_committed(&set);
     assert_eq!(status.members[0].state, MemberState::Quarantined);
     assert_eq!(status.members[0].unary_endpoint, None);
+}
+
+// ---- The fields a member's worker process and a generation add ---------------
+
+/// A status response for a set of one whose member and `active` carry
+/// every field added for the worker process and the generation.
+fn status_with_the_process_fields() -> Value {
+    let set = committed_set("agent_state_0_2_restore_step.json");
+    let (active, _) = singleton_slots(&set);
+    let mut status = ResidentSetStatus::from_committed(&set);
+    let member = &mut status.members[0];
+    member.process = Some(ProcessState::Running);
+    member.readiness = Some(Readiness::NotReady);
+    member.draining = Some(false);
+    member.contact = Some(ContactState::InContact);
+    json!({
+        "schema_version": "0.1", "status": "ok",
+        "agent_status": {"agent_state": "ready", "active": active, "resident_set": status}
+    })
+}
+
+#[test]
+fn the_process_fields_and_the_generation_are_spelled_as_the_schema_allows() {
+    let response = status_with_the_process_fields();
+    let member = &response["agent_status"]["resident_set"]["members"][0];
+    assert_eq!(member["process"], "running");
+    assert_eq!(member["readiness"], "not_ready");
+    assert_eq!(member["draining"], false);
+    assert_eq!(member["contact"], "in_contact");
+    assert_eq!(response["agent_status"]["active"]["generation"], 2);
+    let errors = schema_error_paths(&response);
+    assert!(errors.is_empty(), "schema errors at {errors:?}");
+
+    let decoded: ControlResponse =
+        decode_with_version_check(&response.to_string()).expect("decodes");
+    assert_eq!(
+        serde_json::to_value(&decoded).expect("encode"),
+        response,
+        "nothing is lost or added on the way through the mirror"
+    );
+}
+
+#[test]
+fn the_schema_refuses_a_process_field_of_the_wrong_kind() {
+    for (field, wrong) in [
+        ("process", json!("exited")),
+        ("readiness", json!(true)),
+        ("draining", json!("true")),
+    ] {
+        let mut response = status_with_the_process_fields();
+        response["agent_status"]["resident_set"]["members"][0][field] = wrong;
+        assert_eq!(
+            schema_error_paths(&response),
+            BTreeSet::from([format!("/agent_status/resident_set/members/0/{field}")]),
+            "{field}"
+        );
+    }
+    let mut response = status_with_the_process_fields();
+    response["agent_status"]["active"]["generation"] = json!(0);
+    assert_eq!(
+        schema_error_paths(&response),
+        BTreeSet::from(["/agent_status/active/generation".to_string()]),
+        "a generation is allocated from 1"
+    );
+}
+
+#[test]
+fn a_status_without_the_process_fields_still_decodes_and_writes_none_of_them() {
+    let mut response = status_with_the_process_fields();
+    let status = &mut response["agent_status"];
+    remove(&mut status["active"], "generation");
+    for field in ["process", "readiness", "draining", "contact"] {
+        remove(&mut status["resident_set"]["members"][0], field);
+    }
+    let decoded: ControlResponse =
+        decode_with_version_check(&response.to_string()).expect("decodes");
+    let agent = decoded.agent_status.as_ref().expect("status");
+    assert_eq!(agent.active.as_ref().expect("active").generation, None);
+    let member = &agent.resident_set.as_ref().expect("set").members[0];
+    assert_eq!(
+        (member.process, member.readiness, member.draining),
+        (None, None, None)
+    );
+    assert_eq!(serde_json::to_value(&decoded).expect("encode"), response);
+}
+
+#[test]
+fn a_status_reader_passes_over_a_key_it_does_not_know() {
+    // What lets a client built before a status field read a status that
+    // carries it: no status object refuses a key it has no field for.
+    let mut response = status_with_the_process_fields();
+    let known = decode_with_version_check::<ControlResponse>(&response.to_string())
+        .expect("decodes")
+        .agent_status;
+    let status = &mut response["agent_status"];
+    status["later"] = json!({"a": 1});
+    status["active"]["later"] = json!(1);
+    status["resident_set"]["later"] = json!("x");
+    status["resident_set"]["members"][0]["later"] = json!([1]);
+    let decoded: ControlResponse =
+        decode_with_version_check(&response.to_string()).expect("unknown keys are passed over");
+    assert_eq!(decoded.agent_status, known);
 }

@@ -32,6 +32,7 @@ fn ready_status_response() -> ControlResponse {
         agent_state: AgentRunState::Ready,
         active: Some(DeploymentSummary {
             deployment_id: "d-1".into(),
+            generation: None,
             bundle_digest: "sha256:abc".into(),
             bundle_name: Some("yolov8n".into()),
             bundle_version: Some("0.0.1".into()),

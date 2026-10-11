@@ -72,10 +72,11 @@ pub use agent_control::{
     ControlRequest, ControlResponse, DeployFailureSummary, DeployRequest, DeployStatus,
     DeploymentSummary, MemberRequest, MemberStatus, PlatformMemoryTelemetryStatus,
     PlatformSignalOutcomeStatus, PlatformSignalTelemetryStatus, PlatformTelemetryGate,
-    PlatformTelemetrySignalName, PlatformTelemetryStatus, QuarantineSummary, RecoveryAction,
-    RecoverySummary, ResidentSetStatus, ResponseError, ResponseStatus, RollbackRequest,
-    SetOperation, StatusRequest, SupervisionStatusSummary, FEATURE_MEMBER_ROLLBACK,
-    FEATURE_SET_OPERATION_ADD, MAX_DEPLOYMENT_ID_BYTES, MAX_EVIDENCE_REF_CHARS,
+    PlatformTelemetrySignalName, PlatformTelemetryStatus, ProcessState, QuarantineSummary,
+    Readiness, RecoveryAction, RecoverySummary, ResidentSetStatus, ResponseError, ResponseStatus,
+    RollbackRequest, SetOperation, StatusRequest, SupervisionStatusSummary,
+    FEATURE_MEMBER_ROLLBACK, FEATURE_SET_OPERATION_ADD, MAX_DEPLOYMENT_ID_BYTES,
+    MAX_EVIDENCE_REF_CHARS,
 };
 pub use agent_state::{
     decode_agent_state, AgentState, AgentStateError, DeploymentRecord, ErrorRecord,

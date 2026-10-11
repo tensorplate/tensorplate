@@ -507,6 +507,7 @@ mod tests {
     fn status_response_with_active() -> ControlResponse {
         let active = DeploymentSummary {
             deployment_id: "d-1".into(),
+            generation: None,
             bundle_digest: "sha256:abc".into(),
             bundle_name: None,
             bundle_version: None,

@@ -922,6 +922,7 @@ fn merge_agent_state(base: AgentRunState, supervision: SupervisionAgentState) ->
 fn deployment_summary(d: &DeploymentRecord) -> DeploymentSummary {
     DeploymentSummary {
         deployment_id: d.deployment_id.clone(),
+        generation: None,
         bundle_digest: d.bundle_digest.clone(),
         bundle_name: Some(d.bundle_name.clone()),
         bundle_version: Some(d.bundle_version.clone()),
