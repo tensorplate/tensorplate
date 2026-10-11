@@ -13,6 +13,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -705,6 +706,14 @@ Result<std::unique_ptr<StreamListener>> StreamListener::start(StreamListenerOpti
     return unexpected(manager.error());
   }
   raw->manager = std::move(manager).value();
+  // First, while a failure leaves nothing started to undo.
+  try {
+    raw->watcher = std::thread([raw] { raw->watch_ended_calls(); });
+  } catch (const std::system_error&) {
+    return unexpected(Error::make(Error::Code::Internal,
+                                  "stream listener's watch thread could not start",
+                                  "watch_thread_unavailable"));
+  }
   if (dispatch != nullptr) {
     dispatch->attach(*raw->manager);
   }
@@ -721,12 +730,12 @@ Result<std::unique_ptr<StreamListener>> StreamListener::start(StreamListenerOpti
     if (dispatch != nullptr) {
       dispatch->stop();
     }
+    raw->stop_watching();
     return unexpected(Error::make(Error::Code::Unavailable,
                                   "stream listener could not bind " + address,
                                   "stream_bind_failed"));
   }
   raw->port = static_cast<std::uint16_t>(selected);
-  raw->watcher = std::thread([raw] { raw->watch_ended_calls(); });
   return std::unique_ptr<StreamListener>(new StreamListener(std::move(impl)));
 }
 
