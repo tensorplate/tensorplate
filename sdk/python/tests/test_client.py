@@ -217,6 +217,31 @@ def test_discovery_uses_the_serving_url_a_set_of_one_projects(
     assert endpoint.url == "http://127.0.0.1:18090/infer"
 
 
+_MEMBER_STATUS = (
+    Path(__file__).resolve().parents[3]
+    / "protocol"
+    / "rust"
+    / "tests"
+    / "fixtures"
+    / "agent_control_member_status.jsonl"
+)
+
+
+@pytest.mark.parametrize("line", [2, 4])
+def test_discovery_reads_a_status_that_names_generations_and_processes(
+    monkeypatch: pytest.MonkeyPatch, line: int
+) -> None:
+    # Status responses recorded from an agent that runs the member registry,
+    # as a singleton and as a set of one. They carry a generation and the
+    # state of a member's worker process, which discovery does not read.
+    reply = _MEMBER_STATUS.read_bytes().splitlines()[line - 1] + b"\n"
+    assert b'"generation":2' in reply
+    _agent_replying(monkeypatch, reply)
+    endpoint = resolve_serving_url(None, discover=True)
+    assert endpoint.source == "agent-discovered"
+    assert endpoint.url == "http://127.0.0.1:41281/infer"
+
+
 @pytest.mark.parametrize(
     ("agent_status", "says"),
     [

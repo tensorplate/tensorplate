@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 use tensorplate_protocol::agent_control::{
     AgentRunState, AgentStatus, ContactState, ControlRequest, ControlResponse, DeploymentSummary,
-    QuarantineSummary, ResidentSetStatus, SupervisionStatusSummary,
+    ProcessState, QuarantineSummary, Readiness, ResidentSetStatus, SupervisionStatusSummary,
 };
 use tensorplate_protocol::supervision_event::{SupervisionAgentState, SupervisionServingState};
 use tensorplate_protocol::{AdmissionMode, MemberState};
@@ -217,6 +217,21 @@ fn resident_set_lines(set: &ResidentSetStatus) -> String {
                 ContactState::OutOfContact => " contact=out_of_contact",
             });
         }
+        if let Some(process) = member.process {
+            out.push_str(match process {
+                ProcessState::Running => " process=running",
+                ProcessState::Stopped => " process=stopped",
+            });
+        }
+        if let Some(readiness) = member.readiness {
+            out.push_str(match readiness {
+                Readiness::Ready => " readiness=ready",
+                Readiness::NotReady => " readiness=not_ready",
+            });
+        }
+        if let Some(draining) = member.draining {
+            out.push_str(&format!(" draining={draining}"));
+        }
         out.push('\n');
     }
     out
@@ -225,6 +240,7 @@ fn resident_set_lines(set: &ResidentSetStatus) -> String {
 fn summary_block(d: &DeploymentSummary) -> Value {
     json!({
         "deployment_id": d.deployment_id,
+        "generation": d.generation,
         "bundle_digest": d.bundle_digest,
         "bundle_name": d.bundle_name,
         "bundle_version": d.bundle_version,
@@ -463,6 +479,9 @@ fn render_human(
                     .map(|n| format!("{n}@{}", active.bundle_version.as_deref().unwrap_or("?")))
                     .unwrap_or_else(|| active.bundle_digest.clone()),
             ));
+            if let Some(generation) = active.generation {
+                out.push_str(&format!("  generation={generation}\n"));
+            }
             if let Some(url) = active.serving_url.as_deref() {
                 out.push_str(&format!("  serving_url={url}\n"));
             }
