@@ -195,7 +195,12 @@ figure and the allocation, run for the first time on the next hardware pass.
 
 - N must be smaller than the device memory a second load of the candidate
   takes to become ready, or the load fits, the deploy succeeds and the case
-  is `mismatched`. The sidecar's device figure in the `candidate_warm_idle`
+  is `mismatched`. The record then shows that deploy as it went: the run's
+  result is `fail`, the status check after the negatives fails, and the
+  teardown reads `failed` with `restored '<the candidate's id>', expected
+  '<the predecessor's id>'`, because the rollback undid only the second
+  deploy and did not reach the predecessor, so the machine is left with the
+  candidate active. The sidecar's device figure in the `candidate_warm_idle`
   window of an earlier record of the same bundle on the same machine type
   shows what a loaded sidecar keeps, which a load has to reach at least.
 - N must be larger than what the ballast's allocator takes beyond the bytes
@@ -227,21 +232,29 @@ to its teardown and its record:
   error.
 - The ballast prints no report within `--oom-ballast-report-wait-s` seconds
   (120 unless given), or its first line is not a report: it is stopped, at
-  once in the second case.
+  once in the second case. The 120 seconds are chosen, not timed on a
+  device: raise the wait where a device needs longer.
 - The report contradicts itself, as when another tenant frees memory between
   the two reads and more is left than was free: no figure is recorded, and
   the reason quotes the line.
 - The ballast has exited by the time the deploy has answered: the load met
   no ballast for some or all of its time, so the deploy's answer stays in
-  the case as what was observed and judges nothing.
+  the case as what was observed and judges nothing. Where that deploy
+  succeeded the case is `not_run` and the run's result is still `fail`, as
+  for a load that fit under the first bound on N: the teardown reads
+  `failed`, its rollback did not reach the predecessor, and the machine is
+  left with the candidate active.
 
 Where the ballast gave no report or exited early, the reason ends with the
 last line of its stderr, shortened.
 
 The record's check holds the figures to each other: no more held or left
-than was free, `held_bytes` equal to `free_bytes` less `requested_bytes`
-under `leave_free`, bytes held in a case that is `matched`, and a `ballast`
-object on no case but `oom_at_load`.
+than was free; `held_bytes` equal to `requested_bytes` under `bytes`, and to
+`free_bytes` less `requested_bytes` under `leave_free`, where no more is
+left than `requested_bytes` either (the allocator rounds only upward, so
+more left than N means the load was not bounded by N); bytes held in a case
+that is `matched` or `mismatched`; and a `ballast` object on no case but
+`oom_at_load`.
 
 ### Fixtures
 

@@ -873,8 +873,14 @@ def check_ballast_record_rules(schema: dict) -> None:
     assert moved["negatives"][0]["status"] == "matched"
     broken = [(moved, "/negatives/0/ballast: only the oom_at_load case carries a ballast")]
     for good, change, contradiction in (
-        (by_bytes, {"held_bytes": 10001}, "10001 bytes held are more than the 10000 free before"),
-        (left_free, {"left_bytes": 10001}, "10001 bytes left free are more than the 10000 free"),
+        (
+            by_bytes,
+            {"requested_bytes": 10001, "held_bytes": 10001},
+            "10001 bytes held are more than the 10000 free before",
+        ),
+        (by_bytes, {"held_bytes": 1023}, "1023 bytes held are not the 1024 asked for"),
+        (left_free, {"left_bytes": 4001}, "4001 bytes left free are more than the 4000 to leave"),
+        (by_bytes, {"left_bytes": 10001}, "10001 bytes left free are more than the 10000 free"),
         (left_free, {"held_bytes": 5999}, "5999 bytes held are not the 10000 free less the 4000"),
         (
             left_free,
@@ -886,9 +892,15 @@ def check_ballast_record_rules(schema: dict) -> None:
             {"held_bytes": None, "reason": "unheld"},
             "the case is matched with no bytes held",
         ),
+        (
+            by_bytes,
+            {"held_bytes": None, "reason": "unheld", "status": "mismatched"},
+            "the case is mismatched with no bytes held",
+        ),
     ):
         check_schema(good, schema)
         record = json.loads(json.dumps(good))
+        oom_of(record)["status"] = change.pop("status", "matched")
         oom_of(record)["ballast"].update(change)
         broken.append((record, f"/negatives/5/ballast: {contradiction}"))
     for record, message in broken:
