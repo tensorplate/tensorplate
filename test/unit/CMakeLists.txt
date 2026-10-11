@@ -25,6 +25,7 @@ add_executable(tp_test_unit
   backend_capability_test.cpp
   backend_registry_test.cpp
   backend_builtin_test.cpp
+  bounded_job_bridge_conformance_test.cpp
   tensorrt_adapter_test.cpp
   libtorch_adapter_test.cpp
   sidecar_codec_test.cpp
@@ -73,6 +74,7 @@ target_link_libraries(tp_test_unit
   PRIVATE
     tp::runtime
     tp::synthetic_session_dispatch
+    tp::fixture_job_bridge
     GTest::gtest_main
 )
 

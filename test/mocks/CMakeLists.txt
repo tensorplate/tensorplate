@@ -20,3 +20,23 @@ target_link_libraries(tp_synthetic_session_dispatch
 
 tp_apply_warnings(tp_synthetic_session_dispatch)
 tp_apply_sanitizers(tp_synthetic_session_dispatch)
+
+# A job bridge with an in-process backend, for tests that need speech jobs to
+# run without a sidecar.
+add_library(tp_fixture_job_bridge STATIC
+  fixture_job_bridge.cpp
+)
+add_library(tp::fixture_job_bridge ALIAS tp_fixture_job_bridge)
+
+target_include_directories(tp_fixture_job_bridge
+  PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(tp_fixture_job_bridge
+  PUBLIC
+    tp::runtime
+)
+
+tp_apply_warnings(tp_fixture_job_bridge)
+tp_apply_sanitizers(tp_fixture_job_bridge)
