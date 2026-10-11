@@ -13,7 +13,7 @@ mod common;
 
 use common::{run_cli, AgentStub};
 use serde_json::Value;
-use tensorplate_protocol::agent_control::{ControlResponse, ProcessState, Readiness};
+use tensorplate_protocol::agent_control::{ContactState, ControlResponse, ProcessState, Readiness};
 use tensorplate_protocol::decode_with_version_check;
 
 /// The response on line `line` (from 1) of a recorded exchange.
@@ -120,6 +120,29 @@ fn status_reports_a_member_that_is_stopped_and_one_that_is_draining() {
     assert_eq!(members[0]["readiness"], "not_ready");
     assert_eq!(members[1]["draining"], true);
     assert!(members[1].get("contact").is_none());
+    // Severity judges `contact`, and neither member reports one.
+    assert_eq!(json["payload"]["severity"], "ready");
+}
+
+#[test]
+fn a_member_the_agent_reports_out_of_contact_lowers_severity() {
+    let mut response = recorded("agent_control_member_status.jsonl", 4);
+    let (_, json) = status_of(&response);
+    assert_eq!(json["payload"]["severity"], "ready");
+
+    let set = response
+        .agent_status
+        .as_mut()
+        .and_then(|status| status.resident_set.as_mut())
+        .expect("a set");
+    set.members[0].contact = Some(ContactState::OutOfContact);
+    let (human, json) = status_of(&response);
+
+    assert!(
+        human.contains("contact=out_of_contact process=running"),
+        "{human}"
+    );
+    assert_eq!(json["payload"]["severity"], "degraded");
 }
 
 #[test]

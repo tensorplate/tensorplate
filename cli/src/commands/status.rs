@@ -330,7 +330,8 @@ impl Severity {
 /// How a committed resident set's members stand: the one rule `status`
 /// severity and `doctor` judge a set by. A member is degraded when it is
 /// quarantined, or in `serving` state while the agent reports its worker
-/// out of contact. An absent `contact` is unreported, not a fault.
+/// out of contact. An absent `contact` is not a fault: the agent does not
+/// report contact, or the member's process is stopped or draining.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct ResidentSetHealth<'a> {
     /// Members in `serving` state, whether or not their worker answers.
