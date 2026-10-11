@@ -748,8 +748,13 @@ descriptor, which is every record a deploy writes today, cannot tell a
 redeploy of its own bundle under its own id from the deployment it
 records: for the stop of the replaced worker `active` then carries the new
 worker's generation and URL beside the replaced deployment's promotion
-time. Both are absent while nothing serves: the worker stopped, a restart
-is waiting or loading, or the member is failed. `candidate.generation` is
+time. One gap is latent: startup recovery and a rollback start their member
+from a reference that carries no descriptor identity, so beside a record
+that names a descriptor `active.generation` would stay absent for as long
+as that member serves. No record names a descriptor yet; the change that
+makes rollback and recovery carry the identity closes it. Both are absent
+while nothing serves: the worker stopped, a restart is waiting or loading,
+or the member is failed. `candidate.generation` is
 the generation a deploy has prepared and not promoted; a worker an earlier
 deploy abandoned is not named.
 
