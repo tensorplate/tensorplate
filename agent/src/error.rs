@@ -191,6 +191,11 @@ pub enum AgentError {
     #[error("the agent is stopping")]
     Stopping,
 
+    /// The deployment descriptor a record or a candidate names cannot be
+    /// used. Not recoverable; `code` says why.
+    #[error("deployment descriptor {message}")]
+    DeploymentDescriptor { code: ErrorCode, message: String },
+
     #[error("internal agent error: {0}")]
     Internal(String),
 
@@ -236,6 +241,7 @@ impl AgentError {
                     ErrorCode::ConfigInvalid | ErrorCode::Unsupported | ErrorCode::LoadFailed
                 ),
             ),
+            AgentError::DeploymentDescriptor { code, .. } => (*code, false),
             AgentError::WorkerExited(_) => (ErrorCode::LoadFailed, true),
             AgentError::WorkerTimeout(_) => (ErrorCode::Timeout, true),
             AgentError::Internal(_) | AgentError::Io(_) | AgentError::Serialization(_) => {
@@ -338,6 +344,21 @@ mod tests {
         let r = AgentError::WorkerExited("exit status: 66".into()).to_record();
         assert_eq!(r.code, ErrorCode::LoadFailed);
         assert!(r.recoverable);
+    }
+
+    #[test]
+    fn a_descriptor_refusal_keeps_its_code_and_is_not_recoverable() {
+        let r = AgentError::DeploymentDescriptor {
+            code: ErrorCode::LoadFailed,
+            message: "`descriptor-stt-3.json` is missing".into(),
+        }
+        .to_record();
+        assert_eq!(r.code, ErrorCode::LoadFailed);
+        assert!(!r.recoverable);
+        assert_eq!(
+            r.message,
+            "deployment descriptor `descriptor-stt-3.json` is missing"
+        );
     }
 
     #[test]
