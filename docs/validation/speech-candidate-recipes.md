@@ -189,7 +189,9 @@ active candidate, the ballast process's own use of the device and any other
 tenant. A figure sized on one build stops fitting when the candidate's
 footprint moves. With `--oom-ballast-leave-free` the ballast process reads
 the free figure itself, through `torch.cuda.mem_get_info`, when all of that
-is already resident, so N is the one quantity left to choose:
+is already resident, so N is the one quantity left to choose. The rule has
+run only against the test's fake device: the real device calls, the free
+figure and the allocation, run for the first time on the next hardware pass.
 
 - N must be smaller than the device memory a second load of the candidate
   takes to become ready, or the load fits, the deploy succeeds and the case
@@ -200,20 +202,46 @@ is already resident, so N is the one quantity left to choose:
   it is asked for, or the device refuses the ballast and the case is
   `not_run`.
 
-There is no default, and no figure from one machine is a rule for another.
+Both bounds are the rule as written, not as measured: what happens when N is
+below the size of a device context alone is unobserved. There is no default,
+and no figure from one machine is a rule for another.
 
 The case's entry in `negatives` carries a `ballast` object whenever a
 ballast was asked for: the `rule` (`bytes` or `leave_free`), the
 `requested_bytes` it was given, `free_bytes` read before anything was held,
 `held_bytes`, and `left_bytes`, the free figure read again while holding.
-`left_bytes` is an observation, so it shows what the allocator really left
-rather than repeating N. A figure the ballast could not read is null and
-`reason` says why. The case is `not_run`, with nothing held and no size
-guessed, when the free figure cannot be read under `--oom-ballast-leave-free`,
-when free memory is not above N, when the device refuses the allocation, and
-when the interpreter finds no device. The tool takes every figure from the
-ballast's one report line and reads the device itself no more than it does
-for the windows.
+`held_bytes` is the size asked of the allocator and given, not what the
+allocator reserved to give it. `left_bytes` is an observation, so it shows
+what the allocator really left rather than repeating N. A figure the ballast
+could not read is null and `reason` says why. The case is `not_run`, with
+nothing held and no size guessed, when the free figure cannot be read under
+`--oom-ballast-leave-free`, when free memory is not above N, when the device
+refuses the allocation, and when the interpreter finds no device. The tool
+takes every figure from the ballast's one report line and reads the device
+itself no more than it does for the windows.
+
+A ballast that goes wrong leaves the case `not_run` too, and the run goes on
+to its teardown and its record:
+
+- `--oom-ballast-python` cannot be started: the reason names it and the
+  error.
+- The ballast prints no report within `--oom-ballast-report-wait-s` seconds
+  (120 unless given), or its first line is not a report: it is stopped, at
+  once in the second case.
+- The report contradicts itself, as when another tenant frees memory between
+  the two reads and more is left than was free: no figure is recorded, and
+  the reason quotes the line.
+- The ballast has exited by the time the deploy has answered: the load met
+  no ballast for some or all of its time, so the deploy's answer stays in
+  the case as what was observed and judges nothing.
+
+Where the ballast gave no report or exited early, the reason ends with the
+last line of its stderr, shortened.
+
+The record's check holds the figures to each other: no more held or left
+than was free, `held_bytes` equal to `free_bytes` less `requested_bytes`
+under `leave_free`, bytes held in a case that is `matched`, and a `ballast`
+object on no case but `oom_at_load`.
 
 ### Fixtures
 

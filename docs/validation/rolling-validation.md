@@ -39,6 +39,11 @@ tools/validation/validation-pass.py run \
   --out-dir ~/pass --confirm RESET-TENSORPLATE
 ```
 
+The `leave-free` rule in this example has run only against the test's fake
+device: its device calls run for the first time on the next hardware pass,
+and what happens when the count is below the size of a device context alone
+is unobserved ([the rule](#the-out-of-memory-ballast)).
+
 A candidate's subject is its index subject and names its directories, so it
 is lower-case letters, digits and hyphens, and not `lifecycle`, `doctor`,
 `logs` or `streaming-latency`. `--predecessor-bundle`, `--sampler`,
@@ -117,7 +122,8 @@ larger than the ballast allocator's own slack, as
 [the recipe's page](speech-candidate-recipes.md#the-out-of-memory-ballast)
 states the rule. No value is a default. The rule has run against the
 test's fake device only; its first run on a GPU is the next pass that names
-it.
+it. What happens when N is below the size of a device context alone is
+unobserved.
 
 A `headroom` rule is read with `nvidia-smi` (`--nvidia-smi` names
 another program) and evaluated in preflight, so a machine that reports no
@@ -130,7 +136,8 @@ the option. The interpreter itself need not exist at preflight: it is usually
 the speech runtime family's, which the lifecycle harness purges and the pass
 installs again. Each `qualify` step whose candidate takes a ballast checks
 that it can be run before it runs the recipe, and is `failed` with that
-reason when it cannot.
+reason when it cannot. A file that passes that check and still cannot be
+started leaves the recipe's case `not_run` with the reason.
 
 Without a ballast the recipe records the out-of-memory case as `not_run`, and
 a recipe result with a case that did not run is not `pass`. Where
@@ -149,7 +156,10 @@ candidate without a ballast the reason, which says that its out-of-memory
 case will not run. `bytes` is null without a ballast and under `leave-free`,
 where the size exists only once the ballast is taken: the recipe's record
 then carries the free figure, the bytes held and the figure left, in the
-`ballast` object of its `oom_at_load` case.
+`ballast` object of its `oom_at_load` case. The report writes the rule as it
+was given on the command line (`leave-free`, as `speech_family` holds
+`host-built`); the record writes `leave_free`, as its other enumerations
+(`must_match`, `not_run`) are written.
 
 `--staging-dir` is where the recipe writes the bundles of its negative cases,
 which the agent has to read. The agent's unit runs with `ProtectHome` and

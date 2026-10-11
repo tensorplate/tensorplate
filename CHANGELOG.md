@@ -398,7 +398,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   the tool's reason for a ballast that held nothing names what its exit
   status means, and the pass report's `oom_ballast` entries gain
   `leave_free_bytes`. The new rule has run against the test's fake device
-  only. (V030-E06-F02-T01)
+  only, and what happens when N is below the size of a device context alone
+  is unobserved. A ballast that goes wrong leaves the case `not_run` with
+  the reason, and the tool goes on to its teardown and its record: an
+  interpreter that cannot be started (which used to end the tool with no
+  record), no report within the new `--oom-ballast-report-wait-s` (120
+  seconds unless given), a first line that is not a report, a report whose
+  figures contradict each other, and a ballast that has exited by the time
+  the deploy has answered. Where the ballast gave no report or exited early
+  the reason carries the last line of its stderr. The record's check now
+  holds the figures to each other and to the case, and a negative byte
+  count has its own message. (V030-E06-F02-T01)
 
 ### Changed
 
