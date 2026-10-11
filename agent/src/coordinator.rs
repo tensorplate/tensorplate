@@ -54,7 +54,7 @@ use crate::platform_admission::PlatformAdmission;
 use crate::state::StateStore;
 use crate::supervision::supervisor::{DesiredWorker, WorkerSupervisor};
 use crate::transaction::is_permitted;
-use crate::worker::{LiveMember, MemberRole, WorkerControl, WorkerEvent};
+use crate::worker::{LiveMember, MemberRole, ServingMember, WorkerControl, WorkerEvent};
 
 /// Caller-supplied event sink. The coordinator emits one event per
 /// significant state transition; production sinks ship them to structured
@@ -651,8 +651,10 @@ impl Coordinator {
         let mut active = state.active.as_ref().map(deployment_summary);
         if let (Some(summary), Some(serving)) = (active.as_mut(), self.worker.serving_member()?) {
             // A worker is promoted before the record that names it is
-            // written, so the member serving may be another deployment's.
-            if serving.member.deployment_id == summary.deployment_id {
+            // written, and the worker it replaces is stopped in between:
+            // the member serving may be another deployment's, or another
+            // bundle deployed under the same id.
+            if serves(&serving, summary) {
                 summary.generation = Some(serving.member.generation);
             }
             summary.serving_url = Some(serving.serving_url);
@@ -957,6 +959,13 @@ struct Deployments {
     previous: Option<DeploymentSummary>,
     candidate: Option<DeploymentSummary>,
     resident_set: Option<ResidentSetStatus>,
+}
+
+/// Whether `serving` is the deployment `recorded` describes: the same id,
+/// started from the same bundle.
+fn serves(serving: &ServingMember, recorded: &DeploymentSummary) -> bool {
+    serving.member.deployment_id == recorded.deployment_id
+        && crate::bundle::bundle_digests_equal(&serving.bundle_digest, &recorded.bundle_digest)
 }
 
 /// The generation a deploy of `deployment_id` has prepared and not promoted.

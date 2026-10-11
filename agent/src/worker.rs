@@ -207,6 +207,8 @@ pub trait WorkerControl: Send + Sync {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServingMember {
     pub member: MemberRef,
+    /// The digest of the bundle this generation was started from.
+    pub bundle_digest: String,
     pub serving_url: String,
 }
 

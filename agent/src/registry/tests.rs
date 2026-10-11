@@ -31,6 +31,8 @@ struct Handle {
     config: serde_json::Value,
     calls: Mutex<Vec<&'static str>>,
     exited: AtomicBool,
+    /// Reading whether the process exited fails.
+    uninspectable: AtomicBool,
     obeys_terminate: AtomicBool,
     contact: Mutex<ControlContact>,
     /// `startup_failure` says it has begun, then waits to be let finish.
@@ -52,6 +54,9 @@ struct FakeProcess(Arc<Handle>);
 
 impl MemberProcess for FakeProcess {
     fn exited(&mut self) -> AgentResult<bool> {
+        if self.0.uninspectable.load(Ordering::SeqCst) {
+            return Err(AgentError::WorkerControl("wait failed".into()));
+        }
         Ok(self.0.exited.load(Ordering::SeqCst))
     }
     fn startup_failure(&mut self) -> AgentError {
@@ -123,6 +128,7 @@ impl ProcessLauncher for FakeLauncher {
             config,
             calls: Mutex::new(Vec::new()),
             exited: AtomicBool::new(false),
+            uninspectable: AtomicBool::new(false),
             obeys_terminate: AtomicBool::new(!self.stubborn.load(Ordering::SeqCst)),
             contact: Mutex::new(ControlContact::Reporting),
             hold_failure: Mutex::new(None),

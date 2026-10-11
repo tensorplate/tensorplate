@@ -14,11 +14,7 @@
 // recording and the replay. Run with `UPDATE_GOLDEN=1` to re-record.
 //
 // `agent_control_member_status.jsonl` beside it holds two status exchanges
-// recorded the same way from an agent that runs the member registry: one
-// with the singleton record of two deploys, one after the same history was
-// committed as a resident set of one. They carry what the mock worker
-// control of the first recording never reports: the serving generation,
-// and the state of a member's worker process.
+// recorded the same way from an agent that runs the member registry.
 
 #![cfg(unix)]
 #![allow(

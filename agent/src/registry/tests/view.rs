@@ -85,6 +85,7 @@ fn a_candidate_is_ready_once_a_warm_judged_it_and_serves_once_promoted() {
         f.registry.serving_member().unwrap(),
         Some(ServingMember {
             member: MemberRef::new("stt", 1),
+            bundle_digest: candidate("stt").bundle_digest,
             serving_url: format!("http://127.0.0.1:{ACTIVE_PORT}/infer"),
         })
     );
@@ -269,6 +270,15 @@ fn a_member_that_exited_is_not_running_then_gone_and_its_successor_is_ready_only
         f.registry.serving_member().unwrap().map(|s| s.member),
         Some(MemberRef::new("stt", 2))
     );
+}
+
+#[test]
+fn a_member_whose_process_cannot_be_inspected_has_not_been_seen_to_exit() {
+    let f = fixture();
+    let serving = f.serve("stt");
+    serving.uninspectable.store(true, Ordering::SeqCst);
+
+    assert_eq!(view(&f), [live("stt", 1, MemberRole::Serving, ACTIVE_PORT)]);
 }
 
 #[test]

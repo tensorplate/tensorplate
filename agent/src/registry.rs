@@ -1468,6 +1468,7 @@ impl WorkerControl for MemberRegistry {
     fn serving_member(&self) -> AgentResult<Option<ServingMember>> {
         self.serving(|member| ServingMember {
             member: MemberRef::new(member.deployment_id.clone(), member.generation),
+            bundle_digest: member.recipe.bundle_digest.clone(),
             serving_url: format!(
                 "http://{}:{}/infer",
                 self.settings.bind_host, member.ports.ports.http

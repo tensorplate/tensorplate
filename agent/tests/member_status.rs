@@ -14,13 +14,14 @@ mod registry_agent;
 
 use std::time::Duration;
 
-use common::{vision_bundle, Harness};
+use common::{vision_bundle, write_bundle, BundleSpec, Harness};
 use registry_agent::{RegistryAgent, HELD, MEMBER, PORTS, PREDECESSOR};
 use tensorplate_agent::registry::ControlContact;
 use tensorplate_agent::worker::WorkerControl;
 use tensorplate_protocol::agent_control::{
     AgentStatus, ContactState, DeploymentSummary, MemberStatus, ProcessState, Readiness,
 };
+use tensorplate_protocol::agent_state::DeploymentRecord;
 use tensorplate_protocol::worker_control::CandidateRef;
 
 fn status(agent: &RegistryAgent) -> AgentStatus {
@@ -33,6 +34,23 @@ fn active(agent: &RegistryAgent) -> DeploymentSummary {
 
 fn url(port: u16) -> String {
     format!("http://127.0.0.1:{port}/infer")
+}
+
+/// A candidate started from what `recorded` was staged from, under `id`.
+fn staged_as(id: &str, recorded: &DeploymentRecord) -> CandidateRef {
+    CandidateRef {
+        deployment_id: id.into(),
+        staged_path: recorded.staged_path.clone(),
+        bundle_digest: recorded.bundle_digest.clone(),
+        generation: None,
+        descriptor_digest: None,
+        configuration_digest: None,
+        backend_hint: recorded.backend_hint.clone(),
+        model_class: recorded.model_class.clone(),
+        bundle_name: None,
+        bundle_version: None,
+        artifact_relative_path: None,
+    }
 }
 
 /// The only member of the committed set, as status reports it.
@@ -84,7 +102,17 @@ fn active_names_the_generation_serving_at_its_url_and_each_deploy_moves_both() {
     let agent = RegistryAgent::start(&h);
     assert_eq!(status(&agent).active, None);
 
-    agent.deploy_member(&h);
+    agent
+        .deploy(PREDECESSOR.0, &vision_bundle(h.td.path(), PREDECESSOR.0))
+        .expect("the first deploy");
+    let first = active(&agent);
+    assert_eq!(first.deployment_id, PREDECESSOR.0);
+    assert_eq!(first.generation, Some(PREDECESSOR.1));
+    assert_eq!(first.serving_url, Some(url(PORTS[0])));
+
+    agent
+        .deploy(MEMBER.0, &vision_bundle(h.td.path(), MEMBER.0))
+        .expect("the second deploy");
 
     let serving = active(&agent);
     assert_eq!(serving.deployment_id, MEMBER.0);
@@ -135,19 +163,7 @@ fn the_generation_is_withheld_while_another_deployment_serves_than_the_recorded_
 
     // A worker is promoted before the record that names it is written:
     // the registry as it stands between the two.
-    let other = CandidateRef {
-        deployment_id: "another".into(),
-        staged_path: recorded.staged_path.clone(),
-        bundle_digest: recorded.bundle_digest.clone(),
-        generation: None,
-        descriptor_digest: None,
-        configuration_digest: None,
-        backend_hint: recorded.backend_hint.clone(),
-        model_class: recorded.model_class.clone(),
-        bundle_name: None,
-        bundle_version: None,
-        artifact_relative_path: None,
-    };
+    let other = staged_as("another", &recorded);
     agent.registry.prepare("tx", &other, HELD).expect("prepare");
     assert!(agent.registry.warm("tx", &other, HELD).expect("warm").ready);
     agent.registry.promote("tx", &other).expect("promote");
@@ -159,19 +175,55 @@ fn the_generation_is_withheld_while_another_deployment_serves_than_the_recorded_
 }
 
 #[test]
+fn the_generation_is_withheld_while_another_bundle_serves_under_the_recorded_id() {
+    let h = Harness::new();
+    let agent = RegistryAgent::start(&h);
+    agent
+        .deploy("stt", &vision_bundle(h.td.path(), "stt"))
+        .expect("the first deploy");
+    let first = active(&agent);
+    assert_eq!(first.generation, Some(1));
+    let replacement = write_bundle(
+        h.td.path(),
+        "stt",
+        BundleSpec {
+            memory_estimate_bytes: Some(1),
+            ..BundleSpec::default()
+        },
+    );
+    let (is_stopping, release) = agent.workers.last().hold_stop();
+
+    std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets what is held end.
+        let release = release;
+        let deploying = scope.spawn(|| agent.deploy("stt", &replacement));
+        is_stopping
+            .recv_timeout(HELD)
+            .expect("the replaced worker is asked to stop");
+
+        // Generation 2 serves the replacement; the record is the first
+        // bundle's until the replaced worker has stopped.
+        let during = active(&agent);
+        assert_eq!(during.bundle_digest, first.bundle_digest);
+        assert_eq!(during.generation, None);
+        assert_eq!(during.serving_url, Some(url(PORTS[1])));
+
+        release.send(()).unwrap();
+        deploying.join().unwrap().expect("the second deploy");
+    });
+
+    let after = active(&agent);
+    assert_ne!(after.bundle_digest, first.bundle_digest);
+    assert_eq!(after.generation, Some(2));
+    assert_eq!(after.serving_url, Some(url(PORTS[1])));
+}
+
+#[test]
 fn a_candidate_summary_names_the_generation_being_prepared_beside_the_one_serving() {
     let h = Harness::new();
     let agent = RegistryAgent::start(&h);
     let bundle = vision_bundle(h.td.path(), "stt");
-    let deploy = || {
-        agent.coord.deploy(
-            "stt",
-            &bundle,
-            std::collections::BTreeMap::new(),
-            None,
-            None,
-        )
-    };
+    let deploy = || agent.deploy("stt", &bundle);
     deploy().expect("the first deploy");
     let (is_warming, release) = agent.workers.hold_probe();
 
@@ -302,6 +354,65 @@ fn a_member_asked_to_stop_is_draining_until_its_process_is_reaped() {
 
     assert!(!worker.running());
     assert_eq!(process(&member(&agent)), STOPPED);
+}
+
+#[test]
+fn a_committed_member_promoted_over_is_draining_then_stopped_and_its_successor_is_not_listed() {
+    let h = Harness::new();
+    let agent = RegistryAgent::start(&h);
+    agent.deploy_member(&h);
+    let recorded = h.store.snapshot().expect("state").active.expect("active");
+    agent.commit_member_as_a_set(&h);
+    let committed = agent.workers.last();
+    let (is_stopping, release) = committed.hold_stop();
+    let successor = staged_as(MEMBER.0, &recorded);
+    agent
+        .registry
+        .prepare("tx", &successor, HELD)
+        .expect("prepare");
+    assert!(
+        agent
+            .registry
+            .warm("tx", &successor, HELD)
+            .expect("warm")
+            .ready
+    );
+
+    let projected = |agent: &RegistryAgent| {
+        let active = active(agent);
+        (active.generation, active.serving_url)
+    };
+    let committed_slot = (Some(MEMBER.1), Some(url(committed.port)));
+    std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets what is held end.
+        let release = release;
+        let promoting = scope.spawn(|| agent.registry.promote("tx", &successor));
+        is_stopping
+            .recv_timeout(HELD)
+            .expect("the committed generation is asked to stop");
+
+        assert_eq!(
+            process(&member(&agent)),
+            (
+                Some(ProcessState::Running),
+                Some(Readiness::Ready),
+                Some(true),
+                None,
+            )
+        );
+        assert_eq!(projected(&agent), committed_slot);
+
+        release.send(()).unwrap();
+        promoting.join().unwrap().expect("promote");
+    });
+
+    // The successor serves; no record names it, so status does not.
+    let serving = agent.registry.serving_member().expect("read").expect("one");
+    assert_eq!(serving.member.generation, MEMBER.1 + 1);
+    assert_ne!(Some(serving.serving_url), committed_slot.1);
+    assert_eq!(process(&member(&agent)), STOPPED);
+    assert_eq!(projected(&agent), committed_slot);
+    assert_eq!(status(&agent).candidate, None);
 }
 
 #[test]

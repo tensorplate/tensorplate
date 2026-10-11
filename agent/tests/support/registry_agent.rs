@@ -14,12 +14,12 @@
     clippy::missing_panics_doc
 )]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-use tensorplate_agent::coordinator::Coordinator;
+use tensorplate_agent::coordinator::{Coordinator, DeployOutcome};
 use tensorplate_agent::error::{AgentError, AgentResult};
 use tensorplate_agent::registry::{
     durable_generations, ControlContact, HealthProbe, LaunchSpec, MemberPorts, MemberProcess,
@@ -241,12 +241,16 @@ impl RegistryAgent {
         self.registry.supervise();
     }
 
+    /// Deploy the bundle at `bundle` as `id`.
+    pub fn deploy(&self, id: &str, bundle: &Path) -> AgentResult<DeployOutcome> {
+        self.coord
+            .deploy(id, bundle, std::collections::BTreeMap::new(), None, None)
+    }
+
     /// Deploy [`PREDECESSOR`], then [`MEMBER`] over it.
     pub fn deploy_member(&self, h: &Harness) {
         for (id, _) in [PREDECESSOR, MEMBER] {
-            let bundle = vision_bundle(h.td.path(), id);
-            self.coord
-                .deploy(id, &bundle, std::collections::BTreeMap::new(), None, None)
+            self.deploy(id, &vision_bundle(h.td.path(), id))
                 .expect("deploy");
         }
     }
