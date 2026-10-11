@@ -230,12 +230,17 @@ not as buffer handles.
 
 `test/contract/bounded_job_bridge_conformance.hpp` holds what the bridge
 header promises the caller of a bridge whose backend runs `stt_decode` and
-`tts_synthesis`, as one parameterised suite: twenty cases, each under the
-sentence it holds. A binding (`BridgeUnderTest`) supplies the bridge with
-its backend, the session's side of it (prime, unload, a backend that is
-lost) and a hold on started jobs; the cases force every order they need
-with that hold and never wait on the clock. They do not hold
-`job_not_permitted` or the destruction of the session. A test binary
+`tts_synthesis`, as one parameterised suite: twenty-two cases, each under
+the sentence it holds. A binding (`BridgeUnderTest`) supplies the bridge
+with its backend, the session's side of it (prime, unload, a backend that
+is lost) and a hold on started jobs; the cases force every order they need
+with that hold and never wait on the clock. Where the header leaves a
+backend a choice, the binding's contract says which the cases rely on: no
+third job class, `accepted` when a job is taken in, a job that has not
+started ending as soon as it is cancelled, nothing owed when the unload
+returns. They do not hold `job_not_permitted`, `health_timeout`, the
+`failed` that replaces a backend event a job's order refuses, calls from
+several threads at once, or the destruction of the session. A test binary
 includes the header in one source file and instantiates the suite with the
 bridges it builds.
 
@@ -253,15 +258,26 @@ backend fails its jobs with `backend_reset` and releases them only at the
 unload. Its results are those of the runner's fixture backend (the word
 `hello` ending a quarter of the payload's bytes after the window's start;
 160 bytes of silence for each byte of text) unless the test passes a
-result function, which receives the request. One thread runs the jobs and
-makes every callback while the backend lives; the unload makes the last
-ones on its caller's thread, so `prime`, `lose_backend`, `unload` and the
-destructor are never called from a sink callback. A test can hold started
-jobs, fail the next one, set what `health` answers, and ask whether
-everything submitted so far was worked through (`settled`).
+result function, which receives the request and runs with the bridge's
+lock held. One thread runs the jobs and makes the callbacks while the
+backend lives; the unload returns once every callback owed has run, on its
+caller's thread or on that one, so `prime`, `lose_backend`, `unload` and
+the destructor are never called from a sink callback. A test can hold
+started jobs, fail the next one, set what `health` answers, ask whether
+everything submitted so far was worked through (`settled`), and read the
+events of the fixture's own backend that a job's order refused, which are
+none unless the fixture is wrong.
 
-That the fixture's results and rules are the runner's is held by constants
-and by `FixtureJobBridge`'s own tests in
+It differs from the runner in four ways. A job starts at its submit when
+nothing runs, so the eight that wait are exact. A job's work runs with the
+bridge's lock held, so a cancellation reaches a running job only while a
+test holds it. An unload fails every unfinished job with `session_unloaded`
+at once, where the runner fails the waiting ones itself and lets the
+running one end. And the fake it wraps refuses a submit while 64 jobs are
+unreleased.
+
+The fixture's results are held to the golden frames of the sidecar's job
+messages and its other rules by its own tests, both in
 `test/unit/bounded_job_bridge_conformance_test.cpp`; no test runs the same
 cases against the runner yet.
 

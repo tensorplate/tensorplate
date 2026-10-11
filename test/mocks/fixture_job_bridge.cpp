@@ -224,8 +224,11 @@ void FixtureJobBridge::set_health(Result<void> health) {
 
 bool FixtureJobBridge::settled(std::chrono::milliseconds patience) {
   std::unique_lock<std::mutex> lock(mutex_);
-  // A job that is due to end has pending_ set by whoever made it due.
   return settled_.wait_for(lock, patience, [this] { return !pending_ && !delivering_; });
+}
+
+std::vector<Error> FixtureJobBridge::refusals() const {
+  return rules_.refusals();
 }
 
 // -- The backend. ----------------------------------------------------------------
@@ -233,7 +236,8 @@ bool FixtureJobBridge::settled(std::chrono::milliseconds patience) {
 void FixtureJobBridge::run() {
   std::unique_lock<std::mutex> lock(mutex_);
   for (;;) {
-    if (phase_ == Phase::Ready && running_ != 0 && !held_) {
+    // Whoever made the job due set pending_, so its events are delivered next.
+    if (running_ != 0 && !held_) {
       end_running_locked();
       continue;
     }
@@ -272,14 +276,12 @@ void FixtureJobBridge::end_running_locked() {
     running_ = lane_.front();
     lane_.pop_front();
   }
-  pending_ = true;
 }
 
 void FixtureJobBridge::cancel_locked(std::map<std::uint64_t, OpenJob>::iterator job) {
   const std::uint64_t job_id = job->first;
   job->second.cancelled = true;
   rules_.queue_cancel_acknowledged(job_id);
-  // The running job ends when its work returns; a waiting one ends now.
   if (job_id != running_) {
     lane_.erase(std::find(lane_.begin(), lane_.end(), job_id));
     rules_.queue_failed(job_id, cancelled());

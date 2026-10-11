@@ -11,8 +11,10 @@
 // every job's event order again, and never wait on the clock: an order a case
 // needs is forced by holding the backend's jobs.
 //
-// Not held here: `job_not_permitted` (the bindings permit every option) and
-// the destruction of the session, which a binding tests for itself.
+// Not held here: `job_not_permitted` (the bindings permit every option),
+// `health_timeout`, a backend event the job's order refuses being replaced by
+// `failed`, calls from several threads at once, and the destruction of the
+// session, which a binding tests for itself.
 //
 // Include it in one source file of a test binary and instantiate the suite
 // there with that binary's bindings.
@@ -51,6 +53,12 @@
 namespace tensorplate::testing {
 
 /// A bridge with its backend, and what the cases must know of that backend.
+///
+/// Where the header leaves a backend a choice, the cases rely on what a
+/// binding promises here: its backend runs `stt_decode` and `tts_synthesis`
+/// and no other class; it admits a job (`accepted`) when it takes it in, also
+/// behind a held one; and a job that has not started ends as soon as it is
+/// cancelled, without waiting for the running one.
 class BridgeUnderTest {
  public:
   BridgeUnderTest() = default;
@@ -64,9 +72,12 @@ class BridgeUnderTest {
 
   /// The session's prime: the backend runs jobs from here on.
   virtual void prime() = 0;
-  /// The session's unload; returns once the callbacks it owes have run.
+  /// The session's unload. When it returns every job has its terminal event
+  /// and `released`, every pending session is acknowledged and no callback
+  /// is still owed.
   virtual void unload() = 0;
-  /// The backend is gone under a primed session, which is not told.
+  /// The backend is gone under a primed session, which is not told: its jobs
+  /// fail and none is released before unload().
   virtual void lose_backend() = 0;
 
   /// From now until release_jobs(), a job that has started does not end.
@@ -76,12 +87,33 @@ class BridgeUnderTest {
   /// callback owed for it has run, as far as held jobs allow.
   [[nodiscard]] virtual bool settled(std::chrono::milliseconds patience) = 0;
 
-  /// Jobs that wait behind the running one before one more is turned away.
+  /// Jobs the backend admits behind the running one. It turns one more away,
+  /// by refusing the submit or by ending the job with `failed`.
   [[nodiscard]] virtual std::size_t waiting_jobs() const = 0;
   /// The backend's result for a decode `request`.
   [[nodiscard]] virtual TranscriptResult transcript(const JobRequest& request) const = 0;
   /// The PCM the backend synthesizes for `request`.
   [[nodiscard]] virtual std::vector<std::byte> speech(const JobRequest& request) const = 0;
+};
+
+/// Marks the calling thread as inside a bridge method while it lives.
+class InsideABridgeCall {
+ public:
+  InsideABridgeCall() { ++calls(); }
+  ~InsideABridgeCall() { --calls(); }
+  InsideABridgeCall(const InsideABridgeCall&) = delete;
+  InsideABridgeCall& operator=(const InsideABridgeCall&) = delete;
+  InsideABridgeCall(InsideABridgeCall&&) = delete;
+  InsideABridgeCall& operator=(InsideABridgeCall&&) = delete;
+
+  /// Bridge calls the calling thread is inside.
+  [[nodiscard]] static int depth() { return calls(); }
+
+ private:
+  static int& calls() {
+    thread_local int count = 0;
+    return count;
+  }
 };
 
 struct BridgeCase {
@@ -96,7 +128,6 @@ inline std::ostream& operator<<(std::ostream& out, const BridgeCase& bridge_case
 class BoundedJobBridgeConformance : public ::testing::TestWithParam<BridgeCase> {
  protected:
   using Kinds = std::vector<JobEventKind>;
-  using enum JobEventKind;
 
   /// How long a wait lasts before the case fails.
   static constexpr std::chrono::seconds kPatience{30};
@@ -128,35 +159,42 @@ class BoundedJobBridgeConformance : public ::testing::TestWithParam<BridgeCase> 
 
   /// Registers the sink and primes: the backend runs jobs.
   void ready() {
-    ASSERT_TRUE(bridge().set_event_sink(sink).has_value());
+    ASSERT_TRUE(set_sink(sink).has_value());
     under->prime();
   }
 
   // -- Requests. ---------------------------------------------------------------
 
   [[nodiscard]] JobRequest decode(std::uint64_t job_id, std::uint64_t session_key,
-                                  std::uint64_t start_sample = 0,
-                                  std::uint32_t progress_limit = 0) {
+                                  std::uint64_t start_sample = 0) {
     constexpr std::size_t kBytes = 3'200;
     const BufferRef buffer = under->buffers().allocate(kBytes).value();
     return JobRequest::create(
                JobIdentity{job_id, session_key, kGeneration}, JobClass::SttDecode,
                AudioFrames{kJobInputAudioFormat, PcmWindow{buffer, 0, kBytes}, start_sample},
-               JobOptions{.language = "en"}, progress_limit)
+               JobOptions{.language = "en"})
         .value();
   }
 
-  [[nodiscard]] static JobRequest synthesis(std::uint64_t job_id, std::uint64_t session_key,
-                                            std::uint32_t progress_limit = 0) {
+  [[nodiscard]] static JobRequest synthesis(std::uint64_t job_id, std::uint64_t session_key) {
     return JobRequest::create(
                JobIdentity{job_id, session_key, kGeneration}, JobClass::TtsSynthesis,
                TextSegment{"hello there."},
-               JobOptions{.language = "en-US", .voice = "af_heart", .speed_milli = 1000},
-               progress_limit)
+               JobOptions{.language = "en-US", .voice = "af_heart", .speed_milli = 1000})
         .value();
   }
 
   // -- Bridge calls, noted with the sink first as a receiver notes them. --------
+
+  [[nodiscard]] Result<void> set_sink(std::shared_ptr<JobEventSink> registered) {
+    const InsideABridgeCall inside;
+    return bridge().set_event_sink(std::move(registered));
+  }
+
+  [[nodiscard]] Result<void> health() {
+    const InsideABridgeCall inside;
+    return bridge().health();
+  }
 
   [[nodiscard]] Result<void> submit(const JobRequest& request) {
     sink->expect_job(request);
@@ -165,20 +203,20 @@ class BoundedJobBridgeConformance : public ::testing::TestWithParam<BridgeCase> 
 
   /// A submit the sink is not told of: one the case expects to be refused.
   [[nodiscard]] Result<void> resubmit(const JobRequest& request) {
-    const InsideACall inside;
+    const InsideABridgeCall inside;
     return bridge().submit(request);
   }
 
   [[nodiscard]] Result<void> cancel(std::uint64_t job_id) {
     sink->expect_cancel(job_id);
-    const InsideACall inside;
+    const InsideABridgeCall inside;
     return bridge().cancel(job_id);
   }
 
   [[nodiscard]] Result<void> release(std::uint64_t session_key,
                                      std::uint64_t generation = kGeneration) {
     sink->expect_session_release(session_key);
-    const InsideACall inside;
+    const InsideABridgeCall inside;
     return bridge().release_session(session_key, generation);
   }
 
@@ -253,24 +291,8 @@ class BoundedJobBridgeConformance : public ::testing::TestWithParam<BridgeCase> 
   std::atomic<int> callbacks_inside_a_call{0};
 
  private:
-  // Marks the calling thread as inside a bridge method.
-  class InsideACall {
-   public:
-    InsideACall() { ++depth(); }
-    ~InsideACall() { --depth(); }
-    InsideACall(const InsideACall&) = delete;
-    InsideACall& operator=(const InsideACall&) = delete;
-    InsideACall(InsideACall&&) = delete;
-    InsideACall& operator=(InsideACall&&) = delete;
-
-    static int& depth() {
-      thread_local int calls = 0;
-      return calls;
-    }
-  };
-
   void note_callback() {
-    if (InsideACall::depth() != 0) {
+    if (InsideABridgeCall::depth() != 0) {
       ++callbacks_inside_a_call;
     }
     const std::lock_guard<std::mutex> lock(mutex_);
@@ -281,24 +303,25 @@ class BoundedJobBridgeConformance : public ::testing::TestWithParam<BridgeCase> 
   std::condition_variable changed_;
 };
 
+using enum JobEventKind;
+
 // -- The sink. -------------------------------------------------------------------
 
 // set_event_sink: "@return success, or Error::Code::ConfigInvalid with reason
 // "event_sink_null" or "event_sink_already_set"."
 TEST_P(BoundedJobBridgeConformance, ANullSinkAndASecondSinkAreRefused) {
-  expect_refused(bridge().set_event_sink(nullptr), Error::Code::ConfigInvalid, "event_sink_null");
-  ASSERT_TRUE(bridge().set_event_sink(sink).has_value());
-  expect_refused(bridge().set_event_sink(sink), Error::Code::ConfigInvalid,
+  expect_refused(set_sink(nullptr), Error::Code::ConfigInvalid, "event_sink_null");
+  ASSERT_TRUE(set_sink(sink).has_value());
+  expect_refused(set_sink(sink), Error::Code::ConfigInvalid, "event_sink_already_set");
+  expect_refused(set_sink(std::make_shared<RecordingJobEventSink>()), Error::Code::ConfigInvalid,
                  "event_sink_already_set");
-  expect_refused(bridge().set_event_sink(std::make_shared<RecordingJobEventSink>()),
-                 Error::Code::ConfigInvalid, "event_sink_already_set");
 }
 
 // submit: "the first of these that applies: Error::Code::NotReady,
 // "event_sink_missing": no sink registered", ahead of "backend_not_ready".
 // release_session: "or Error::Code::NotReady, "event_sink_missing"".
 TEST_P(BoundedJobBridgeConformance, WithoutASinkSubmitAndReleaseAreRefused) {
-  ASSERT_FALSE(bridge().set_event_sink(nullptr).has_value());
+  ASSERT_FALSE(set_sink(nullptr).has_value());
   expect_refused(resubmit(decode(1, 5)), Error::Code::NotReady, "event_sink_missing");
   expect_refused(release(5), Error::Code::NotReady, "event_sink_missing");
   under->prime();
@@ -312,17 +335,24 @@ TEST_P(BoundedJobBridgeConformance, WithoutASinkSubmitAndReleaseAreRefused) {
 // success, or Error::Code::NotReady ("backend_not_ready")". "After a method
 // fails, no event is delivered because of that call."
 TEST_P(BoundedJobBridgeConformance, BeforeThePrimeNoJobIsTakenAndHealthIsNotReady) {
-  ASSERT_TRUE(bridge().set_event_sink(sink).has_value());
+  ASSERT_TRUE(set_sink(sink).has_value());
   expect_refused(resubmit(decode(1, 5)), Error::Code::NotReady, "backend_not_ready");
-  expect_refused(bridge().health(), Error::Code::NotReady, "backend_not_ready");
+  expect_refused(health(), Error::Code::NotReady, "backend_not_ready");
   ASSERT_TRUE(settled());
   EXPECT_TRUE(sink->events().empty());
 }
 
-// health: "Reports whether the backend can run jobs now".
-TEST_P(BoundedJobBridgeConformance, APrimedBackendIsHealthy) {
+// health: "Reports whether the backend can run jobs now ... without entering
+// the session lifecycle or waiting for a job."
+TEST_P(BoundedJobBridgeConformance, APrimedBackendIsHealthyAlsoWhileAJobRuns) {
   ASSERT_NO_FATAL_FAILURE(ready());
-  EXPECT_TRUE(bridge().health().has_value());
+  EXPECT_TRUE(health().has_value());
+  under->hold_jobs();
+  ASSERT_TRUE(submit(decode(1, 5)).has_value());
+  ASSERT_TRUE(settled());
+  EXPECT_TRUE(health().has_value());
+  under->release_jobs();
+  EXPECT_TRUE(wait_kinds(1, {Accepted, Completed, Released}));
 }
 
 // -- Jobs. -----------------------------------------------------------------------
@@ -358,15 +388,15 @@ TEST_P(BoundedJobBridgeConformance, ASynthesisCompletesWithOneChunkTheReceiverRe
   EXPECT_TRUE(under->buffers().release(chunk->pcm.buffer).has_value());
 }
 
-// Not a sentence of the bridge header: the speech backends return a job's
-// whole result with `completed`, so a job that may deliver progress
-// (JobRequest::progress_limit() above zero) still delivers none.
+// job_event.hpp: "A job delivers at most JobRequest::progress_limit() of them;
+// with the default limit of zero it delivers none."
 TEST_P(BoundedJobBridgeConformance, NeitherSpeechClassDeliversProgress) {
   ASSERT_NO_FATAL_FAILURE(ready());
-  ASSERT_TRUE(submit(decode(1, 5, 0, /*progress_limit=*/4)).has_value());
-  ASSERT_TRUE(submit(synthesis(2, 5, /*progress_limit=*/4)).has_value());
+  ASSERT_TRUE(submit(decode(1, 5)).has_value());
+  ASSERT_TRUE(submit(synthesis(2, 5)).has_value());
   ASSERT_TRUE(wait_kinds(1, {Accepted, Completed, Released}));
   ASSERT_TRUE(wait_kinds(2, {Accepted, Completed, Released}));
+  EXPECT_EQ(count(1, Progress) + count(2, Progress), 0U);
   const JobResult speech = event_of(2, Completed).result().value();
   EXPECT_TRUE(under->buffers()
                   .release(std::get<AudioChunkResult>(speech.payload()).pcm.buffer)
@@ -401,10 +431,9 @@ TEST_P(BoundedJobBridgeConformance, AJobIdIsRefusedUntilItsJobWasReleased) {
   EXPECT_TRUE(wait_kinds(1, {Accepted, Completed, Released, Accepted, Completed, Released}));
 }
 
-// "Several jobs may be outstanding at once; an implementation that admits
-// fewer refuses the rest with Error::Code::ResourceExhausted". submit:
-// ""job_capacity_exhausted": the backend's bounded admission is full". A
-// backend that finds out after the submit ends the job with `failed` instead.
+// "an implementation that admits fewer refuses the rest with
+// Error::Code::ResourceExhausted"; submit: ""job_capacity_exhausted": the
+// backend's bounded admission is full". BridgeUnderTest::waiting_jobs().
 TEST_P(BoundedJobBridgeConformance, OneJobBeyondTheBackendsBoundIsTurnedAway) {
   ASSERT_NO_FATAL_FAILURE(ready());
   under->hold_jobs();
@@ -445,7 +474,8 @@ TEST_P(BoundedJobBridgeConformance, ACancelOfAJobNeverSubmittedOrAlreadyReleased
 
 // cancel: "The job still ends with exactly one terminal event and then, once
 // its release is confirmed, `released`". job_event.hpp: "`failed` with
-// Error::Code::Cancelled if the backend stopped the job".
+// Error::Code::Cancelled if the backend stopped the job". That it ends while
+// another job is held is BridgeUnderTest's promise.
 TEST_P(BoundedJobBridgeConformance, ACancelledWaitingJobFailsCancelledAndIsReleased) {
   ASSERT_NO_FATAL_FAILURE(ready());
   under->hold_jobs();
@@ -597,12 +627,9 @@ TEST_P(BoundedJobBridgeConformance, ACallbackMaySubmitCancelAndRelease) {
 
 // JobEventSink: "Every job whose submit() succeeded receives exactly one
 // `completed` or `failed`, also when ... the session unloads (then `failed`
-// with Error::Code::Unavailable and reason ... "session_unloaded")". submit:
-// "Error::Code::Unavailable, "backend_unavailable": ... its session was
-// unloaded or destroyed". release_session and health: "Error::Code::Unavailable
-// ("backend_unavailable")". registry.hpp: "afterwards no callback runs".
-TEST_P(BoundedJobBridgeConformance,
-       AnUnloadEndsEveryJobAcknowledgesEverySessionAndClosesTheBridge) {
+// with Error::Code::Unavailable and reason ... "session_unloaded")". That all
+// of it has happened when the unload returns is BridgeUnderTest::unload().
+TEST_P(BoundedJobBridgeConformance, AnUnloadEndsEveryJobAndAcknowledgesEverySession) {
   ASSERT_NO_FATAL_FAILURE(ready());
   under->hold_jobs();
   ASSERT_TRUE(submit(decode(1, 5)).has_value());
@@ -620,44 +647,75 @@ TEST_P(BoundedJobBridgeConformance,
   expect_failed(2, Error::Code::Unavailable, "session_unloaded");
   EXPECT_EQ(sink->session_releases(),
             (std::vector<std::pair<std::uint64_t, std::uint64_t>>{{5, kGeneration}}));
+}
+
+// submit: "Error::Code::Unavailable, "backend_unavailable": the backend was
+// reset, its session was unloaded or destroyed, or it is shutting down".
+// release_session: "or Error::Code::Unavailable, "backend_unavailable"".
+// health: "Error::Code::Unavailable ("backend_unavailable")".
+TEST_P(BoundedJobBridgeConformance, AfterAnUnloadTheBridgeIsUnavailableAndSilent) {
+  ASSERT_NO_FATAL_FAILURE(ready());
+  ASSERT_TRUE(submit(decode(1, 5)).has_value());
+  ASSERT_TRUE(wait_kinds(1, {Accepted, Completed, Released}));
+
+  under->unload();
+
   const std::size_t delivered = sink->events().size();
-  expect_refused(resubmit(decode(3, 7)), Error::Code::Unavailable, "backend_unavailable");
-  expect_refused(release(7), Error::Code::Unavailable, "backend_unavailable");
-  expect_refused(bridge().health(), Error::Code::Unavailable, "backend_unavailable");
+  expect_refused(resubmit(decode(2, 6)), Error::Code::Unavailable, "backend_unavailable");
+  expect_refused(release(6), Error::Code::Unavailable, "backend_unavailable");
+  expect_refused(health(), Error::Code::Unavailable, "backend_unavailable");
   ASSERT_TRUE(settled());
   EXPECT_EQ(sink->events().size(), delivered);
-  EXPECT_EQ(sink->session_releases().size(), 1U);
+  EXPECT_TRUE(sink->session_releases().empty());
 }
 
 // JobEventSink: "also when the backend resets ... (then `failed` with
-// Error::Code::Unavailable and reason "backend_reset" ...). `released` follows
-// only once release actually happened, including after a confirmed process
-// reap". cancel: "cancelling a job whose terminal event was already delivered,
-// succeeds and changes nothing". release_session: "Error::Code::Unavailable,
-// "backend_unavailable" (the backend holds no state any more ...)".
+// Error::Code::Unavailable and reason "backend_reset" ...)"; "`released`
+// follows only once release actually happened". BridgeUnderTest::lose_backend().
 TEST_P(BoundedJobBridgeConformance, ALostBackendFailsItsJobsAndReleasesThemOnlyAtTheUnload) {
   ASSERT_NO_FATAL_FAILURE(ready());
   under->hold_jobs();
   ASSERT_TRUE(submit(decode(1, 5)).has_value());
   ASSERT_TRUE(settled());
+  ASSERT_TRUE(submit(decode(2, 5)).has_value());
+  ASSERT_TRUE(settled());
 
   under->lose_backend();
 
-  ASSERT_TRUE(wait_kinds(1, {Accepted, Failed}));
-  const Error lost = event_of(1, Failed).error().value();
-  EXPECT_EQ(lost.code, Error::Code::Unavailable);
-  EXPECT_EQ(lost.context.value_or(""), "backend_reset");
-  EXPECT_TRUE(cancel(1).has_value());
-  expect_refused(resubmit(decode(2, 5)), Error::Code::Unavailable, "backend_unavailable");
-  expect_refused(release(6), Error::Code::Unavailable, "backend_unavailable");
-  expect_refused(bridge().health(), Error::Code::Unavailable, "backend_unavailable");
+  for (const std::uint64_t job_id : {1U, 2U}) {
+    ASSERT_TRUE(wait_kinds(job_id, {Accepted, Failed})) << job_id;
+    const Error lost = event_of(job_id, Failed).error().value();
+    EXPECT_EQ(lost.code, Error::Code::Unavailable);
+    EXPECT_EQ(lost.context.value_or(""), "backend_reset");
+  }
   ASSERT_TRUE(settled());
   EXPECT_EQ(sink->kinds_for(1), (Kinds{Accepted, Failed}));
-  EXPECT_TRUE(sink->session_releases().empty());
+  EXPECT_EQ(sink->kinds_for(2), (Kinds{Accepted, Failed}));
 
   under->unload();
 
   EXPECT_EQ(sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  EXPECT_EQ(sink->kinds_for(2), (Kinds{Accepted, Failed, Released}));
+}
+
+// cancel: "cancelling a job whose terminal event was already delivered,
+// succeeds and changes nothing". submit, release_session and health:
+// "Error::Code::Unavailable", "backend_unavailable".
+TEST_P(BoundedJobBridgeConformance, AfterItsBackendWasLostTheBridgeIsUnavailable) {
+  ASSERT_NO_FATAL_FAILURE(ready());
+  under->hold_jobs();
+  ASSERT_TRUE(submit(decode(1, 5)).has_value());
+  ASSERT_TRUE(settled());
+  under->lose_backend();
+  ASSERT_TRUE(wait_kinds(1, {Accepted, Failed}));
+
+  EXPECT_TRUE(cancel(1).has_value());
+  expect_refused(resubmit(decode(2, 5)), Error::Code::Unavailable, "backend_unavailable");
+  expect_refused(release(6), Error::Code::Unavailable, "backend_unavailable");
+  expect_refused(health(), Error::Code::Unavailable, "backend_unavailable");
+  ASSERT_TRUE(settled());
+  EXPECT_EQ(sink->kinds_for(1), (Kinds{Accepted, Failed}));
+  EXPECT_TRUE(sink->session_releases().empty());
 }
 
 }  // namespace tensorplate::testing

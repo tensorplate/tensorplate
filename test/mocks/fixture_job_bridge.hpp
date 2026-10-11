@@ -6,8 +6,8 @@
 // It keeps the bridge's promises through FakeBoundedJobBridge (the refusals,
 // one JobEventSequence per job, a session acknowledged after its jobs) and
 // plays the backend as the in-tree sidecar runner does with its fixture
-// backend (backends/python_pytorch/src/tensorplate_pytorch_backend/jobs.py
-// and backends/fixture.py):
+// backend (jobs.py and backends/fixture.py under
+// backends/python_pytorch/src/tensorplate_pytorch_backend/):
 //
 //   - it runs `stt_decode` and `tts_synthesis`; one job runs and
 //     kWaitingJobs wait in submission order; one more ends with `failed`
@@ -20,10 +20,18 @@
 //   - a lost backend fails its jobs (`backend_reset`) and releases nothing
 //     until the session unloads.
 //
-// One thread runs the jobs and makes every callback while the backend lives;
-// unload() makes the last ones on its caller's thread. prime(),
-// lose_backend(), unload() and the destructor stand for the session's side:
-// never call them from a sink callback or while holding a lock one takes.
+// Where it differs from the runner: a job starts at its submit when nothing
+// runs, so the eight that wait are exact; a job's work runs with the bridge's
+// lock held, so a cancel reaches a running job only while a test holds it;
+// an unload fails every unfinished job with `session_unloaded` at once, where
+// the runner fails the waiting ones itself and lets the running one end; and
+// the wrapped fake refuses a submit while 64 jobs are unreleased.
+//
+// One thread runs the jobs and makes the callbacks while the backend lives.
+// unload() returns once every callback owed has run, on its caller's thread
+// or on that one. prime(), lose_backend(), unload() and the destructor stand
+// for the session's side: never call them from a sink callback or while
+// holding a lock one takes.
 
 #pragma once
 
@@ -69,7 +77,8 @@ class FixtureJobBridge final : public BoundedJobBridge {
   /// Jobs that wait behind the running one.
   static constexpr std::size_t kWaitingJobs = 8;
 
-  /// What a job that ran returns; an error fails the job with it.
+  /// What a job that ran returns; an error fails the job with it. Called
+  /// with the bridge's lock held: it neither blocks nor calls the bridge.
   using ResultFunction = std::function<Result<JobResult>(const JobRequest&, BufferManager&)>;
 
   /// @param buffers  where a synthesis result is published; outlives the
@@ -117,6 +126,9 @@ class FixtureJobBridge final : public BoundedJobBridge {
   /// callback owed for it has run, as far as a held job allows; false when
   /// that takes longer than `patience`.
   [[nodiscard]] bool settled(std::chrono::milliseconds patience);
+  /// Events of its own backend that a job's event order refused. Empty unless
+  /// the fixture itself is wrong.
+  [[nodiscard]] std::vector<Error> refusals() const;
 
  private:
   enum class Phase : std::uint8_t { Loaded, Ready, Lost, Unloaded };

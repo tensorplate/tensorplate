@@ -8,12 +8,14 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <future>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -28,6 +30,7 @@
 
 #include "fixture_job_bridge.hpp"
 #include "recording_job_event_sink.hpp"
+#include "speech_job_golden.hpp"
 
 namespace tensorplate::testing {
 namespace {
@@ -42,6 +45,11 @@ std::unique_ptr<BufferManager> make_buffers(std::size_t capacity_bytes = 16U << 
 
 class FixtureBridgeUnderTest final : public BridgeUnderTest {
  public:
+  ~FixtureBridgeUnderTest() override {
+    bridge_.unload();
+    EXPECT_TRUE(bridge_.refusals().empty());
+  }
+
   BoundedJobBridge& bridge() override { return bridge_; }
   BufferManager& buffers() override { return *buffers_; }
   void prime() override { bridge_.prime(); }
@@ -64,22 +72,27 @@ class FixtureBridgeUnderTest final : public BridgeUnderTest {
   FixtureJobBridge bridge_{*buffers_};
 };
 
-// -- The fixture's own hold on its backend. ---------------------------------------
+// The lane depth of the runner's job table (GPU_LANE_QUEUE_DEPTH in jobs.py).
+static_assert(FixtureJobBridge::kWaitingJobs == 8);
+
+// -- The fixture's own rules, which the cases leave open. -------------------------
 
 constexpr std::chrono::seconds kPatience{30};
 
-JobRequest synthesis(std::uint64_t job_id) {
+JobRequest synthesis(std::uint64_t job_id, std::string text = "hello there.",
+                     std::uint32_t progress_limit = 0) {
   return JobRequest::create(
-             JobIdentity{job_id, 5, 3}, JobClass::TtsSynthesis, TextSegment{"hello there."},
-             JobOptions{.language = "en-US", .voice = "af_heart", .speed_milli = 1000})
+             JobIdentity{job_id, 5, 3}, JobClass::TtsSynthesis, TextSegment{std::move(text)},
+             JobOptions{.language = "en-US", .voice = "af_heart", .speed_milli = 1000},
+             progress_limit)
       .value();
 }
 
-JobRequest decode(std::uint64_t job_id, BufferManager& buffers) {
+JobRequest decode(std::uint64_t job_id, BufferManager& buffers, std::uint32_t progress_limit = 0) {
   const BufferRef buffer = buffers.allocate(3'200).value();
   return JobRequest::create(JobIdentity{job_id, 5, 3}, JobClass::SttDecode,
                             AudioFrames{kJobInputAudioFormat, PcmWindow{buffer, 0, 3'200}, 0},
-                            JobOptions{.language = "en"})
+                            JobOptions{.language = "en"}, progress_limit)
       .value();
 }
 
@@ -90,6 +103,9 @@ struct Bench {
     EXPECT_TRUE(bridge.set_event_sink(sink).has_value());
     bridge.prime();
   }
+  Bench(const Bench&) = delete;
+  Bench& operator=(const Bench&) = delete;
+  ~Bench() { EXPECT_EQ(bridge.refusals().size(), refusals_expected); }
 
   [[nodiscard]] Result<void> submit(const JobRequest& request) {
     sink->expect_job(request);
@@ -111,30 +127,87 @@ struct Bench {
   std::unique_ptr<BufferManager> buffers;
   std::shared_ptr<RecordingJobEventSink> sink = std::make_shared<RecordingJobEventSink>();
   FixtureJobBridge bridge;
+  /// Events of the fixture's backend that a job's event order refused.
+  std::size_t refusals_expected = 0;
 };
 
 using Kinds = std::vector<JobEventKind>;
 using enum JobEventKind;
 
-// backends/fixture.py: "hello" with one word unit that ends a quarter of the
-// payload's bytes after its start; 160 bytes of silence for each byte of text.
-TEST(FixtureJobBridge, ItsResultsAreTheRunnersFixtureResults) {
+// Against the golden frames of the sidecar's job messages
+// (protocol/rust/tests/fixtures/python_pytorch_ipc_speech_jobs_*.jsonl): the
+// result each records for its submit is the one the fixture gives.
+TEST(FixtureJobBridge, ItsResultsAreThoseOfTheGoldenFrames) {
   Bench bench;
-  const JobRequest audio = decode(1, *bench.buffers);
-  AudioFrames shifted = std::get<AudioFrames>(audio.payload());
-  shifted.start_sample = 480;
-  EXPECT_EQ(fixture_transcript(shifted),
-            (TranscriptResult{"hello", {1}, {WordUnit{"hello", 0, 1, 480, 1'280}}}));
-  ASSERT_TRUE(bench.submit(synthesis(2)).has_value());
-  const JobResult speech = bench.event_of(2, Completed).result().value();
-  const PcmWindow pcm = std::get<AudioChunkResult>(speech.payload()).pcm;
-  EXPECT_EQ(pcm.byte_size, 1'920U);
-  const auto bytes = bench.buffers->data(pcm.buffer).value();
-  EXPECT_EQ(std::count(bytes.begin(), bytes.end(), std::byte{0}), 1'920);
+  const auto decoded = speech_golden::golden("stt_decode");
+  ASSERT_GE(decoded.size(), 3U);
+  const auto& window = decoded[0].at("input");
+  const auto bytes = window.at("payload_length").get<std::size_t>();
+  const AudioFrames audio{kJobInputAudioFormat,
+                          PcmWindow{bench.buffers->allocate(bytes).value(), 0, bytes},
+                          window.at("start_sample").get<std::uint64_t>()};
+  const auto& transcript = decoded[2].at("result");
+  const auto& word = transcript.at("words").at(0);
+  EXPECT_EQ(fixture_transcript(audio),
+            (TranscriptResult{transcript.at("text").get<std::string>(),
+                              transcript.at("tokens").get<std::vector<std::uint32_t>>(),
+                              {WordUnit{word.at("text").get<std::string>(),
+                                        word.at("token_begin").get<std::uint32_t>(),
+                                        word.at("token_end").get<std::uint32_t>(),
+                                        word.at("start_sample").get<std::uint64_t>(),
+                                        word.at("end_sample").get<std::uint64_t>()}}}));
+
+  const auto spoken = speech_golden::golden("tts_synthesis");
+  ASSERT_GE(spoken.size(), 3U);
+  const auto text_bytes = spoken[0].at("input").at("payload_length").get<std::size_t>();
+  ASSERT_TRUE(bench.submit(synthesis(1, std::string(text_bytes, 'a'))).has_value());
+  const JobResult speech = bench.event_of(1, Completed).result().value();
+  const auto& chunk = std::get<AudioChunkResult>(speech.payload());
+  const auto& recorded = spoken[2].at("result");
+  EXPECT_EQ(chunk.pcm.byte_size, recorded.at("payload_length").get<std::size_t>());
+  EXPECT_EQ(chunk.format.sample_rate_hz,
+            recorded.at("format").at("sample_rate_hz").get<std::uint32_t>());
+  EXPECT_EQ(chunk.clipped_samples, recorded.at("clipped_samples").get<std::uint32_t>());
+  // The frames do not hold the payload; the fixture backend returns silence.
+  const auto pcm = bench.buffers->data(chunk.pcm.buffer).value();
+  EXPECT_EQ(static_cast<std::size_t>(std::count(pcm.begin(), pcm.end(), std::byte{0})),
+            chunk.pcm.byte_size);
+}
+
+// The speech backends return a job's whole result with `completed`: a job
+// that may deliver progress still delivers none.
+TEST(FixtureJobBridge, AJobAllowedProgressDeliversNone) {
+  Bench bench;
+  ASSERT_TRUE(bench.submit(decode(1, *bench.buffers, 4)).has_value());
+  ASSERT_TRUE(bench.submit(synthesis(2, "hello there.", 4)).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, Completed, Released}));
+  EXPECT_EQ(bench.sink->kinds_for(2), (Kinds{Accepted, Completed, Released}));
+}
+
+TEST(FixtureJobBridge, TheTenthJobIsFailedUnacceptedAndTheNineRunInSubmissionOrder) {
+  std::vector<std::uint64_t> ran;
+  Bench bench(make_buffers(), [&ran](const JobRequest& request, BufferManager& buffers) {
+    ran.push_back(request.identity().job_id);
+    return fixture_job_result(request, buffers);
+  });
+  bench.bridge.hold_jobs();
+  for (std::uint64_t job_id = 1; job_id <= 10; ++job_id) {
+    ASSERT_TRUE(bench.submit(decode(job_id, *bench.buffers)).has_value()) << job_id;
+  }
+  const Error full = bench.event_of(10, Failed).error().value();
+  EXPECT_EQ(full.code, Error::Code::ResourceExhausted);
+  EXPECT_EQ(full.context.value_or(""), "job_capacity_exhausted");
+  EXPECT_EQ(bench.sink->kinds_for(10), (Kinds{Failed, Released}));
+  EXPECT_EQ(bench.sink->kinds_for(9), Kinds{Accepted});
+
+  bench.bridge.release_jobs();
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(ran, (std::vector<std::uint64_t>{1, 2, 3, 4, 5, 6, 7, 8, 9}));
 }
 
 // jobs.py: a cancellation is acknowledged when it arrives; a waiting job ends
-// then, the running one when its work returns, both cancelled.
+// then, the running one when its work returns, both cancelled and no reason.
 TEST(FixtureJobBridge, ACancelIsAcknowledgedAtOnceAndEndsTheJobCancelled) {
   Bench bench;
   bench.bridge.hold_jobs();
@@ -147,11 +220,15 @@ TEST(FixtureJobBridge, ACancelIsAcknowledgedAtOnceAndEndsTheJobCancelled) {
   ASSERT_TRUE(bench.bridge.settled(kPatience));
   EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, CancelAcknowledged}));
   EXPECT_EQ(bench.sink->kinds_for(2), (Kinds{Accepted, CancelAcknowledged, Failed, Released}));
-  EXPECT_EQ(bench.event_of(2, Failed).error().value().code, Error::Code::Cancelled);
 
   bench.bridge.release_jobs();
-  EXPECT_EQ(bench.event_of(1, Failed).error().value().code, Error::Code::Cancelled);
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
   EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, CancelAcknowledged, Failed, Released}));
+  for (const std::uint64_t job_id : {1U, 2U}) {
+    const Error ended = bench.event_of(job_id, Failed).error().value();
+    EXPECT_EQ(ended.code, Error::Code::Cancelled) << job_id;
+    EXPECT_FALSE(ended.context.has_value()) << job_id;
+  }
   EXPECT_TRUE(bench.sink->violations().empty());
 }
 
@@ -181,6 +258,20 @@ TEST(FixtureJobBridge, AJobCompletesWithWhatItsResultFunctionReturns) {
             JobResult::create(TranscriptResult{"7", {}, {}}).value());
   EXPECT_EQ(bench.event_of(8, Completed).result().value(),
             JobResult::create(TranscriptResult{"8", {}, {}}).value());
+}
+
+TEST(FixtureJobBridge, AResultOfTheWrongKindFailsItsJobAndIsReported) {
+  Bench bench(make_buffers(), [](const JobRequest&, BufferManager&) {
+    return JobResult::create(TranscriptResult{"not speech", {}, {}});
+  });
+  bench.refusals_expected = 1;
+  ASSERT_TRUE(bench.submit(synthesis(1)).has_value());
+  const Error failed = bench.event_of(1, Failed).error().value();
+  EXPECT_EQ(failed.code, Error::Code::InferenceFailed);
+  EXPECT_EQ(failed.context.value_or(""), "result_kind_mismatch");
+  EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  ASSERT_EQ(bench.bridge.refusals().size(), 1U);
+  EXPECT_EQ(bench.bridge.refusals()[0].context.value_or(""), "result_kind_mismatch");
 }
 
 TEST(FixtureJobBridge, ASynthesisItsBuffersCannotHoldFailsWithTheirError) {
@@ -248,6 +339,59 @@ TEST(FixtureJobBridge, IsNotSettledWhileACallbackRuns) {
   leave.set_value();
   ASSERT_TRUE(bench.bridge.settled(kPatience));
   EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, Completed, Released}));
+}
+
+// The callback of job 1 starts job 2, which is held, and then blocks: the
+// unload finds a job to fail while a callback is running on the other thread.
+TEST(FixtureJobBridge, AnUnloadWaitsForARunningCallbackAndLeavesNothingOwed) {
+  std::promise<void> inside;
+  std::promise<void> leave;
+  std::atomic<bool> left{false};
+  Bench bench;
+  const JobRequest second = decode(2, *bench.buffers);
+  bench.sink->set_callback_hook([&, waiting = leave.get_future().share()](const JobEvent& event) {
+    if (event.identity().job_id == 1 && event.kind() == Completed) {
+      bench.bridge.hold_jobs();
+      EXPECT_TRUE(bench.submit(second).has_value());
+      inside.set_value();
+      waiting.wait();
+      left = true;
+    }
+  });
+  ASSERT_TRUE(bench.submit(decode(1, *bench.buffers)).has_value());
+  inside.get_future().wait();
+
+  bool left_at_return = false;
+  Kinds second_at_return;
+  std::thread unloader([&] {
+    bench.bridge.unload();
+    left_at_return = left.load();
+    second_at_return = bench.sink->kinds_for(2);
+  });
+  // Once health reports the unload, it is at its wait for the callback.
+  const auto limit = std::chrono::steady_clock::now() + kPatience;
+  while (bench.bridge.health().has_value() && std::chrono::steady_clock::now() < limit) {
+    std::this_thread::yield();
+  }
+  EXPECT_FALSE(bench.bridge.health().has_value());
+  leave.set_value();
+  unloader.join();
+
+  EXPECT_TRUE(left_at_return);
+  EXPECT_EQ(second_at_return, (Kinds{Accepted, Failed, Released}));
+}
+
+TEST(InsideABridgeCall, CountsTheCallsOfItsOwnThreadOnly) {
+  EXPECT_EQ(InsideABridgeCall::depth(), 0);
+  {
+    const InsideABridgeCall outer;
+    const InsideABridgeCall inner;
+    EXPECT_EQ(InsideABridgeCall::depth(), 2);
+    int elsewhere = -1;
+    std::thread([&elsewhere] { elsewhere = InsideABridgeCall::depth(); }).join();
+    EXPECT_EQ(elsewhere, 0);
+  }
+  EXPECT_EQ(InsideABridgeCall::depth(), 0);
 }
 
 }  // namespace
