@@ -37,6 +37,8 @@
 #include "tensorplate/ipc/sidecar_codec.hpp"
 #include "tensorplate/ipc/unix_socket.hpp"
 
+#include "job_channel.hpp"
+#include "job_wire.hpp"
 #include "runner_profile.hpp"
 #include "sidecar_frame_io.hpp"
 #include "sidecar_process.hpp"
@@ -197,6 +199,11 @@ ipc::UnixSocket::TimePoint clamped_deadline(const InferRequest& req,
   return TensorView::create(*dtype, std::move(shape));
 }
 
+[[nodiscard]] Unexpected buffer_manager_missing() {
+  return unexpected(Error::Code::ConfigInvalid,
+                    "python_pytorch adapter requires a BufferManager hook");
+}
+
 [[nodiscard]] json model_spec_to_json(const ModelSpec& spec) {
   json out;
   out["schema_version"] = std::string(kSchemaVersion);
@@ -238,11 +245,19 @@ BackendCapability make_python_pytorch_capability() {
 class PythonPytorchSession final : public ExecutionSession {
  public:
   PythonPytorchSession(ExecutionSessionRuntimeHooks hooks, PythonPytorchConfig config,
-                       SidecarLauncher launcher)
+                       SidecarLauncher launcher, std::shared_ptr<JobChannel> channel)
       : ExecutionSession(hooks),
         config_(std::move(config)),
         launcher_(std::move(launcher)),
-        manager_(hooks.buffer_manager) {}
+        manager_(hooks.buffer_manager),
+        channel_(std::move(channel)) {}
+
+  ~PythonPytorchSession() override { stop_sidecar(kSessionUnloaded); }
+
+  PythonPytorchSession(const PythonPytorchSession&) = delete;
+  PythonPytorchSession& operator=(const PythonPytorchSession&) = delete;
+  PythonPytorchSession(PythonPytorchSession&&) = delete;
+  PythonPytorchSession& operator=(PythonPytorchSession&&) = delete;
 
   [[nodiscard]] std::string_view backend_name() const noexcept override { return kBackendName; }
 
@@ -250,6 +265,10 @@ class PythonPytorchSession final : public ExecutionSession {
   Result<void> do_load(const ModelSpec& spec) override {
     if (process_) {
       return unexpected(Error::Code::Internal, "python_pytorch session already loaded");
+    }
+    if (config_.speech_jobs && manager_ == nullptr) {
+      // The channel would refuse every job for good.
+      return buffer_manager_missing();
     }
     auto req = launch_request(spec);
     if (!req.has_value()) {
@@ -265,17 +284,26 @@ class PythonPytorchSession final : public ExecutionSession {
     // Read the ready_event the runner emits on connect.
     auto ready = read_frame(process_->socket(), deadline_from_now(config_.startup_timeout));
     if (!ready.has_value()) {
-      process_->shutdown();
-      process_.reset();
-      return unexpected(ready.error());
+      return load_failure(ready.error());
     }
     auto ready_hdr = json::parse(ready.value().json_header, nullptr, /*allow_exceptions=*/false);
     if (ready_hdr.is_discarded() ||
         string_field(ready_hdr, "schema_version").value_or("") != std::string(kSchemaVersion) ||
         string_field(ready_hdr, "kind").value_or("") != std::string(kKindReadyEvent)) {
-      process_->shutdown();
-      process_.reset();
-      return unexpected(Error::Code::LoadFailed, "sidecar did not emit ready_event on connect");
+      return load_failure(
+          Error::make(Error::Code::LoadFailed, "sidecar did not emit ready_event on connect"));
+    }
+    if (config_.speech_jobs) {
+      // Enabled only where the sidecar lists it: an older one refuses the field.
+      const auto offered = offers_speech_jobs(ready.value().json_header);
+      if (!offered.has_value()) {
+        return load_failure(offered.error());
+      }
+      if (!offered.value()) {
+        return load_failure(Error::make(Error::Code::Unsupported,
+                                        "sidecar does not offer speech jobs",
+                                        "speech_jobs_not_offered"));
+      }
     }
 
     json req_hdr;
@@ -283,12 +311,26 @@ class PythonPytorchSession final : public ExecutionSession {
     req_hdr["message_id"] = next_message_id();
     req_hdr["kind"] = std::string(kKindLoadModel);
     req_hdr["model_spec"] = model_spec_to_json(spec);
+    if (config_.speech_jobs) {
+      req_hdr["capabilities"] = json::array({std::string(kSpeechJobsCapability)});
+    }
 
     auto resp = exchange(req_hdr, /*payload=*/{}, deadline_from_now(config_.startup_timeout),
                          std::string(kKindLoadModelResponse), Error::Code::LoadFailed);
     if (!resp.has_value()) {
-      shutdown_sidecar();
-      return unexpected(resp.error());
+      return load_failure(resp.error());
+    }
+    if (config_.speech_jobs) {
+      const auto classes = declared_job_classes(resp.value().dump());
+      if (!classes.has_value()) {
+        return load_failure(classes.error());
+      }
+      // From here on the channel's reader owns the socket.
+      if (auto started = channel_->start(process_->socket(), classes.value());
+          !started.has_value()) {
+        return load_failure(started.error());
+      }
+      jobs_started_ = true;
     }
     return Result<void>{};
   }
@@ -310,10 +352,17 @@ class PythonPytorchSession final : public ExecutionSession {
     if (!health.has_value()) {
       return unexpected(health.error());
     }
+    channel_->admit_jobs();
     return Result<void>{};
   }
 
   Result<std::vector<NamedOutput>> do_infer(const InferRequest& request) override {
+    if (config_.speech_jobs) {
+      // The one exchange slot stays free for prime, health and unload.
+      return unexpected(Error::make(Error::Code::Unsupported,
+                                    "a session that runs speech jobs takes no tensor request",
+                                    "tensor_inference_unsupported"));
+    }
     return run_infer(request);
   }
 
@@ -321,13 +370,15 @@ class PythonPytorchSession final : public ExecutionSession {
     if (!process_) {
       return Result<void>{};
     }
+    // The sidecar fails the jobs that wait when the unload arrives.
+    channel_->close_admission();
     json hdr;
     hdr["schema_version"] = std::string(kSchemaVersion);
     hdr["message_id"] = next_message_id();
     hdr["kind"] = std::string(kKindUnload);
     auto resp = exchange(hdr, {}, deadline_from_now(config_.startup_timeout),
                          std::string(kKindUnloadResponse), Error::Code::InferenceFailed);
-    shutdown_sidecar();
+    stop_sidecar(kSessionUnloaded);
     if (!resp.has_value()) {
       return unexpected(resp.error());
     }
@@ -373,17 +424,23 @@ class PythonPytorchSession final : public ExecutionSession {
     ipc::SidecarFrame frame;
     frame.json_header = request_header.dump();
     frame.payload = payload;
-    if (auto w = write_frame(process_->socket(), frame, deadline); !w.has_value()) {
-      return transport_failure(w.error());
-    }
-    auto resp = read_frame(process_->socket(), deadline);
+    const std::string message_id = string_field(request_header, "message_id").value_or("");
+    // Once the channel is started its reader owns the socket.
+    auto resp = jobs_started_ ? channel_->exchange(frame, message_id, deadline)
+                              : exchange_on_socket(frame, deadline);
     if (!resp.has_value()) {
+      // A timeout among them: the slot does not tell a late answer from the next one.
       return transport_failure(resp.error());
     }
     auto hdr = json::parse(resp.value().json_header, nullptr, false);
     if (hdr.is_discarded()) {
       return transport_failure(
           Error::make(Error::Code::InferenceFailed, "sidecar returned malformed JSON header"));
+    }
+    // The slot hands over the next frame that is not a job message.
+    if (jobs_started_ && string_field(hdr, "message_id").value_or("") != message_id) {
+      return transport_failure(
+          Error::make(Error::Code::InferenceFailed, "sidecar response answers another request"));
     }
     if (string_field(hdr, "schema_version").value_or("") != std::string(kSchemaVersion)) {
       return transport_failure(
@@ -415,16 +472,35 @@ class PythonPytorchSession final : public ExecutionSession {
     return hdr;
   }
 
+  Result<ipc::SidecarFrame> exchange_on_socket(const ipc::SidecarFrame& frame,
+                                               ipc::UnixSocket::TimePoint deadline) {
+    if (auto w = write_frame(process_->socket(), frame, deadline); !w.has_value()) {
+      return unexpected(w.error());
+    }
+    return read_frame(process_->socket(), deadline);
+  }
+
   Result<json> transport_failure(Error error) {
-    shutdown_sidecar();
+    stop_sidecar(kBackendReset);
     return unexpected(std::move(error));
   }
 
-  void shutdown_sidecar() noexcept {
-    if (process_) {
-      process_->shutdown();
-      process_.reset();
-    }
+  Result<void> load_failure(Error error) {
+    stop_sidecar(kBackendReset);
+    return unexpected(std::move(error));
+  }
+
+  // Ends the connection and the process. The channel's threads leave the
+  // socket before the process object closes it; a channel that was not
+  // started only runs the reap. `reason` is what open jobs fail with.
+  void stop_sidecar(std::string_view reason) {
+    channel_->stop(reason, [this] {
+      if (process_) {
+        process_->shutdown();
+      }
+    });
+    process_.reset();
+    jobs_started_ = false;
     last_payload_.clear();
   }
 
@@ -548,8 +624,7 @@ class PythonPytorchSession final : public ExecutionSession {
       return unexpected(Error::Code::NotReady, "sidecar not started");
     }
     if (manager_ == nullptr) {
-      return unexpected(Error::Code::ConfigInvalid,
-                        "python_pytorch adapter requires a BufferManager hook");
+      return buffer_manager_missing();
     }
 
     json hdr;
@@ -571,15 +646,27 @@ class PythonPytorchSession final : public ExecutionSession {
   PythonPytorchConfig config_;
   SidecarLauncher launcher_;
   BufferManager* manager_ = nullptr;
+  std::shared_ptr<JobChannel> channel_;
   std::unique_ptr<SidecarProcess> process_;
+  /// The channel's reader owns the socket: exchanges go through its slot.
+  bool jobs_started_ = false;
   std::vector<std::byte> last_payload_;
 };
+
+SessionWithJobChannel make_python_pytorch_session_with_channel(ExecutionSessionRuntimeHooks hooks,
+                                                               PythonPytorchConfig config,
+                                                               SidecarLauncher launcher) {
+  auto channel = std::make_shared<JobChannel>(hooks.buffer_manager, config.write_timeout);
+  std::unique_ptr<ExecutionSession> session(
+      new PythonPytorchSession(hooks, std::move(config), std::move(launcher), channel));
+  return SessionWithJobChannel{std::move(session), std::move(channel)};
+}
 
 std::unique_ptr<ExecutionSession> make_python_pytorch_session(ExecutionSessionRuntimeHooks hooks,
                                                               PythonPytorchConfig config,
                                                               SidecarLauncher launcher) {
-  return std::unique_ptr<ExecutionSession>(
-      new PythonPytorchSession(hooks, std::move(config), std::move(launcher)));
+  return make_python_pytorch_session_with_channel(hooks, std::move(config), std::move(launcher))
+      .session;
 }
 
 }  // namespace tensorplate::adapters::python_pytorch

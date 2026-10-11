@@ -122,6 +122,9 @@ Result<void> JobChannel::start(ipc::UnixSocket& socket, const std::vector<JobCla
       job_classes_.push_back(job_class);
     }
   }
+  if (job_classes_.empty()) {
+    return refuse(Error::Code::Unsupported, "job_class_unsupported");
+  }
   socket_ = &socket;
   try {
     writer_ = std::thread(&JobChannel::write_loop, this);
@@ -373,7 +376,7 @@ JobChannelCounters JobChannel::counters() const {
 void JobChannel::read_loop() {
   for (;;) {
     wait_readable(socket_->fd());
-    auto frame = read_frame(*socket_, TimePoint::max());
+    auto frame = read_frame(*socket_, TimePoint::max(), kMaxJobFramePayloadBytes);
     if (!frame.has_value()) {
       end_connection(frame.error());
       return;

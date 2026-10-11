@@ -33,6 +33,7 @@ add_executable(tp_test_unit
   runner_profile_test.cpp
   job_wire_test.cpp
   job_channel_test.cpp
+  python_pytorch_job_session_test.cpp
   scheduler_interface_test.cpp
   scheduler_fifo_test.cpp
   scheduler_deadline_test.cpp
@@ -85,9 +86,11 @@ target_compile_features(tp_test_unit PRIVATE cxx_std_20)
 tp_apply_warnings(tp_test_unit)
 tp_apply_sanitizers(tp_test_unit)
 
+# A test that hangs fails after two minutes, not after ctest's default 25.
 gtest_discover_tests(tp_test_unit
   PROPERTIES
     LABELS "T1"
+    TIMEOUT 120
   DISCOVERY_MODE PRE_TEST
 )
 

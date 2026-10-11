@@ -41,6 +41,7 @@ TEST(JobChannelRunner, FeatureFlagDisabled) {
 namespace tensorplate::adapters::python_pytorch {
 namespace {
 
+using testing::failure_of;
 using testing::JobChannelHarness;
 using Json = nlohmann::json;
 using Kinds = JobChannelHarness::Kinds;
@@ -61,7 +62,6 @@ class JobChannelRunner : public ::testing::Test {
   }
 
   void TearDown() override {
-    EXPECT_EQ(h.sink->violations(), std::vector<std::string>{});
     if (!entry_.empty()) {
       std::filesystem::remove_all(entry_.parent_path());
     }
@@ -92,6 +92,9 @@ class JobChannelRunner : public ::testing::Test {
   }
 
   std::filesystem::path entry_;
+  // Written by a sink callback, which can still run in the harness's stop
+  // after an assertion has ended the test's body.
+  std::atomic<bool> released_before_the_reap{false};
   JobChannelHarness h;
 };
 
@@ -159,15 +162,13 @@ TEST_F(JobChannelRunner, BehindAHeldJobHealthIsAnsweredAndWaitingJobsEndWhenCanc
   EXPECT_EQ(h.channel.counters(), JobChannelCounters{});
 
   h.stop(kSessionUnloaded);
-  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
-  EXPECT_EQ(h.sink->events().at(h.sink->events().size() - 2).error()->context.value_or(""),
-            kSessionUnloaded);
+  ASSERT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kSessionUnloaded);
 }
 
 TEST_F(JobChannelRunner, StoppingWithAJobOpenFailsItAndReleasesItOnceTheRunnerIsGone) {
   up(kHeld);
-  std::atomic<bool> released_before_the_reap{false};
-  h.on_event = [&](const JobEvent& event) {
+  h.on_event = [this](const JobEvent& event) {
     if (event.kind() == Released && !h.reaped) {
       released_before_the_reap = true;
     }
@@ -176,8 +177,8 @@ TEST_F(JobChannelRunner, StoppingWithAJobOpenFailsItAndReleasesItOnceTheRunnerIs
   ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
 
   h.stop(kBackendReset);
-  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
-  const Error failure = *h.sink->events().at(1).error();
+  ASSERT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  const Error failure = *failure_of(h, 1);
   EXPECT_EQ(failure.code, Error::Code::Unavailable);
   EXPECT_EQ(failure.context.value_or(""), kBackendReset);
   EXPECT_FALSE(released_before_the_reap);
