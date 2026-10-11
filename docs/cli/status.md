@@ -15,7 +15,16 @@ tensorplate status [--observability-snapshot <path>] [--no-quarantine] [--output
   rows; signal outcomes appear only when a live collector snapshot was
   supplied. When the agent reports a committed resident set, human output
   adds one line per member and JSON adds the agent's `resident_set` block;
-  both are absent otherwise, so a singleton agent's output is unchanged.
+  both are absent otherwise. A member's line ends with `process=`,
+  `readiness=` and `draining=` when the agent reports how its worker
+  process stands (see [what status reads from the
+  registry](../architecture/agent.md#what-status-reads-from-the-registry)).
+  When the agent names the generation serving the active deployment, human
+  output adds a `generation=` line under `active:`; in JSON, `active`,
+  `previous_active` and `candidate` always carry a `generation` key, `null`
+  when the agent did not name one. Not done yet: `severity` does not judge
+  `process` or `readiness`, so a `serving` member whose process is `stopped`
+  does not by that alone lower it.
 - **Observability snapshot** (optional): when `--observability-snapshot
   <path>` is supplied, the CLI reads the V01-E10 status snapshot at that
   path (schema: [`protocol/schemas/observability_status.json`](../../protocol/schemas/observability_status.json))
@@ -75,6 +84,7 @@ worker from its actual state.
     "agent_state": "ready",
     "active": {
       "deployment_id": "d-1",
+      "generation": 4,
       "backend": "tensorrt",
       "serving_url": "http://127.0.0.1:18081/infer",
       …
@@ -109,7 +119,11 @@ worker from its actual state.
           "state": "serving",
           "admission_mode": "production",
           "quota": { "session_count": 1, "domain_bytes": { … } },
-          "stream_endpoint": "127.0.0.1:18105"
+          "stream_endpoint": "127.0.0.1:18105",
+          "contact": "in_contact",
+          "process": "running",
+          "readiness": "ready",
+          "draining": false
         }
       ]
     }

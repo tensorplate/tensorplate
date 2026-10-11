@@ -190,10 +190,14 @@ When the durable state records a resident set, `agent_status.resident_set`
 lists it: `set_id`, `revision`, and one entry per member in committed order
 with its `deployment_id`, `generation`, `bundle_digest`, `state` (`serving`
 or `quarantined`), `admission_mode`, committed `quota`, and its unary and
-stream endpoints from the committed endpoint map. `stream_api_version`,
-`effective_quota` (the quota the member's worker reports in force),
-`staged_bytes` and `contact` (`in_contact` or `out_of_contact`) stay absent
-until their sources exist. Beside a resident set the durable singleton slots
+stream endpoints from the committed endpoint map. `process`, `readiness`,
+`draining` and `contact` say how the worker process of that committed
+generation stands, [as the member registry holds
+it](#what-status-reads-from-the-registry); an agent whose worker control
+reports no processes (`worker.mode: mock`) leaves all four absent.
+`stream_api_version`, `effective_quota` (the quota the member's worker
+reports in force) and `staged_bytes` stay absent until their sources exist.
+Beside a resident set the durable singleton slots
 are empty; a set whose only member is serving projects that member into
 `active` (with `serving_url`, the `/infer` URL of its unary endpoint when
 that endpoint is `http://127.0.0.1:<port>` or `http://localhost:<port>` with
@@ -372,7 +376,10 @@ calls it on every such return, a failed state write included, and it does
 nothing by default. `supervise`, `member_failure` and `shutdown` do nothing by
 default; the [member registry](#member-registry) implements them to
 restart a serving worker that stops, to report one it no longer restarts,
-and to stop every worker when the agent is told to stop. `stopping` is
+and to stop every worker when the agent is told to stop. `serving_member`
+and `live_members` answer nothing by default; the registry answers them
+with the generation serving now and its URL, in one reading, and with
+[every worker process it holds](#what-status-reads-from-the-registry). `stopping` is
 false by default and true once the registry's `shutdown` has begun; the
 coordinator reads it to begin no transaction and record no failure from
 then on. A registry whose lock is poisoned answers false: that is not a
@@ -691,6 +698,66 @@ launched and counts as one. A `process`-mode agent installs the stamp
 described under [descriptor documents](#deployment-descriptor-documents); a
 restart in a registry without one is unchanged. The registry writes no
 resident set.
+### What status reads from the registry
+
+The registry answers for every worker process it holds: the serving member,
+the candidate a deploy has prepared, and each generation it has asked to
+stop and not yet reaped. A generation that left the registry's map to be
+stopped is recorded as draining under the same lock that took it out, and
+the record is removed once its process has been reaped. A worker the
+registry is still starting is not listed until its launch has returned, and
+one it kills, for lost contact or for not becoming ready after a restart,
+is not listed while it is killed. For each one listed the registry reports its deployment id and generation, whether its process has
+been seen to exit, whether the agent judged it ready, whether its control
+channel is in contact, and the ports it holds.
+
+- **Ready** is the agent's last judgement, not a reading taken for the
+  status: `warm` records it for a candidate it found ready, and the
+  supervision step records it for a restarted generation. A serving worker
+  is not probed again afterwards.
+- **In contact** is the control channel's own reading: contact is lost once
+  three polls in a row went unanswered. Lost contact alone does not take a
+  member out of service; ten seconds without an answer does.
+- **Draining** generations are reported as running until they are reaped,
+  with the readiness they had; their control channel is held by the thread
+  that stops them and is not read.
+
+Agent status uses this in two places. `active.generation` is the generation
+serving at `active.serving_url`, read together with the URL; it is attached
+only when the member serving is the recorded active deployment (a worker is
+promoted before the record that names it is written, so for a moment it may
+not be), and both are absent while nothing serves: the worker stopped, a
+restart is waiting or loading, or the member is failed.
+`candidate.generation` is the generation a deploy has prepared.
+`previous_active.generation` is absent: nothing runs for a retained
+deployment, and the agent does not yet write a generation into a
+deployment record.
+
+For a resident set, each member is matched to the registry by deployment id
+and generation. A committed generation the registry holds no running
+process for reads `process: stopped`, `readiness: not_ready`, with no
+`contact`: it exited, it was stopped, or it was never started. After a
+restart the registry runs a later generation than the committed one, so the
+committed generation stays `stopped` until a record names the generation
+that runs.
+
+`draining` describes the committed generation only. After a promotion the
+generation that was replaced drains for up to the stop deadline (ten
+seconds), and the registry holds it as draining, but it is no longer a
+committed member, so status does not list it: during that window an
+operator sees only the new generation, serving. The older one is visible on
+the host as a worker process that still runs, and through the ports it
+still holds: a deploy that needs them waits for it to be reaped.
+
+Not done yet: `tensorplate status` severity and `tensorplate doctor` do not
+judge `process` or `readiness`. A member in `serving` state whose process
+is `stopped` is still counted as healthy.
+
+The slots a set of one projects carry the committed
+generations (`active.generation`, and `previous_active.generation` from the
+retained one). No production path writes a resident set yet, so these
+member fields are reached only through a state that already holds one.
+
 `WorkerSupervisor` is a separate process manager that no packaged
 configuration enables; a configuration that enables `supervision` beside
 `worker.mode: process` is refused at start, since each would start its own
