@@ -203,11 +203,15 @@ runs speech jobs is wired in.
   reading for the limit, lost its session to `slow_consumer` and reads
   again within the next 5 s still receives the outcome and status
   `RESOURCE_EXHAUSTED`; one that never reads again has its call ended
-  without it. The rule does not depend on why the session ended: a session
-  that failed behind a write that never completes is covered too. A
-  finished call is watched until its reactor is done, since the transport
-  may be unable to send the status either. The listener's thread sleeps
-  until the earliest such limit, and at most a second, the way the
+  without it. The restarts are bounded: nothing is queued behind a
+  session's `SessionClosed`, so the limit restarts at most once for each
+  write that was still to complete when the session ended, and the call is
+  over, or cancelled, within one limit for each of those writes and one
+  more for its status. The rule does not depend on why the session ended:
+  a session that failed behind a write that never completes is covered
+  too. A finished call is watched until its reactor is done, since the
+  transport may be unable to send the status either. The listener's thread
+  sleeps until the earliest such limit, and at most a second, the way the
   manager's timer does. A cancel is sent at most once per call, and never
   after the reactor is done: the write path holds a lock through the
   cancel that the reactor's last reaction takes before the reactor is
