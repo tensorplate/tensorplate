@@ -873,6 +873,17 @@ TEST_F(JobChannelTest, AFrameNobodyCanAttributeEndsTheConnection) {
   }
 }
 
+TEST_F(JobChannelTest, AnEndTheReaderDecidesIsEndOfFileForTheSidecarBeforeAnyStop) {
+  up();
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
+  peer.write_raw("not a header");
+  // The sidecar is alive and holds the job: only the socket can tell it.
+  EXPECT_TRUE(peer.read_end_of_file());
+  EXPECT_FALSE(peer.gave_up()) << "the end of file is the adapter's doing";
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted, Failed}));
+}
+
 // -- The writer. -----------------------------------------------------------------
 
 TEST(JobChannelWriter, AFrameTheSidecarDoesNotTakeWithinTheWriteBoundEndsTheConnection) {

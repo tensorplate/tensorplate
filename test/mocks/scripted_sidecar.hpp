@@ -229,6 +229,13 @@ class ScriptedSidecar {
     return gave_up_;
   }
 
+  /// Waits until this sidecar's reader reads end of file: the adapter shut
+  /// its side down, unless this sidecar ended the connection itself.
+  [[nodiscard]] bool read_end_of_file() {
+    std::unique_lock<std::mutex> lock(log_mutex_);
+    return log_changed_.wait_for(lock, kPatience, [this] { return end_of_file_; });
+  }
+
   // -- Outside the runner's behaviour. -------------------------------------------
 
   /// Writes one job message of an admitted job as given, under the job lock;
@@ -392,6 +399,13 @@ class ScriptedSidecar {
         continue;
       }
       const auto n = ::recv(fd_, chunk.data(), chunk.size(), 0);
+      if (n == 0) {
+        {
+          std::lock_guard<std::mutex> lock(log_mutex_);
+          end_of_file_ = true;
+        }
+        log_changed_.notify_all();
+      }
       if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
         return;
       }
@@ -662,6 +676,7 @@ class ScriptedSidecar {
   bool reaped_ = false;
   bool gave_up_ = false;
   bool parked_ = false;
+  bool end_of_file_ = false;
 };
 
 }  // namespace tensorplate::testing

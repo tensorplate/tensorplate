@@ -347,7 +347,9 @@ channel.
   has no terminal event with `unavailable` and `backend_reset`, or with the
   reason `stop` was given. A writer whose write failed shuts the socket down
   and leaves, which is what wakes the reader, and its error is then the
-  connection's. `stop` wakes both threads with
+  connection's. A reader that ends the connection itself shuts the socket
+  down too, so a sidecar that is still running reads end of file and a
+  writer inside a frame is woken. `stop` wakes both threads with
   `shutdown(2)` on the socket's descriptor (the reader out of its wait, the
   writer out of a write the sidecar is not taking; a writer that waits for a
   frame is woken by the reader as it leaves), joins the reader, then the

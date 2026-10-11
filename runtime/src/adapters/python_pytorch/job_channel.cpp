@@ -423,6 +423,8 @@ void JobChannel::end_connection(const Error& error) {
       fail_locked(job, ended, out);
     }
   }
+  // The sidecar reads end of file and a writer inside a frame is woken.
+  (void)::shutdown(socket_->fd(), SHUT_RDWR);
   unary_cv_.notify_all();
   outbox_cv_.notify_all();
   deliver(out);

@@ -27,7 +27,9 @@
 // A write that fails, or a frame the sidecar does not take within the write
 // bound, ends the connection: the writer records the error, shuts the socket
 // down and leaves, and the reader, woken by that, fails every job without a
-// terminal event with kBackendReset.
+// terminal event with kBackendReset. An end the reader decides (end of file, a
+// read error, a header it cannot read) shuts the socket down as well: the
+// sidecar reads end of file and a writer inside a frame is woken.
 //
 // stop() ends the connection with shutdown(2) on the socket's descriptor,
 // which wakes the reader out of its wait and the writer out of a write the
