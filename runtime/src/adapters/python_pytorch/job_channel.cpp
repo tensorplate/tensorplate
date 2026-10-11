@@ -366,10 +366,19 @@ JobChannelCounters JobChannel::counters() const {
 // -- The threads. ----------------------------------------------------------------
 
 void JobChannel::read_loop() {
-  // The reader is not written yet: the first frame ends the connection.
-  wait_readable(socket_->fd());
-  end_connection(
-      Error::make(Error::Code::Internal, "the job channel's reader is not implemented"));
+  for (;;) {
+    wait_readable(socket_->fd());
+    auto frame = read_frame(*socket_, TimePoint::max());
+    if (!frame.has_value()) {
+      end_connection(frame.error());
+      return;
+    }
+    if (!route(std::move(frame).value())) {
+      end_connection(
+          Error::make(Error::Code::InferenceFailed, "sidecar sent an unreadable header"));
+      return;
+    }
+  }
 }
 
 void JobChannel::write_loop() {
