@@ -37,6 +37,7 @@
 #include "tensorplate/ipc/sidecar_codec.hpp"
 #include "tensorplate/ipc/unix_socket.hpp"
 
+#include "job_channel.hpp"
 #include "runner_profile.hpp"
 #include "sidecar_frame_io.hpp"
 #include "sidecar_process.hpp"
@@ -575,11 +576,20 @@ class PythonPytorchSession final : public ExecutionSession {
   std::vector<std::byte> last_payload_;
 };
 
+SessionWithJobChannel make_python_pytorch_session_with_channel(ExecutionSessionRuntimeHooks hooks,
+                                                               PythonPytorchConfig config,
+                                                               SidecarLauncher launcher) {
+  auto channel = std::make_shared<JobChannel>(hooks.buffer_manager, config.write_timeout);
+  std::unique_ptr<ExecutionSession> session(
+      new PythonPytorchSession(hooks, std::move(config), std::move(launcher)));
+  return SessionWithJobChannel{std::move(session), std::move(channel)};
+}
+
 std::unique_ptr<ExecutionSession> make_python_pytorch_session(ExecutionSessionRuntimeHooks hooks,
                                                               PythonPytorchConfig config,
                                                               SidecarLauncher launcher) {
-  return std::unique_ptr<ExecutionSession>(
-      new PythonPytorchSession(hooks, std::move(config), std::move(launcher)));
+  return make_python_pytorch_session_with_channel(hooks, std::move(config), std::move(launcher))
+      .session;
 }
 
 }  // namespace tensorplate::adapters::python_pytorch
