@@ -73,8 +73,9 @@ inline constexpr std::string_view kJobMessageMalformed = "job_message_malformed"
 
 // -- Negotiation. ------------------------------------------------------------
 
-/// Most names a load response's `job_classes` holds: the schema's bound.
-inline constexpr std::size_t kMaxDeclaredJobClasses = 3;
+/// Most names a load response's `job_classes` may hold, whether this adapter
+/// knows them or not: the bound the schema gives a capability list.
+inline constexpr std::size_t kMaxDeclaredJobClasses = 16;
 
 /// Whether a `ready_event` header lists kSpeechJobsCapability. A header
 /// without `capabilities` lists nothing, and a capability this adapter does
@@ -110,16 +111,18 @@ inline constexpr std::size_t kMaxDeclaredJobClasses = 3;
 using PcmPublisher = std::function<Result<BufferRef>(std::span<const std::byte>)>;
 
 /// A frame the job channel does not own, with a header it can read: a unary
-/// response, a `ready_event`, a `metric_event`, a `session_*` kind other
-/// than `session_released` and `session_release`, or an `error_event`
-/// without a readable `message_id`. The unary exchange judges it.
+/// response, a `ready_event`, a `metric_event`, or a `session_*` kind other
+/// than `session_released` and `session_release`. The unary exchange judges
+/// it.
 struct NotJobMessage {
   friend bool operator==(const NotJobMessage&, const NotJobMessage&) noexcept = default;
 };
 
-/// A frame whose header is not a JSON object with a string `kind`. Nothing
-/// says whom it was for, so its reader ends the connection, as the unary
-/// exchange does for a response it cannot parse.
+/// A frame the adapter cannot attribute: its header is not a JSON object
+/// with a string `kind`, or it is an `error_event` without a readable,
+/// non-empty `message_id`, which no sidecar writes. Nothing says whom it was
+/// for, so its reader ends the connection, as the unary exchange does for a
+/// response it cannot parse.
 struct UnreadableHeader {
   friend bool operator==(const UnreadableHeader&, const UnreadableHeader&) noexcept = default;
 };

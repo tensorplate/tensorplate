@@ -251,11 +251,13 @@ into exactly one of:
   Its text starts with the message's kind and, for a malformed field, names
   the field;
 - nothing of the job protocol's, for a frame the unary exchange judges: a
-  unary response, a `ready_event`, a `metric_event`, any other `session_*`
-  kind, or an `error_event` without a readable `message_id`;
-- an unreadable header, for one that is not a JSON object with a string
-  `kind`. Nothing says whom such a frame was for, so its reader ends the
-  connection, as the unary exchange does for a response it cannot parse.
+  unary response, a `ready_event`, a `metric_event` or any other `session_*`
+  kind;
+- an unreadable header, for a frame the adapter cannot attribute: its header
+  is not a JSON object with a string `kind`, or it is an `error_event`
+  without a readable, non-empty `message_id`, which no sidecar writes.
+  Nothing says whom such a frame was for, so its reader ends the connection,
+  as the unary exchange does for a response it cannot parse.
 
 The decoder reads the fields it uses by name and ignores any other, as the
 unary exchange does. What it reads it first holds to the schema's type and
@@ -280,7 +282,7 @@ releases what the callable returned.
 It also reads the two negotiation fields: whether a `ready_event` lists
 `speech_jobs_v1`, and the `job_classes` of a load response, leaving out a
 capability or class name it does not know and refusing a list of more than
-the schema's three names. `test/unit/job_wire_test.cpp` replays every golden
+sixteen names, known or not. `test/unit/job_wire_test.cpp` replays every golden
 file it finds beside the Rust replay and all four sections of the vectors
 through it; the six vectors the socket cannot carry (an in-process buffer
 handle, ill-formed UTF-8, a non-finite probability) are listed there by

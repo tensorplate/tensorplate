@@ -867,19 +867,19 @@ TEST(JobWireDecode, AnErrorEventNamesTheRefusedMessageAndNoJob) {
   EXPECT_EQ(std::get<MessageRefused>(message).error,
             Error::make(Error::Code::ConfigInvalid, std::string(kMaxJobErrorTextBytes, 'm')));
 
-  // Without a readable message id it names nothing the channel sent, whatever
-  // else is wrong with it.
+  // Without a readable message id it is no one's, whatever else is wrong
+  // with it: no sidecar writes one.
   for (const Json& id : {Json(nullptr), Json(7), Json("")}) {
     Json anonymous = refusal;
     anonymous["message_id"] = id;
-    EXPECT_TRUE(std::holds_alternative<NotJobMessage>(decode(anonymous))) << id;
+    EXPECT_TRUE(std::holds_alternative<UnreadableHeader>(decode(anonymous))) << id;
     anonymous["schema_version"] = "0.2";
     anonymous.erase("error");
-    EXPECT_TRUE(std::holds_alternative<NotJobMessage>(decode(anonymous))) << id;
+    EXPECT_TRUE(std::holds_alternative<UnreadableHeader>(decode(anonymous))) << id;
   }
   Json no_id = refusal;
   no_id.erase("message_id");
-  EXPECT_TRUE(std::holds_alternative<NotJobMessage>(decode(no_id)));
+  EXPECT_TRUE(std::holds_alternative<UnreadableHeader>(decode(no_id)));
 }
 
 TEST(JobWireDecode, AnErrorEventItCannotReadStillRefusesTheMessageItNames) {
@@ -1096,12 +1096,18 @@ TEST(JobWireNegotiation, JobClassesAreReadByNameAndHeldToTheirShape) {
   EXPECT_EQ(
       classes(Json::array({"vad_frames", "a_class_of_a_later_release", "stt_decode"})).value(),
       (std::vector<JobClass>{JobClass::VadFrames, JobClass::SttDecode}));
-  EXPECT_EQ(classes(Json::array({"vad_frames", "tts_synthesis", "stt_decode"})).value().size(),
-            kMaxDeclaredJobClasses);
+  // Names of a later release are left out, up to the bound of the list.
+  Json many = Json::array({"vad_frames", "tts_synthesis", "stt_decode"});
+  while (many.size() < kMaxDeclaredJobClasses) {
+    many.push_back("a_class_of_a_later_release_" + std::to_string(many.size()));
+  }
+  EXPECT_EQ(
+      classes(many).value(),
+      (std::vector<JobClass>{JobClass::VadFrames, JobClass::TtsSynthesis, JobClass::SttDecode}));
+  many.push_back("one_class_too_many");
   for (const Json& malformed :
        {Json(nullptr), Json::array(), Json("stt_decode"), Json::array({"stt_decode", 7}),
-        Json::array({"stt_decode", "stt_decode"}),
-        Json::array({"stt_decode", "tts_synthesis", "vad_frames", "a_class_of_a_later_release"})}) {
+        Json::array({"stt_decode", "stt_decode"}), many}) {
     const auto refused = classes(malformed);
     ASSERT_FALSE(refused.has_value()) << malformed;
     EXPECT_EQ(refused.error().code, Error::Code::InferenceFailed);

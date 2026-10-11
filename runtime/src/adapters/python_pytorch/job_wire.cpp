@@ -359,12 +359,13 @@ SidecarJobMessage read_session_released(const json& header, const ipc::SidecarFr
   return std::move(*failed);
 }
 
-// An `error_event` that names a message. One it cannot read otherwise still
-// ends whatever waits behind that message.
+// An `error_event` names the message it refuses; one that does not is no
+// one's. One it cannot read otherwise still ends whatever waits behind the
+// message it names.
 SidecarJobMessage read_error_event(const json& header) {
   auto message_id = wire_text(header, "message_id");
   if (!message_id.has_value() || message_id->empty()) {
-    return NotJobMessage{};
+    return UnreadableHeader{};
   }
   const auto unreadable = [&](std::string_view field) {
     return MessageRefused{
@@ -614,7 +615,7 @@ Result<std::vector<JobClass>> declared_job_classes(std::string_view load_model_r
     return violation(kReason, "sidecar load response declares no job class");
   }
   if (listed->size() > kMaxDeclaredJobClasses) {
-    return violation(kReason, "sidecar load response declares more job classes than exist");
+    return violation(kReason, "sidecar load response declares too many job classes");
   }
   std::vector<JobClass> classes;
   for (auto it = listed->begin(); it != listed->end(); ++it) {
