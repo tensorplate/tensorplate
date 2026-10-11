@@ -526,15 +526,20 @@ async def play_audio(
 ```
 
 - **Sessions.** `client.synthesize(target, *, language, voice, trace_id="",
-  turn_id="", open_timeout=10.0, close_timeout=150.0, cancel_timeout=5.0)`.
+  turn_id="", open_timeout=10.0, close_timeout=<follows the server>,
+  cancel_timeout=5.0)`.
   The deployment declares its voices, and the server chooses the audio
   format for the voice: `session.output_format` is an `AudioFormat`, and
   `session.limits.text_to_speech` holds the text bounds. `close()`, or
   leaving the block, has the server synthesize every segment it accepted and
   ends once the session has read all of that audio, which takes as long as
-  the caller takes to play it less what the playback buffer holds. That is
-  why `close_timeout` is longer here: the server allows itself two minutes
-  to deliver what it accepted.
+  the caller takes to play it less what the playback buffer holds. The
+  server allows itself `session.limits.finalize_deadline_ms` to deliver what
+  it accepted, two minutes by default. A `close_timeout` that is left out
+  follows that limit: it is the deadline the session's `Ready` declared
+  plus a margin of 30 seconds, so 150 seconds by default. A `close_timeout`
+  that is given is used as it is, a number of seconds or `None` for no
+  bound.
 - **Input and credit.** `send_text(text, *, turn_id="")` sends one complete
   segment, a sentence or a clause, and returns its id: ids grow by one from
   1, and a segment's events carry its id. It waits while the server's input

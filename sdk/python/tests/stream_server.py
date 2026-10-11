@@ -207,6 +207,8 @@ class StreamServer:
     hold_synthesis: bool = False
     heartbeat_interval_ms: int = 10000
     output_stall_timeout_ms: int = 5000
+    # The finalize deadline of a text-to-speech session.
+    synthesis_deadline_ms: int = 120000
     max_sessions: int = 1
     admission_open: bool = True
     # Accepted audio stays charged until `consume()`.
@@ -354,7 +356,7 @@ class StreamServer:
                 heartbeat_interval_ms=self.heartbeat_interval_ms,
                 liveness_timeout_ms=30000,
                 max_duration_ms=3600000,
-                finalize_deadline_ms=120000 if speaks else 10000,
+                finalize_deadline_ms=self.synthesis_deadline_ms if speaks else 10000,
                 output_stall_timeout_ms=self.output_stall_timeout_ms,
             ),
             remaining_duration_ms=3600000,

@@ -846,8 +846,7 @@ def test_a_text_to_speech_session_is_obtained_from_the_client_with_its_bounds() 
         async with speech.SpeechClient("127.0.0.1:1") as stream:
             options: dict[str, Any] = {"language": "en", "voice": "synthetic_voice"}
             default = stream.synthesize(TARGET, **options)
-            bounds = (default._open_timeout, default._close_timeout, default._cancel_timeout)
-            assert bounds == (10.0, 150.0, 5.0)
+            assert (default._open_timeout, default._cancel_timeout) == (10.0, 5.0)
             given = stream.synthesize(
                 TARGET, open_timeout=1.0, close_timeout=None, cancel_timeout=3.0, **options
             )
@@ -861,6 +860,36 @@ def test_a_text_to_speech_session_is_obtained_from_the_client_with_its_bounds() 
                 stream.synthesize(TARGET, **options)
 
     run(main)
+
+
+@pytest.mark.parametrize(
+    ("deadline_ms", "given", "bound"),
+    [
+        (120_000, {}, 150.0),
+        (300_000, {}, 330.0),
+        (300_000, {"close_timeout": 150.0}, 150.0),
+        (300_000, {"close_timeout": None}, None),
+    ],
+)
+def test_a_close_without_a_timeout_is_bounded_by_the_servers_finalize_deadline_and_a_margin(
+    deadline_ms: int, given: dict[str, Any], bound: float | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario(fake: StreamServer, session: speech.TextToSpeechSession) -> None:
+        bounds: list[float | None] = []
+        within = session._within
+
+        async def spy(work: Any, timeout: float | None) -> Any:
+            bounds.append(timeout)
+            return await within(work, timeout)
+
+        monkeypatch.setattr(session, "_within", spy)
+        async with session:
+            assert session.limits.finalize_deadline_ms == deadline_ms
+        # The open's bound, then the bound of the close that the exit made.
+        assert bounds == [10.0, bound]
+
+    play(scenario, StreamServer(synthesis_deadline_ms=deadline_ms), **given)
+    assert tts.CLOSE_MARGIN_S == 30.0
 
 
 def test_closing_the_client_ends_a_text_to_speech_session_made_from_it() -> None:

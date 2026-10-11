@@ -220,9 +220,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `ResourceExhaustedError`. Audio that is not in the format `Ready`
   declared, out of order, or not what a completion or the closing totals
   count ends the session with `StreamProtocolError`. Text the server would
-  refuse raises `ValueError` before it is sent. `close_timeout` defaults
-  to 150 seconds for these sessions. Run against an in-process server
-  only, like the rest of the client. (V030-E04-F02-T03)
+  refuse raises `ValueError` before it is sent, and text no session would
+  send (empty, only whitespace, not a `str`) at once, before any wait. A
+  `close_timeout` that is not given follows the server: the
+  `finalize_deadline_ms` its `Ready` declares plus 30 seconds, which is 150
+  seconds by default. Run against an in-process server only, like the rest
+  of the client. (V030-E04-F02-T03)
 
 - A gRPC stream listener in the serving worker that binds and refuses every
   `Open`: the worker does not serve stream sessions yet. In builds with

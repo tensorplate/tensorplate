@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import enum
 from collections import deque
 from collections.abc import Callable
 from typing import Any
@@ -22,6 +23,14 @@ TextToSpeechEvent = AudioChunk | SegmentCompleted | SynthesisCompleted
 # itself hold undelivered.
 PLAYBACK_BUFFER_MS = 2000
 CHUNK_MS = 20
+# What a close is given beyond the server's finalize deadline when its caller named no timeout.
+CLOSE_MARGIN_S = 30.0
+
+
+class _Follow(enum.Enum):
+    """The default of a timeout that is taken from a limit the server declares."""
+
+    FINALIZE_DEADLINE = "limits.finalize_deadline_ms and a margin"
 
 
 class TextToSpeechSession(Session[TextToSpeechEvent]):
@@ -55,15 +64,21 @@ class TextToSpeechSession(Session[TextToSpeechEvent]):
         trace_id: str,
         turn_id: str,
         open_timeout: float | None,
-        close_timeout: float | None,
+        close_timeout: float | _Follow | None,
         cancel_timeout: float,
     ) -> TextToSpeechSession:
         session = cls.__new__(cls)
-        session._setup(connect, target, open_timeout, close_timeout, cancel_timeout)
-        session._configure(language, voice, trace_id, turn_id)
+        follows = close_timeout is _Follow.FINALIZE_DEADLINE
+        # A close needs an open session, and Ready sets the bound that follows it.
+        given = None if close_timeout is _Follow.FINALIZE_DEADLINE else close_timeout
+        session._setup(connect, target, open_timeout, given, cancel_timeout)
+        session._configure(language, voice, trace_id, turn_id, follows)
         return session
 
-    def _configure(self, language: str, voice: str, trace_id: str, turn_id: str) -> None:
+    def _configure(
+        self, language: str, voice: str, trace_id: str, turn_id: str, close_follows_deadline: bool
+    ) -> None:
+        self._close_follows_deadline = close_follows_deadline
         self._language, self._voice = language, voice
         self._trace_id, self._turn_id = trace_id, turn_id
         self._format: AudioFormat | None = None
@@ -113,6 +128,8 @@ class TextToSpeechSession(Session[TextToSpeechEvent]):
         self._format, self._wire_format = audio, wire
         self._chunk_samples = audio.sample_rate_hz * CHUNK_MS // 1000
         self._events.bound_audio(second * PLAYBACK_BUFFER_MS // 1000)
+        if self._close_follows_deadline:
+            self._close_timeout = ready.limits.finalize_deadline_ms / 1000 + CLOSE_MARGIN_S
 
     async def send_text(self, text: str, *, turn_id: str = "") -> int:
         """Send one complete text segment and return its id.
