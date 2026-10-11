@@ -89,6 +89,12 @@ inline constexpr std::size_t kMaxQueuedFrames = 2 * kMaxOpenJobs + kMaxPendingSe
 /// Sessions whose release the sidecar acknowledged that the channel still
 /// remembers, oldest forgotten first. The sidecar forgets a session it
 /// released, so a release repeated for a remembered one is not sent again.
+///
+/// That memory is the whole of the channel's "once per session": after this
+/// many later acknowledgements the session is forgotten here too, and the
+/// channel takes its key as a new session's. A repeated release is then sent,
+/// answered and delivered again, and a job submitted for it is taken. Holding
+/// "at most once" beyond the memory is the caller's, which knows its sessions.
 inline constexpr std::size_t kMaxRememberedSessions = 1'024;
 
 /// Error::context of the `failed` a job gets when its connection ends.
@@ -205,10 +211,11 @@ class JobChannel {
   [[nodiscard]] Result<void> cancel(std::uint64_t job_id);
 
   /// Queues a `session_release`, once per session key; a repeat while it is
-  /// pending or remembered changes nothing. The sink's on_session_released
-  /// follows the `released` of the session's last job. A sidecar whose jobs
-  /// an unload has closed refuses the release; that refusal is counted and
-  /// the release stays pending until stop() acknowledges it.
+  /// pending or remembered changes nothing, and one for a session the channel
+  /// has forgotten (kMaxRememberedSessions) is a new release. The sink's
+  /// on_session_released follows the `released` of the session's last job. A
+  /// sidecar whose jobs an unload has closed refuses the release; that refusal
+  /// is counted and the release stays pending until stop() acknowledges it.
   ///
   /// @return success, or Error::Code::NotReady, "event_sink_missing";
   ///   Error::Code::Unavailable, "backend_unavailable" (not started, or the

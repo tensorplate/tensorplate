@@ -319,7 +319,12 @@ channel.
   released, because the sidecar's `error_event` names only that id. The last
   1,024 acknowledged sessions are remembered: the sidecar forgets a session
   it released and would answer a repeated `session_release` again, so a
-  repeat for a remembered session is not sent.
+  repeat for a remembered session is not sent. That memory is the whole of
+  the channel's "once per session". After 1,024 later acknowledgements the
+  channel has forgotten the session as well and takes its key as a new
+  session's: a repeated release is sent, answered and delivered to the sink
+  again, and a job submitted for it is taken. Holding "at most once" beyond
+  that is the caller's, which knows its sessions.
 - **Each frame goes one way.** A job event is checked by its job's
   `JobEventSequence` and delivered; one the check refuses fails the job with
   the refusal in its place when the job has no terminal event yet, and a

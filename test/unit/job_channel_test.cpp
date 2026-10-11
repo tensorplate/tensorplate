@@ -535,15 +535,23 @@ TEST(JobChannelSessions, OnlyTheLastAcknowledgedSessionsAreRemembered) {
     ASSERT_TRUE(h.channel.release_session(session, 1).has_value());
     ASSERT_TRUE(h.wait([&] { return h.sink->session_releases().size() == session; })) << session;
   }
-  // The second is still remembered. The first is not: it is asked for again,
-  // and the sidecar, which forgot it too, acknowledges it again.
+  // The second is still remembered. The first is past the memory the header
+  // states, so its key is a new session's: a job for it is taken, and its
+  // release is sent again and acknowledged again by the sidecar, which forgot
+  // it too. The recording sink holds "at most once", as the caller has to.
+  h.channel.admit_jobs();
+  expect_refused(h.channel.submit(JobChannelHarness::tts(1, 2)), Error::Code::NotReady,
+                 "session_releasing");
+  ASSERT_TRUE(h.submit(JobChannelHarness::tts(2, 1)).has_value());
+  ASSERT_TRUE(h.wait_kinds(2, {Accepted}));
   ASSERT_TRUE(h.channel.release_session(2, 1).has_value());
-  ASSERT_TRUE(h.channel.release_session(1, 1).has_value());
+  ASSERT_TRUE(h.release(1).has_value());
   EXPECT_EQ(peer.sent("session_release", kMaxRememberedSessions + 2).size(),
             kMaxRememberedSessions + 2);
   ASSERT_TRUE(
       h.wait([&] { return h.sink->session_releases().size() == kMaxRememberedSessions + 2; }));
   EXPECT_EQ(h.sink->session_releases().back(), (std::pair<std::uint64_t, std::uint64_t>{1, 1}));
+  EXPECT_EQ(h.sink->kinds_for(2), (Kinds{Accepted, CancelAcknowledged, Failed, Released}));
   EXPECT_EQ(h.sink->violations(), std::vector<std::string>{"duplicate_session_released 1"});
 }
 
