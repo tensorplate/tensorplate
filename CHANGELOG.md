@@ -224,6 +224,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   stream/v1 frame through the modules and encode it back byte for byte.
   (V030-E04-F02-T04)
 
+- A rollback and the restore at an agent start begin a deployment that
+  names a deployment descriptor at a new generation, and the agent removes
+  the descriptor documents nothing names when it starts. For a record that
+  names a descriptor, one state update takes the next generation, reads the
+  recorded document, re-stamps it, writes the new document and names it: on
+  the rollback's transaction, whose identity the swap then gives the record
+  it puts back as active, or on the active record for a restore. The
+  candidate reference carries that identity, so the member starts as that
+  generation. The staged manifest's digest is compared with the record's
+  first. A recorded document that is missing or is not the one named, or a
+  staged bundle that is not the record's, is `load_failed`, not
+  recoverable: the rollback fails and leaves the previous record as it was,
+  and a restore fails the start, as a missing staged manifest does. At its
+  start the agent removes every descriptor document that neither file of
+  its state pair names, before recovery writes any; a prune that fails is
+  logged and the start goes on. A record that names no descriptor is rolled
+  back to and restored as before, and no deploy records a descriptor yet, so
+  a deployed agent has no such document and serves, rolls back and recovers
+  as before. (V030-E02-F01-T04)
+
 - The agent keeps deployment descriptor documents beside its state, and the
   member registry reads and re-stamps them. A descriptor is one file in the
   state directory, `descriptor-<deployment_id>-<generation>.json`, written

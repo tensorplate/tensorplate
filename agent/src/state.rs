@@ -64,10 +64,10 @@ use std::sync::Mutex;
 
 use tensorplate_protocol::agent_state::{
     decode_agent_state, AgentState, DeploymentRecord, ErrorRecord, QuarantineRecord,
-    TransactionRecord, AGENT_STATE_SCHEMA_VERSION_LEGACY,
+    TransactionKind, TransactionRecord, AGENT_STATE_SCHEMA_VERSION_LEGACY,
 };
 use tensorplate_protocol::deploy_transaction::DeployState;
-use tensorplate_protocol::DecodeError;
+use tensorplate_protocol::{DecodeError, DescriptorIdentity};
 
 use crate::error::{AgentError, AgentResult};
 
@@ -196,14 +196,25 @@ impl StateStore {
         &self.state_dir
     }
 
-    /// The state each file of the pair holds, for the files that decode.
+    /// The state each file of the pair holds; a damaged file holds none.
     /// They differ after a write that stopped between its two renames.
     ///
     /// # Errors
     ///
-    /// Returns [`AgentError::Io`] when a file is there and cannot be read.
-    pub fn files(&self) -> AgentResult<Vec<AgentState>> {
-        Ok(Vec::new())
+    /// Returns [`AgentError::Io`] when a file is there and cannot be read,
+    /// and [`AgentError::CorruptState`] for one at a state version this
+    /// build does not read: what such a file holds cannot be told.
+    pub(crate) fn files(&self) -> AgentResult<Vec<AgentState>> {
+        let mut states = Vec::new();
+        for path in [&self.primary, &self.backup] {
+            match load_one(path) {
+                Ok(state) => states.extend(state),
+                // Damage is what lets a backup stand in: no start reads the file.
+                Err(damaged) if damaged.allows_backup() => {}
+                Err(untold) => return Err(untold.into()),
+            }
+        }
+        Ok(states)
     }
 
     /// Clone of the currently-loaded state. Cheap; intended for status
@@ -443,6 +454,7 @@ impl StateStore {
                 .previous_active
                 .take()
                 .ok_or_else(|| AgentError::Unavailable("no previous active deployment".into()))?;
+            take_rollback_identity(&mut prev, s.in_flight_transaction.as_ref())?;
             prev.promoted_monotonic_ns = Some(monotonic_ns);
             let demoted = s.active.take();
             s.active = Some(prev);
@@ -518,6 +530,52 @@ impl StateStore {
             .map(|d| d.labels.clone())
             .unwrap_or_default())
     }
+}
+
+/// Give `previous`, which a rollback puts back as active, the descriptor
+/// identity its transaction names: a later generation of the configuration
+/// the record names. Under its old one it would name a generation that is
+/// not serving.
+fn take_rollback_identity(
+    previous: &mut DeploymentRecord,
+    transaction: Option<&TransactionRecord>,
+) -> AgentResult<()> {
+    let id = previous.deployment_id.clone();
+    let refused = |why: String| AgentError::Internal(format!("rollback to `{id}` refused: {why}"));
+    let rollback = transaction
+        .filter(|tx| tx.kind == TransactionKind::Rollback && tx.deployment_id == id)
+        .map(TransactionRecord::descriptor_identity)
+        .transpose()
+        .map_err(|e| refused(format!("its transaction {e}")))?;
+    let recorded = previous
+        .descriptor_identity()
+        .map_err(|e| refused(format!("its record {e}")))?;
+    let started = match (recorded, rollback.flatten()) {
+        (None, None) => return Ok(()),
+        (Some(recorded), Some(started))
+            if started.generation > recorded.generation
+                && started.configuration_digest == recorded.configuration_digest =>
+        {
+            (started.generation, started.descriptor_digest.to_owned())
+        }
+        (recorded, started) => {
+            let show = |named: Option<DescriptorIdentity<'_>>| match named {
+                Some(named) => format!(
+                    "generation {} of configuration `{}`",
+                    named.generation, named.configuration_digest
+                ),
+                None => "no deployment descriptor".to_owned(),
+            };
+            return Err(refused(format!(
+                "its record names {} and its rollback transaction names {}, which is not a later generation of the same configuration",
+                show(recorded),
+                show(started)
+            )));
+        }
+    };
+    previous.generation = Some(started.0);
+    previous.descriptor_digest = Some(started.1);
+    Ok(())
 }
 
 /// Why a state file could not be loaded.
@@ -1668,6 +1726,13 @@ mod tests {
         let backup = td.path().join("state.json.bak");
         fs::write(&backup, "{").expect("damage");
         assert_eq!(store.files().expect("the primary alone"), [first]);
+
+        let later = r#"{"schema_version":"9.9","store_version":1}"#;
+        fs::write(&backup, later).expect("another version");
+        let err = store
+            .files()
+            .expect_err("a backup this build does not read");
+        assert!(matches!(err, AgentError::CorruptState(_)), "{err:?}");
 
         fs::remove_file(&backup).expect("rm");
         fs::create_dir(&backup).expect("mkdir");

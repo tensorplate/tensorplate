@@ -32,6 +32,7 @@ use tensorplate_protocol::ErrorCode;
 
 use crate::bundle::model_artifact_relative_path;
 use crate::coordinator::{now_monotonic_ns, Coordinator};
+use crate::descriptor_store::{start_again, Start};
 use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
 use crate::transaction::{classify, PhaseClass};
@@ -272,7 +273,7 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
         ));
         return coordinator.state().set_last_error(Some(err.to_record()));
     }
-    let candidate = match candidate_from_record(&active) {
+    let candidate = match candidate_from_record(coordinator.state(), &active) {
         Ok(candidate) => candidate,
         Err(err) => {
             coordinator.state().set_last_error(Some(err.to_record()))?;
@@ -348,21 +349,14 @@ fn resume_replayable(coordinator: &Coordinator) -> AgentResult<()> {
     Ok(())
 }
 
-fn candidate_from_record(record: &DeploymentRecord) -> AgentResult<CandidateRef> {
+/// The reference `record`, the active deployment, is restored from: for a
+/// record that names a descriptor, at a generation named on it by now.
+fn candidate_from_record(
+    store: &StateStore,
+    record: &DeploymentRecord,
+) -> AgentResult<CandidateRef> {
     let artifact_relative_path = model_artifact_relative_path(Path::new(&record.staged_path))?;
-    Ok(CandidateRef {
-        deployment_id: record.deployment_id.clone(),
-        staged_path: record.staged_path.clone(),
-        bundle_digest: record.bundle_digest.clone(),
-        generation: None,
-        descriptor_digest: None,
-        configuration_digest: None,
-        backend_hint: record.backend_hint.clone(),
-        model_class: record.model_class.clone(),
-        bundle_name: Some(record.bundle_name.clone()),
-        bundle_version: Some(record.bundle_version.clone()),
-        artifact_relative_path: Some(artifact_relative_path),
-    })
+    start_again(store, record, artifact_relative_path, Start::Restore)
 }
 
 fn action(a: RecoveryAction, reason: impl Into<String>) -> RecoverySummary {
@@ -473,7 +467,8 @@ mod tests {
         let mut record = record("d-active");
         record.staged_path = staged_bundle(td.path(), "d-active");
 
-        let candidate = candidate_from_record(&record).expect("candidate");
+        let store = StateStore::open(td.path().join("state")).expect("open");
+        let candidate = candidate_from_record(&store, &record).expect("candidate");
 
         assert_eq!(
             candidate.artifact_relative_path.as_deref(),

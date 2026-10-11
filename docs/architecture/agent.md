@@ -435,6 +435,14 @@ Rollback is a transaction, not a file-pointer swap:
 A failed rollback preserves the current active deployment — the
 previous-active record is left intact, and the operator can retry.
 
+A previous record that names a
+[deployment descriptor](#deployment-descriptor-documents) is started at a
+new generation: just before step 3 the rollback re-stamps the recorded
+descriptor and names the new one on its transaction, and the candidate
+reference carries that identity. The swap of step 4 gives it to the record
+it puts back as active, and refuses a described record whose rollback
+transaction does not name a later generation of the same configuration.
+
 ## Restart recovery (V01-E08-F07)
 
 The recovery planner reads durable state and (best-effort) the worker's
@@ -457,6 +465,11 @@ the local control socket. Replayable transactions are resumed through the
 normal coordinator path, unsafe worker-side candidates are quarantined,
 and promoted-but-not-finalized transactions are finalized only when the
 worker-reported active deployment matches the transaction target.
+`restore_active` starts an active record that names a
+[deployment descriptor](#deployment-descriptor-documents) at a new
+generation, named on the record before a worker is asked for; a recorded
+document that is missing or is not the one named fails the restore, and
+with it the start, as a missing staged manifest does.
 
 Recovery is **state-diff based**; the planner never replays commands
 just because they appeared in the original request order.
@@ -533,9 +546,45 @@ before the first document is written.
 - **Prune.** `DescriptorStore::prune` removes every document that no
   singleton record, in-flight transaction or resident-set member (with the
   generation it retains) names, and every `.tmp` a crash left; no other
-  file, and nothing when a record's identity cannot be read. It is for a
-  start, before anything writes a document. Nothing calls it yet, so the
-  document of a generation a restart replaced stays where it is.
+  file, and nothing when a record's identity cannot be read. The agent
+  prunes once when it starts (`prune_at_start`), after it has opened its
+  state and before recovery or a restart can write a document: later it
+  would race the write of a document not named yet. It keeps what either
+  file of the state pair names: a state write that stopped between its two
+  renames leaves the backup naming a document the primary does not, and a
+  later start reads the backup once the primary is damaged. A state file
+  that cannot be read, or is at a state version this agent does not read,
+  leaves every document in place; a damaged one names nothing. A prune
+  that fails is logged and does not stop the start, because a document
+  nothing names is never read and a later write of its generation replaces
+  it. Between starts, the document a re-stamp replaced stays, and so does
+  the finished document of an update whose state write then failed: at
+  most one for each generation started.
+- **Rollback and restore.** `start_again` builds the candidate reference a
+  rollback, or recovery's restore, hands the worker control from a
+  deployment record. For a record that names a descriptor it compares the
+  staged manifest's digest with the record's (the registry reads no staged
+  manifest for such a reference) and then, in one state update, requires
+  the record to stand where it was read (`previous_active` for a rollback,
+  `active` for a restore), takes the next generation, reads the recorded
+  document, requires it to describe the record's bundle, re-stamps it,
+  names the new identity (on the in-flight rollback transaction, or on
+  `active`) and writes the new document. The reference carries that
+  identity, so the registry starts the member as that generation. A refusal
+  names nothing and spends no generation: the restore's is a failed start,
+  the rollback's a failed rollback that leaves the previous record as it
+  was. A kill after the document and before the state write leaves a
+  document no record names; the next start removes it and hands out the
+  same generation again. A kill after the state write leaves the generation
+  named: the next start restores `active` from it, or decides the rollback
+  as it decides any in-flight transaction, the previous record still naming
+  its own document (resumed, the rollback takes another generation). The
+  descriptor is re-stamped as recorded, as by the restart stamp. Between a
+  rollback's update and its `prepare`, a restart of the serving member can
+  take a newer generation; the registry then refuses the rollback's
+  reference, the rollback fails with nothing else changed, and it can be
+  asked for again. A record that names no descriptor gets the reference it
+  got before, and nothing is written.
 - **Restart stamp.** For a member whose recipe names a descriptor, the stamp
   a `process`-mode agent installs reads the stopped generation's document,
   [re-stamps](../bundles/integrity.md#re-stamping) it, writes the new

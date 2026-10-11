@@ -354,15 +354,15 @@ fn a_restore_is_refused_unless_the_document_and_the_staged_bundle_are_the_record
         let host = host();
         let (agent, _) = host.restoring(Worker::default());
         broken(&host, &agent);
-        let before = host.view();
+        let before = (host.view(), host.documents());
 
         let error = apply_startup(&agent.coordinator).unwrap_err().to_record();
 
         let load_failed = error.code == ErrorCode::LoadFailed && !error.recoverable;
         assert!(load_failed && error.message.contains(says), "{error:?}");
         assert_eq!(host.last_error(), Some(error));
-        assert_eq!((host.view(), before[3].as_str()), (before.clone(), "2"));
-        assert!(agent.never_asked() && host.documents() == "stt-1", "{says}");
+        assert_eq!((host.view(), host.documents()), before, "{says}");
+        assert!(agent.never_asked() && before.0[3] == "2", "{says}");
     }
 }
 
@@ -539,6 +539,10 @@ fn start_again_refuses_a_record_out_of_its_slot_and_a_rollback_that_is_not_in_fl
     assert!(refused(&previous, Start::Restore).contains(says));
     let says = "descriptor-tts-2.json` is not re-stamped: the previous active deployment record";
     assert!(refused(&active, Start::Rollback("tx")).contains(says));
+
+    let mut partial = previous.clone();
+    partial.descriptor_digest = None;
+    assert!(refused(&partial, Start::Rollback("tx")).contains("all three or none"));
 
     let says = "is not re-stamped: rollback transaction `tx` of `stt` is not in flight";
     assert!(refused(&previous, Start::Rollback("tx")).contains(says));

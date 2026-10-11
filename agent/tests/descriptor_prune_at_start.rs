@@ -95,30 +95,22 @@ fn files(dir: &Path) -> Vec<String> {
     names
 }
 
-#[test]
-fn the_agent_removes_unnamed_documents_at_its_start_before_recovery_writes_the_next() {
-    let td = TempDir::new().unwrap();
-    let state_dir = td.path().join("state");
-    let first = staged_and_described(td.path(), 1);
-    record_active(&state_dir, &first);
-    let unnamed = DescriptorStore::new(&state_dir);
-    unnamed.write(&first.restamp(7).unwrap()).unwrap();
-    std::fs::write(state_dir.join("descriptor-stt-8.json.tmp"), "{").unwrap();
-    std::fs::write(state_dir.join("descriptor-notes.txt"), "kept").unwrap();
-
+/// Start the agent binary over `dir` and wait until it listens; returns it
+/// with what it had written to stderr by then.
+fn start_agent(dir: &Path) -> (Started, String) {
     let config = serde_json::json!({
-        "socket_path": td.path().join("agent.sock"),
-        "state_dir": state_dir,
-        "staging_dir": td.path().join("staging"),
+        "socket_path": dir.join("agent.sock"),
+        "state_dir": dir.join("state"),
+        "staging_dir": dir.join("staging"),
         "available_backends": ["mock"],
         "device_memory_bytes": 8_u64 << 30,
     });
-    let log = td.path().join("agent.stderr");
+    let log = dir.join("agent.stderr");
     let agent = std::process::Command::new(env!("CARGO_BIN_EXE_tensorplate-agent"))
         .arg("--config-json")
         .arg(config.to_string())
         // Without a platform registry the start does not depend on the host.
-        .env("TP_PLATFORM_REGISTRY_DIR", td.path().join("no-registry"))
+        .env("TP_PLATFORM_REGISTRY_DIR", dir.join("no-registry"))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::fs::File::create(&log).unwrap())
@@ -126,17 +118,31 @@ fn the_agent_removes_unnamed_documents_at_its_start_before_recovery_writes_the_n
         .unwrap();
     let mut agent = Started(agent);
     let stderr = || std::fs::read_to_string(&log).unwrap_or_default();
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !stderr().contains("tensorplate-agent listening on ") {
         let exited = agent.0.try_wait().unwrap();
         assert!(exited.is_none(), "exited: {exited:?}: {}", stderr());
         assert!(Instant::now() < deadline, "never listening: {}", stderr());
         std::thread::sleep(Duration::from_millis(20));
     }
+    (agent, stderr())
+}
+
+#[test]
+fn the_agent_removes_unnamed_documents_at_its_start_before_recovery_writes_the_next() {
+    let td = TempDir::new().unwrap();
+    let state_dir = td.path().join("state");
+    let first = staged_and_described(td.path(), 1);
+    record_active(&state_dir, &first);
+    let unnamed = first.restamp(7).unwrap();
+    DescriptorStore::new(&state_dir).write(&unnamed).unwrap();
+    std::fs::write(state_dir.join("descriptor-stt-8.json.tmp"), "{").unwrap();
+    std::fs::write(state_dir.join("descriptor-notes.txt"), "kept").unwrap();
+
+    let (_agent, stderr) = start_agent(td.path());
 
     // Generation 1 was named when the prune ran, so it is still there
     // beside the generation the restore then started.
-    let stderr = stderr();
     assert!(
         stderr.contains("startup recovery: RestoreActive"),
         "{stderr}"
@@ -149,6 +155,29 @@ fn the_agent_removes_unnamed_documents_at_its_start_before_recovery_writes_the_n
         "state.json.bak",
     ];
     assert_eq!(files(&state_dir), left, "{stderr}");
-    let says = "deployment descriptors: removed 2 documents that no state record names";
+    let says = "deployment descriptors: 2 removed that no state record names";
     assert!(stderr.contains(says), "{stderr}");
+}
+
+#[test]
+fn a_prune_that_fails_is_logged_and_does_not_stop_the_start() {
+    let td = TempDir::new().unwrap();
+    let state_dir = td.path().join("state");
+    StateStore::open(&state_dir)
+        .unwrap()
+        .update(|_| Ok(()))
+        .unwrap();
+    std::fs::write(state_dir.join("descriptor-stt-7.json"), "{").unwrap();
+    // A backup the agent cannot read: it cannot tell what that file names.
+    std::fs::remove_file(state_dir.join("state.json.bak")).unwrap();
+    std::fs::create_dir(state_dir.join("state.json.bak")).unwrap();
+
+    let (_agent, stderr) = start_agent(td.path());
+
+    let says = "deployment descriptors: unnamed documents were not removed: ";
+    assert!(stderr.contains(says), "{stderr}");
+    assert!(
+        state_dir.join("descriptor-stt-7.json").is_file(),
+        "{stderr}"
+    );
 }

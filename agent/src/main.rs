@@ -31,6 +31,7 @@ use tensorplate_agent::{
     },
     config::AgentConfig,
     coordinator::Coordinator,
+    descriptor_store,
     platform_admission::{ObservedStack, PlatformAdmission},
     recovery,
     server::Server,
@@ -830,6 +831,15 @@ fn main() -> ExitCode {
             return ExitCode::from(3);
         }
     };
+    // Before recovery and the worker control, which write documents. A
+    // document left behind is never read, so a failure does not stop the start.
+    match descriptor_store::prune_at_start(&store) {
+        Ok(0) => {}
+        Ok(removed) => {
+            eprintln!("deployment descriptors: {removed} removed that no state record names");
+        }
+        Err(err) => eprintln!("deployment descriptors: unnamed documents were not removed: {err}"),
+    }
     let worker = match worker::from_config(&cfg, &store) {
         Ok(w) => w,
         Err(err) => {

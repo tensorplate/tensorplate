@@ -12,7 +12,7 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
-use tensorplate_protocol::agent_state::{AgentState, DeploymentRecord};
+use tensorplate_protocol::agent_state::{AgentState, DeploymentRecord, TransactionKind};
 use tensorplate_protocol::worker_control::CandidateRef;
 use tensorplate_protocol::{ArtifactRole, DeploymentDescriptor, DescriptorIdentity, ErrorCode};
 
@@ -295,6 +295,30 @@ impl DescriptorStore {
         Ok(descriptor)
     }
 
+    /// The descriptor `identity` names for `deployment_id`, read, verified
+    /// and re-stamped for `generation`. It must describe `bundle_digest`,
+    /// which the caller has compared with the manifest at `staged_path`.
+    fn restamped(
+        &self,
+        deployment_id: &str,
+        identity: DescriptorIdentity<'_>,
+        bundle_digest: &str,
+        staged_path: &str,
+        generation: u64,
+    ) -> AgentResult<DeploymentDescriptor> {
+        let path = self.path(deployment_id, identity.generation)?;
+        let unstamped = |reason: String| refused(&path, format!("is not re-stamped: {reason}"));
+        let current = self.read(deployment_id, identity)?;
+        let described = &current.configuration.bundle.bundle_digest;
+        if !crate::bundle::bundle_digests_equal(described, bundle_digest) {
+            return Err(unstamped(format!(
+                "it describes bundle `{described}`, and `{bundle_digest}` is staged at `{staged_path}`"
+            )));
+        }
+        let next = current.restamp(generation);
+        next.map_err(|e| unstamped(e.to_string()))
+    }
+
     /// Remove every document no record of `state` names, and every write
     /// that did not finish; returns how many files were removed. Only for
     /// a start: later it would race the write of a document not named yet.
@@ -305,7 +329,10 @@ impl DescriptorStore {
     /// nothing is removed; [`AgentError::Io`] when the directory cannot be
     /// read or a file cannot be removed.
     pub fn prune(&self, state: &AgentState) -> AgentResult<usize> {
-        let kept = named_by(state)?;
+        self.remove_all_but(&named_by(state)?)
+    }
+
+    fn remove_all_but(&self, kept: &BTreeSet<String>) -> AgentResult<usize> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(0),
@@ -361,17 +388,33 @@ fn named_by(state: &AgentState) -> AgentResult<BTreeSet<String>> {
 ///
 /// # Errors
 ///
-/// As [`DescriptorStore::prune`], and when a state file cannot be read;
-/// nothing is removed then.
+/// As [`DescriptorStore::prune`], and when what a state file holds cannot
+/// be told (it cannot be read, or is at a state version this build does not
+/// read); nothing is removed then.
 pub fn prune_at_start(store: &StateStore) -> AgentResult<usize> {
-    let _ = store;
-    Ok(0)
+    let mut kept = BTreeSet::new();
+    for state in store.files()? {
+        kept.append(&mut named_by(&state)?);
+    }
+    DescriptorStore::new(store.state_dir()).remove_all_but(&kept)
+}
+
+/// The identity fields of a record that names `descriptor`.
+fn naming(descriptor: &DeploymentDescriptor) -> (Option<u64>, Option<String>, Option<String>) {
+    let descriptor_digest = descriptor.descriptor_digest.clone();
+    let configuration_digest = descriptor.configuration_digest.clone();
+    let generation = Some(descriptor.generation);
+    (
+        generation,
+        Some(descriptor_digest),
+        Some(configuration_digest),
+    )
 }
 
 /// Which record the agent starts again, and so where the new generation's
 /// descriptor is named.
 #[derive(Clone, Copy, Debug)]
-pub enum Start<'a> {
+pub(crate) enum Start<'a> {
     /// Recovery restores `active`: named on it.
     Restore,
     /// The rollback transaction of this id restores `previous_active`:
@@ -386,20 +429,21 @@ pub enum Start<'a> {
 ///
 /// # Errors
 ///
-/// [`AgentError::BundleIntegrity`] when the bundle staged for a described
-/// record is not the record's; [`AgentError::DeploymentDescriptor`] when
-/// the record no longer stands where `start` reads it, its document is
-/// refused or describes another bundle, or a rollback's transaction is not
-/// in flight; and the errors of the state update.
-pub fn start_again(
+/// For a described record: the staged manifest's own error when it cannot
+/// be read, and [`AgentError::BundleIntegrity`] when it is not the record's
+/// bundle; [`AgentError::DeploymentDescriptor`] when the record no longer
+/// stands where `start` reads it, its document is refused or describes
+/// another bundle, or a rollback's transaction is not in flight; and the
+/// errors of the state update.
+pub(crate) fn start_again(
     store: &StateStore,
     record: &DeploymentRecord,
     artifact_relative_path: String,
     start: Start<'_>,
 ) -> AgentResult<CandidateRef> {
-    let _ = (store, start);
-    Ok(CandidateRef {
-        deployment_id: record.deployment_id.clone(),
+    let id = &record.deployment_id;
+    let reference = CandidateRef {
+        deployment_id: id.clone(),
         staged_path: record.staged_path.clone(),
         bundle_digest: record.bundle_digest.clone(),
         generation: None,
@@ -410,6 +454,74 @@ pub fn start_again(
         bundle_name: Some(record.bundle_name.clone()),
         bundle_version: Some(record.bundle_version.clone()),
         artifact_relative_path: Some(artifact_relative_path),
+    };
+    let named = record.descriptor_identity();
+    let named = named.map_err(|e| unusable(format!("of `{id}` is not named: its record {e}")))?;
+    let Some(identity) = named else {
+        return Ok(reference);
+    };
+    // `prepare` reads no staged manifest for a reference that names a descriptor.
+    let (digest, staged_path) = (&*record.bundle_digest, &*record.staged_path);
+    let staged = crate::bundle::staged_manifest(Path::new(staged_path))?.bundle_digest;
+    if !crate::bundle::bundle_digests_equal(&staged, digest) {
+        return Err(AgentError::BundleIntegrity {
+            path: "manifest.json".into(),
+            reason: format!(
+                "`{id}` is not started again: the bundle staged at `{staged_path}` is `{staged}`, not the `{digest}` its record names"
+            ),
+        });
+    }
+    let descriptors = DescriptorStore::new(store.state_dir());
+    let path = descriptors.path(id, identity.generation)?;
+    let unstamped = |reason: String| refused(&path, format!("is not re-stamped: {reason}"));
+    let next = store.update(|state| {
+        let (slot, held) = match start {
+            Start::Restore => (&state.active, "active"),
+            Start::Rollback(_) => (&state.previous_active, "previous active"),
+        };
+        if slot.as_ref() != Some(record) {
+            return Err(unstamped(format!(
+                "the {held} deployment record does not name it"
+            )));
+        }
+        let generation = state.allocate_generation(1);
+        let generation = generation.map_err(|e| unstamped(e.to_string()))?;
+        let next = descriptors.restamped(id, identity, digest, staged_path, generation)?;
+        let (generation, descriptor_digest, configuration_digest) = naming(&next);
+        match start {
+            Start::Restore => {
+                state.active = Some(DeploymentRecord {
+                    generation,
+                    descriptor_digest,
+                    configuration_digest,
+                    ..record.clone()
+                });
+            }
+            Start::Rollback(transaction_id) => {
+                let in_flight = state.in_flight_transaction.as_mut().filter(|tx| {
+                    tx.transaction_id == transaction_id
+                        && tx.kind == TransactionKind::Rollback
+                        && tx.deployment_id == *id
+                });
+                let rollback = in_flight.ok_or_else(|| {
+                    unstamped(format!(
+                        "rollback transaction `{transaction_id}` of `{id}` is not in flight"
+                    ))
+                })?;
+                rollback.generation = generation;
+                rollback.descriptor_digest = descriptor_digest;
+                rollback.configuration_digest = configuration_digest;
+            }
+        }
+        descriptors.write(&next)?;
+        Ok(next)
+    })?;
+    let (generation, descriptor_digest, configuration_digest) = naming(&next);
+    Ok(CandidateRef {
+        generation,
+        descriptor_digest,
+        configuration_digest,
+        ..reference
     })
 }
 
@@ -445,28 +557,23 @@ pub fn restart_stamp(
                         && active.descriptor_identity() == Ok(Some(identity))
                 })
                 .ok_or_else(|| unstamped("the active deployment record does not name it".into()))?;
-            let current = descriptors.read(&recipe.deployment_id, identity)?;
             // The registry has compared the recipe's digest with the staged manifest's.
-            let described = &current.configuration.bundle.bundle_digest;
-            if !crate::bundle::bundle_digests_equal(described, &recipe.bundle_digest) {
-                return Err(unstamped(format!(
-                    "it describes bundle `{described}`, and `{}` is staged at `{}`",
-                    recipe.bundle_digest, recipe.staged_path
-                )));
-            }
-            let next = current
-                .restamp(restamp.generation)
-                .map_err(|e| unstamped(e.to_string()))?;
-            active.generation = Some(next.generation);
-            active.descriptor_digest = Some(next.descriptor_digest.clone());
-            active.configuration_digest = Some(next.configuration_digest.clone());
+            let (digest, staged_path) = (&recipe.bundle_digest, &recipe.staged_path);
+            let (id, generation) = (&recipe.deployment_id, restamp.generation);
+            let next = descriptors.restamped(id, identity, digest, staged_path, generation)?;
+            (
+                active.generation,
+                active.descriptor_digest,
+                active.configuration_digest,
+            ) = naming(&next);
             descriptors.write(&next)?;
             Ok(next)
         })?;
+        let (generation, descriptor_digest, configuration_digest) = naming(&next);
         Ok(CandidateRef {
-            generation: Some(next.generation),
-            descriptor_digest: Some(next.descriptor_digest),
-            configuration_digest: Some(next.configuration_digest),
+            generation,
+            descriptor_digest,
+            configuration_digest,
             ..recipe.clone()
         })
     })
