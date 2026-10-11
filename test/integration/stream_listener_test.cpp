@@ -24,6 +24,7 @@
 #include <span>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -666,8 +667,23 @@ std::string infer_body() {
   return body.dump();
 }
 
+/// The `drain_ends_ns` of the worker's log line `message`, on the steady clock.
+std::optional<std::chrono::steady_clock::time_point> logged_drain_end(const std::string& log,
+                                                                      std::string_view message) {
+  std::istringstream lines{log};
+  for (std::string line; std::getline(lines, line);) {
+    const auto entry = nlohmann::json::parse(line, nullptr, false);
+    if (entry.is_object() && entry.value("message", "") == message) {
+      return std::chrono::steady_clock::time_point{
+          std::chrono::nanoseconds{entry.at("fields").at("drain_ends_ns").get<std::int64_t>()}};
+    }
+  }
+  return std::nullopt;
+}
+
 // A stop waits for a unary request in flight before it reaches the stream
-// listener, which keeps listening until then.
+// listener, which keeps listening until then. Both drains end with the one
+// window that began when shutdown was asked, however late each one starts.
 TEST(StreamListener, TheWorkersStopWaitsForAUnaryRequestInFlightThenClosesItsStreamListener) {
   auto gate = std::make_shared<InferGate>();
   tensorplate::BackendRegistry registry;
@@ -721,7 +737,10 @@ TEST(StreamListener, TheWorkersStopWaitsForAUnaryRequestInFlightThenClosesItsStr
     ASSERT_TRUE(gate->cv.wait_for(lock, 10s, [&] { return gate->entered; }));
   }
 
+  ::testing::internal::CaptureStderr();
+  const auto before_shutdown = std::chrono::steady_clock::now();
   served.worker->shutdown("test");
+  const auto after_shutdown = std::chrono::steady_clock::now();
   // Stream admission is closed at once, with the request still in flight.
   const auto refused = served.open(open_event(wire::SESSION_MODE_STT_STREAMING));
   EXPECT_NE(refused.error_message().find("FAILURE_REASON_ADMISSION_CLOSED"), std::string::npos)
@@ -737,8 +756,17 @@ TEST(StreamListener, TheWorkersStopWaitsForAUnaryRequestInFlightThenClosesItsStr
   EXPECT_TRUE(accepts(AF_INET, served.port)) << "the stream listener was stopped first";
   gate->release();
   stopper.join();
+  const auto log = ::testing::internal::GetCapturedStderr();
   EXPECT_EQ(exit_code, tensorplate::ServingExitCode::Ok);
   EXPECT_FALSE(accepts(AF_INET, served.port)) << "the stream listener outlived the stop";
+  for (const auto* drain : {"stream listener stopping", "draining requests"}) {
+    SCOPED_TRACE(drain);
+    const auto end = logged_drain_end(log, drain);
+    ASSERT_TRUE(end.has_value()) << log;
+    EXPECT_GE(*end, before_shutdown + config.shutdown.drain_deadline);
+    EXPECT_LE(*end, after_shutdown + config.shutdown.drain_deadline)
+        << "the window began after shutdown was asked";
+  }
 }
 
 TEST(StreamListener, ShutdownFromAnotherThreadWhileTheWorkerServes) {

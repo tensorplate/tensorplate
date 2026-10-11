@@ -81,7 +81,9 @@ runs speech jobs is wired in.
 - **API and threads.** The listener uses gRPC's callback API: no thread per
   call. gRPC's own threads run each call's reactions, which apply one client
   event to the manager and never wait on a job, plus the manager's timer
-  thread. gRPC sizes its pool by the machine's cores.
+  thread and one thread of the listener's own, which cancels calls that
+  outlive their session (see "Calls that outlive their session"). gRPC
+  sizes its pool by the machine's cores.
 - **Write path.** Each call writes through a small writer interface
   (`stream_output.hpp`), so the path is tested without a transport. The
   queue's consumer captures the path, never the call, and starts the next
@@ -179,14 +181,37 @@ runs speech jobs is wired in.
   a write when HTTP/2 flow control lets the bytes pass, not when the
   client's application reads them. The no-progress limit and the output
   budgets therefore trail a reader that has stopped by the receive window
-  its own channel announced, and no server setting bounds that window. A
-  listener test measures it with a text session whose client reads nothing
-  and prints the figures of each run. On x86-64 Linux over loopback, with
-  the pinned gRPC: 4,052,160 bytes of PCM, 84 s of the 24 kHz output
-  format, were written to a default client channel before writes stopped,
-  and 64,320 bytes, 1.3 s, to a channel with `grpc.http2.bdp_probe=0`.
-  From there the session ends `slow_consumer` when the 5 s limit passes. A
-  client that wants the limit to follow its reading turns the probe off.
+  its own channel announced, and no server setting bounds that window.
+  Listener tests hold both halves with a text session whose client reads
+  nothing. With `grpc.http2.bdp_probe=0` the client keeps the HTTP/2
+  default window of 65,535 bytes: chunk writes complete until that window
+  is full to within two chunks and no further, and the session then ends
+  `slow_consumer` when the 5 s limit passes on an injected clock. A default
+  client channel widens its window with its bandwidth probe, and more than
+  the default window passes unread; how much is the client's choice and is
+  not asserted. A client that wants the limit to follow its reading turns
+  the probe off.
+- **Calls that outlive their session.** A write in flight completes only
+  when the peer takes it, the session's `SessionClosed` waits behind it,
+  and the call is finished only after that event is written. A reader that
+  stops would therefore hold its call, though no longer a session slot,
+  for as long as it liked. Once a session has ended its call is given the
+  same 5 s no-progress limit again, counted from the end and then from
+  each write that completes; a call that outruns it is cancelled through
+  its server context, which fails the write in flight and ends the call
+  with status `CANCELLED` and no `SessionClosed`. So a client that stopped
+  reading for the limit, lost its session to `slow_consumer` and reads
+  again within the next 5 s still receives the outcome and status
+  `RESOURCE_EXHAUSTED`; one that never reads again has its call ended
+  without it. The rule does not depend on why the session ended: a session
+  that failed behind a write that never completes is covered too. A
+  finished call is watched until its reactor is done, since the transport
+  may be unable to send the status either. The listener's thread sleeps
+  until the earliest such limit, and at most a second, the way the
+  manager's timer does. A cancel is sent at most once per call, and never
+  after the reactor is done: the write path holds a lock through the
+  cancel that the reactor's last reaction takes before the reactor is
+  destroyed.
 - **Refusals.** A refused `Open` creates no session: the call ends with no
   event and a status whose code follows the reason (`invalid_event` is
   `INVALID_ARGUMENT`; unsupported, target and generation reasons are
@@ -215,13 +240,27 @@ runs speech jobs is wired in.
   calls that have not been admitted, and the refusal of compressed messages
   are not enforced by this listener, and neither is the server's own
   receive window, which bounds what a client can leave in the server's
-  transport beyond its input credit; a following change adds them. A
+  transport beyond its input credit; a following change adds them. A call
+  whose `Open` was refused is not watched after its status is handed to
+  the transport. A
   client event that does not decode, for example a `TextSegment` whose
   text is not UTF-8, does not fail its session with `invalid_event` as the
   schema says a refused event does: the session drains and closes with no
   cause and status OK, because the listener cannot tell that failed read
-  from a half-close. A listener test holds this behaviour until it is
-  changed. The listener's sources build only with the
+  from a half-close. In a speech-to-text session the open utterance is
+  therefore finalized and transcribed as if the client had asked for it,
+  and in either mode every valid event the client sends after the bad one
+  goes unread: `last_accepted_sequence` in `SessionClosed` is the only
+  trace of where the server stopped. A listener test holds this behaviour
+  until it is changed. A client event larger than the 64 KiB the listener
+  receives is rejected by the transport before the listener sees it: the
+  call ends with a transport status and no `SessionClosed`, and its session
+  ends as a cancelled call's does, not failed with a typed reason: aborted
+  `client_cancelled`, unless it had nothing in progress and the half-close
+  of the failed read closed it first. A text
+  segment is refused as empty when it holds nothing but ASCII whitespace;
+  other Unicode whitespace is not recognized, so such a segment is accepted
+  and synthesized. The listener's sources build only with the
   feature, which the clang-tidy job leaves off, so CI runs no static
   analysis on `runtime/src/serving/stream/`. What covers them is the build's
   warnings; the address and undefined-behaviour sanitizer leg, which runs
@@ -240,7 +279,11 @@ runs speech jobs is wired in.
   below, which waits only for what is left of the same window. One value
   holds that window (`runtime/src/serving/drain_window.hpp`): whichever
   drain is asked first begins it, and each later one is given the same
-  end. Stopping the HTTP listener waits for its request handlers and has
+  end. The worker logs that end as `drain_ends_ns`, on the clock of the
+  lines' `ts_ns`, when it stops the stream listener (`stream listener
+  stopping`) and when it starts the HTTP drain (`draining requests`); a
+  test reads both and holds them to the instant shutdown was asked.
+  Stopping the HTTP listener waits for its request handlers and has
   no deadline of its own, so a unary request in flight holds the stop
   before the stream listener is reached, and can use up the window the
   stream sessions were to drain in. The stopped

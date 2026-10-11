@@ -32,7 +32,8 @@ struct WireEvent final : OutputBody {
 [[nodiscard]] OutputItem lifecycle_item(::tensorplate::stream::v1::ServerEvent event);
 
 /// The transport of one call, as its write path drives it: one write at a
-/// time, each answered by CallOutput::write_done(), and nothing after finish().
+/// time, each answered by CallOutput::write_done(), and no write after
+/// finish().
 class CallWriter {
  public:
   CallWriter() = default;
@@ -43,6 +44,10 @@ class CallWriter {
   /// `event` stays unchanged until the write is answered.
   virtual void start_write(const ::tensorplate::stream::v1::ServerEvent& event) = 0;
   virtual void finish(const grpc::Status& status) = 0;
+  /// Ends the call without waiting for the peer: a write in flight is
+  /// answered as failed. It may follow finish(), and may run while another
+  /// thread starts a write or finishes.
+  virtual void cancel() = 0;
 };
 
 /// The write path of one call. It sends a session's queued output in sequence
@@ -51,8 +56,14 @@ class CallWriter {
 /// is taken, and SessionClosed leaves with the totals of what was taken
 /// before it.
 ///
-/// Thread-safe. The writer is called with no lock held. This object outlives
-/// the writer, which detach() takes away.
+/// A reader that stops would hold its call for as long as it likes: a write
+/// in flight completes only when the peer takes it, and nothing ends the call
+/// before that. So once the session has ended the call is given the session's
+/// no-progress limit, from the end and again from each write that completes,
+/// and cancel_if_stalled() cancels one that outruns it.
+///
+/// Thread-safe. The writer is called with no lock a reaction takes. This
+/// object outlives the writer, which detach() takes away.
 class CallOutput {
  public:
   /// Hears of each confirmed delivery, in the order written, before the next
@@ -82,8 +93,18 @@ class CallOutput {
   /// first status wins.
   void finish(grpc::Status status);
 
-  /// The writer is gone; nothing is written or finished from now on.
+  /// The writer is gone; nothing is written, finished or cancelled from now
+  /// on. Waits for a cancel in progress.
   void detach();
+
+  /// The session's terminal event was queued at `now`.
+  void session_ended(SchedulerClock::TimePoint now);
+
+  /// Cancels the call, once, if its session ended and it has neither
+  /// completed a write nor lost its writer for the no-progress limit since.
+  /// @return when to ask again; none once nothing is left to watch.
+  [[nodiscard]] std::optional<SchedulerClock::TimePoint> cancel_if_stalled(
+      SchedulerClock::TimePoint now);
 
  private:
   struct Step {
@@ -101,6 +122,9 @@ class CallOutput {
   void run(const Step& step);
 
   const SchedulerClock& clock_;
+  /// Held through a cancel so that detach() cannot take the writer from under
+  /// it. Taken before mu_.
+  std::mutex cancel_mu_;
   mutable std::mutex mu_;
   CallWriter* writer_;
   std::shared_ptr<BoundedOutputQueue> output_;
@@ -118,6 +142,9 @@ class CallOutput {
   grpc::Status end_status_;
   std::optional<grpc::Status> finish_wanted_;
   bool finished_ = false;
+  /// Since the session ended: when it did, or when a later write completed.
+  std::optional<SchedulerClock::TimePoint> ended_progress_at_;
+  bool cancelled_ = false;
 };
 
 }  // namespace tensorplate::serving::stream

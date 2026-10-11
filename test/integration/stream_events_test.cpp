@@ -756,103 +756,211 @@ TEST(StreamEvents, AnEventThatDoesNotDecodeClosesTheSessionAsAHalfCloseDoes) {
   EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::OK);
 }
 
-// A write completes when HTTP/2 flow control lets it pass: a reader that stops
-// is noticed once the window its channel announced is full. Measured here for
-// two client channels.
-TEST(StreamEvents, AReaderThatStopsEndsItsSessionAsASlowConsumerOnceItsWindowIsFull) {
-  struct Channel {
-    const char* name;
-    grpc::ChannelArguments arguments;
-  };
-  std::vector<Channel> channels(2);
-  channels[0].name = "default client channel";
-  channels[1].name = "client channel with the bandwidth probe off";
-  channels[1].arguments.SetInt(GRPC_ARG_HTTP2_BDP_PROBE, 0);
-  for (const auto& channel : channels) {
-    SCOPED_TRACE(channel.name);
-    FakeSchedulerClock clock;
-    Served served{true, "127.0.0.1", &clock};
-    served.use_channel(channel.arguments);
-    auto& seen = served.dispatch().seen;
-    auto client = served.ready(wire::SESSION_MODE_TTS_STREAMING, nullptr, 300s);
-
-    // Waits for `done`. False once no write has completed for a second: the
-    // only wait here that is not for an event, and nothing is asserted on it.
-    const auto unless_stalled = [&](const std::function<bool()>& done) {
-      auto deliveries = seen.deliveries();
-      for (int quiet = 0; quiet < 200;) {
-        if (done()) {
-          return true;
-        }
-        std::this_thread::sleep_for(5ms);
-        const auto now = seen.deliveries();
-        quiet = now == deliveries ? quiet + 1 : 0;
-        deliveries = now;
-      }
-      return false;
-    };
-    // Text for as long as the server takes it, three segments to a Finalize,
-    // and never a read.
-    const std::string text(4'096, 'x');
-    std::uint64_t segments = 0;
-    std::uint64_t finalizes = 0;
-    for (bool writing = true; writing;) {
-      for (int in_synthesis = 0; writing && in_synthesis < 3; ++in_synthesis) {
-        writing = unless_stalled([&] {
-          return seen.inputs() == segments && seen.state() == LogicalSessionState::Active &&
-                 seen.waiting_segments() < 2;
-        });
-        if (writing) {
-          ASSERT_TRUE(client.send(raw_text(++segments, text)));
-        }
-      }
-      writing = writing && unless_stalled([&] { return seen.inputs() == segments; });
-      if (writing) {
-        (void)client.finalize();
-        ++finalizes;
-        writing = unless_stalled([&] {
-          return seen.finalizes().size() == finalizes &&
-                 seen.state() == LogicalSessionState::Active;
-        });
-      }
-    }
-    const auto chunks_written = seen.audio_deliveries();
-    ASSERT_EQ(seen.aborts(), 0) << "nothing ends the session while its clock stands still";
-
-    // Just past the limit, and short of every other timer of the session. A
-    // write that completed after all restarts the limit: hence the rounds.
-    bool ended = false;
-    for (int round = 0; round < 4 && !ended; ++round) {
-      clock.advance(tensorplate::serving::SessionBudgets::kOutputNoProgressTimeout + 1ms);
-      ended = eventually([&] { return seen.aborts() == 1; });
-    }
-    ASSERT_TRUE(ended);
-    EXPECT_EQ(seen.cause(), "slow_consumer");
-
-    // The client reads again: what the server wrote, then the outcome.
-    std::uint64_t pcm_read = 0;
-    std::optional<wire::SessionClosed> closed;
-    while (const auto event = client.read()) {
-      if (event->has_audio_chunk()) {
-        pcm_read += event->audio_chunk().data().size();
-      } else if (event->has_session_closed()) {
-        closed = event->session_closed();
-      }
-    }
-    ASSERT_TRUE(closed.has_value());
-    EXPECT_EQ(closed->state(), wire::SESSION_STATE_CLOSED);
-    EXPECT_EQ(closed->cause().reason(), wire::FAILURE_REASON_SLOW_CONSUMER);
-    // The totals are what was written on this stream before them.
-    EXPECT_EQ(closed->totals().output_audio_samples() * 2, pcm_read);
-    EXPECT_GT(pcm_read, 0U);
-    EXPECT_LT(pcm_read, segments * text.size() * Fake::kSamplesPerTextByte * 2)
-        << "the server wrote everything: the reader was never noticed";
-    EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
-    std::cout << "[ measured ] " << channel.name << ": " << pcm_read
-              << " bytes of PCM written to a client that read nothing (" << chunks_written
-              << " chunk writes had completed when writes stopped; " << segments
-              << " segments sent)\n";
+// The transport rejects an event above the 64 KiB the listener receives
+// before the listener sees it: the call ends with no SessionClosed, and all
+// the session learns is that its call was cancelled. The held job keeps the
+// half-close of the failed read from closing the session first.
+TEST(StreamEvents, AnEventAboveTheReceiveLimitEndsTheCallWithNoSessionClosed) {
+  Served served;
+  auto& fake = served.dispatch().synthetic();
+  auto& seen = served.dispatch().seen;
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  fake.pause(Fake::Gate::InJob);
+  ASSERT_TRUE(client.send_audio(kFrame));
+  ASSERT_TRUE(eventually([&] { return seen.inputs() == 1; }));
+  (void)client.send(raw_audio(kFrame, kFrame, 70'000));
+  while (const auto event = client.read()) {
+    EXPECT_FALSE(event->has_session_closed()) << event->ShortDebugString();
   }
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+  ASSERT_TRUE(eventually([&] { return seen.aborts() == 1; }));
+  EXPECT_EQ(seen.cause(), "client_cancelled");
+  EXPECT_EQ(seen.inputs(), 1U) << "the event the transport rejected was accepted";
+  fake.resume();
+  ASSERT_TRUE(eventually([&] { return served.listener().live_sessions() == 0; }));
+}
+
+constexpr auto kNoProgressLimit = tensorplate::serving::SessionBudgets::kOutputNoProgressTimeout;
+/// What HTTP/2 lets a sender pass before its peer reads, unless the peer
+/// announces another window (RFC 9113, 6.9.2).
+constexpr std::uint64_t kHttp2DefaultWindow = 65'535;
+constexpr std::uint64_t kChunkBytes = std::uint64_t{Fake::kChunkSamples} * 2;
+/// One segment: ten times the default window in PCM.
+constexpr std::size_t kStalledTextBytes = 4'096;
+constexpr std::uint64_t kStalledPcmBytes = kStalledTextBytes * Fake::kSamplesPerTextByte * 2;
+
+/// No chunk of the segment is longer on the wire, its message prefix included.
+std::uint64_t longest_chunk_on_the_wire() {
+  wire::ServerEvent event;
+  event.set_sequence(kStalledPcmBytes);
+  auto& chunk = *event.mutable_audio_chunk();
+  chunk.set_segment_id(1);
+  chunk.set_chunk_index(static_cast<std::uint32_t>(kStalledPcmBytes / kChunkBytes));
+  chunk.set_segment_sample_offset(kStalledPcmBytes);
+  auto& format = *chunk.mutable_format();
+  format.set_encoding(wire::AUDIO_ENCODING_PCM_S16LE);
+  format.set_sample_rate_hz(48'000);
+  format.set_channels(2);
+  chunk.set_data(std::string(kChunkBytes, '\1'));
+  return event.ByteSizeLong() + 5;
+}
+
+/// A text session on a listener with an injected clock, whose client reads
+/// nothing after Ready.
+struct UnreadSession {
+  explicit UnreadSession(const grpc::ChannelArguments& arguments) {
+    served.use_channel(arguments);
+    client = served.ready(wire::SESSION_MODE_TTS_STREAMING, nullptr, 300s);
+  }
+
+  /// Sends one segment and returns once its chunk writes have all but filled
+  /// a window of `window` bytes: with no read, HTTP/2 lets at most two more
+  /// complete, so the next write to start stays in flight.
+  void fill(std::uint64_t window) {
+    ASSERT_TRUE(client.send(raw_text(1, std::string(kStalledTextBytes, 'x'))));
+    // One chunk short, for Ready and Accepted, which the window also carried.
+    const auto all_but_full = window / longest_chunk_on_the_wire() - 1;
+    ASSERT_TRUE(eventually([&] { return seen().audio_deliveries() >= all_but_full; }))
+        << seen().audio_deliveries() << " chunk writes completed, short of " << all_but_full;
+  }
+
+  /// Moves the clock past the no-progress limit until the session ends. A
+  /// write that completed after all restarts the limit: hence the rounds,
+  /// each of which waits for one of the two events.
+  void end_as_slow_consumer() {
+    for (int round = 0; round < 4 && seen().aborts() == 0; ++round) {
+      // Any completed write restarts the limit, a reply's as well as a chunk's.
+      const auto completed = seen().deliveries();
+      clock.advance(kNoProgressLimit + 1ms);
+      ASSERT_TRUE(
+          eventually([&] { return seen().aborts() == 1 || seen().deliveries() > completed; }));
+    }
+    ASSERT_EQ(seen().aborts(), 1);
+    EXPECT_EQ(seen().cause(), "slow_consumer");
+  }
+
+  [[nodiscard]] tensorplate::testing::stream_listener::Seen& seen() {
+    return served.dispatch().seen;
+  }
+
+  FakeSchedulerClock clock;
+  Served served{true, "127.0.0.1", &clock};
+  Client client;
+};
+
+grpc::ChannelArguments without_the_bandwidth_probe() {
+  grpc::ChannelArguments arguments;
+  arguments.SetInt(GRPC_ARG_HTTP2_BDP_PROBE, 0);
+  return arguments;
+}
+
+// A write completes when HTTP/2 flow control lets it pass, so the no-progress
+// limit trails a reader that stops by the window its channel announced: here
+// the default one, which a client channel keeps with its bandwidth probe off.
+TEST(StreamEvents, AReaderThatStopsIsNoticedOnceTheWindowItsChannelAnnouncedIsFull) {
+  UnreadSession session{without_the_bandwidth_probe()};
+  session.fill(kHttp2DefaultWindow);
+  if (HasFatalFailure()) {
+    return;
+  }
+  session.end_as_slow_consumer();
+  if (HasFatalFailure()) {
+    return;
+  }
+  // Nothing completes for a session that ended, so this is all that passed.
+  const auto completed = session.seen().audio_deliveries();
+  EXPECT_LE(completed * (kChunkBytes + 5), kHttp2DefaultWindow)
+      << "more was written than the window the client announced";
+
+  // The client reads again within the limit: what the server wrote, then the
+  // outcome.
+  auto& client = session.client;
+  std::uint64_t pcm_read = 0;
+  std::optional<wire::SessionClosed> closed;
+  while (const auto event = client.read()) {
+    if (event->has_audio_chunk()) {
+      pcm_read += event->audio_chunk().data().size();
+    } else if (event->has_session_closed()) {
+      closed = event->session_closed();
+    }
+  }
+  ASSERT_TRUE(closed.has_value());
+  EXPECT_EQ(closed->state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_EQ(closed->cause().reason(), wire::FAILURE_REASON_SLOW_CONSUMER);
+  // The totals are what was written on this stream before them: the chunks
+  // that had completed and the one that was in flight.
+  EXPECT_EQ(closed->totals().output_audio_samples() * 2, pcm_read);
+  EXPECT_EQ(pcm_read, (completed + 1) * kChunkBytes);
+  EXPECT_LT(pcm_read, kStalledPcmBytes) << "the server wrote everything it was asked for";
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+  EXPECT_TRUE(eventually([&] { return session.served.listener().open_calls() == 0; }));
+}
+
+// The same reader on a default client channel, whose bandwidth probe widens
+// the window it announces: more passes unread than the default window holds.
+TEST(StreamEvents, ADefaultClientChannelLetsMorePassUnreadThanTheDefaultWindow) {
+  UnreadSession session{grpc::ChannelArguments{}};
+  ASSERT_TRUE(session.client.send(raw_text(1, std::string(kStalledTextBytes, 'x'))));
+  EXPECT_TRUE(eventually(
+      [&] { return session.seen().audio_deliveries() * kChunkBytes > kHttp2DefaultWindow; }));
+  session.client.context->TryCancel();
+}
+
+// A reader that never resumes holds a write in flight for as long as it
+// likes, and the session's last event behind it. The call is cancelled once
+// nothing was written for the limit after the session ended.
+TEST(StreamEvents, ACallWhoseReaderNeverResumesIsCancelledAfterItsSessionEnded) {
+  UnreadSession session{without_the_bandwidth_probe()};
+  auto& listener = session.served.listener();
+  session.fill(kHttp2DefaultWindow);
+  if (HasFatalFailure()) {
+    return;
+  }
+  session.end_as_slow_consumer();
+  if (HasFatalFailure()) {
+    return;
+  }
+  ASSERT_TRUE(eventually([&] { return listener.live_sessions() == 0; }));
+  // The clock has not moved since the end: the call still has its limit.
+  EXPECT_EQ(listener.open_calls(), 1U);
+  session.clock.advance(kNoProgressLimit + 1ms);
+  ASSERT_TRUE(eventually([&] { return listener.open_calls() == 0; }))
+      << "the call outlived the limit: its reactor was never done";
+
+  // Only now does the client look: its call is over and told it nothing.
+  auto& client = session.client;
+  while (const auto event = client.read()) {
+    EXPECT_FALSE(event->has_session_closed()) << "SessionClosed was never written";
+  }
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
+}
+
+// The limit after the end is its own: a session that failed with a write in
+// flight never came to the no-progress limit of a live session.
+TEST(StreamEvents, ACallIsCancelledWhenItsSessionFailedBehindAWriteThatNeverCompletes) {
+  UnreadSession session{without_the_bandwidth_probe()};
+  auto& listener = session.served.listener();
+  auto& seen = session.seen();
+  session.fill(kHttp2DefaultWindow);
+  if (HasFatalFailure()) {
+    return;
+  }
+  // Out of sequence: the session fails at once, with its clock where it was.
+  wire::ClientEvent stray;
+  stray.set_sequence(99);
+  stray.set_session_id(session.client.session_id);
+  stray.mutable_ping();
+  ASSERT_TRUE(session.client.call->Write(stray));
+  ASSERT_TRUE(eventually([&] { return seen.state() == LogicalSessionState::Failed; }));
+  EXPECT_EQ(seen.cause(), "invalid_event");
+  ASSERT_TRUE(eventually([&] { return listener.live_sessions() == 0; }));
+  EXPECT_EQ(listener.open_calls(), 1U);
+  session.clock.advance(kNoProgressLimit + 1ms);
+  ASSERT_TRUE(eventually([&] { return listener.open_calls() == 0; }));
+  EXPECT_EQ(seen.aborts(), 0) << "the no-progress limit of a live session ended it";
+  // The slot was free all along, and is served.
+  auto next = session.served.ready(wire::SESSION_MODE_TTS_STREAMING);
+  EXPECT_FALSE(next.session_id.empty());
 }
 
 // A session with work in progress cannot drain behind its finished call: the

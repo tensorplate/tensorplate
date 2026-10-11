@@ -5,7 +5,9 @@
 #include <grpcpp/support/server_callback.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -13,6 +15,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "tensorplate/stream/v1/session.grpc.pb.h"
 
@@ -121,6 +124,9 @@ struct StreamListener::Impl final : wire::SessionService::CallbackService {
   void on_transition(const ManagedSessionTransition& transition);
   void close_admission() noexcept;
   [[nodiscard]] bool admitting() const;
+  void watch(std::shared_ptr<CallOutput> ended_call);
+  void watch_ended_calls();
+  void stop_watching() noexcept;
 
   StreamListenerOptions options;
   SessionDispatch* dispatch;
@@ -131,6 +137,16 @@ struct StreamListener::Impl final : wire::SessionService::CallbackService {
 
   std::mutex calls_mu;
   std::map<std::uint64_t, std::shared_ptr<CallState>> calls;
+  /// Reactors not done yet.
+  std::atomic<std::size_t> open_calls{0};
+
+  /// Calls whose session has ended, each until its reactor is done.
+  std::mutex ended_mu;
+  std::condition_variable ended_cv;
+  std::vector<std::shared_ptr<CallOutput>> ended;
+  bool ended_added = false;
+  bool watch_stopped = false;
+  std::thread watcher;
 
   /// Serializes stop(); held through its wait.
   std::mutex lifecycle_mu;
@@ -148,8 +164,9 @@ namespace {
 class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEvent>,
                           public stream::CallWriter {
  public:
-  explicit SessionCall(StreamListener::Impl& listener)
-      : listener_(listener), state_(std::make_shared<CallState>()) {
+  SessionCall(StreamListener::Impl& listener, grpc::CallbackServerContext& context)
+      : listener_(listener), context_(context), state_(std::make_shared<CallState>()) {
+    ++listener_.open_calls;
     state_->out = std::make_shared<CallOutput>(*this, listener.clock);
     StartRead(&in_);
   }
@@ -188,11 +205,14 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
       fail(*key,
            Error::make(Error::Code::Internal, "the call ended before its session", "internal"));
     }
+    --listener_.open_calls;
     delete this;
   }
 
   void start_write(const ServerEvent& event) override { StartWrite(&event); }
   void finish(const grpc::Status& status) override { Finish(status); }
+  // The context lives until OnDone has returned, and detach() runs in it.
+  void cancel() override { context_.TryCancel(); }
 
  private:
   [[nodiscard]] std::optional<std::uint64_t> session_key() const {
@@ -458,6 +478,7 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
   }
 
   StreamListener::Impl& listener_;
+  grpc::CallbackServerContext& context_;
   std::shared_ptr<CallState> state_;
   ClientEvent in_;
   std::uint64_t expected_sequence_ = 1;
@@ -470,8 +491,8 @@ class SessionCall final : public grpc::ServerBidiReactor<ClientEvent, ServerEven
 }  // namespace
 
 grpc::ServerBidiReactor<ClientEvent, ServerEvent>* StreamListener::Impl::Session(
-    grpc::CallbackServerContext* /*context*/) {
-  return new SessionCall(*this);
+    grpc::CallbackServerContext* context) {
+  return new SessionCall(*this, *context);
 }
 
 void StreamListener::Impl::on_transition(const ManagedSessionTransition& transition) {
@@ -563,7 +584,9 @@ void StreamListener::Impl::on_transition(const ManagedSessionTransition& transit
           totals.set_input_audio_samples(input_audio_samples);
           totals.set_input_text_bytes(input_text_bytes);
           state->out->set_end_status(stream::session_end_status(closed));
+          state->out->session_ended(clock.now());
           offer(std::move(event));
+          watch(state->out);
           break;
         }
         default:
@@ -602,6 +625,61 @@ void StreamListener::Impl::close_admission() noexcept {
 bool StreamListener::Impl::admitting() const {
   const std::lock_guard guard(manager_mu);
   return !admission_stopped;
+}
+
+void StreamListener::Impl::watch(std::shared_ptr<CallOutput> ended_call) {
+  {
+    const std::lock_guard guard(ended_mu);
+    ended.push_back(std::move(ended_call));
+    ended_added = true;
+  }
+  ended_cv.notify_one();
+}
+
+void StreamListener::Impl::watch_ended_calls() {
+  std::unique_lock lock(ended_mu);
+  while (!watch_stopped) {
+    ended_added = false;
+    auto watched = ended;
+    lock.unlock();
+    // Unlocked: a cancel calls into gRPC, and the sink adds under this lock.
+    const auto now = clock.now();
+    std::optional<SchedulerClock::TimePoint> next;
+    std::erase_if(watched, [&](const std::shared_ptr<CallOutput>& call) {
+      const auto due = call->cancel_if_stalled(now);
+      if (due && (!next || *due < *next)) {
+        next = due;
+      }
+      return due.has_value();
+    });
+    lock.lock();
+    // What is left of `watched` needs no more watching.
+    std::erase_if(ended, [&](const std::shared_ptr<CallOutput>& call) {
+      return std::find(watched.begin(), watched.end(), call) != watched.end();
+    });
+    const auto woken = [&] { return watch_stopped || ended_added; };
+    if (!next) {
+      ended_cv.wait(lock, woken);
+    } else {
+      // At most a second: an injected clock moves without telling.
+      const auto until_due = std::chrono::duration_cast<std::chrono::milliseconds>(*next - now);
+      ended_cv.wait_for(
+          lock,
+          std::clamp(until_due, std::chrono::milliseconds{1}, std::chrono::milliseconds{1000}),
+          woken);
+    }
+  }
+}
+
+void StreamListener::Impl::stop_watching() noexcept {
+  {
+    const std::lock_guard guard(ended_mu);
+    watch_stopped = true;
+  }
+  ended_cv.notify_one();
+  if (watcher.joinable()) {
+    watcher.join();
+  }
 }
 
 StreamListener::StreamListener(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -648,6 +726,7 @@ Result<std::unique_ptr<StreamListener>> StreamListener::start(StreamListenerOpti
                                   "stream_bind_failed"));
   }
   raw->port = static_cast<std::uint16_t>(selected);
+  raw->watcher = std::thread([raw] { raw->watch_ended_calls(); });
   return std::unique_ptr<StreamListener>(new StreamListener(std::move(impl)));
 }
 
@@ -677,10 +756,16 @@ void StreamListener::stop(std::chrono::steady_clock::time_point deadline) noexce
   if (impl_->dispatch != nullptr) {
     impl_->dispatch->stop();
   }
+  // Every reactor is done: nothing is left to cancel.
+  impl_->stop_watching();
   impl_->server.reset();
   const std::lock_guard guard(impl_->manager_mu);
   impl_->held_at_stop = impl_->manager->held_slots();
   impl_->manager.reset();
+}
+
+std::size_t StreamListener::open_calls() const noexcept {
+  return impl_->open_calls.load();
 }
 
 std::size_t StreamListener::live_sessions() const noexcept {

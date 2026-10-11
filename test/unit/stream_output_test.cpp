@@ -6,13 +6,17 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <future>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -43,16 +47,18 @@ using tensorplate::stream::v1::ServerEvent;
 /// The format of a session's chunks: 24 kHz 16-bit mono.
 constexpr StreamAudioFormat kFormat{StreamAudioEncoding::PcmS16Le, 24'000, 1};
 
-/// A clock that runs a hook once, inside the next now().
+/// A clock that runs a hook once, inside the next now(), and reads `fixed`
+/// when a test set it.
 class HookClock final : public SchedulerClock {
  public:
   [[nodiscard]] TimePoint now() const noexcept override {
     if (auto hook = std::exchange(next_now, nullptr)) {
       hook();
     }
-    return std::chrono::steady_clock::now();
+    return fixed.value_or(std::chrono::steady_clock::now());
   }
   mutable std::function<void()> next_now;
+  std::optional<TimePoint> fixed;
 };
 
 class RecordingWriter final : public CallWriter {
@@ -69,6 +75,19 @@ class RecordingWriter final : public CallWriter {
   void finish(const grpc::Status& status) override {
     const std::lock_guard guard(mu);
     finished.push_back(status);
+  }
+  void cancel() override {
+    {
+      const std::lock_guard guard(mu);
+      ++cancels;
+    }
+    if (on_cancel) {
+      on_cancel();
+    }
+  }
+  [[nodiscard]] int cancelled() const {
+    const std::lock_guard guard(mu);
+    return cancels;
   }
   [[nodiscard]] std::vector<std::uint64_t> sequences() const {
     const std::lock_guard guard(mu);
@@ -90,7 +109,9 @@ class RecordingWriter final : public CallWriter {
   mutable std::mutex mu;
   std::vector<ServerEvent> written;
   std::vector<grpc::Status> finished;
+  int cancels = 0;
   std::function<void()> on_write;
+  std::function<void()> on_cancel;
 };
 
 OutputItem item(OutputKind kind, const std::string& tag = "t") {
@@ -258,6 +279,123 @@ TEST(StreamOutput, NothingIsWrittenOrFinishedAfterDetach) {
   path.out->finish(grpc::Status::CANCELLED);
   EXPECT_TRUE(path.writer.sequences().empty());
   EXPECT_TRUE(path.writer.codes().empty());
+}
+
+constexpr auto kLimit = SessionBudgets::kOutputNoProgressTimeout;
+const SchedulerClock::TimePoint kEnded{std::chrono::hours{1}};
+
+TEST(StreamOutput, ACallIsNotWatchedBeforeItsSessionEnded) {
+  Path path;
+  path.offer(OutputKind::Control);
+  EXPECT_FALSE(path.out->cancel_if_stalled(kEnded + std::chrono::hours{1}).has_value());
+  EXPECT_EQ(path.writer.cancelled(), 0);
+}
+
+TEST(StreamOutput, AnEndedCallWhoseWriteNeverCompletesIsCancelledOnceAtTheLimit) {
+  Path path;
+  path.offer(OutputKind::Control);
+  path.out->session_ended(kEnded);
+  path.offer(OutputKind::Terminal);
+  EXPECT_EQ(path.out->cancel_if_stalled(kEnded), kEnded + kLimit);
+  EXPECT_EQ(path.out->cancel_if_stalled(kEnded + kLimit - std::chrono::nanoseconds{1}),
+            kEnded + kLimit);
+  EXPECT_EQ(path.writer.cancelled(), 0) << "the call has the whole limit";
+  EXPECT_FALSE(path.out->cancel_if_stalled(kEnded + kLimit).has_value());
+  EXPECT_EQ(path.writer.cancelled(), 1);
+  // Nothing is left to watch, and a second cancel is never sent.
+  EXPECT_FALSE(path.out->cancel_if_stalled(kEnded + 2 * kLimit).has_value());
+  EXPECT_EQ(path.writer.cancelled(), 1);
+  // The transport answers the write it gave up, which ends the call.
+  path.out->write_done(false);
+  EXPECT_EQ(path.writer.codes(), (Codes{grpc::StatusCode::CANCELLED}));
+  EXPECT_EQ(path.writer.sequences(), (Sequences{1})) << "the terminal event was never written";
+}
+
+TEST(StreamOutput, AWriteThatCompletesAfterTheEndGivesTheCallTheLimitAgain) {
+  Path path;
+  path.offer(OutputKind::Control);
+  path.out->session_ended(kEnded);
+  path.offer(OutputKind::Terminal);
+  path.clock.fixed = kEnded + kLimit - std::chrono::seconds{1};
+  path.out->write_done(true);
+  EXPECT_EQ(path.out->cancel_if_stalled(kEnded + kLimit), *path.clock.fixed + kLimit);
+  EXPECT_EQ(path.writer.cancelled(), 0);
+  EXPECT_FALSE(path.out->cancel_if_stalled(*path.clock.fixed + kLimit).has_value());
+  EXPECT_EQ(path.writer.cancelled(), 1);
+}
+
+TEST(StreamOutput, TheEndOfASessionIsCountedFromOnce) {
+  Path path;
+  path.offer(OutputKind::Control);
+  path.out->session_ended(kEnded);
+  path.out->session_ended(kEnded + kLimit);
+  EXPECT_EQ(path.out->cancel_if_stalled(kEnded), kEnded + kLimit);
+}
+
+TEST(StreamOutput, AFailedWriteDoesNotGiveAnEndedCallTheLimitAgain) {
+  Path path;
+  path.offer(OutputKind::Control);
+  path.out->session_ended(kEnded);
+  path.clock.fixed = kEnded + std::chrono::seconds{1};
+  path.out->write_done(false);
+  EXPECT_EQ(path.out->cancel_if_stalled(kEnded), kEnded + kLimit);
+}
+
+// A finished call is watched until its writer is gone: the transport may not
+// be able to send its status either.
+TEST(StreamOutput, AnEndedCallIsWatchedPastItsFinishUntilItsWriterIsGone) {
+  Path path;
+  path.out->set_end_status(grpc::Status(grpc::StatusCode::UNAVAILABLE, "ended"));
+  path.out->session_ended(kEnded);
+  path.offer(OutputKind::Terminal);
+  path.clock.fixed = kEnded;
+  path.out->write_done(true);
+  ASSERT_EQ(path.writer.codes(), (Codes{grpc::StatusCode::UNAVAILABLE}));
+  EXPECT_EQ(path.out->cancel_if_stalled(kEnded), kEnded + kLimit);
+  EXPECT_FALSE(path.out->cancel_if_stalled(kEnded + kLimit).has_value());
+  EXPECT_EQ(path.writer.cancelled(), 1);
+}
+
+TEST(StreamOutput, ACallWhoseWriterIsGoneIsNeverCancelled) {
+  Path path;
+  path.offer(OutputKind::Control);
+  path.out->session_ended(kEnded);
+  path.out->detach();
+  EXPECT_FALSE(path.out->cancel_if_stalled(kEnded + kLimit).has_value());
+  EXPECT_EQ(path.writer.cancelled(), 0);
+}
+
+// The reactor is destroyed when detach() returns: it must not return while a
+// cancel is still using it.
+TEST(StreamOutput, DetachWaitsForACancelInProgress) {
+  Path path;
+  path.offer(OutputKind::Control);
+  path.out->session_ended(kEnded);
+  std::promise<void> detaching;
+  std::atomic<bool> detached{false};
+  bool detached_during_cancel = false;
+  std::thread detacher;
+  path.writer.on_cancel = [&] {
+    detacher = std::thread([&] {
+      detaching.set_value();
+      path.out->detach();
+      detached = true;
+    });
+    detaching.get_future().wait();
+    // The reactions of a cancelled call run while the cancel is in progress.
+    path.out->write_done(false);
+    // Bounded by its count, not by a clock: a detach() that did not wait
+    // would have returned long before the last yield.
+    for (int spin = 0; spin < 100'000 && !detached; ++spin) {
+      std::this_thread::yield();
+    }
+    detached_during_cancel = detached;
+  };
+  EXPECT_FALSE(path.out->cancel_if_stalled(kEnded + kLimit).has_value());
+  detacher.join();
+  EXPECT_FALSE(detached_during_cancel);
+  EXPECT_EQ(path.writer.cancelled(), 1);
+  EXPECT_EQ(path.writer.codes(), (Codes{grpc::StatusCode::CANCELLED}));
 }
 
 TEST(StreamOutput, ABodyTheStreamDidNotQueueEndsTheCallAsInternal) {

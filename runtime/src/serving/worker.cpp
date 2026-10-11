@@ -60,6 +60,13 @@ void log_stderr(const ServingConfig& cfg, std::string_view level, std::string_vi
   std::cerr << j.dump() << '\n';
 }
 
+/// When the drain window ends, on the clock and in the unit of a line's
+/// `ts_ns`.
+nlohmann::json drain_end_fields(std::chrono::steady_clock::time_point end) {
+  return {{"drain_ends_ns",
+           std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count()}};
+}
+
 class SchedulerHealthSink final : public SchedulerEventSink {
  public:
   SchedulerHealthSink(HealthState& health, ServingMetrics& metrics, InferScheduler*& scheduler)
@@ -463,8 +470,13 @@ void ServingWorker::Impl::stop_stream_listener() noexcept {
 #if TP_ENABLE_STREAMING_GRPC
   if (auto* listener = stream_listener(); listener != nullptr) {
     // Sessions drain inside the window that began when shutdown was asked.
-    listener->stop(
-        drain_window.begin(std::chrono::steady_clock::now(), config.shutdown.drain_deadline));
+    const auto end =
+        drain_window.begin(std::chrono::steady_clock::now(), config.shutdown.drain_deadline);
+    try {
+      log_stderr(config, "info", "stream listener stopping", drain_end_fields(end));
+    } catch (...) {  // NOLINT(bugprone-empty-catch): the stop continues without the line.
+    }
+    listener->stop(end);
   }
 #endif
 }
@@ -503,6 +515,7 @@ void ServingWorker::Impl::run_drain() {
   // stream drain before this one has used part of it.
   const auto deadline =
       drain_window.begin(std::chrono::steady_clock::now(), config.shutdown.drain_deadline);
+  log_stderr(config, "info", "draining requests", drain_end_fields(deadline));
   while (std::chrono::steady_clock::now() < deadline) {
     const auto m = scheduler->metrics();
     if (m.queue_depth == 0 && m.in_flight == 0) {

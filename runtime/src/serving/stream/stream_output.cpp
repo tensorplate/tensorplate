@@ -93,6 +93,9 @@ void CallOutput::write_done(bool ok) {
   {
     const std::lock_guard guard(mu_);
     writing_ = false;
+    if (ok && ended_progress_at_) {
+      ended_progress_at_ = now;
+    }
     if (!finish_wanted_) {
       if (!ok) {
         finish_wanted_ = grpc::Status::CANCELLED;
@@ -118,8 +121,37 @@ void CallOutput::finish(grpc::Status status) {
 }
 
 void CallOutput::detach() {
+  const std::lock_guard cancelling(cancel_mu_);
   const std::lock_guard guard(mu_);
   writer_ = nullptr;
+}
+
+void CallOutput::session_ended(SchedulerClock::TimePoint now) {
+  const std::lock_guard guard(mu_);
+  if (!ended_progress_at_) {
+    ended_progress_at_ = now;
+  }
+}
+
+std::optional<SchedulerClock::TimePoint> CallOutput::cancel_if_stalled(
+    SchedulerClock::TimePoint now) {
+  const std::lock_guard cancelling(cancel_mu_);
+  CallWriter* writer = nullptr;
+  {
+    const std::lock_guard guard(mu_);
+    if (!ended_progress_at_ || writer_ == nullptr || cancelled_) {
+      return std::nullopt;
+    }
+    const auto due = *ended_progress_at_ + SessionBudgets::kOutputNoProgressTimeout;
+    if (now < due) {
+      return due;
+    }
+    cancelled_ = true;
+    writer = writer_;
+  }
+  // Outside mu_, which the reactions take; cancel_mu_ keeps the writer.
+  writer->cancel();
+  return std::nullopt;
 }
 
 CallOutput::Step CallOutput::next_locked() {

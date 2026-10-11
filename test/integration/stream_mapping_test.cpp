@@ -298,6 +298,9 @@ TEST(StreamMapping, ATextSegmentIsCheckedAgainstTheTermsAndWhatCameBefore) {
               "empty_input");
   }
   EXPECT_EQ(refusal(stream::check_text_segment(segment(8, " a "), terms, history)), "accepted");
+  // Only ASCII whitespace is recognized: a no-break space is text.
+  EXPECT_EQ(refusal(stream::check_text_segment(segment(8, "\xc2\xa0"), terms, history)),
+            "accepted");
   // A control character that is not whitespace is text.
   EXPECT_EQ(refusal(stream::check_text_segment(segment(8, "\x1f"), terms, history)), "accepted");
   EXPECT_EQ(refusal(stream::check_text_segment(segment(8, "\x08"), terms, history)), "accepted");
