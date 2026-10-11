@@ -106,6 +106,15 @@ exclude = ['/tensorplate/stream/v1/session_pb2']
 module = ["numpy", "numpy.*", "PIL", "PIL.*"]
 ignore_missing_imports = true
 
+# grpcio ships no type information, and the generated service module has none.
+[[tool.mypy.overrides]]
+module = ["grpc", "grpc.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tensorplate.stream.v1.session_pb2_grpc"]
+follow_imports = "skip"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"

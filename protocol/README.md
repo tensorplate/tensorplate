@@ -35,9 +35,12 @@ C++ and Rust components.
 `proto/tensorplate/stream/v1/session.proto` is a **draft** of the messages a
 client and the serving worker will exchange on one bidirectional gRPC call
 per logical session, and the source of truth for them. Nothing serves it
-yet: no listener or server is built from it, and its one client is the
+yet: no listener or server is built from it. Its clients are the
 measurement tool `tools/validation/slice_measure.py`, which generates Python
-bindings from it when it starts. It is not a compatibility promise until it
+bindings from it when it starts, and the Python SDK's streaming speech
+client (`tensorplate.speech`), built on the modules the SDK's wheel carries;
+that client has been run against an in-process server only. It is not a
+compatibility promise until it
 is frozen. The JSON contracts under `schemas/` are unchanged by it.
 
 - **Bindings.** A build with `TP_ENABLE_STREAMING_GRPC=ON` generates the C++

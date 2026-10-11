@@ -142,9 +142,10 @@ def test_the_extra_is_grpcio_and_protobuf_pinned_at_their_floors() -> None:
 
 
 @pytest.mark.usefixtures("stand_ins")
-@pytest.mark.parametrize("package", _GUARDED)
-def test_import_succeeds_when_both_dependencies_import(package: str) -> None:
-    assert _import(package).__name__ == package
+def test_import_succeeds_when_both_dependencies_import() -> None:
+    # Only the package that is the guard alone: tensorplate.speech goes on to
+    # import its client, which the stand-ins cannot serve.
+    assert _import("tensorplate.stream").__name__ == "tensorplate.stream"
 
 
 def test_the_guard_checks_every_distribution_the_extra_declares() -> None:

@@ -53,6 +53,33 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The Python SDK gains a streaming speech client, `tensorplate.speech`
+  (the `speech` extra), over the draft stream session schema. It is
+  asyncio only. `SpeechClient(endpoint)`, or `SpeechClient(channel=...)` on
+  a `grpc.aio` channel the caller keeps, opens speech-to-text sessions on a
+  named deployment: audio frames go out under the server's input credit,
+  partial transcripts, endpoints and final transcripts come back as the
+  SDK's own frozen dataclasses, `finalize()` returns the final transcript
+  that names it, `close()` drains and returns the session's totals, and
+  `cancel()` abandons the session. Events are read while the session sends:
+  a session holds 16 KiB of unread events and then reads nothing more from
+  the server, and one left that way for the server's output stall time ends
+  with `ResourceExhaustedError`. The open, the close and the cancel are
+  bounded (`open_timeout`, `close_timeout`, `cancel_timeout`); a timeout is
+  one deadline over the whole call and ends the session. A cancelled caller
+  gets its cancellation and the session stays open. Closing the client ends
+  the sessions made from it. The session sends `Ping` at the interval
+  the server gives. Every failure is a typed `SpeechError` whose class
+  follows the call's final status, or the stated cause's error code where
+  a write that raced the end of the call made gRPC report `INTERNAL`, and
+  which says whether the session was admitted, was not, or cannot be
+  known; the client never retries. The client's own channel turns gRPC's
+  bandwidth probe off so that a session that stops reading holds the
+  server back within HTTP/2's window of about 64 KiB.
+  Text-to-speech sessions and discovery of the stream endpoint are not in
+  the package yet, and the client has been run against an in-process server
+  built from the schema, not against a worker. (V030-E04-F02-T03)
+
 - A gRPC stream listener in the serving worker that binds and refuses every
   `Open`: the worker does not serve stream sessions yet. In builds with
   `TP_ENABLE_STREAMING_GRPC` and with `streaming.enabled`, the worker binds

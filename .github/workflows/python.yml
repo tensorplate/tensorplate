@@ -158,9 +158,12 @@ jobs:
             --wheel-dir "${RUNNER_TEMP}/sdk-wheel" .
           pip install "$(echo "${RUNNER_TEMP}"/sdk-wheel/tensorplate_python-*.whl)[dev,speech]"
 
-      - name: pytest the dependency guard, the pins, the stream modules and the build
+      # The streaming client's tests come last: they start no process, and
+      # nothing forks once their gRPC channels have run.
+      - name: pytest the dependency guard, the pins, the stream modules, the build and the streaming client
         env:
           TENSORPLATE_REQUIRE_SPEECH_EXTRAS: '1'
         run: >-
           pytest -q tests/test_import_safety.py tests/test_speech_import.py
           tests/test_stream_modules.py tests/test_distribution.py
+          tests/test_streaming_server.py tests/test_streaming_client.py
