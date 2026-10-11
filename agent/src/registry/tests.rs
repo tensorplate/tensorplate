@@ -11,6 +11,7 @@ use tempfile::TempDir;
 use crate::supervision::FakeClock;
 use crate::worker::MemberEvent;
 
+mod descriptors;
 mod ports;
 mod restart;
 

@@ -24,6 +24,7 @@ use tensorplate_protocol::worker_control::{CandidateRef, MemberRef};
 use crate::bundle::StagedManifest;
 use crate::config::{AgentConfig, WorkerConfig};
 use crate::control_channel::{ContactState, ControlChannel};
+use crate::descriptor_store::{self, DescriptorStore};
 use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
 use crate::supervision::{MonotonicClock, SystemMonotonicClock};
@@ -365,6 +366,7 @@ pub struct MemberRegistry {
     clock: Arc<dyn MonotonicClock>,
     ports: Arc<PortPool>,
     restart_stamp: Option<RestartStamp>,
+    descriptors: Option<Arc<DescriptorStore>>,
     inner: Mutex<Members>,
     /// Runs once, just before a restart reads the staged manifest.
     #[cfg(test)]
@@ -382,6 +384,7 @@ impl MemberRegistry {
         Self {
             ports: PortPool::new(settings.ports.clone()),
             restart_stamp: None,
+            descriptors: None,
             settings,
             launcher,
             probe,
@@ -397,6 +400,13 @@ impl MemberRegistry {
     #[must_use]
     pub fn with_restart_stamp(mut self, stamp: RestartStamp) -> Self {
         self.restart_stamp = Some(stamp);
+        self
+    }
+
+    /// Read the descriptor a recipe names from `descriptors`.
+    #[must_use]
+    pub fn with_descriptor_store(mut self, descriptors: Arc<DescriptorStore>) -> Self {
+        self.descriptors = Some(descriptors);
         self
     }
 
@@ -552,7 +562,8 @@ impl MemberRegistry {
 
     /// Start the next generation of `recipe` on `ports`. Refused once the
     /// registry is stopping; a launch that began before is waited for.
-    /// `restart_of` is the generation a restart replaces.
+    /// `restart_of` is the generation a restart replaces. A deploy's recipe
+    /// that names a descriptor is started as the generation it names.
     fn launch(
         &self,
         recipe: &CandidateRef,
@@ -560,6 +571,8 @@ impl MemberRegistry {
         runner_profile: Option<&str>,
         restart_of: Option<u64>,
     ) -> Result<(u64, Member), FailedLaunch> {
+        // A restart's recipe still names the generation that stopped.
+        let handed = descriptor_store::identity_of(recipe)?.filter(|_| restart_of.is_none());
         let outside = {
             let members = self.members()?;
             if members.stopping {
@@ -567,13 +580,23 @@ impl MemberRegistry {
             }
             Outside::new(&members.outside)
         };
-        let generation = (self.generations)()?;
+        let generation = match handed {
+            Some(named) => named.generation,
+            None => (self.generations)()?,
+        };
         // A stop gives up waiting on a write that hangs; once the write
         // returns, nothing is started for it.
         {
             let members = self.members()?;
             if members.stopping {
                 return Err(AgentError::Stopping.into());
+            }
+            if members.by_generation.contains_key(&generation) {
+                return Err(AgentError::Internal(format!(
+                    "`{}` was handed generation {generation}, which is running",
+                    recipe.deployment_id
+                ))
+                .into());
             }
             // Unloaded, promoted over or taken hold of by a deploy while the
             // staged manifest was read: nothing is stamped or started for it.
@@ -658,6 +681,13 @@ impl MemberRegistry {
         port: u16,
         runner_profile: Option<&str>,
     ) -> AgentResult<PathBuf> {
+        // A candidate that names a descriptor is rendered from its document.
+        let descriptor =
+            descriptor_store::resolve(self.descriptors.as_deref(), candidate, generation)?;
+        let runner_profile = descriptor.as_ref().map_or(runner_profile, |described| {
+            let profile = described.configuration.runner_profile.as_ref();
+            profile.map(|profile| profile.id.as_str())
+        });
         fs::create_dir_all(&self.settings.config_dir)?;
         let path = self.settings.config_dir.join(format!(
             "{CONFIG_PREFIX}{}-{generation}{CONFIG_SUFFIX}",
@@ -1130,6 +1160,7 @@ impl WorkerControl for MemberRegistry {
                 candidate.deployment_id
             )));
         }
+        let described = descriptor_store::identity_of(candidate)?.is_some();
         let displaced = {
             let mut members = self.members()?;
             members.preparing += 1;
@@ -1138,10 +1169,14 @@ impl WorkerControl for MemberRegistry {
         let _preparing = Preparing(self);
         self.retire(displaced.map(|(_, member)| member).into_iter().collect());
 
-        let staged = crate::bundle::staged_manifest(Path::new(&candidate.staged_path))?;
+        let staged_profile = if described {
+            None
+        } else {
+            crate::bundle::staged_manifest(Path::new(&candidate.staged_path))?.runner_profile
+        };
         let ports = self.lease_ports(candidate, timeout)?;
         let (generation, member) = self
-            .launch(candidate, &ports, staged.runner_profile.as_deref(), None)
+            .launch(candidate, &ports, staged_profile.as_deref(), None)
             .map_err(|failed| failed.error)?;
         // The lock was released since the slot was emptied; whatever took it
         // in between is displaced as well, not forgotten.

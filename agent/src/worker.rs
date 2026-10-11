@@ -241,11 +241,7 @@ pub fn from_config(
     match config.worker.mode {
         WorkerControlMode::Mock => Ok(Arc::new(MockWorkerControl::new())),
         #[cfg(unix)]
-        WorkerControlMode::Process => Ok(Arc::new(crate::registry::MemberRegistry::from_config(
-            config,
-            crate::registry::durable_generations(store.clone()),
-            agent_stderr_sink(),
-        )?)),
+        WorkerControlMode::Process => Ok(Arc::new(process_registry(config, store)?)),
         #[cfg(not(unix))]
         WorkerControlMode::Process => {
             let _ = store;
@@ -254,6 +250,26 @@ pub fn from_config(
             ))
         }
     }
+}
+
+/// The member registry of a `process`-mode agent: it reads the descriptor
+/// documents beside `store`'s state and re-stamps them when it restarts a
+/// member.
+#[cfg(unix)]
+pub(crate) fn process_registry(
+    config: &AgentConfig,
+    store: &Arc<crate::state::StateStore>,
+) -> AgentResult<crate::registry::MemberRegistry> {
+    use crate::descriptor_store::{restart_stamp, DescriptorStore};
+    let descriptors = Arc::new(DescriptorStore::new(store.state_dir()));
+    let registry = crate::registry::MemberRegistry::from_config(
+        config,
+        crate::registry::durable_generations(store.clone()),
+        agent_stderr_sink(),
+    )?;
+    Ok(registry
+        .with_restart_stamp(restart_stamp(store.clone(), descriptors.clone()))
+        .with_descriptor_store(descriptors))
 }
 
 /// Receives every stderr line of the serving workers this agent starts,

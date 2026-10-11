@@ -1,0 +1,429 @@
+// SPDX-License-Identifier: Apache-2.0
+
+use super::*;
+use tensorplate_protocol::agent_state::{AgentState, DeploymentRecord};
+use tensorplate_protocol::{DeploymentDescriptor, ErrorCode};
+
+use crate::descriptor_store::tests::{deploy, derive, naming, reference};
+use crate::descriptor_store::{identity_of, resolve, restart_stamp};
+
+/// A registry wired as the agent's is, over a state whose `active` record
+/// names the descriptor of generation 1 of `stt`.
+struct Described {
+    f: Fixture,
+    state: TempDir,
+    store: Arc<StateStore>,
+    descriptors: Arc<DescriptorStore>,
+    first: DeploymentDescriptor,
+    recipe: CandidateRef,
+}
+
+impl std::ops::Deref for Described {
+    type Target = Fixture;
+    fn deref(&self) -> &Fixture {
+        &self.f
+    }
+}
+
+/// A staged root holding the manifest of `bundle`, which is all a restart
+/// reads of it.
+fn staged_copy(under: &TempDir, name: &str, bundle: &str) -> String {
+    let staged = under.path().join(name);
+    std::fs::create_dir_all(&staged).unwrap();
+    let manifest = std::path::Path::new(&bundle_fixture(bundle)).join("manifest.json");
+    std::fs::copy(manifest, staged.join("manifest.json")).unwrap();
+    staged.display().to_string()
+}
+
+fn described() -> Described {
+    described_with(|stamp| stamp)
+}
+
+fn described_with(stamp_of: impl FnOnce(RestartStamp) -> RestartStamp) -> Described {
+    let state = TempDir::new().unwrap();
+    let staged = staged_copy(&state, "staged", "v0_2/speech_stt_streaming");
+    let store = Arc::new(StateStore::open(state.path().join("state")).unwrap());
+    let descriptors = Arc::new(DescriptorStore::new(store.state_dir()));
+    let first = deploy(&store, &descriptors, "stt", &staged).unwrap();
+    let stamp = stamp_of(restart_stamp(store.clone(), descriptors.clone()));
+    let wired = |mut registry: MemberRegistry| {
+        registry.generations = durable_generations(store.clone());
+        let stamped = registry.with_restart_stamp(stamp);
+        stamped.with_descriptor_store(descriptors.clone())
+    };
+    let f = fixture_with(|settings| settings, wired);
+    let recipe = reference(&first);
+    Described {
+        f,
+        state,
+        store,
+        descriptors,
+        first,
+        recipe,
+    }
+}
+
+impl Described {
+    /// Take `recipe` through to serving on the first port.
+    fn serve(&self, recipe: &CandidateRef) {
+        self.registry.prepare("tx", recipe, WARM).unwrap();
+        self.health(ACTIVE_PORT, &recipe.deployment_id);
+        assert!(self.registry.warm("tx", recipe, WARM).unwrap().ready);
+        self.registry.promote("tx", recipe).unwrap();
+    }
+    /// The serving generation exits and its restart becomes owed.
+    fn stop(&self, generation: u64) {
+        let serving = self.launcher.handle(generation);
+        serving.exited.store(true, Ordering::SeqCst);
+        self.registry.supervise();
+    }
+    /// One supervision step, `after` seconds later on the registry's clock.
+    fn step(&self, after: u64) -> Vec<MemberEvent> {
+        self.clock.advance(Duration::from_secs(after));
+        self.registry.supervise()
+    }
+    /// `active` as the next agent start reads it.
+    fn active(&self) -> DeploymentRecord {
+        let read = StateStore::open(self.store.state_dir()).unwrap();
+        read.snapshot().unwrap().active.unwrap()
+    }
+    /// Whether `active` names `descriptor` and its document is that one.
+    fn records(&self, descriptor: &DeploymentDescriptor) -> bool {
+        let identity = descriptor.identity();
+        let read = self.descriptors.read("stt", identity).ok();
+        self.active().descriptor_identity() == Ok(Some(identity))
+            && read.as_ref() == Some(descriptor)
+    }
+    fn document(&self, generation: u64) -> std::path::PathBuf {
+        let name = format!("descriptor-stt-{generation}.json");
+        self.store.state_dir().join(name)
+    }
+    fn documents(&self) -> usize {
+        let entries = std::fs::read_dir(self.store.state_dir()).unwrap();
+        let names = entries.map(|e| e.unwrap().file_name().into_string().unwrap());
+        names.filter(|name| name.starts_with("descriptor-")).count()
+    }
+    fn edit_active(&self, edit: fn(&mut DeploymentRecord)) {
+        let edit = |state: &mut AgentState| {
+            edit(state.active.as_mut().unwrap());
+            Ok(())
+        };
+        self.store.update(edit).unwrap();
+    }
+    fn last_config(&self) -> serde_json::Value {
+        let launched = self.launcher.launched.lock().unwrap();
+        launched.last().unwrap().config["deployment"].clone()
+    }
+}
+
+fn restarted(generation: u64) -> [MemberEvent; 1] {
+    let member = MemberRef::new("stt", generation);
+    [MemberEvent::Restarted { member }]
+}
+
+/// The message of a restart refused as a launch that failed and counted:
+/// `load_failed`, not recoverable, the next restart owed two seconds later.
+fn refused_restart(events: &[MemberEvent]) -> &str {
+    let [MemberEvent::LaunchFailed { error, .. }, MemberEvent::RestartDue { after, .. }] = events
+    else {
+        panic!("{events:?}");
+    };
+    assert_eq!(
+        (error.code, error.recoverable),
+        (ErrorCode::LoadFailed, false)
+    );
+    assert_eq!(*after, Duration::from_secs(2));
+    &error.message
+}
+
+#[test]
+fn a_deploys_launch_is_the_generation_its_reference_names_and_takes_none() {
+    let d = described();
+    assert_eq!(durable_generations(d.store.clone())().unwrap(), 2);
+
+    d.serve(&d.recipe);
+
+    let launched = d.launcher.handle(1);
+    assert_eq!(launched.spec.member, MemberRef::new("stt", 1));
+    assert_eq!(launched.config["deployment"]["generation"], 1);
+    assert_eq!(d.store.snapshot().unwrap().next_generation, Some(3));
+
+    // The generation is running: it is not handed to a second launch.
+    let error = d.registry.prepare("tx", &d.recipe, WARM).unwrap_err();
+    assert!(
+        error.to_string().contains("generation 1, which is running"),
+        "{error}"
+    );
+    assert!(d.launcher.count() == 1 && launched.calls().is_empty());
+}
+
+#[test]
+fn prepare_refuses_a_reference_that_names_part_of_a_descriptor_before_it_displaces_anything() {
+    let d = described();
+    d.registry.prepare("tx", &d.recipe, WARM).unwrap();
+    let counter = d.store.snapshot().unwrap().next_generation;
+
+    let partial = [
+        [true, false, false],
+        [false, true, true],
+        [true, true, false],
+    ];
+    for kept in partial {
+        let partial = naming(&d.recipe, kept);
+        let error = d.registry.prepare("tx", &partial, WARM).unwrap_err();
+        let record = error.to_record();
+        assert!(
+            matches!(error, AgentError::DeploymentDescriptor { .. }),
+            "{error}"
+        );
+        assert!(record.code == ErrorCode::LoadFailed && !record.recoverable);
+        assert!(record.message.contains("all three or none"), "{record:?}");
+    }
+    assert!(d.launcher.count() == 1 && d.launcher.handle(1).calls().is_empty());
+    assert_eq!(d.store.snapshot().unwrap().next_generation, counter);
+}
+
+#[test]
+fn a_candidate_that_names_a_descriptor_is_rendered_from_its_document_and_no_staged_manifest() {
+    let d = described();
+    let gone = d.state.path().join("gone").display().to_string();
+    let another = staged_copy(&d.state, "another", "v0_2/speech_tts_streaming");
+    for staged_path in [gone, another] {
+        let mut elsewhere = d.recipe.clone();
+        elsewhere.staged_path = staged_path;
+        d.registry.prepare("tx", &elsewhere, WARM).unwrap();
+        assert_eq!(d.last_config()["model"]["runner_profile"], "faster_whisper");
+    }
+}
+
+#[test]
+fn a_candidate_whose_document_cannot_be_read_is_not_started() {
+    let d = described();
+    std::fs::remove_file(d.document(1)).unwrap();
+
+    let error = d.registry.prepare("tx", &d.recipe, WARM).unwrap_err();
+
+    let says = "descriptor-stt-1.json` is missing";
+    assert!(error.to_string().contains(says), "{error}");
+    assert_eq!(error.code(), ErrorCode::LoadFailed);
+    assert_eq!((d.launcher.count(), d.configs()), (0, 0));
+
+    // A registry that was given no store cannot start it either.
+    let plain = fixture();
+    let error = plain.registry.prepare("tx", &d.recipe, WARM).unwrap_err();
+    assert!(error.to_string().contains("no descriptor store"), "{error}");
+    assert_eq!((plain.launcher.count(), plain.configs()), (0, 0));
+}
+
+#[test]
+fn a_restart_re_stamps_the_descriptor_and_the_restart_after_it_starts_from_that() {
+    let d = described();
+    d.serve(&d.recipe);
+    d.stop(1);
+
+    assert_eq!(d.step(1), restarted(2));
+
+    let second = d.first.restamp(2).unwrap();
+    assert!(d.records(&second));
+    assert_eq!(second.configuration_digest, d.first.configuration_digest);
+    assert_ne!(second.descriptor_digest, d.first.descriptor_digest);
+    assert_eq!(d.last_config()["generation"], 2);
+    assert_eq!(d.last_config()["model"]["runner_profile"], "faster_whisper");
+    let member = MemberRef::new("stt", 2);
+    assert_eq!(d.step(0), [MemberEvent::Serving { member }]);
+
+    d.stop(2);
+    assert_eq!(d.step(2), restarted(3));
+    assert!(d.records(&second.restamp(3).unwrap()));
+    assert_eq!(d.last_config()["generation"], 3);
+}
+
+#[test]
+fn a_restart_whose_descriptor_cannot_be_re_stamped_is_a_launch_that_failed_and_writes_nothing() {
+    const NOT_NAMED: &str = "the active deployment record does not name it";
+    let other = serde_json::to_vec(&derive("stt", 1, "/staged/other")).unwrap();
+    let says = [
+        "is missing",
+        "does not verify",
+        ", not generation 1 of `stt`",
+        NOT_NAMED,
+        NOT_NAMED,
+    ];
+    for (case, says) in says.into_iter().enumerate() {
+        let d = described();
+        d.serve(&d.recipe);
+        durable_generations(d.store.clone())().unwrap();
+        match case {
+            0 => std::fs::remove_file(d.document(1)).unwrap(),
+            1 => std::fs::write(d.document(1), "{}").unwrap(),
+            2 => std::fs::write(d.document(1), &other).unwrap(),
+            3 => d.edit_active(|active| active.deployment_id = "tts".into()),
+            _ => d.edit_active(|active| active.generation = Some(2)),
+        }
+        let before = (d.active(), d.documents());
+        d.stop(1);
+
+        let events = d.step(1);
+
+        let message = refused_restart(&events);
+        assert!(
+            message.contains("descriptor-stt-1.json` "),
+            "case {case}: {message}"
+        );
+        assert!(message.contains(says), "case {case}: {message}");
+        assert_eq!((d.launcher.count(), d.configs()), (1, 0), "case {case}");
+        assert_eq!((d.active(), d.documents()), before, "case {case}");
+    }
+}
+
+#[test]
+fn a_restart_is_refused_when_the_staged_bundle_is_not_the_one_the_descriptor_describes() {
+    let d = described();
+    let bundle = "v0_2/speech_tts_streaming";
+    let mut another = d.recipe.clone();
+    another.bundle_digest = candidate_staged_at("stt", &bundle_fixture(bundle)).bundle_digest;
+    another.staged_path = staged_copy(&d.state, "another", bundle);
+    d.serve(&another);
+    d.stop(1);
+
+    let events = d.step(1);
+
+    let message = refused_restart(&events);
+    let described = &d.first.configuration.bundle.bundle_digest;
+    assert!(message.contains(&another.bundle_digest), "{message}");
+    assert!(message.contains(described), "{message}");
+    assert!(d.records(&d.first) && d.launcher.count() == 1);
+}
+
+#[test]
+fn a_stop_that_begins_while_the_descriptor_is_re_stamped_starts_nothing() {
+    let (stamping, is_stamping) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let held = Mutex::new((stamping, released));
+    let d = described_with(move |real| {
+        Arc::new(move |restamp| {
+            let held = held.lock().unwrap();
+            held.0.send(()).unwrap();
+            let _ = held.1.recv();
+            real(restamp)
+        })
+    });
+    d.serve(&d.recipe);
+    d.stop(1);
+    d.clock.advance(Duration::from_secs(1));
+
+    std::thread::scope(|scope| {
+        let release = release;
+        let restarting = scope.spawn(|| d.registry.supervise());
+        is_stamping
+            .recv_timeout(GRACE)
+            .expect("the restart is stamped");
+        let stopping = scope.spawn(|| d.registry.shutdown());
+        let deadline = Instant::now() + GRACE;
+        while !d.registry.stopping() {
+            assert!(Instant::now() < deadline, "shutdown never began");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        release.send(()).unwrap();
+        assert_eq!(restarting.join().unwrap(), []);
+        stopping.join().unwrap();
+    });
+
+    assert_eq!((d.launcher.count(), d.configs()), (1, 0));
+    // What the stamp wrote stands, for the next start to read.
+    assert!(d.records(&d.first.restamp(2).unwrap()));
+}
+
+/// A recipe with no identity, whatever its bundle's format: the configs the
+/// wired registry writes are those of a registry with no stamp and no store.
+#[test]
+fn a_recipe_that_names_no_descriptor_is_started_and_restarted_as_without_a_store() {
+    for bundle in ["v0_1/x86_fixture_smoke", "v0_2/speech_stt_streaming"] {
+        let d = described();
+        let plain = fixture();
+        plain.next_generation.store(2, Ordering::SeqCst);
+        let recipe = candidate_staged_at("stt", &bundle_fixture(bundle));
+        let recorded = d.active();
+        let config = |launcher: &FakeLauncher, generation| {
+            std::fs::read(&launcher.handle(generation).spec.config_path).unwrap()
+        };
+
+        d.serve(&recipe);
+        plain.registry.prepare("tx", &recipe, WARM).unwrap();
+        plain.health(ACTIVE_PORT, "stt");
+        assert!(plain.registry.warm("tx", &recipe, WARM).unwrap().ready);
+        plain.registry.promote("tx", &recipe).unwrap();
+        assert_eq!(
+            config(&d.launcher, 2),
+            config(&plain.launcher, 2),
+            "{bundle}"
+        );
+
+        d.stop(2);
+        plain
+            .launcher
+            .handle(2)
+            .exited
+            .store(true, Ordering::SeqCst);
+        plain.registry.supervise();
+        plain.clock.advance(Duration::from_secs(1));
+        assert_eq!(d.step(1), restarted(3));
+        assert_eq!(plain.registry.supervise(), restarted(3));
+        assert_eq!(
+            config(&d.launcher, 3),
+            config(&plain.launcher, 3),
+            "{bundle}"
+        );
+        assert_eq!((d.active(), d.documents()), (recorded, 1));
+    }
+    // Its staged manifest is still what it is rendered from.
+    let d = described();
+    let mut gone = naming(&d.recipe, [false; 3]);
+    gone.staged_path = d.state.path().join("gone").display().to_string();
+    let refused = d.registry.prepare("tx", &gone, WARM);
+    assert!(
+        matches!(refused, Err(AgentError::BundleMissing(_))),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn the_agents_registry_reads_and_re_stamps_the_documents_beside_its_state() {
+    let td = TempDir::new().unwrap();
+    let config = serde_json::json!({
+        "transport": "loopback_tcp",
+        "state_dir": td.path().join("state"),
+        "staging_dir": td.path().join("staging"),
+        "worker": {
+            "mode": "process",
+            "serving_binary_path": "/usr/local/bin/tensorplate-serving",
+            "serving_config_dir": td.path().join("worker-configs"),
+        },
+    });
+    let agent = crate::config::AgentConfig::parse_json(&config.to_string()).unwrap();
+    let store = Arc::new(StateStore::open(&agent.state_dir).unwrap());
+    let beside = DescriptorStore::new(&agent.state_dir);
+    let first = deploy(&store, &beside, "stt", "/staged/stt").unwrap();
+    let recipe = reference(&first);
+
+    let registry = crate::worker::process_registry(&agent, &store).unwrap();
+
+    let read = resolve(registry.descriptors.as_deref(), &recipe, 1).unwrap();
+    assert_eq!(read.as_ref(), Some(&first));
+    let stamp = registry
+        .restart_stamp
+        .as_ref()
+        .expect("a stamp is installed");
+    let generation = (registry.generations)().unwrap();
+    let restamp = Restamp {
+        recipe: &recipe,
+        stopped_generation: 1,
+        generation,
+    };
+    let stamped = stamp(&restamp).unwrap();
+    let second = first.restamp(2).unwrap();
+    assert_eq!(identity_of(&stamped).unwrap(), Some(second.identity()));
+    assert_eq!(beside.read("stt", second.identity()).unwrap(), second);
+    let active = store.snapshot().unwrap().active.unwrap();
+    assert_eq!(active.descriptor_identity(), Ok(Some(second.identity())));
+}
