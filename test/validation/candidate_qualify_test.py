@@ -630,7 +630,7 @@ def check_ballast_rules(harness: Harness, schema: dict) -> None:
     takes blocks of 64, and a second load of the candidate that needs 9,500."""
 
     def case(*sizing: str, sampler: bool = False, **device: str) -> tuple[int, dict, dict]:
-        completed, record, evidence = harness.run(
+        completed, record, _ = harness.run(
             "stt",
             "--oom-ballast-python",
             str(harness.ballast),
@@ -662,7 +662,7 @@ def check_ballast_rules(harness: Harness, schema: dict) -> None:
     # What was left is what the device reported while the ballast held, not the 4,000 asked for.
     assert oom["ballast"] == figures("leave_free", 4000, 10000, 6000, 3984), oom["ballast"]
 
-    # Leaving as much as the load needs: it fits, as it did on a device with too small a ballast.
+    # Leaving as much as the load needs: the load fits, and the case is a mismatch.
     code, record, oom = case("--oom-ballast-leave-free", "9600")
     assert code == 2 and record["result"]["status"] == "fail", record["result"]
     assert (oom["status"], oom["reason"]) == ("mismatched", "the request succeeded"), oom

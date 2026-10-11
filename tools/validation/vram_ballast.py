@@ -49,7 +49,7 @@ class TorchDevice:
         self._held: Any = None
 
     def free_bytes(self) -> int:
-        """Free memory on the device, read inside this process's own device context."""
+        """Free memory on the current device, as `cudaMemGetInfo` gives it to this process."""
         return int(self._torch.cuda.mem_get_info()[0])
 
     def hold(self, count: int) -> int:
