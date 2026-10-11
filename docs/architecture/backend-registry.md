@@ -213,8 +213,10 @@ the phoneme count, which a backend reports as `failed`.
 [`protocol/fixtures/job_seam.json`](../../protocol/fixtures/job_seam.json)
 holds the ceilings, the stable names, every validation reason, construction
 vectors and per-job event traces. `test/unit/job_value_objects_test.cpp`
-replays all of them. Another implementation of these objects replays every
-vector whose `scope` is `all` and holds its own bounds to `limits`. The
+replays all of them, reading the file's notation through
+`test/mocks/job_seam_vectors.hpp`. Another implementation of these objects
+replays every vector whose `scope` is `all` and holds its own bounds to
+`limits`. The
 sidecar's job messages in `python_pytorch_ipc.json` carry these objects over
 the socket; `protocol/rust/tests/python_pytorch_ipc_speech_jobs.rs` replays
 the vectors through that schema and its Rust mirror, and the golden trace
@@ -223,6 +225,68 @@ or rule edits the header and the vectors in the same commit. There is no
 `protocol/schemas/job_*.json`: no process exchanges these objects as
 standalone JSON, and a socket transport carries PCM as frame payload bytes,
 not as buffer handles.
+
+### Job messages in the C++ adapter
+
+`runtime/src/adapters/python_pytorch/job_wire.{hpp,cpp}` is the adapter's
+codec for the same messages: an internal unit with no socket, no thread and
+no buffer manager. It builds the header of a `job_submit`, a `job_cancel`
+and a `session_release` from the objects above, and reads one sidecar frame
+into exactly one of:
+
+- a `JobEvent`, for the six `job_*` kinds the sidecar sends;
+- a session release, for `session_released`;
+- a refusal that names one of the adapter's own messages by `message_id`,
+  for an `error_event` with a readable, non-empty id: the sidecar names no
+  job in it, so whoever sent the message knows which job, if any, it was.
+  An `error_event` whose `schema_version` is not `0.1`, or whose error
+  object cannot be read, still names its message; the refusal then carries
+  `internal` with `job_message_malformed`, so the job behind the message
+  ends instead of waiting for an event that never comes;
+- a fault, for a job or session message that cannot be delivered as it
+  stands, for a `job_*` kind the sidecar does not send, and for a
+  `session_release`, which only the adapter sends. It names the job when the
+  message's `job_id` can be read, and a faulty `session_released` names its
+  session when the key and the generation can both be read and are nonzero.
+  Its text starts with the message's kind and, for a malformed field, names
+  the field;
+- nothing of the job protocol's, for a frame the unary exchange judges: a
+  unary response, a `ready_event`, a `metric_event` or any other `session_*`
+  kind;
+- an unreadable header, for a frame the adapter cannot attribute: its header
+  is not a JSON object with a string `kind`, or it is an `error_event`
+  without a readable, non-empty `message_id`, which no sidecar writes.
+  Nothing says whom such a frame was for, so its reader ends the connection,
+  as the unary exchange does for a response it cannot parse.
+
+The decoder reads the fields it uses by name and ignores any other, as the
+unary exchange does. What it reads it first holds to the schema's type and
+range (an identity is an integer of at most 2^53 - 1, never a boolean or a
+fraction; a token fits 32 bits; only an `audio_chunk` has payload bytes, and
+exactly `payload_length` of them), and a miss is the fault
+`job_message_malformed`. The value then goes through the same factories as
+any other event, so a refusal carries the seam's own reason (`job_id_zero`,
+`token_count_exceeded`, `pcm_misaligned`), with the code `inference_failed`
+that a backend protocol violation carries. An error's texts are cut to the
+seam's 512 bytes at a character boundary instead of being refused, and an
+error code the adapter does not know reads as `internal`. The PCM of an
+`audio_chunk` is published through a callable the caller supplies, once, and
+only after the chunk passed every check against a handle that names no
+buffer, so a chunk the sidecar got wrong is never published. The bytes the
+callable is given are the frame's and are valid during the call only. A
+handle it returns that is released or cannot hold the chunk is the caller's
+fault, reported as `internal` with `pcm_publisher_handle_unusable`. No event
+carries that handle, so a caller that gets a fault after its callable ran
+releases what the callable returned.
+
+It also reads the two negotiation fields: whether a `ready_event` lists
+`speech_jobs_v1`, and the `job_classes` of a load response, leaving out a
+capability or class name it does not know and refusing a list of more than
+sixteen names, known or not. `test/unit/job_wire_test.cpp` replays every golden
+file it finds beside the Rust replay and all four sections of the vectors
+through it; the six vectors the socket cannot carry (an in-process buffer
+handle, ill-formed UTF-8, a non-finite probability) are listed there by
+name. The adapter does not send or read these messages on a socket yet.
 
 ### Job messages in the Python sidecar
 
