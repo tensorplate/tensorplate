@@ -64,6 +64,55 @@ struct ServedTarget {
 [[nodiscard]] wire::SessionState wire_state(LogicalSessionState state) noexcept;
 [[nodiscard]] wire::AudioFormat wire_format(const StreamAudioFormat& format);
 
+/// The input credit and the status a stream reports, from one transition the
+/// manager's sink was shown.
+[[nodiscard]] wire::InputCredit wire_credit(const LogicalSessionStatus& status,
+                                            const LogicalSessionUsage& waiting_segments);
+[[nodiscard]] wire::SessionStatus wire_status(const LogicalSessionStatus& status,
+                                              const LogicalSessionUsage& waiting_segments);
+
+/// What a call's session has accepted, as the checks of its next input need
+/// it.
+struct InputHistory {
+  /// Audio samples accepted: the offset the next Audio carries.
+  std::uint64_t samples = 0;
+  /// The last frame accepted was shorter than the smallest granted, and no
+  /// Finalize of the client's has followed it.
+  bool short_frame = false;
+  /// The highest segment id accepted.
+  std::optional<std::uint64_t> last_segment_id;
+  /// Text bytes accepted since the last Finalize the session started on.
+  std::uint64_t synthesis_text_bytes = 0;
+};
+
+/// Whether `audio` may be offered to a session granted `terms`.
+/// @return ConfigInvalid with context "empty_input" for a body without data,
+///   else with context "invalid_event" and the failed check as its message:
+///   `wrong_input_kind`, `frame_size_mismatch`, `frame_too_long`,
+///   `sample_offset_mismatch` or `audio_after_short_frame`.
+[[nodiscard]] Result<void> check_audio(const wire::Audio& audio, const SessionTerms& terms,
+                                       const InputHistory& history);
+
+/// Whether a frame of `sample_count` samples is shorter than the smallest
+/// `terms` grant: valid only as the last before a Finalize or a half-close.
+[[nodiscard]] bool is_short_frame(std::uint32_t sample_count, const SessionTerms& terms) noexcept;
+
+/// Whether `segment` may be offered to a session granted `terms`.
+/// @return ConfigInvalid with context "empty_input" for text that is empty or
+///   only ASCII whitespace, else with context "invalid_event" and the failed
+///   check as its message: `wrong_input_kind`, `segment_id_out_of_range`,
+///   `segment_id_not_increasing`, `segment_too_long`,
+///   `synthesis_text_limit_exceeded` or `turn_id_malformed`.
+[[nodiscard]] Result<void> check_text_segment(const wire::TextSegment& segment,
+                                              const SessionTerms& terms,
+                                              const InputHistory& history);
+
+/// The server event that carries `output`, without its sequence; `format` is
+/// the session's audio format. None for an alternative this server does not
+/// send.
+[[nodiscard]] std::optional<wire::ServerEvent> task_event(const TaskOutput& output,
+                                                          const StreamAudioFormat& format);
+
 /// The request an Open makes, checked against the schema's bounds.
 /// @return ConfigInvalid with context "invalid_event" for a malformed Open,
 ///   Unsupported with context "backend_unsupported_capability" for a mode or

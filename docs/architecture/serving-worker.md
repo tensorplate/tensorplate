@@ -87,7 +87,10 @@ runs speech jobs is wired in.
   queue's consumer captures the path, never the call, and starts the next
   write when none is in flight. A write that completes is confirmed to the
   queue and told to the dispatch before the next write can start, so
-  deliveries are confirmed in the order written.
+  deliveries are confirmed in the order written. Task output is encoded
+  when the path takes it from the queue. A body the listener cannot encode
+  (the dispatch contract lets `TaskOutput` grow) ends the call `INTERNAL`:
+  no result or audio is dropped silently.
 - **Target.** The worker serves no generation and no descriptor digest, so an
   `Open` must name the worker's `deployment.endpoint` with generation zero and
   an empty digest; `Ready` names neither. A selector is refused as
@@ -95,15 +98,95 @@ runs speech jobs is wired in.
   any generation as `stale_generation`. Internally the manager binds sessions
   to a fixed non-zero generation that never reaches the wire, because the
   session layer refuses generation zero.
-- **What it serves.** `Open`, `Ready`, `Ping` (answered by `Pong`) and
-  `SessionClosed`, and a half-close, which drains and closes the session.
-  Every other client event fails the session with
-  `backend_unsupported_capability`; a body the schema does not define, a
-  second `Open`, or an event out of sequence or naming another session, with
-  `invalid_event`.
-  `Ready` reports the deployment's limits and the session's initial credit; a
-  text session's waiting-segment usage is zero then, since it has accepted
-  nothing.
+- **What it serves.** From the client: `Open` (answered by `Ready`),
+  `Audio`, `TextSegment`, `Finalize`, `Cancel`, `Ping` (answered by `Pong`),
+  `StatusRequest` (answered by `SessionStatus`) and a half-close, which
+  drains and closes the session. To the client: `Ready`, `Accepted`,
+  `SessionStatus`, `Pong`, `CancelAccepted`, `EndpointDetected`,
+  `FinalTranscript`, `AudioChunk`, `SegmentCompleted`, `SynthesisCompleted`
+  and `SessionClosed`. No client event of the schema is refused as
+  unsupported. A body the schema does not define, a second `Open`, or an
+  event out of sequence or naming another session fails the session with
+  `invalid_event`. No `PartialTranscript` is sent: the dispatch contract
+  has no partial result yet. `Ready` reports the deployment's limits and
+  the session's initial credit.
+- **Input.** The listener checks each `Audio` and `TextSegment` before it
+  offers it to the manager, against the terms the dispatch granted and
+  what the session accepted before. A check that fails fails the session
+  with `invalid_event`, and the cause's `detail` names the check:
+  `wrong_input_kind` (audio in a text session, or the reverse),
+  `frame_size_mismatch` (the data is not `sample_count` samples of the
+  input format), `frame_too_long`, `sample_offset_mismatch` (the offset is
+  not the number of samples accepted so far), `audio_after_short_frame`,
+  `segment_id_out_of_range`, `segment_id_not_increasing`,
+  `segment_too_long`, `synthesis_text_limit_exceeded` (with the segments
+  accepted since the last Finalize the session started on, the text
+  exceeds the limit) and `turn_id_malformed`. An `Audio` without data, and
+  a segment whose text is empty or only ASCII whitespace, fail it with
+  `empty_input`. A frame shorter than the smallest granted is accepted, as
+  the last before a Finalize or a half-close: audio after it fails the
+  session, also when an automatic endpoint came between, and only the
+  client's own Finalize makes audio valid again. Accepted input is handed
+  to the dispatch once the manager's call has returned, one item at a time
+  in the order accepted. Input that a drain does not take is not handed
+  over, and from the first input or Finalize a drain does not take the
+  listener checks no more input for the rest of the call: the history its
+  checks compare against stops there, while a client cannot know of a
+  drain the worker started and goes on sending.
+- **Credit and totals.** `Accepted` and the status reply are built in the
+  manager's sink from the transition they belong to, never from the result
+  of a call, because only the sink's statuses are in order (see [Logical
+  sessions](#logical-sessions)). Each accepted input queues an `Accepted`
+  with its sequence and the credit as it then stood. Each return of credit
+  queues one under the sequence of the `Accepted` before, while the
+  session is `active` or `finalizing` and not otherwise: in any other
+  state no client can use credit. `Accepted`, `Pong` and `SessionStatus`
+  each replace their own unsent instance in the queue, whose newest says
+  everything, so a stream that is not read holds one of each and replies
+  do not use up the reserve kept for lifecycle messages. `SessionClosed`
+  names the last input accepted and carries the session's totals: the
+  input as the sink counted it on acceptance, and the output as the write
+  path took it, which is what was written on that stream before it.
+- **Finalize.** The listener hands each Finalize the manager started on to
+  the dispatch with that event's own sequence, and writes the
+  `finalize_sequence` the dispatch puts on a final unchanged. The
+  hand-over follows the result of the listener's own call, so the
+  `start_finalize` that an automatic endpoint shows the sink is never
+  handed over. The listener keys on nothing while a Finalize is
+  unanswered: following a Finalize to the final that carries its sequence
+  is the client's. While the session is `finalizing` for a Finalize, the
+  manager refuses input (`illegal_transition`) and ignores a repeated
+  Finalize. The dispatch may complete the finalization shortly before it
+  queues the answer; input or a Finalize read in that window belongs to
+  the next utterance or synthesis. A client that sends nothing between a
+  Finalize and its answer meets neither case.
+- **Cancel.** A `Cancel` of a live session is answered by `CancelAccepted`.
+  Output stops at once, and `SessionClosed` follows with
+  `client_cancelled` and status `CANCELLED` when the dispatch has released
+  the session.
+- **Calls that end.** A read that fails is applied as a half-close. A read
+  also fails when the call was cancelled or its transport lost, and gRPC
+  reports that cancellation in a reaction of its own, before or after the
+  failed read: a vanished client's session may have begun to drain when
+  the cancellation aborts it (`client_cancelled`). A read fails, too, once
+  the listener has ended a call itself for output it cannot send. A
+  session still live when its call is done is failed (`internal`), so that
+  it does not stay draining with no stream to deliver to. gRPC also
+  reports a message it cannot decode as a failed read, with no
+  cancellation after it: such an event closes the session as a half-close
+  does (see "Not enforced yet").
+- **Transport window.** A delivery is a completed write, and gRPC completes
+  a write when HTTP/2 flow control lets the bytes pass, not when the
+  client's application reads them. The no-progress limit and the output
+  budgets therefore trail a reader that has stopped by the receive window
+  its own channel announced, and no server setting bounds that window. A
+  listener test measures it with a text session whose client reads nothing
+  and prints the figures of each run. On x86-64 Linux over loopback, with
+  the pinned gRPC: 4,052,160 bytes of PCM, 84 s of the 24 kHz output
+  format, were written to a default client channel before writes stopped,
+  and 64,320 bytes, 1.3 s, to a channel with `grpc.http2.bdp_probe=0`.
+  From there the session ends `slow_consumer` when the 5 s limit passes. A
+  client that wants the limit to follow its reading turns the probe off.
 - **Refusals.** A refused `Open` creates no session: the call ends with no
   event and a status whose code follows the reason (`invalid_event` is
   `INVALID_ARGUMENT`; unsupported, target and generation reasons are
@@ -130,8 +213,15 @@ runs speech jobs is wired in.
   stays open until the client ends it, and at shutdown it holds the gRPC
   server for the whole drain window. The open handshake timeout, the limit on
   calls that have not been admitted, and the refusal of compressed messages
-  are not enforced by this listener; the change that serves the remaining
-  client events adds them. The listener's sources build only with the
+  are not enforced by this listener, and neither is the server's own
+  receive window, which bounds what a client can leave in the server's
+  transport beyond its input credit; a following change adds them. A
+  client event that does not decode, for example a `TextSegment` whose
+  text is not UTF-8, does not fail its session with `invalid_event` as the
+  schema says a refused event does: the session drains and closes with no
+  cause and status OK, because the listener cannot tell that failed read
+  from a half-close. A listener test holds this behaviour until it is
+  changed. The listener's sources build only with the
   feature, which the clang-tidy job leaves off, so CI runs no static
   analysis on `runtime/src/serving/stream/`. What covers them is the build's
   warnings; the address and undefined-behaviour sanitizer leg, which runs
@@ -147,7 +237,13 @@ runs speech jobs is wired in.
   shutdown was asked, then shuts the gRPC server down with what is left of
   that window (a call still open is cancelled, which aborts its session),
   stops the dispatch and destroys the manager, and then runs the HTTP drain
-  below, which waits only for what is left of the same window. The stopped
+  below, which waits only for what is left of the same window. One value
+  holds that window (`runtime/src/serving/drain_window.hpp`): whichever
+  drain is asked first begins it, and each later one is given the same
+  end. Stopping the HTTP listener waits for its request handlers and has
+  no deadline of its own, so a unary request in flight holds the stop
+  before the stream listener is reached, and can use up the window the
+  stream sessions were to drain in. The stopped
   listener stays in place until the worker is destroyed, so a `shutdown()`
   on another thread never finds it gone. The control channel and the signal
   pipe are unchanged and still end with the worker.

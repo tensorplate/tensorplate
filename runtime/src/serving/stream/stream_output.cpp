@@ -1,17 +1,54 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "serving/stream/stream_output.hpp"
 
+#include <algorithm>
+
+#include "serving/stream/stream_mapping.hpp"
+
 namespace tensorplate::serving::stream {
+namespace {
+
+/// Replace keys of the lifecycle replies whose newest instance says everything.
+constexpr std::uint64_t kPongReplaceKey = 1;
+constexpr std::uint64_t kAcceptedReplaceKey = 2;
+constexpr std::uint64_t kStatusReplaceKey = 3;
+
+}  // namespace
+
+OutputItem lifecycle_item(wire::ServerEvent event) {
+  auto kind = OutputKind::Control;
+  std::uint64_t replace_key = 0;
+  switch (event.body_case()) {
+    case wire::ServerEvent::kSessionClosed:
+      kind = OutputKind::Terminal;
+      break;
+    case wire::ServerEvent::kPong:
+      replace_key = kPongReplaceKey;
+      break;
+    case wire::ServerEvent::kAccepted:
+      replace_key = kAcceptedReplaceKey;
+      break;
+    case wire::ServerEvent::kStatus:
+      replace_key = kStatusReplaceKey;
+      break;
+    default:
+      break;
+  }
+  const auto bytes = std::max<std::uint64_t>(1, event.ByteSizeLong());
+  return OutputItem{kind, bytes, replace_key, std::make_unique<WireEvent>(std::move(event))};
+}
 
 CallOutput::CallOutput(CallWriter& writer, const SchedulerClock& clock)
     : clock_(clock), writer_(&writer) {}
 
-void CallOutput::bind(std::shared_ptr<BoundedOutputQueue> output, Delivered delivered) {
+void CallOutput::bind(std::shared_ptr<BoundedOutputQueue> output, Delivered delivered,
+                      const StreamAudioFormat& format) {
   const std::lock_guard guard(mu_);
   if (output_) {
     return;
   }
   output_ = std::move(output);
+  format_ = format;
   delivered_ = std::make_shared<const Delivered>(std::move(delivered));
 }
 
@@ -91,11 +128,9 @@ CallOutput::Step CallOutput::next_locked() {
   }
   if (!finish_wanted_ && output_) {
     if (auto next = output_->take()) {
-      auto* body = dynamic_cast<WireEvent*>(next->item.body.get());
-      if (body == nullptr) {
+      if (!encode_locked(next->item.body.get())) {
         finish_wanted_ = grpc::Status(grpc::StatusCode::INTERNAL, "output this server cannot send");
       } else {
-        buffer_ = std::move(body->event);
         buffer_.set_sequence(next->sequence);
         writing_ = true;
         writing_kind_ = next->item.kind;
@@ -109,6 +144,39 @@ CallOutput::Step CallOutput::next_locked() {
     return {Step::Kind::Finish, writer_, *finish_wanted_};
   }
   return {};
+}
+
+bool CallOutput::encode_locked(OutputBody* body) {
+  if (auto* lifecycle = dynamic_cast<WireEvent*>(body)) {
+    buffer_ = std::move(lifecycle->event);
+    if (buffer_.has_session_closed()) {
+      // Everything taken before it was written: a failed write ends the call
+      // without this event.
+      auto& totals = *buffer_.mutable_session_closed()->mutable_totals();
+      totals.set_output_audio_samples(audio_samples_);
+      totals.set_utterances_completed(utterances_);
+      totals.set_segments_completed(segments_);
+    }
+    return true;
+  }
+  const auto* task = dynamic_cast<const TaskOutputBody*>(body);
+  if (task == nullptr) {
+    return false;
+  }
+  auto event = task_event(task->output, format_);
+  if (!event) {
+    return false;
+  }
+  buffer_ = std::move(*event);
+  if (buffer_.has_audio_chunk()) {
+    audio_samples_ += buffer_.audio_chunk().data().size() /
+                      (std::uint64_t{format_.bytes_per_sample()} * format_.channels);
+  } else if (buffer_.has_final_transcript()) {
+    ++utterances_;
+  } else if (buffer_.has_segment_completed()) {
+    ++segments_;
+  }
+  return true;
 }
 
 void CallOutput::run(const Step& step) {

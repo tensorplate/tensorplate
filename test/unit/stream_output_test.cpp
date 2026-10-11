@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "serving/session/credits.hpp"
+#include "serving/session/dispatch.hpp"
 #include "serving/session/output_queue.hpp"
 
 namespace {
@@ -30,10 +31,17 @@ using tensorplate::serving::OutputItem;
 using tensorplate::serving::OutputKind;
 using tensorplate::serving::OutputOffer;
 using tensorplate::serving::SessionBudgets;
+using tensorplate::serving::StreamAudioEncoding;
+using tensorplate::serving::StreamAudioFormat;
+using tensorplate::serving::TaskOutput;
 using tensorplate::serving::stream::CallOutput;
 using tensorplate::serving::stream::CallWriter;
+using tensorplate::serving::stream::lifecycle_item;
 using tensorplate::serving::stream::WireEvent;
 using tensorplate::stream::v1::ServerEvent;
+
+/// The format of a session's chunks: 24 kHz 16-bit mono.
+constexpr StreamAudioFormat kFormat{StreamAudioEncoding::PcmS16Le, 24'000, 1};
 
 /// A clock that runs a hook once, inside the next now().
 class HookClock final : public SchedulerClock {
@@ -98,16 +106,20 @@ OutputItem item(OutputKind kind, const std::string& tag = "t") {
 
 /// One call's write path with its queue, as the listener wires them.
 struct Path {
-  Path() {
-    out->bind(queue, [this](OutputKind kind) {
-      {
-        const std::lock_guard guard(mu);
-        told.push_back(kind);
-      }
-      if (auto hook = std::exchange(next_told, nullptr)) {
-        hook();
-      }
-    });
+  explicit Path(const SessionBudgets& budgets = SessionBudgets::for_audio_input(32'000).value())
+      : queue(std::make_shared<BoundedOutputQueue>(budgets)) {
+    out->bind(
+        queue,
+        [this](OutputKind kind) {
+          {
+            const std::lock_guard guard(mu);
+            told.push_back(kind);
+          }
+          if (auto hook = std::exchange(next_told, nullptr)) {
+            hook();
+          }
+        },
+        kFormat);
     EXPECT_TRUE(queue->set_consumer([weak = std::weak_ptr<CallOutput>(out)] {
       if (const auto shared = weak.lock()) {
         shared->pump();
@@ -119,6 +131,15 @@ struct Path {
     auto queued = item(kind, tag);
     return queue->offer(queued, std::chrono::steady_clock::now()).value();
   }
+  /// Queues task output as a dispatch does.
+  OutputOffer offer(TaskOutput output) {
+    auto queued = tensorplate::serving::make_task_output_item(std::move(output));
+    return queue->offer(queued, std::chrono::steady_clock::now()).value();
+  }
+  OutputOffer offer(ServerEvent event) {
+    auto queued = lifecycle_item(std::move(event));
+    return queue->offer(queued, std::chrono::steady_clock::now()).value();
+  }
   [[nodiscard]] std::size_t told_count() const {
     const std::lock_guard guard(mu);
     return told.size();
@@ -126,8 +147,7 @@ struct Path {
 
   HookClock clock;
   RecordingWriter writer;
-  std::shared_ptr<BoundedOutputQueue> queue =
-      std::make_shared<BoundedOutputQueue>(SessionBudgets::for_audio_input(32'000).value());
+  std::shared_ptr<BoundedOutputQueue> queue;
   std::shared_ptr<CallOutput> out = std::make_shared<CallOutput>(writer, clock);
   mutable std::mutex mu;
   std::vector<OutputKind> told;
@@ -248,6 +268,108 @@ TEST(StreamOutput, ABodyTheStreamDidNotQueueEndsTheCallAsInternal) {
             OutputOffer::Queued);
   EXPECT_EQ(path.writer.codes(), (Codes{grpc::StatusCode::INTERNAL}));
   EXPECT_TRUE(path.writer.sequences().empty());
+}
+
+TEST(StreamOutput, TaskOutputIsEncodedWhenItIsTakenInTheSessionsFormat) {
+  Path path{SessionBudgets::for_text_input(48'000).value()};
+  tensorplate::serving::AudioChunkOutput chunk;
+  chunk.segment_id = 4;
+  chunk.chunk_index = 2;
+  chunk.segment_sample_offset = 960;
+  chunk.pcm = {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+  ASSERT_EQ(path.offer(chunk), OutputOffer::Queued);
+  ASSERT_EQ(path.writer.written.size(), 1U);
+  const auto& event = path.writer.written.front();
+  ASSERT_TRUE(event.has_audio_chunk());
+  EXPECT_EQ(event.sequence(), 1U);
+  EXPECT_EQ(event.audio_chunk().segment_id(), 4U);
+  EXPECT_EQ(event.audio_chunk().chunk_index(), 2U);
+  EXPECT_EQ(event.audio_chunk().segment_sample_offset(), 960U);
+  EXPECT_EQ(event.audio_chunk().data(), std::string("\1\2\3\4"));
+  EXPECT_EQ(event.audio_chunk().format().sample_rate_hz(), 24'000U);
+  EXPECT_EQ(event.audio_chunk().format().channels(), 1U);
+  EXPECT_EQ(event.audio_chunk().format().encoding(),
+            tensorplate::stream::v1::AUDIO_ENCODING_PCM_S16LE);
+  path.out->write_done(true);
+  EXPECT_EQ(path.told, (std::vector<OutputKind>{OutputKind::Audio}));
+}
+
+TEST(StreamOutput, SessionClosedLeavesWithTheTotalsOfWhatWasTakenBeforeIt) {
+  Path path{SessionBudgets::for_text_input(48'000).value()};
+  tensorplate::serving::AudioChunkOutput chunk;
+  chunk.pcm.assign(960, std::byte{0});
+  ASSERT_EQ(path.offer(chunk), OutputOffer::Queued);
+  chunk.pcm.assign(160, std::byte{0});
+  ASSERT_EQ(path.offer(chunk), OutputOffer::Queued);
+  ASSERT_EQ(path.offer(tensorplate::serving::SegmentCompletedOutput{1, 560, 2}),
+            OutputOffer::Queued);
+  ASSERT_EQ(path.offer(tensorplate::serving::FinalTranscriptOutput{}), OutputOffer::Queued);
+  ASSERT_EQ(path.offer(tensorplate::serving::EndpointDetectedOutput{}), OutputOffer::Queued);
+  ASSERT_EQ(path.offer(tensorplate::serving::SynthesisCompletedOutput{}), OutputOffer::Queued);
+  // What the sink knows is already in the event; the write path adds its own.
+  ServerEvent terminal;
+  terminal.mutable_session_closed()->mutable_totals()->set_input_text_bytes(13);
+  ASSERT_EQ(path.offer(terminal), OutputOffer::Queued);
+  for (int written = 0; written < 6; ++written) {
+    path.out->write_done(true);
+  }
+  ASSERT_EQ(path.writer.written.size(), 7U);
+  ASSERT_TRUE(path.writer.written.back().has_session_closed());
+  const auto& totals = path.writer.written.back().session_closed().totals();
+  EXPECT_EQ(totals.output_audio_samples(), 560U);
+  EXPECT_EQ(totals.segments_completed(), 1U);
+  EXPECT_EQ(totals.utterances_completed(), 1U);
+  EXPECT_EQ(totals.input_text_bytes(), 13U);
+}
+
+// A stream the peer does not read holds one unsent Pong, one Accepted and one
+// status reply, the newest of each, so replies never use up the part of the
+// budget kept for lifecycle messages.
+TEST(StreamOutput, KeyedRepliesReplaceTheirUnsentInstanceAndAreNeverRefused) {
+  Path path;
+  // Never answered: everything queued behind this write stays unsent.
+  ASSERT_EQ(path.offer(OutputKind::Control), OutputOffer::Queued);
+  tensorplate::serving::FinalTranscriptOutput transcript;
+  transcript.segments.push_back({0, 1, std::string(400, 't')});
+  std::size_t results = 0;
+  while (path.offer(transcript) == OutputOffer::Queued) {
+    ++results;
+  }
+  ASSERT_GT(results, 0U) << "task output never filled its share of the budget";
+
+  constexpr std::uint64_t kRounds = 400;
+  std::map<OutputOffer, int> answers;
+  for (std::uint64_t round = 1; round <= kRounds; ++round) {
+    ServerEvent pong;
+    pong.mutable_pong();
+    ServerEvent accepted;
+    accepted.mutable_accepted()->set_accepted_sequence(round);
+    ServerEvent status;
+    status.mutable_status()->set_input_queue_depth(static_cast<std::uint32_t>(round));
+    for (auto* reply : {&pong, &accepted, &status}) {
+      ++answers[path.offer(*reply)];
+    }
+  }
+  EXPECT_EQ(answers[OutputOffer::Queued], 3);
+  EXPECT_EQ(answers[OutputOffer::Replaced], static_cast<int>(3 * kRounds - 3));
+  EXPECT_EQ(answers.size(), 2U) << "a reply was refused";
+
+  for (std::size_t written = 0; written < results + 4; ++written) {
+    path.out->write_done(true);
+  }
+  int replies = 0;
+  for (const auto& event : path.writer.written) {
+    if (event.has_accepted()) {
+      ++replies;
+      EXPECT_EQ(event.accepted().accepted_sequence(), kRounds);
+    } else if (event.has_status()) {
+      ++replies;
+      EXPECT_EQ(event.status().input_queue_depth(), kRounds);
+    } else if (event.has_pong()) {
+      ++replies;
+    }
+  }
+  EXPECT_EQ(replies, 3);
 }
 
 TEST(StreamOutput, ProducersAndTransportThreadsKeepEveryOrder) {

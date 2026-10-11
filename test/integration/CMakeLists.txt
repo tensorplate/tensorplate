@@ -80,13 +80,12 @@ gtest_discover_tests(tp_test_integration
 if(TP_ENABLE_STREAMING_GRPC AND NOT TP_ENABLE_TSAN)
   # The stream listener with a real gRPC client over loopback, in a binary of
   # its own because it links the generated protobuf bindings.
-  add_executable(tp_test_stream_listener stream_listener_test.cpp stream_mapping_test.cpp)
-  # The synthetic session dispatch behind the listener.
-  set(_tp_stream_test_dispatch tp::synthetic_session_dispatch)
+  add_executable(tp_test_stream_listener
+    stream_listener_test.cpp stream_events_test.cpp stream_mapping_test.cpp)
   target_include_directories(tp_test_stream_listener
     PRIVATE ${CMAKE_SOURCE_DIR}/test/mocks ${CMAKE_SOURCE_DIR}/runtime/src)
   target_link_libraries(tp_test_stream_listener
-    PRIVATE tp::runtime ${_tp_stream_test_dispatch} tp::stream_proto gRPC::grpc++
+    PRIVATE tp::runtime tp::synthetic_session_dispatch tp::stream_proto gRPC::grpc++
             GTest::gtest_main)
   target_compile_definitions(tp_test_stream_listener PRIVATE TP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   target_compile_features(tp_test_stream_listener PRIVATE cxx_std_20)

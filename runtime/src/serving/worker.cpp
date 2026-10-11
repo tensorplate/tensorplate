@@ -32,6 +32,7 @@
 #include "tensorplate/version.hpp"
 
 #include "serving/control_channel.hpp"
+#include "serving/drain_window.hpp"
 #include "serving/mock_session.hpp"
 #if TP_ENABLE_STREAMING_GRPC
 #include "serving/stream/stream_listener.hpp"
@@ -119,9 +120,10 @@ struct ServingWorker::Impl {
   /// Once set it stays until the worker is destroyed.
   std::mutex stream_mutex;
   std::unique_ptr<serving::StreamListener> stream;
-  /// When the drain that began at shutdown ends, for streams and HTTP alike.
-  std::atomic<std::chrono::steady_clock::rep> stream_drain_deadline{0};
 #endif
+  /// The drain of streams and of HTTP requests share it; it begins with
+  /// whichever is asked first.
+  serving::DrainWindow drain_window;
   // Declared last: the control thread stops before anything it could reach.
   serving::UnimplementedControlTarget control_target;
   std::unique_ptr<serving::ControlChannel> control;
@@ -450,10 +452,7 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
 void ServingWorker::Impl::stop_stream_admission() noexcept {
 #if TP_ENABLE_STREAMING_GRPC
   if (auto* listener = stream_listener(); listener != nullptr) {
-    auto expected = std::chrono::steady_clock::rep{0};
-    const auto deadline = std::chrono::steady_clock::now() + config.shutdown.drain_deadline;
-    (void)stream_drain_deadline.compare_exchange_strong(expected,
-                                                        deadline.time_since_epoch().count());
+    (void)drain_window.begin(std::chrono::steady_clock::now(), config.shutdown.drain_deadline);
     listener->stop_admission();
   }
 #endif
@@ -463,10 +462,9 @@ void ServingWorker::Impl::stop_stream_admission() noexcept {
 void ServingWorker::Impl::stop_stream_listener() noexcept {
 #if TP_ENABLE_STREAMING_GRPC
   if (auto* listener = stream_listener(); listener != nullptr) {
-    stop_stream_admission();
     // Sessions drain inside the window that began when shutdown was asked.
-    listener->stop(std::chrono::steady_clock::time_point{
-        std::chrono::steady_clock::duration{stream_drain_deadline.load()}});
+    listener->stop(
+        drain_window.begin(std::chrono::steady_clock::now(), config.shutdown.drain_deadline));
   }
 #endif
 }
@@ -501,13 +499,10 @@ void ServingWorker::Impl::run_drain() {
     (void)scheduler->shutdown();
     async_store->cancel_all();
   }
-  // Wait up to drain_deadline for in-flight to settle.
-  auto deadline = std::chrono::steady_clock::now() + config.shutdown.drain_deadline;
-#if TP_ENABLE_STREAMING_GRPC
-  if (const auto shared = stream_drain_deadline.load(); shared != 0) {
-    deadline = std::chrono::steady_clock::time_point{std::chrono::steady_clock::duration{shared}};
-  }
-#endif
+  // Wait for in-flight to settle, for what is left of the drain window: a
+  // stream drain before this one has used part of it.
+  const auto deadline =
+      drain_window.begin(std::chrono::steady_clock::now(), config.shutdown.drain_deadline);
   while (std::chrono::steady_clock::now() < deadline) {
     const auto m = scheduler->metrics();
     if (m.queue_depth == 0 && m.in_flight == 0) {
