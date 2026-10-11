@@ -8,6 +8,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Every integer key of the agent configuration now accepts a number written
+  with a zero fraction (`18100.0`), as the configuration schema does. Only
+  the port range did; elsewhere the agent refused a file the schema
+  validates. All the keys share one reader, and a test that lists the
+  schema's integer keys checks each against the schema and the agent. A
+  fraction, a negative, a value outside the key's range and a string are
+  still refused, and no key's range changed. (V030-E01-F01)
+
 - The release driver checks (`test/release/run.sh`) no longer pipe `cargo run`
   into `head` when they check what a candidate build reports as its version.
   Under `pipefail` that pipe turned any cargo failure into an exit with no

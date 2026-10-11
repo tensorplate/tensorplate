@@ -674,11 +674,17 @@ const INTEGER_KEYS: &[(&str, u64)] = &[
     ("/supervision/kill_timeout_ms", 2000),
     ("/supervision/status_poll_interval_ms", 1000),
     ("/supervision/restart_policy/backoff/initial_delay_ms", 500),
-    ("/supervision/restart_policy/backoff/multiplier_hundredths", 200),
+    (
+        "/supervision/restart_policy/backoff/multiplier_hundredths",
+        200,
+    ),
     ("/supervision/restart_policy/backoff/max_delay_ms", 30_000),
     ("/supervision/restart_policy/backoff/window_ms", 300_000),
     ("/supervision/restart_policy/backoff/threshold", 5),
-    ("/supervision/restart_policy/backoff/stable_reset_ms", 120_000),
+    (
+        "/supervision/restart_policy/backoff/stable_reset_ms",
+        120_000,
+    ),
     ("/supervision/event_sink/queue_capacity", 256),
 ];
 
@@ -718,7 +724,9 @@ fn set_pointer(document: &mut serde_json::Value, pointer: &str, value: serde_jso
     let mut cursor = document;
     let mut parts = pointer.split('/').skip(1).peekable();
     while let Some(part) = parts.next() {
-        let object = cursor.as_object_mut().expect("the path runs through objects");
+        let object = cursor
+            .as_object_mut()
+            .expect("the path runs through objects");
         if parts.peek().is_none() {
             object.insert(part.to_string(), value);
             return;
