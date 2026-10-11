@@ -173,9 +173,10 @@ Result<ipc::SidecarFrame> JobChannel::exchange(const ipc::SidecarFrame& request,
   if (queue_full_locked()) {
     return refuse(Error::Code::ResourceExhausted, "send_queue_full");
   }
+  // Queued first: a push that throws must leave no waiter registered.
+  queue_locked(std::move(encoded).value());
   UnaryWaiter waiter{message_id, std::nullopt};
   unary_ = &waiter;
-  queue_locked(std::move(encoded).value());
   unary_cv_.wait_until(lock, deadline, [&waiter] { return waiter.outcome.has_value(); });
   if (waiter.outcome.has_value()) {
     return std::move(*waiter.outcome);
