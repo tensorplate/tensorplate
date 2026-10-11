@@ -1,4 +1,4 @@
-"""An in-process stream server for the streaming client's tests.
+"""In-process stream servers for the streaming client's tests.
 
 ``StreamServer`` serves speech-to-text sessions as the stream schema and
 ``docs/architecture/serving-worker.md`` ("Stream listener", "Logical
@@ -13,6 +13,9 @@ when audio is consumed (``consume()``), and a timer or the worker ending the
 session (``end()``). A `fault` makes it break one rule, for the tests of
 what the client does then. ``test_streaming_server.py`` holds it to the
 recorded frames under ``test/contract/fixtures/stream/v1``.
+
+``Playback`` serves one call from a recording instead: the recorded server
+frames, byte for byte, each run after the client frames that precede it.
 """
 
 from __future__ import annotations
@@ -118,6 +121,37 @@ async def serve(session: Callable[[Any, Any], Awaitable[None]]) -> AsyncIterator
         yield f"127.0.0.1:{port}"
     finally:
         await server.stop(None)
+
+
+@dataclass
+class Playback:
+    """One call served from the recording `file`, and the client frames it was sent."""
+
+    file: str
+    received: list[Any] = field(default_factory=list)
+
+    def serving(self) -> contextlib.AbstractAsyncContextManager[str]:
+        return serve(self.Session)
+
+    async def Session(self, unused_requests: Any, context: Any) -> None:
+        # Each run of server frames, with the number of client frames recorded before it.
+        runs: list[tuple[int, list[bytes]]] = []
+        sent = 0
+        for _, kind, encoded in frames(self.file):
+            if kind == "ClientEvent":
+                sent += 1
+            elif runs and runs[-1][0] == sent:
+                runs[-1][1].append(encoded)
+            else:
+                runs.append((sent, [encoded]))
+        for count, replies in runs:
+            while len(self.received) < count:
+                self.received.append(await context.read())
+            if replies is runs[-1][1]:
+                # The recording's last run answers the half-close, which is not a frame.
+                assert await context.read() is grpc.aio.EOF
+            for reply in replies:
+                await context.write(reply)
 
 
 class _Ends(Exception):

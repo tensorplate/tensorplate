@@ -38,13 +38,14 @@ except MissingDependencyError as missing:
 import grpc
 import grpc.aio
 
-from stream_server import StreamServer, recorded
+from stream_server import Playback, StreamServer, frames, recorded
 from tensorplate.speech import _session, client
 from tensorplate.speech._buffer import EventBuffer
 from tensorplate.stream.v1 import session_pb2 as pb
 
 TARGET = speech.Target("synthetic-deployment", 7, "sha256:" + "0" * 64)
 PCM = speech.AudioFormat("pcm_s16le", 16000)
+MULAW = speech.AudioFormat("mulaw", 8000)
 STEREO = speech.AudioFormat("pcm_s16le", 48000, channels=2)
 # 20 ms; the server grants one second, which is fifty of them.
 FRAME = bytes(640)
@@ -537,6 +538,68 @@ def test_the_event_buffer_lets_a_held_put_through_once_unbound() -> None:
         assert buffer.used == 111
 
     run(main)
+
+
+def test_the_recorded_session_is_what_the_client_sends_and_what_it_reads() -> None:
+    session_frames = frames("stt_session")
+    sent = [(name, encoded) for name, kind, encoded in session_frames if kind == "ClientEvent"]
+    audio = [recorded(name).audio.data for name, _ in sent if name.startswith("stt_audio")]
+    opening = recorded("stt_open").open
+    playback = Playback("stt_session")
+
+    async def main() -> tuple[Any, ...]:
+        async with playback.serving() as endpoint, speech.SpeechClient(endpoint) as stream:
+            session = stream.transcribe(
+                TARGET,
+                language=opening.language,
+                input_format=MULAW,
+                trace_id=opening.trace_id,
+                turn_id=opening.turn_id,
+            )
+            async with session:
+                reader = asyncio.create_task(taken(session))
+                for data in audio[:5]:
+                    await session.send_audio(data)
+                second = await session.finalize()
+                await session.send_audio(audio[5])
+                third = await session.finalize()
+                await session.send_audio(audio[6])
+                await session.send_audio(audio[7])
+                totals = await session.close()
+            return await reader, second, third, totals
+
+    events, second, third, totals = run(main)
+
+    assert playback.received == [recorded(name) for name, _ in sent]
+    assert [event.SerializeToString() for event in playback.received] == [e for _, e in sent]
+    part = speech.TranscriptSegment
+    finals = [
+        speech.FinalTranscript(
+            1, (part(0, 30000, "synthetic"), part(30000, 60000, " transcript")), 480, 0
+        ),
+        speech.FinalTranscript(
+            2, (part(75000, 100000, "synthetic"), part(100000, 110000, " words")), 880, 7
+        ),
+        speech.FinalTranscript(3, (), 1040, 9),
+        speech.FinalTranscript(4, (part(135000, 160000, "synthetic end"),), 1280, 0),
+    ]
+    assert events == [
+        speech.PartialTranscript(1, 1, "synthetic"),
+        speech.PartialTranscript(1, 2, "synthetic transcript"),
+        speech.EndpointDetected(1, 480, "silence"),
+        finals[0],
+        speech.PartialTranscript(2, 1, "synthetic words"),
+        speech.EndpointDetected(2, 880, "client_finalize"),
+        finals[1],
+        speech.EndpointDetected(3, 1040, "client_finalize"),
+        finals[2],
+        speech.PartialTranscript(4, 1, "synthetic end"),
+        speech.EndpointDetected(4, 1280, "half_close"),
+        finals[3],
+    ]
+    assert (second, third) == (finals[1], finals[2])
+    assert [final.text for final in finals[1:3]] == ["synthetic words", ""]
+    assert totals == speech.SessionTotals(1280, 0, 0, 4, 0)
 
 
 @pytest.mark.parametrize(
