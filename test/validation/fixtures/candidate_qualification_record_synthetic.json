@@ -1334,7 +1334,15 @@
       },
       "observed_outcome": "failed",
       "status": "matched",
-      "reason": null
+      "reason": null,
+      "ballast": {
+        "rule": "bytes",
+        "requested_bytes": 1024,
+        "free_bytes": 10000,
+        "held_bytes": 1024,
+        "left_bytes": 8976,
+        "reason": null
+      }
     }
   ],
   "result": {

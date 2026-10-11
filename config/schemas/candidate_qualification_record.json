@@ -478,7 +478,7 @@
         "free_bytes": {
           "type": ["integer", "null"],
           "minimum": 0,
-          "description": "Free device memory the ballast read before it held anything, its own device context already made."
+          "description": "Free device memory the ballast read before it held anything."
         },
         "held_bytes": { "type": ["integer", "null"], "minimum": 1 },
         "left_bytes": {
