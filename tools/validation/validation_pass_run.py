@@ -69,7 +69,9 @@ STREAMING_MARGIN_S = 300
 RESERVED_SUBJECTS = ("lifecycle", "doctor", "logs", STREAMING_LATENCY)
 # Runner profiles whose load puts the entry's `device` to use.
 DEVICE_PROFILES = ("cuda_fixture", "faster_whisper", "kokoro")
-BALLAST_RULES = ("bytes", "headroom")
+BALLAST_RULES = ("bytes", "headroom", "leave-free")
+# The recipe's own sizing options, which the pass sets from `--oom-ballast`.
+RECIPE_BALLAST_OPTIONS = ("--oom-ballast-bytes", "--oom-ballast-leave-free")
 NO_BALLAST = "none"
 BUNDLE_NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 EXIT_OK, EXIT_STEP_FAILED = 0, 1
@@ -301,8 +303,8 @@ def parse_ballast(items: list[str], subjects: list[str]) -> dict[str, tuple[str,
         sized = kind in BALLAST_RULES and re.fullmatch(r"[1-9][0-9]*", count) is not None
         if not subject or not (sized or rule == NO_BALLAST):
             raise index_mod.IndexLineError(
-                "--oom-ballast takes SUBJECT=bytes:N, SUBJECT=headroom:N or SUBJECT=none, "
-                f"not {item!r}"
+                "--oom-ballast takes SUBJECT=bytes:N, SUBJECT=headroom:N, "
+                f"SUBJECT=leave-free:N or SUBJECT=none, not {item!r}"
             )
         if subject not in subjects:
             raise index_mod.IndexLineError(
@@ -368,7 +370,7 @@ class Pass:
                 "--oom-ballast needs --oom-ballast-python: the ballast is held by an "
                 "interpreter that imports the runtime's torch, which the pass cannot choose"
             )
-        for option in ("--oom-ballast-bytes", "--predecessor-bundle", "--sampler"):
+        for option in (*RECIPE_BALLAST_OPTIONS, "--predecessor-bundle", "--sampler"):
             if claims(option, args.qualify_arg):
                 raise index_mod.IndexLineError(
                     f"--qualify-arg may not set {option}: the pass does, from its own options"
@@ -670,6 +672,7 @@ class Pass:
             "rule": None,
             "bytes": None,
             "headroom_bytes": None,
+            "leave_free_bytes": None,
             "reason": "no --oom-ballast names this candidate: its out-of-memory case will not run",
         }
         if subject not in self.ballast_rules:
@@ -700,6 +703,14 @@ class Pass:
                     f"of {total} bytes"
                 )
             sized.update(rule=kind, bytes=total - count, headroom_bytes=count, reason=None)
+        elif kind == "leave-free":
+            # Sized by the ballast when it is taken: the recipe's record states what was held.
+            if total is not None and count >= total:
+                raise StepFailed(
+                    f"{subject}: leaving {count} bytes free leaves no ballast on a device "
+                    f"of {total} bytes"
+                )
+            sized.update(rule=kind, leave_free_bytes=count, reason=None)
         else:
             if total is not None and count >= total:
                 raise StepFailed(
@@ -874,6 +885,7 @@ class Pass:
             "--predecessor-bundle": args.predecessor_bundle,
             "--sampler": args.sampler,
             "--oom-ballast-bytes": self.ballast[candidate.subject]["bytes"],
+            "--oom-ballast-leave-free": self.ballast[candidate.subject]["leave_free_bytes"],
             "--oom-ballast-python": args.oom_ballast_python,
         }
         for flag, value in optional.items():
@@ -881,7 +893,8 @@ class Pass:
                 argv += [flag, str(value)]
         # Checked here and not in preflight: the family installed since then may hold it.
         python = args.oom_ballast_python
-        if self.ballast[candidate.subject]["bytes"] and shutil.which(python) is None:
+        takes_ballast = self.ballast[candidate.subject]["rule"] in BALLAST_RULES
+        if takes_ballast and shutil.which(python) is None:
             raise StepFailed(f"--oom-ballast-python {python} is not a program that can be run")
         staging = self.staging / candidate.subject
         owner = [f"--owner={os.getuid()}", f"--group={os.getgid()}"]
@@ -1036,9 +1049,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--oom-ballast",
         action="append",
         default=[],
-        metavar="SUBJECT=bytes:N|headroom:N|none",
+        metavar="SUBJECT=bytes:N|headroom:N|leave-free:N|none",
         help="the device memory a candidate's out-of-memory case holds: N bytes, or the "
-        "device's memory minus N bytes, read from nvidia-smi on this machine; repeatable. "
+        "device's memory minus N bytes, read from nvidia-smi on this machine, or what is "
+        "free when the ballast is taken minus N bytes, read by the ballast; repeatable. "
         "SUBJECT=none skips the case; where a device answers, a candidate with no rule "
         "is refused",
     )

@@ -895,13 +895,14 @@ def check_arguments(machine: Machine) -> None:
         "stt-whisper=bytes:05", "stt-whisper=bytes:1e9", "stt-whisper=bytes:5 ",
         "stt-whisper=bytes:\u0665", "stt-whisper=headroom:0", "stt-whisper=percent:5",
         "stt-whisper=bytes=5", "stt-whisper:bytes:5", "stt-whisper=none:5", "stt-whisper=none:",
-        "stt-whisper=None", "stt-whisper=", "=none",
+        "stt-whisper=None", "stt-whisper=", "=none", "stt-whisper=leave-free",
+        "stt-whisper=leave-free:0", "stt-whisper=leave_free:5", "stt-whisper=leave-free:5:6",
     ):  # fmt: skip
-        no_pass("--oom-ballast takes SUBJECT=bytes:N, SUBJECT=headroom:N or SUBJECT=none", "--oom-ballast", bad)  # fmt: skip
+        no_pass("SUBJECT=headroom:N, SUBJECT=leave-free:N or SUBJECT=none", "--oom-ballast", bad)
     no_pass("names 'other', which no --candidate declares", "--oom-ballast", "other=bytes:5")
     no_pass("names 'other', which no --candidate declares", "--oom-ballast", "other=none")
     # A ballast is held by an interpreter the operator names; skipping the case needs none.
-    for rule in ("bytes:5", "headroom:5"):
+    for rule in ("bytes:5", "headroom:5", "leave-free:5"):
         no_pass("--oom-ballast needs --oom-ballast-python", "--oom-ballast", f"stt-whisper={rule}")
     no_pass("no --candidate declares", "--oom-ballast", "stt-whisper=bytes:5", candidates=False)
     no_pass(
@@ -915,6 +916,9 @@ def check_arguments(machine: Machine) -> None:
         ("--oom-ballast-bytes", "--oom-ballast-b=5"),
         ("--oom-ballast-bytes", "--oom-ballast-bytes"),
         ("--oom-ballast-bytes", "--oom"),
+        ("--oom-ballast-leave-free", "--oom-ballast-leave-free=5"),
+        ("--oom-ballast-leave-free", "--oom-ballast-l=5"),
+        ("--oom-ballast-leave-free", "--oom-ballast-leave-free"),
         ("--predecessor-bundle", "--predecessor-bundle=/x"),
         ("--predecessor-bundle", "--predecessor-b=/x"),
         ("--predecessor-bundle", "--pred=/x"),
@@ -1057,10 +1061,56 @@ def sampled(machine: Machine, *arguments: str, **options: object) -> Result:
     return machine.run("--sampler", str(machine.bin / "sync"), *arguments, **options)
 
 
-def ballast_of(result: Result, subject: str) -> str:
+def recipe_command(result: Result, subject: str) -> list[str]:
     commands = result.steps[f"qualify:{subject}"]["commands"]
-    argv = next(command for command in commands if "--oom-ballast-bytes" in command)
+    return next(command for command in commands if "candidate-qualify.py" in command[0])
+
+
+def ballast_of(result: Result, subject: str) -> str:
+    argv = recipe_command(result, subject)
     return argv[argv.index("--oom-ballast-bytes") + 1]
+
+
+def sized(rule: str | None, reason: str | None = None, **figures: int) -> dict:
+    """A candidate's entry in the report's `oom_ballast`."""
+    entry = {"rule": rule, "bytes": None, "headroom_bytes": None, "leave_free_bytes": None}
+    return {**entry, **figures, "reason": reason}
+
+
+def check_ballast_left_free(machine: Machine) -> None:
+    """A ballast sized when it is taken: the pass hands the recipe the rule, not a size."""
+    rules = (
+        "--oom-ballast", "stt-whisper=leave-free:7000",
+        "--oom-ballast", "tts-kokoro=bytes:5000", *BALLAST_PYTHON,
+    )  # fmt: skip
+    tool = ROOT / "tools/validation/candidate-qualify.py"
+    spec = importlib.util.spec_from_file_location("candidate_qualify", tool)
+    recipe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(recipe)
+    # Every ballast option the recipe has is one the pass sets or passes on itself.
+    options = set(re.findall(r'"(--oom-ballast-[a-z-]+)"', tool.read_text(encoding="utf-8")))
+    assert options == {*run_mod.RECIPE_BALLAST_OPTIONS, BALLAST_PYTHON[0]}, options
+    # With a device that answers and with none, the count goes through as given.
+    for gpu in (str(GPU_MIB), None):
+        result = machine.run(*rules, gpu=gpu)
+        assert result.statuses("preflight") == ["ok"], result.steps["preflight"]
+        assert result.report["oom_ballast"] == {
+            "stt-whisper": sized("leave-free", leave_free_bytes=7000),
+            "tts-kokoro": sized("bytes", bytes=5000),
+        }
+        # The recipe's own parser reads what the pass gives it: one sizing option each.
+        whisper = recipe.parse_args(recipe_command(result, "stt-whisper")[1:])
+        kokoro = recipe.parse_args(recipe_command(result, "tts-kokoro")[1:])
+        assert (whisper.oom_ballast_leave_free, whisper.oom_ballast_bytes) == (7000, 0)
+        assert (kokoro.oom_ballast_leave_free, kokoro.oom_ballast_bytes) == (0, 5000)
+        assert whisper.oom_ballast_python == kokoro.oom_ballast_python == BALLAST_PYTHON[1]
+    # One byte less than the device still leaves a ballast; the device's size leaves none.
+    result = machine.run(
+        "--oom-ballast", f"stt-whisper=leave-free:{GPU_BYTES - 1}",
+        "--oom-ballast", "tts-kokoro=none", *BALLAST_PYTHON, gpu=str(GPU_MIB),
+    )  # fmt: skip
+    assert result.statuses("preflight") == ["ok"], result.steps["preflight"]
+    assert f"--oom-ballast-leave-free {GPU_BYTES - 1}" in result.called("candidate-qualify.py")[0]
 
 
 def check_ballast_per_candidate(machine: Machine) -> None:
@@ -1075,14 +1125,11 @@ def check_ballast_per_candidate(machine: Machine) -> None:
     assert (whisper, kokoro) == ("5000000000", str(GPU_BYTES - 1_000_000_000))
     assert result.report["device_memory"] == {"bytes": GPU_BYTES, "reason": None}
     assert result.report["oom_ballast"] == {
-        "stt-whisper": {"rule": "bytes", "bytes": 5_000_000_000, "headroom_bytes": None, "reason": None},
-        "tts-kokoro": {
-            "rule": "headroom",
-            "bytes": GPU_BYTES - 1_000_000_000,
-            "headroom_bytes": 1_000_000_000,
-            "reason": None,
-        },
-    }  # fmt: skip
+        "stt-whisper": sized("bytes", bytes=5_000_000_000),
+        "tts-kokoro": sized(
+            "headroom", bytes=GPU_BYTES - 1_000_000_000, headroom_bytes=1_000_000_000
+        ),
+    }
 
     assert result.report["predecessor_check"] == {"applied": True, "reason": None}
 
@@ -1113,12 +1160,8 @@ def check_ballast_per_candidate(machine: Machine) -> None:
     kokoro = result.steps["qualify:tts-kokoro"]["commands"]
     assert not any("--oom-ballast-bytes" in command for command in kokoro)
     assert ballast_of(result, "stt-whisper") == "5000"
-    assert result.report["oom_ballast"]["tts-kokoro"] == {
-        "rule": "none",
-        "bytes": None,
-        "headroom_bytes": None,
-        "reason": "--oom-ballast names none for this candidate: its out-of-memory case will not run",
-    }
+    skipped = "--oom-ballast names none for this candidate: its out-of-memory case will not run"
+    assert result.report["oom_ballast"]["tts-kokoro"] == sized("none", reason=skipped)
     # No interpreter is asked for when no candidate takes a ballast.
     result = machine.run(*SKIP_BALLAST, gpu=str(GPU_MIB))
     assert result.statuses("preflight") == ["ok"], result.steps["preflight"]
@@ -1135,7 +1178,7 @@ def check_ballast_per_candidate(machine: Machine) -> None:
     assert result.report["device_memory"] == {"bytes": None, "reason": UNRUNNABLE}
     unnamed = "no --oom-ballast names this candidate: its out-of-memory case will not run"
     for entry in result.report["oom_ballast"].values():
-        assert entry == {"rule": None, "bytes": None, "headroom_bytes": None, "reason": unnamed}
+        assert entry == sized(None, reason=unnamed)
     # A pass with no candidate asks the device nothing, and the report says that too.
     result = machine.run(candidates=False, family="none", gpu=str(GPU_MIB))
     assert result.called("nvidia-smi") == [] and result.report["oom_ballast"] == {}
@@ -1170,7 +1213,11 @@ def check_device_refusals(machine: Machine) -> None:
         )  # fmt: skip
     refused_in_preflight(machine, "`nvidia-smi` exited 9", *headroom, fail={"nvidia-smi": 9}, gpu=gpu)  # fmt: skip
     refused_in_preflight(machine, f"needs the device's memory, and {UNRUNNABLE}", *headroom)
-    for rule, needle in ((f"headroom:{GPU_BYTES}", "leaves no ballast"), (f"bytes:{GPU_BYTES}", "does not fit")):  # fmt: skip
+    for rule, needle in (
+        (f"headroom:{GPU_BYTES}", "leaves no ballast"),
+        (f"bytes:{GPU_BYTES}", "does not fit"),
+        (f"leave-free:{GPU_BYTES}", "leaves no ballast"),
+    ):
         refused_in_preflight(
             machine, needle, "--oom-ballast", f"stt-whisper={rule}", "--oom-ballast",
             "tts-kokoro=none", *BALLAST_PYTHON, gpu=gpu,
@@ -1241,6 +1288,10 @@ def check_the_ballast_interpreter_is_checked_where_it_is_used(machine: Machine) 
         recipe = result.called("candidate-qualify.py")
         assert len(recipe) == 1 and "tts-kokoro-candidate" in recipe[0], recipe
         assert not (result.staging / "stt-whisper").exists()
+    # A ballast sized when it is taken is held by the same interpreter.
+    left_free = ("--oom-ballast", "stt-whisper=leave-free:5000", *rules[2:])
+    step = machine.run(*left_free).steps["qualify:stt-whisper"]
+    assert (step["status"], step["reason"], step["exit_code"]) == ("failed", reason, None)
     # Installed by the time the step runs, it is what the recipe is given.
     installed = f"mkdir -p '{python.parent}' && ln -s /usr/bin/python3 '{python}'"
     result = machine.run(*rules, install_hook=installed)
@@ -1341,6 +1392,8 @@ def check_options_the_pass_sets_cannot_be_overridden() -> None:
     assert claims("--oom-ballast-bytes", ["--oom-ballast-b=5", "x"])
     assert claims("--oom-ballast-bytes", ["--oom"])
     assert not claims("--oom-ballast-bytes", ["--oom-ballast-python=x", "--window=5s", "5"])
+    assert claims("--oom-ballast-leave-free", ["--oom-ballast-leave=5"])
+    assert not claims("--oom-ballast-leave-free", ["--oom-ballast-bytes=5"])
     assert not claims("--predecessor-bundle", ["--predecessor-deployment-id=x"])
     assert not claims("--predecessor-bundle", ["--predecessor-bundles"])
     # A lone dash pair or a single dash is not an abbreviation of anything.
@@ -1569,6 +1622,7 @@ def main() -> int:
         check_a_command_that_cannot_be_stopped(machine)
         check_arguments(machine)
         check_ballast_per_candidate(machine)
+        check_ballast_left_free(machine)
         check_device_refusals(machine)
         check_the_ballast_interpreter_is_checked_where_it_is_used(machine)
         check_predecessor_problem(machine)
