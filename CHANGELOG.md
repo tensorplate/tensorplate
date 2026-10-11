@@ -8,6 +8,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The agent's deploy load-failure tests no longer bound a failing deploy by
+  a time a loaded machine reaches. One required the answer within 750 ms
+  when the worker exits without a startup record, and failed wherever the
+  deploy itself took longer; the others allowed 5 seconds of a 10-second
+  warm timeout. The tests now run with a 300-second warm timeout and
+  require the answer within a tenth of it, which shows that the worker's
+  exit ended the wait and not the timeout. The 750 ms bound was also the
+  only check that the agent stops waiting for a startup record once the
+  worker's stderr has closed, instead of for the full second it allows; no
+  test checks that now. (V030-E04-F03-T02)
+
 - The doctor's runner-profile unit tests no longer fail now and then with
   "Text file busy". They wrote an interpreter script and ran it, and a test
   thread that forked in between held the file open for writing until its
