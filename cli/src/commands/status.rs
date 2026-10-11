@@ -338,6 +338,9 @@ pub(crate) struct ResidentSetHealth<'a> {
     pub(crate) serving: usize,
     /// Members in `serving` state the agent reports in contact.
     pub(crate) in_contact: usize,
+    /// Members in `serving` state with no contact reported because their
+    /// worker is stopped or draining.
+    pub(crate) stopped_or_draining: usize,
     /// Quarantined members, in committed order.
     pub(crate) quarantined: Vec<&'a str>,
     /// Members in `serving` state the agent reports out of contact, in
@@ -357,7 +360,12 @@ impl<'a> ResidentSetHealth<'a> {
                     match contact {
                         Some(ContactState::InContact) => health.in_contact += 1,
                         Some(ContactState::OutOfContact) => health.out_of_contact.push(id),
-                        None => {}
+                        None => {
+                            let stopped = member.process == Some(ProcessState::Stopped);
+                            if stopped || member.draining == Some(true) {
+                                health.stopped_or_draining += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -1178,15 +1186,30 @@ mod tests {
                     MemberState::Quarantined,
                     Some(ContactState::OutOfContact),
                 ),
+                tensorplate_protocol::MemberStatus {
+                    process: Some(ProcessState::Stopped),
+                    draining: Some(false),
+                    ..health_member("g", MemberState::Serving, None)
+                },
+                tensorplate_protocol::MemberStatus {
+                    process: Some(ProcessState::Running),
+                    draining: Some(true),
+                    ..health_member("h", MemberState::Serving, None)
+                },
+                tensorplate_protocol::MemberStatus {
+                    process: Some(ProcessState::Stopped),
+                    ..health_member("i", MemberState::Quarantined, None)
+                },
             ],
         };
         let health = ResidentSetHealth::of(&set);
         assert_eq!(
             health,
             ResidentSetHealth {
-                serving: 3,
+                serving: 5,
                 in_contact: 1,
-                quarantined: vec!["d", "e", "f"],
+                stopped_or_draining: 2,
+                quarantined: vec!["d", "e", "f", "i"],
                 out_of_contact: vec!["c"],
             }
         );

@@ -789,7 +789,8 @@ judge `process` or `readiness`. They judge `contact`, which the agent now
 fills: a member in `serving` state reported `out_of_contact` lowers
 severity to `degraded` and is named by `doctor`. A member whose process is
 `stopped` or draining reports no `contact`, so it is still counted as
-healthy, and `doctor` says that contact is not reported for it.
+healthy; the message of `doctor`'s `ok` finding counts such members apart
+from those in contact and from those the agent reports nothing for.
 
 Beside a resident set the singleton slots are projections of the record. A
 set of one carries its committed generations into `active.generation` and

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// `tensorplate status` against the status responses recorded from an agent
+// `tensorplate status`, and `tensorplate doctor`'s finding on the members of
+// a set, against the status responses recorded from an agent
 // that runs the member registry
 // (`protocol/rust/tests/fixtures/agent_control_member_status.jsonl`), which
 // carry the serving generation and the state of a member's worker process,
@@ -38,6 +39,20 @@ fn status_of(response: &ControlResponse) -> (String, Value) {
     let (code, json, stderr) = run_cli(&stub.socket, &["--output", "json", "status"]);
     assert_eq!(code, 0, "stderr was {stderr}");
     (human, serde_json::from_str(&json).expect("json envelope"))
+}
+
+/// What `doctor` says of the members of the set in `response`.
+fn doctor_on_members(response: &ControlResponse) -> Value {
+    let stub = AgentStub::start();
+    // doctor sends: version, then status.
+    stub.enqueue(ControlResponse::ok(Some("v".into())));
+    stub.enqueue(response.clone());
+    let (code, stdout, stderr) = run_cli(&stub.socket, &["--output", "json", "doctor"]);
+    assert_eq!(code, 0, "stderr was {stderr}");
+    let body: Value = serde_json::from_str(&stdout).expect("json envelope");
+    let findings = body["payload"]["findings"].as_array().expect("findings");
+    let members = findings.iter().find(|f| f["id"] == "resident_set_members");
+    members.expect("a finding on the members").clone()
 }
 
 #[test]
@@ -81,6 +96,37 @@ fn status_reports_the_process_of_a_committed_member() {
     assert_eq!(member["contact"], "in_contact");
     assert_eq!(agent["active"]["generation"], 2);
     assert_eq!(agent["previous_active"]["generation"], 1);
+}
+
+#[test]
+fn doctor_says_which_members_are_in_contact_and_which_have_no_worker_in_service() {
+    let mut response = recorded("agent_control_member_status.jsonl", 4);
+    let judged = doctor_on_members(&response);
+    assert_eq!(judged["status"], "ok", "{judged}");
+    assert_eq!(
+        judged["message"],
+        "1 member in `serving` state and in contact"
+    );
+
+    let set = response
+        .agent_status
+        .as_mut()
+        .and_then(|status| status.resident_set.as_mut())
+        .expect("a set");
+    let mut stopped = set.members[0].clone();
+    stopped.deployment_id = "vision-v3".into();
+    stopped.process = Some(ProcessState::Stopped);
+    stopped.readiness = Some(Readiness::NotReady);
+    stopped.contact = None;
+    set.members.push(stopped);
+    let judged = doctor_on_members(&response);
+
+    // Not judged: a stopped worker does not change the verdict, only the message.
+    assert_eq!(judged["status"], "ok", "{judged}");
+    assert_eq!(
+        judged["message"],
+        "2 members in `serving` state; 1 in contact, 1 with a worker that is stopped or draining"
+    );
 }
 
 #[test]
