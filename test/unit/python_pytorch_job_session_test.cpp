@@ -275,6 +275,26 @@ TEST_F(JobSessionTest, UnloadClosesAdmissionThenExchangesThroughTheChannelThenSt
                  "backend_unavailable");
 }
 
+TEST_F(JobSessionTest, AnUnloadAnsweredWithAJobStillOpenFailsThatJobAsUnloaded) {
+  watch_releases();
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_a_job());
+  Result<void> unloaded = unexpected(Error::Code::Internal, "not run");
+  std::thread unload([&] { unloaded = h.session->unload(); });
+  const auto sent = peer.sent("unload", 1);
+  EXPECT_EQ(sent.size(), 1U);
+  // No runner answers an unload ahead of the job it is running.
+  peer.write(Json{{"schema_version", "0.1"},
+                  {"message_id", sent.empty() ? Json("") : sent.at(0).at("message_id")},
+                  {"kind", "unload_response"},
+                  {"status", "ok"}});
+  unload.join();
+  ASSERT_TRUE(unloaded.has_value()) << unloaded.error().message;
+  EXPECT_FALSE(released_before_the_reap);
+  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kSessionUnloaded);
+}
+
 TEST_F(JobSessionTest, DestructionFailsAnOpenJobAndReleasesItOnlyAfterTheReap) {
   // When the process is ended the channel's reader has left the socket: it
   // failed the job on its way out.

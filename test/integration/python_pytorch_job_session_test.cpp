@@ -138,6 +138,11 @@ TEST_F(JobSessionRunner, BothSpeechClassesRunOnAChannelTheSessionStartedAndUnloa
   ASSERT_TRUE(unloaded.has_value()) << unloaded.error().message;
   expect_refused(h->channel->submit(JobSessionHarness::tts(3, 1)), Error::Code::Unavailable,
                  "backend_unavailable");
+
+  // The same session loads again, on a new sidecar and a restarted channel.
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_TRUE(h->submit(h->stt(3, 2)).has_value());
+  ASSERT_TRUE(h->wait_kinds(3, {Accepted, Completed, Released}));
   EXPECT_EQ(h->channel->counters(), JobChannelCounters{});
 }
 
