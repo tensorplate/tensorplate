@@ -343,7 +343,6 @@ jobs:
           tools/ci/apt-get.sh install -y --no-install-recommends \
             build-essential \
             ca-certificates \
-            clang-15 \
             debhelper \
             dh-exec \
             dpkg-dev \

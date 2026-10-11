@@ -4941,6 +4941,76 @@ class HostedCompilerTests(unittest.TestCase):
                 self.assertNotEqual(self.run_script(*args).returncode, 0)
         self.assertFalse(self.calls.exists())
 
+    # What the tools print on the hosted image, as its job logs record them.
+    TOOL_OUTPUT = {
+        "clang-format": "Ubuntu clang-format version {v}-1ubuntu1.1\n",
+        "clang-tidy": ("Ubuntu LLVM version {v}\n  Optimized build.\n"
+                       "  Default target: x86_64-pc-linux-gnu\n"),
+    }
+
+    def tool(self, name: str, version: str | None) -> None:
+        (self.bin / name).unlink(missing_ok=True)
+        if version:
+            text = self.TOOL_OUTPUT[name].format(v=version)
+            write_executable(self.bin / name, f"#!/bin/sh\nprintf '%s' '{text}'\n")
+
+    def test_the_format_and_tidy_tools_pass_on_14_and_report_what_they_found(self):
+        for name in self.TOOL_OUTPUT:
+            with self.subTest(name=name):
+                self.tool(name, "14.0.0")
+                result = self.run_script("--tool", name)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"{name}: ", result.stdout)
+                self.assertIn("version 14.0.0", result.stdout)
+        self.assertFalse(self.calls.exists())
+
+    def test_a_format_or_tidy_tool_of_another_major_or_none_fails_with_a_sentence(self):
+        for name in self.TOOL_OUTPUT:
+            for version in ("15.0.7", "140.1.0", "114.0.0", None):
+                with self.subTest(name=name, version=version):
+                    self.tool(name, version)
+                    result = self.run_script("--tool", name)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    expected = (r"is not on PATH" if version is None
+                                else r"is .*, not version 14")
+                    self.assertRegex(result.stdout, rf"(?m)^::error::{name} {expected}")
+
+    def test_a_tool_that_prints_no_version_fails(self):
+        write_executable(self.bin / "clang-tidy", "#!/bin/sh\necho 'no version here'\n")
+        result = self.run_script("--tool", "clang-tidy")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertRegex(result.stdout, r"(?m)^::error::clang-tidy is of unknown version")
+
+    def test_only_the_format_and_tidy_tools_are_checked_by_name(self):
+        for args in (("--tool",), ("--tool", "clang"), ("--tool", "clang-format", "x")):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_script(*args).returncode, 2)
+
+    def test_the_format_and_tidy_jobs_check_their_tool_before_it_runs(self):
+        helper = ReleaseWorkflowVcpkgTests("job")
+        for name, tool, running in (("format", "clang-format", "Check formatting"),
+                                    ("tidy", "clang-tidy", "Run clang-tidy")):
+            with self.subTest(job=name):
+                job = helper.job("cpp.yml", name)
+                checks = [index for index, step in enumerate(job["steps"])
+                          if re.search(rf"(?m)^\s*tools/ci/select-clang\.sh --tool {tool}\s*$",
+                                       step.get("run") or "")]
+                self.assertEqual(len(checks), 1, f"{name}: expected one version check")
+                ran = [index for index, step in enumerate(job["steps"])
+                       if step.get("name") == running]
+                self.assertEqual(len(ran), 1)
+                self.assertLess(checks[0], ran[0])
+                text = json.dumps(job)
+                self.assertNotRegex(
+                    text, rf"update-alternatives[^\"]*{tool}\b|{tool}-1\d\b",
+                    f"{name}: the image's {tool} is the one that runs; a registration or "
+                    "install of another version never took effect")
+
+    def test_no_job_installs_a_clang_it_does_not_select(self):
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            self.assertNotRegex(path.read_text(), r"(?m)^\s+clang-15\b",
+                                f"{path.name}: nothing selects clang 15")
+
     def test_the_release_job_asserts_the_major_version_in_its_toolchain_step(self):
         job = ReleaseWorkflowVcpkgTests.job(self, "release.yml", "build_packages_amd64")
         step = job["steps"][ReleaseWorkflowVcpkgTests.only_step(

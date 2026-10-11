@@ -22,6 +22,12 @@ a clean CI pass.
   toolchain is installed automatically by `rust-toolchain.toml` on first
   invocation.
 
+CI compiles, formats and runs clang-tidy with version 14 of the tools, the
+hosted runner image's own, and fails a job whose tool reports another major
+version (`tools/ci/select-clang.sh`). The dev container and the host above use
+15, which can format a file or report a finding differently: when a format or
+tidy job fails on code that passes locally, run version 14 of the tool.
+
 ## C++
 
 ```bash

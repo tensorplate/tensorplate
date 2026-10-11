@@ -411,7 +411,6 @@ jobs:
           # tree requires 3.25 (same reason as the release workflow's amd64 job).
           tools/ci/apt-get.sh install -y --no-install-recommends \
             build-essential \
-            clang-15 \
             debhelper \
             dh-exec \
             dpkg-dev \

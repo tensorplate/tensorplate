@@ -105,7 +105,8 @@ The build is split between CMake/vcpkg for C++ (`runtime/`, `serving_worker/`,
 C++ tests) and Cargo for Rust (`agent/`, `cli/`, `observability/`,
 `protocol/rust/`). The fastest way to a working environment is the
 devcontainer at [`.devcontainer/`](.devcontainer/devcontainer.json), which
-preinstalls Clang 15, Ninja, CMake, vcpkg, and the pinned Rust toolchain.
+preinstalls Clang 15, Ninja, CMake, vcpkg, and the pinned Rust toolchain (CI
+uses Clang 14; see `docs/contributing/local-validation.md`).
 For the canonical command sequence that mirrors CI, see
 [`docs/contributing/local-validation.md`](docs/contributing/local-validation.md).
 For Jetson cross-compile setup, see
@@ -167,7 +168,8 @@ support lands.
 
 `clang-format` and `clang-tidy` are configured at the repo root via
 `.clang-format` and `.clang-tidy`. CI invokes them through the workflows in
-`.github/workflows/` (V01-E01-F04).
+`.github/workflows/` (V01-E01-F04), with version 14 of both tools; the dev
+container's version 15 can differ in what it formats and reports.
 
 ### Rust (agent, CLI, observability, protocol crate)
 

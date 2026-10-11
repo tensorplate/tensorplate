@@ -345,7 +345,6 @@ jobs:
           tools/ci/apt-get.sh update
           tools/ci/apt-get.sh install -y --no-install-recommends \
             ca-certificates \
-            clang-15 \
             llvm-15 \
             ninja-build
           tools/ci/select-clang.sh
