@@ -73,7 +73,6 @@ jobs:
           tools/ci/apt-get.sh update
           tools/ci/apt-get.sh install -y --no-install-recommends \
             ninja-build \
-            clang-15 \
             llvm-15 \
             ca-certificates
           tools/ci/select-clang.sh
@@ -205,7 +204,6 @@ jobs:
           tools/ci/apt-get.sh update
           tools/ci/apt-get.sh install -y --no-install-recommends \
             ninja-build \
-            clang-15 \
             llvm-15 \
             ca-certificates
           tools/ci/select-clang.sh
@@ -247,36 +245,12 @@ jobs:
   format:
     name: clang-format
     runs-on: ubuntu-22.04
-    # Budgeted for the retrying apt wrapper's worst case (~19 min of bounded
-    # attempts across two calls), not for the ~2 min this job actually takes.
-    # At 10 a job that was recovering got cut off mid-retry.
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      # A stalled mirror is what costs time here, not a failing one: apt
-      # holds an open-but-idle connection and waits, so a job burns its
-      # whole budget without ever failing. A response timeout turns the
-      # stall into an error, and only then can a retry recover it —
-      # retries alone do nothing for a hang. Written as a drop-in so it
-      # also covers apt calls inside the test scripts, which per-command
-      # flags would miss.
-      - name: Make apt fail fast and retry
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          printf '%s\n' \
-            'Acquire::Retries "3";' \
-            'Acquire::http::Timeout "30";' \
-            'Acquire::https::Timeout "30";' \
-            | sudo tee /etc/apt/apt.conf.d/99-tensorplate-resilience >/dev/null
-          apt-config dump | grep -E '^Acquire::(Retries|http::Timeout)' || {
-            echo 'apt did not accept the resilience drop-in' >&2; exit 1; }
+      - name: Check the clang-format version
+        run: tools/ci/select-clang.sh --tool clang-format
 
-      - name: Install clang-format
-        run: |
-          tools/ci/apt-get.sh update
-          tools/ci/apt-get.sh install -y --no-install-recommends clang-format-15
-          sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-15 100
       - name: Check formatting
         shell: bash
         run: |
@@ -320,11 +294,9 @@ jobs:
         run: |
           tools/ci/apt-get.sh update
           tools/ci/apt-get.sh install -y --no-install-recommends \
-            ninja-build \
-            clang-15 \
-            clang-tidy-15
+            ninja-build
           tools/ci/select-clang.sh
-          sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-15 100
+          tools/ci/select-clang.sh --tool clang-tidy
 
       - name: Check out vcpkg at the manifest's baseline
         run: tools/ci/checkout-vcpkg.sh

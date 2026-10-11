@@ -379,6 +379,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The hosted format and tidy jobs state and assert the version of their tool.
+  They installed `clang-format-15` and `clang-tidy-15` and registered them as
+  alternatives at the priority of the runner image's own version 14, which
+  never changed the choice: both jobs have run version 14 all along, as the
+  compiler did, while the contributor documentation read as if they ran 15.
+  `tools/ci/select-clang.sh --tool` now fails a job whose tool is not version
+  14, no file is reformatted and no finding is new, and the documentation names
+  the versions CI runs. The format job no longer runs apt, and no hosted job
+  installs `clang-15`, which nothing selected. The dependency cache keys do not
+  change.
+
 - The C++ workflow checks vcpkg out at the `builtin-baseline` of
   `vcpkg.json` and bootstraps it (`tools/ci/checkout-vcpkg.sh`), in the
   three jobs that use it, as the release jobs already did. It built with the

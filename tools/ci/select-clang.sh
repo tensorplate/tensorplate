@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Selects the Clang the hosted jobs compile with and fails unless clang and
-# clang++ both report it.
+# clang++ both report it. The format and tidy jobs check their own tool against
+# the same version, so their results do not change under a runner image update.
 #
 # Clang 14 is the runner image's default and the compiler every published
 # amd64 worker and both dependency caches were built with. The caches key on
@@ -11,8 +12,9 @@
 # as an alternative at the priority of the image's own never changed the
 # choice, which is why the selection is explicit.
 #
-# Usage: tools/ci/select-clang.sh          select, then check
-#        tools/ci/select-clang.sh --check  check only, as later steps see PATH
+# Usage: tools/ci/select-clang.sh                  select, then check
+#        tools/ci/select-clang.sh --check          check only, as later steps see PATH
+#        tools/ci/select-clang.sh --tool <name>    check clang-format or clang-tidy
 
 set -Eeuo pipefail
 
@@ -46,14 +48,38 @@ check_clang() {
   done
 }
 
+check_tool() {
+  local tool=$1 output line="" candidate
+  command -v "$tool" >/dev/null || fail "${tool} is not on PATH"
+  output="$("$tool" --version)"
+  while IFS= read -r candidate; do
+    if [[ "$candidate" =~ version\ [0-9]+\. ]]; then
+      line=$candidate
+      break
+    fi
+  done <<<"$output"
+  printf '%s: %s (%s)\n' "$tool" "$(readlink -f "$(command -v "$tool")")" "$line"
+  [[ "$line" =~ version\ ${MAJOR}\. ]] ||
+    fail "${tool} is ${line:-of unknown version}, not version ${MAJOR}; the runner image changed it, and so would the formatting and findings it reports"
+}
+
 case "$#:${1-}" in
   0:)
     select_clang
     check_clang
     ;;
   1:--check) check_clang ;;
+  2:--tool)
+    case "$2" in
+      clang-format | clang-tidy) check_tool "$2" ;;
+      *)
+        printf 'usage: select-clang.sh --tool clang-format|clang-tidy\n' >&2
+        exit 2
+        ;;
+    esac
+    ;;
   *)
-    printf 'usage: select-clang.sh [--check]\n' >&2
+    printf 'usage: select-clang.sh [--check | --tool clang-format|clang-tidy]\n' >&2
     exit 2
     ;;
 esac
