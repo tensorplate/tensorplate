@@ -59,9 +59,9 @@
 //     writes no more and drops what waits.
 //
 // The test is the backend: it takes the job at the head of the FIFO and says
-// how it ends. emit(), refuse(), stop_reading(), stop_reading_after() and the
-// overrides in Options step outside the runner's behaviour for what the
-// adapter has to survive.
+// how it ends. emit(), refuse(), stop_reading(), stop_reading_after(),
+// hold_health() and the overrides in Options step outside the runner's
+// behaviour for what the adapter has to survive.
 
 #pragma once
 
@@ -343,6 +343,26 @@ class ScriptedSidecar {
     stop_after_ = kind;
   }
 
+  /// From now until release_health() a `health_check` is read and not
+  /// answered, where the runner's reader answers it at once.
+  void hold_health() {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    holding_health_ = true;
+  }
+
+  /// Answers the health checks held, in arrival order, and holds no more.
+  void release_health() {
+    std::vector<Json> held;
+    {
+      std::lock_guard<std::mutex> lock(log_mutex_);
+      holding_health_ = false;
+      held.swap(held_health_);
+    }
+    for (const Json& request : held) {
+      answer_health(request);
+    }
+  }
+
   /// Waits until the reader has parked.
   [[nodiscard]] bool parked() {
     std::unique_lock<std::mutex> lock(log_mutex_);
@@ -549,9 +569,14 @@ class ScriptedSidecar {
       return;
     }
     if (kind == "health_check") {
-      Json response = answer(header, "health_check_response");
-      response["health"] = {{"ready", loaded_.load() && !unready_.load()}};
-      write_frame(response, 0);
+      {
+        std::lock_guard<std::mutex> lock(log_mutex_);
+        if (holding_health_) {
+          held_health_.push_back(header);
+          return;
+        }
+      }
+      answer_health(header);
       return;
     }
     std::lock_guard<std::mutex> lock(table_mutex_);
@@ -570,6 +595,12 @@ class ScriptedSidecar {
       lane_.emplace_back(header);
     }
     pump_locked();
+  }
+
+  void answer_health(const Json& request) {
+    Json response = answer(request, "health_check_response");
+    response["health"] = {{"ready", loaded_.load() && !unready_.load()}};
+    write_frame(response, 0);
   }
 
   // -- Under the job lock. -------------------------------------------------------
@@ -823,6 +854,8 @@ class ScriptedSidecar {
   std::vector<Json> written_;
   std::string writing_kind_;
   std::string stop_after_;
+  bool holding_health_ = false;
+  std::vector<Json> held_health_;
   bool reaped_ = false;
   bool gave_up_ = false;
   bool parked_ = false;

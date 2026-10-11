@@ -437,7 +437,8 @@ class PythonPytorchSession final : public ExecutionSession {
       return transport_failure(
           Error::make(Error::Code::InferenceFailed, "sidecar returned malformed JSON header"));
     }
-    // The slot hands over the next frame that is not a job message.
+    // The slot hands over the next frame that is neither a job message nor the
+    // channel's own health answer.
     if (jobs_started_ && string_field(hdr, "message_id").value_or("") != message_id) {
       return transport_failure(
           Error::make(Error::Code::InferenceFailed, "sidecar response answers another request"));

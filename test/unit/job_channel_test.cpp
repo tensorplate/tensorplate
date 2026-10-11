@@ -111,6 +111,52 @@ class WaitingExchange {
   std::thread thread_;
 };
 
+// A `health_check_response` as a sidecar with a loaded backend writes it.
+Json health_report(const std::string& message_id) {
+  return Json{{"schema_version", "0.1"},
+              {"message_id", message_id},
+              {"kind", "health_check_response"},
+              {"status", "ok"},
+              {"health", {{"ready", true}}}};
+}
+
+// A deadline that has passed, and one a test that works never reaches.
+JobChannel::TimePoint passed() {
+  return JobChannel::TimePoint::clock::now();
+}
+JobChannel::TimePoint patient() {
+  return passed() + JobChannelHarness::kPatience;
+}
+
+// A health call that waits on a thread of its own, joined before it goes.
+class WaitingHealth {
+ public:
+  explicit WaitingHealth(JobChannel& channel)
+      : thread_([this, &channel] { outcome_ = channel.probe_health(patient()); }) {}
+  ~WaitingHealth() {
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+  WaitingHealth(const WaitingHealth&) = delete;
+  WaitingHealth& operator=(const WaitingHealth&) = delete;
+  WaitingHealth(WaitingHealth&&) = delete;
+  WaitingHealth& operator=(WaitingHealth&&) = delete;
+
+  // Waits for the call to end.
+  [[nodiscard]] const Result<void>& outcome() {
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+    return outcome_;
+  }
+
+ private:
+  Result<void> outcome_ = unexpected(Error::Code::Internal, "the call did not end");
+  std::thread thread_;
+};
+
 class JobChannelTest : public ::testing::Test {
  protected:
   // The sidecar is loaded with jobs enabled, primed, and the channel admits.
@@ -516,6 +562,9 @@ TEST_F(JobChannelTest, TheQueueHasAPlaceForEveryFrameOfEveryRecordAndRefusesNoCa
   for (std::uint64_t session = 1; session < kLastSession; ++session) {
     ASSERT_TRUE(h.release(session).has_value()) << session;
   }
+  // Both requests: the probe's, which stands though its caller gave up, and
+  // the exchange's.
+  expect_refused(h.channel.probe_health(passed()), Error::Code::Timeout, "health_timeout");
   WaitingExchange health(h, "health_check");
   ASSERT_TRUE(h.wait([&] { return h.channel.queued_frames() == kMaxQueuedFrames - 3; }));
 
@@ -668,6 +717,107 @@ TEST_F(JobChannelTest, AnExchangeAnsweredBeforeItsRequestWasBegunTakesItOutOfThe
   EXPECT_EQ(peer.sent("prime", 0).size(), 1U) << "the one up() sent";
 }
 
+TEST_F(JobChannelTest,
+       AWaitingExchangeKeepsItsQueuedRequestThroughAStrayRefusalAndASecondExchange) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(1, 1));
+  WaitingExchange prime(h, "prime");
+  ASSERT_TRUE(h.wait([&] { return h.channel.queued_frames() == 1; }));
+  // An `error_event` that names another message is not this exchange's answer.
+  peer.refuse("tp-msg-unknown", "unsupported", nullptr);
+  ASSERT_TRUE(h.wait([&] { return h.channel.counters() == JobChannelCounters{0, 1}; }));
+  EXPECT_EQ(h.channel.queued_frames(), 1U);
+  // One exchange at a time, and the one refused takes nothing out either.
+  EXPECT_EQ(h.unary("health_check").error().code, Error::Code::Internal);
+  EXPECT_EQ(h.channel.queued_frames(), 1U);
+
+  peer.resume_reading();
+  ASSERT_EQ(peer.take_job(), 1U);
+  peer.complete(1, transcript());
+  ASSERT_TRUE(prime.outcome().has_value());
+  EXPECT_EQ(prime.outcome().value().value("kind", ""), "prime_response");
+}
+
+TEST_F(JobChannelTest, AHealthProbeStillQueuedWhenTheConnectionEndsLeavesTheQueue) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(1, 1));
+  // No caller is left: what is queued is the probe's request alone, once.
+  expect_refused(h.channel.probe_health(passed()), Error::Code::Timeout, "health_timeout");
+  expect_refused(h.channel.probe_health(passed()), Error::Code::Timeout, "health_timeout");
+  ASSERT_EQ(h.channel.queued_frames(), 1U);
+  peer.write_raw("not a header");
+  ASSERT_TRUE(h.wait_kinds(1, {Failed}));
+  EXPECT_EQ(h.channel.queued_frames(), 0U) << "before any stop";
+}
+
+TEST_F(JobChannelTest, AHealthProbeAnsweredBeforeItsRequestWasBegunLeavesTheQueue) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(1, 1));
+  // Ids come from one counter and nothing else draws one here: the probe's
+  // is the next.
+  const std::string drawn = next_message_id();
+  const std::string probes = "tp-msg-" + std::to_string(std::stoull(drawn.substr(7)) + 1);
+  WaitingHealth health(h.channel);
+  ASSERT_TRUE(h.wait([&] { return h.channel.queued_frames() == 1; }));
+  // Frames that name another message leave the request where it is.
+  peer.write(health_report("s90"));
+  peer.refuse("tp-msg-unknown", "unsupported", nullptr);
+  ASSERT_TRUE(h.wait([&] { return h.channel.counters() == JobChannelCounters{0, 2}; }));
+  EXPECT_EQ(h.channel.queued_frames(), 1U);
+  // No sidecar answers a request it has not read. Its id is what makes a
+  // frame the probe's answer all the same.
+  peer.write(health_report(probes));
+  EXPECT_TRUE(health.outcome().has_value());
+  EXPECT_EQ(h.channel.queued_frames(), 0U);
+
+  peer.resume_reading();
+  ASSERT_EQ(peer.take_job(), 1U);
+  peer.complete(1, transcript());
+  ASSERT_TRUE(h.unary("prime").has_value());
+  EXPECT_TRUE(peer.sent("health_check", 0).empty());
+}
+
+TEST_F(JobChannelTest, AnExchangeThatGivesUpLeavesTheHealthProbesQueuedRequest) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(1, 1));
+  expect_refused(h.channel.probe_health(passed()), Error::Code::Timeout, "health_timeout");
+  ASSERT_EQ(h.channel.queued_frames(), 1U);
+  ASSERT_EQ(h.unary("prime", std::chrono::milliseconds{0}).error().code, Error::Code::Timeout);
+  EXPECT_EQ(h.channel.queued_frames(), 1U) << "the probe's request stays";
+}
+
+TEST_F(JobChannelTest, AHealthProbeThatIsAnsweredLeavesTheWaitingExchangesQueuedRequest) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(1, 1));
+  WaitingExchange prime(h, "prime");
+  ASSERT_TRUE(h.wait([&] { return h.channel.queued_frames() == 1; }));
+  // Ids come from one counter and nothing else draws one here.
+  const std::string drawn = next_message_id();
+  const std::string probes = "tp-msg-" + std::to_string(std::stoull(drawn.substr(7)) + 1);
+  WaitingHealth health(h.channel);
+  ASSERT_TRUE(h.wait([&] { return h.channel.queued_frames() == 2; }));
+  peer.write(health_report(probes));
+  EXPECT_TRUE(health.outcome().has_value());
+  EXPECT_EQ(h.channel.queued_frames(), 1U) << "the exchange's request stays";
+
+  peer.resume_reading();
+  ASSERT_EQ(peer.take_job(), 1U);
+  peer.complete(1, transcript());
+  ASSERT_TRUE(prime.outcome().has_value());
+  EXPECT_EQ(prime.outcome().value().value("kind", ""), "prime_response");
+}
+
+// The number, not the constant: nothing else in the tree states it.
+TEST_F(JobChannelTest, TheSeventeenthUnreleasedJobIsRefused) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.stop_reading();
+  for (std::uint64_t job = 1; job <= 16; ++job) {
+    ASSERT_TRUE(h.submit(JobChannelHarness::tts(job, 1)).has_value()) << job;
+  }
+  expect_refused(h.channel.submit(JobChannelHarness::tts(17, 1)), Error::Code::ResourceExhausted,
+                 "job_capacity_exhausted");
+}
+
 // -- Cancel and session release. -------------------------------------------------
 
 TEST_F(JobChannelTest, ACancelIsWrittenOnceAndOnlyWhileTheJobCanStillEnd) {
@@ -748,6 +898,46 @@ TEST_F(JobChannelTest, AReleaseTheSidecarRefusesAfterAnUnloadStaysPendingUntilTh
   EXPECT_TRUE(h.sink->session_releases().empty());
   h.stop(kSessionUnloaded);
   EXPECT_EQ(h.sink->session_releases().size(), 1U);
+}
+
+TEST_F(JobChannelTest, AReleaseRefusedOnceTheConnectionIsGoneIsRecordedAndItsKeyTakesNoJobAgain) {
+  ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
+  // Never started: there was no session to release, and nothing is recorded.
+  expect_refused(h.channel.release_session(1, 1), Error::Code::Unavailable, "backend_unavailable");
+  EXPECT_EQ(h.channel.released_session_runs(), 0U);
+
+  ASSERT_TRUE(h.connect(peer.launcher()).has_value());
+  peer.close();
+  // An exchange fails once the reader has left: the connection has ended.
+  ASSERT_FALSE(h.unary("prime").has_value());
+  expect_refused(h.channel.release_session(3, 1), Error::Code::Unavailable, "backend_unavailable");
+  // Arguments a live channel refuses name no session.
+  expect_refused(h.channel.release_session(0, 1), Error::Code::Unavailable, "backend_unavailable");
+  expect_refused(h.channel.release_session(7, 0), Error::Code::Unavailable, "backend_unavailable");
+  expect_refused(h.channel.release_session(kMaxWireInteger + 1, 1), Error::Code::Unavailable,
+                 "backend_unavailable");
+  EXPECT_EQ(h.channel.released_session_runs(), 1U);
+  h.stop(kSessionUnloaded);
+  expect_refused(h.channel.release_session(5, 1), Error::Code::Unavailable, "backend_unavailable");
+  EXPECT_EQ(h.channel.released_session_runs(), 2U);
+  expect_refused(h.channel.release_session(4, 1), Error::Code::Unavailable, "backend_unavailable");
+  EXPECT_EQ(h.channel.released_session_runs(), 1U) << "3 to 5";
+
+  // On the next connection those keys are released ones.
+  ScriptedSidecar next;
+  ASSERT_TRUE(h.connect(next.launcher()).has_value());
+  h.channel.admit_jobs();
+  for (const std::uint64_t key : {3U, 4U, 5U}) {
+    expect_refused(h.channel.submit(h.stt(key, key)), Error::Code::NotReady, "session_releasing");
+    EXPECT_TRUE(h.channel.release_session(key, 1).has_value()) << key;
+  }
+  EXPECT_TRUE(h.submit(h.stt(1, 1)).has_value()) << "its release was refused before any start";
+  EXPECT_TRUE(h.submit(h.stt(2, 7)).has_value()) << "its release named no generation";
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
+  settle();
+  EXPECT_TRUE(next.sent("session_release", 0).empty());
+  EXPECT_TRUE(h.sink->session_releases().empty());
+  h.stop(kSessionUnloaded);
 }
 
 TEST(JobChannelSessions, AReleasedSessionStaysReleasedHoweverManyFollowIt) {
@@ -1030,6 +1220,217 @@ TEST_F(JobChannelTest, AnExchangeThatIsNotAnsweredByItsDeadlineTimesOut) {
   const auto primed = h.unary("prime", std::chrono::milliseconds{20});
   ASSERT_FALSE(primed.has_value());
   EXPECT_EQ(primed.error().code, Error::Code::Timeout);
+}
+
+// -- Health. ---------------------------------------------------------------------
+
+TEST_F(JobChannelTest, HealthAnswersFromThePhaseAndAsksOnlyWhileTheChannelAdmits) {
+  expect_refused(h.channel.probe_health(patient()), Error::Code::NotReady, "backend_not_ready");
+  ASSERT_TRUE(h.connect(peer.launcher()).has_value());
+  expect_refused(h.channel.probe_health(patient()), Error::Code::NotReady, "backend_not_ready");
+  // `prime` arrives behind whatever was sent before it.
+  ASSERT_TRUE(h.unary("prime").has_value());
+  EXPECT_TRUE(peer.sent("health_check", 0).empty());
+
+  h.channel.admit_jobs();
+  EXPECT_TRUE(h.channel.probe_health(patient()).has_value());
+  peer.report_not_ready();
+  expect_refused(h.channel.probe_health(patient()), Error::Code::NotReady, "backend_not_ready");
+
+  h.channel.close_admission();
+  expect_refused(h.channel.probe_health(patient()), Error::Code::Unavailable,
+                 "backend_unavailable");
+  ASSERT_TRUE(h.unary("prime").has_value());
+  EXPECT_EQ(peer.sent("health_check", 0).size(), 2U) << "the two asked while it admitted";
+  h.stop(kSessionUnloaded);
+  expect_refused(h.channel.probe_health(patient()), Error::Code::Unavailable,
+                 "backend_unavailable");
+  EXPECT_EQ(h.channel.counters(), JobChannelCounters{});
+}
+
+TEST_F(JobChannelTest, AfterItsConnectionEndedHealthIsUnavailableWithoutAsking) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.close();
+  // An exchange fails once the reader has left: the connection has ended.
+  ASSERT_FALSE(h.unary("prime").has_value());
+  expect_refused(h.channel.probe_health(patient()), Error::Code::Unavailable,
+                 "backend_unavailable");
+  EXPECT_EQ(h.channel.queued_frames(), 0U);
+}
+
+TEST_F(JobChannelTest, HealthIsAnsweredBesideARunningJobAndAnExchangeThatWaits) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_EQ(peer.take_job(), 1U);
+  WaitingExchange prime(h, "prime");
+  ASSERT_EQ(peer.sent("prime", 2).size(), 2U);
+  // The sidecar answers health at once, while `prime` waits behind the job.
+  EXPECT_TRUE(h.channel.probe_health(patient()).has_value());
+  peer.complete(1, transcript());
+  ASSERT_TRUE(prime.outcome().has_value());
+  EXPECT_EQ(prime.outcome().value().value("kind", ""), "prime_response");
+  EXPECT_EQ(h.channel.counters(), JobChannelCounters{});
+}
+
+TEST_F(JobChannelTest, ARefusalThatNamesTheHealthProbeIsItsAnswerAndNotTheExchanges) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_EQ(peer.take_job(), 1U);
+  WaitingExchange prime(h, "prime");
+  ASSERT_EQ(peer.sent("prime", 2).size(), 2U);
+  peer.hold_health();
+  WaitingHealth health(h.channel);
+  const auto asked = peer.sent("health_check", 1);
+  ASSERT_EQ(asked.size(), 1U);
+  peer.refuse(asked[0].value("message_id", ""), "unsupported", nullptr);
+  expect_refused(health.outcome(), Error::Code::Unavailable, "backend_unavailable");
+  peer.complete(1, transcript());
+  ASSERT_TRUE(prime.outcome().has_value());
+  EXPECT_EQ(prime.outcome().value().value("kind", ""), "prime_response");
+  EXPECT_EQ(h.channel.counters(), JobChannelCounters{});
+}
+
+TEST_F(JobChannelTest, AHealthAnswerThatIsNoHealthReportMakesTheBackendUnavailable) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.hold_health();
+  WaitingHealth health(h.channel);
+  const auto asked = peer.sent("health_check", 1);
+  ASSERT_EQ(asked.size(), 1U);
+  Json answer = health_report(asked[0].value("message_id", ""));
+  answer.erase("health");
+  peer.write(answer);
+  expect_refused(health.outcome(), Error::Code::Unavailable, "backend_unavailable");
+}
+
+TEST_F(JobChannelTest, AHealthCallThatTimesOutLeavesItsProbeForALaterCallToBeAnsweredBy) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.hold_health();
+  expect_refused(h.channel.probe_health(passed()), Error::Code::Timeout, "health_timeout");
+  expect_refused(h.channel.probe_health(passed()), Error::Code::Timeout, "health_timeout");
+  WaitingHealth later(h.channel);
+  ASSERT_TRUE(h.wait([&] { return h.channel.health_waiters() == 1; }));
+  // `prime` arrives behind whatever was sent before it.
+  ASSERT_TRUE(h.unary("prime").has_value());
+  EXPECT_EQ(peer.sent("health_check", 0).size(), 1U) << "one probe, however many callers";
+
+  peer.release_health();
+  EXPECT_TRUE(later.outcome().has_value());
+  EXPECT_EQ(h.channel.counters(), JobChannelCounters{});
+  // Answered, so the next call asks again.
+  EXPECT_TRUE(h.channel.probe_health(patient()).has_value());
+  EXPECT_EQ(peer.sent("health_check", 2).size(), 2U);
+}
+
+TEST_F(JobChannelTest, AHealthAnswerThatComesAfterEveryCallerGaveUpIsDroppedAndFreesTheProbe) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_EQ(peer.take_job(), 1U);
+  peer.hold_health();
+  expect_refused(h.channel.probe_health(passed()), Error::Code::Timeout, "health_timeout");
+  WaitingExchange prime(h, "prime");
+  ASSERT_EQ(peer.sent("prime", 2).size(), 2U);
+  ASSERT_EQ(peer.sent("health_check", 1).size(), 1U);
+  // The late answer arrives while the exchange waits for its own.
+  peer.release_health();
+  ASSERT_TRUE(h.wait([&] { return h.channel.counters() == JobChannelCounters{0, 1}; }));
+  peer.complete(1, transcript());
+  ASSERT_TRUE(prime.outcome().has_value());
+  EXPECT_EQ(prime.outcome().value().value("kind", ""), "prime_response");
+  // The next call sends a probe of its own.
+  EXPECT_TRUE(h.channel.probe_health(patient()).has_value());
+  EXPECT_EQ(peer.sent("health_check", 2).size(), 2U);
+}
+
+TEST_F(JobChannelTest, AWaitingHealthCallEndsWithTheConnection) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.hold_health();
+  WaitingHealth health(h.channel);
+  ASSERT_EQ(peer.sent("health_check", 1).size(), 1U);
+  peer.close();
+  expect_refused(health.outcome(), Error::Code::Unavailable, "backend_unavailable");
+}
+
+TEST_F(JobChannelTest, AWaitingHealthCallIsReleasedByAStop) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.hold_health();
+  WaitingHealth health(h.channel);
+  ASSERT_TRUE(h.wait([&] { return h.channel.health_waiters() == 1; }));
+  h.stop(kSessionUnloaded);
+  expect_refused(health.outcome(), Error::Code::Unavailable, "backend_unavailable");
+}
+
+TEST_F(JobChannelTest, AnUnloadThatBeginsWhileAHealthCallWaitsMakesItUnavailable) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.hold_health();
+  WaitingHealth health(h.channel);
+  ASSERT_EQ(peer.sent("health_check", 1).size(), 1U);
+  h.channel.close_admission();
+  // The sidecar still reports ready; the channel no longer takes a job.
+  peer.release_health();
+  expect_refused(health.outcome(), Error::Code::Unavailable, "backend_unavailable");
+}
+
+// The channel's state comes first, whatever the sidecar answered.
+TEST_F(JobChannelTest, AnUnloadThatBeginsWhileAHealthCallWaitsOutranksAnAnswerOfNotReady) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.hold_health();
+  peer.report_not_ready();
+  WaitingHealth health(h.channel);
+  ASSERT_EQ(peer.sent("health_check", 1).size(), 1U);
+  h.channel.close_admission();
+  peer.release_health();
+  expect_refused(health.outcome(), Error::Code::Unavailable, "backend_unavailable");
+}
+
+TEST_F(JobChannelTest, AHealthCallMadeOnceAdmissionClosedDoesNotJoinTheProbeThatStands) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.hold_health();
+  expect_refused(h.channel.probe_health(passed()), Error::Code::Timeout, "health_timeout");
+  h.channel.close_admission();
+  expect_refused(h.channel.probe_health(passed()), Error::Code::Unavailable, "backend_unavailable");
+}
+
+TEST_F(JobChannelTest, AfterAConnectionEndedUnderAStandingProbeTheNextConnectionAsksAgain) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.hold_health();
+  expect_refused(h.channel.probe_health(passed()), Error::Code::Timeout, "health_timeout");
+  h.stop(kSessionUnloaded);
+
+  ScriptedSidecar next;
+  ASSERT_TRUE(h.connect(next.launcher()).has_value());
+  ASSERT_TRUE(h.unary("prime").has_value());
+  h.channel.admit_jobs();
+  EXPECT_TRUE(h.channel.probe_health(patient()).has_value());
+  EXPECT_EQ(next.sent("health_check", 1).size(), 1U);
+  h.stop(kSessionUnloaded);
+}
+
+// Their deadline lies beyond the test's patience: a caller the answer does not
+// wake returns only then.
+TEST_F(JobChannelTest, TwoHealthCallsThatWaitAreBothWokenByTheOneAnswer) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.hold_health();
+  std::atomic<int> answered{0};
+  const JobChannel::TimePoint late = passed() + 2 * JobChannelHarness::kPatience;
+  struct Joined {
+    std::vector<std::thread> threads;
+    ~Joined() {
+      for (std::thread& thread : threads) {
+        thread.join();
+      }
+    }
+  } callers;
+  for (int caller = 0; caller < 2; ++caller) {
+    callers.threads.emplace_back([&] {
+      if (h.channel.probe_health(late).has_value()) {
+        ++answered;
+      }
+    });
+  }
+  EXPECT_TRUE(h.wait([&] { return h.channel.health_waiters() == 2; }));
+  EXPECT_EQ(peer.sent("health_check", 1).size(), 1U);
+  peer.release_health();
+  EXPECT_TRUE(h.wait([&] { return answered.load() == 2; }));
 }
 
 // -- The end of a connection. ----------------------------------------------------

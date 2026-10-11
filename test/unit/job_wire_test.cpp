@@ -19,6 +19,7 @@ TEST(JobWire, FeatureFlagDisabled) {
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -893,9 +894,19 @@ TEST(JobWireDecode, AFrameThatIsNotAJobMessageIsLeftToTheUnaryExchange) {
   for (const char* kind : {"load_model_response", "prime_response", "infer_response",
                            "health_check_response", "unload_response", "ready_event",
                            "metric_event", "session_opened", "", "a_kind_of_a_later_release"}) {
-    const Json header{
-        {"schema_version", "0.1"}, {"message_id", "a1"}, {"kind", kind}, {"status", "ok"}};
-    EXPECT_TRUE(std::holds_alternative<NotJobMessage>(decode(header, 4))) << kind;
+    Json header{{"schema_version", "0.1"}, {"message_id", "a1"}, {"kind", kind}, {"status", "ok"}};
+    const auto id_of = [&] {
+      const SidecarJobMessage message = decode(header, 4);
+      EXPECT_TRUE(std::holds_alternative<NotJobMessage>(message)) << header;
+      const auto* left = std::get_if<NotJobMessage>(&message);
+      return left == nullptr ? std::string{"not left"} : left->message_id;
+    };
+    EXPECT_EQ(id_of(), "a1");
+    // An id that is no string is none: nothing can be matched to it.
+    header["message_id"] = 7;
+    EXPECT_EQ(id_of(), "");
+    header.erase("message_id");
+    EXPECT_EQ(id_of(), "");
   }
 }
 
@@ -1080,6 +1091,53 @@ TEST(JobWireNegotiation, JobClassesAreReadByNameAndHeldToTheirShape) {
     EXPECT_EQ(refused.error().context.value_or(""), "job_classes_malformed");
   }
   EXPECT_FALSE(declared_job_classes("[").has_value());
+}
+
+TEST(JobWireHealth, TheCheckIsItsEnvelopeAlone) {
+  const auto header = encode_health_check("a1");
+  ASSERT_TRUE(header.has_value());
+  EXPECT_EQ(Json::parse(header.value()),
+            (Json{{"schema_version", "0.1"}, {"message_id", "a1"}, {"kind", "health_check"}}));
+  const auto unnamed = encode_health_check("");
+  ASSERT_FALSE(unnamed.has_value());
+  EXPECT_EQ(unnamed.error().context.value_or(""), "message_id_empty");
+}
+
+TEST(JobWireHealth, TheAnswerIsReadFromTheRecordedResponseAndHeldToItsShape) {
+  std::ifstream in(kGoldenDirectory + "python_pytorch_ipc_health_check_response.json");
+  ASSERT_TRUE(in.is_open());
+  const Json recorded = Json::parse(in);
+  EXPECT_TRUE(reports_ready(recorded.dump()).value());
+
+  const auto with = [&](const char* field, const Json& value) {
+    Json answer = recorded;
+    answer[field] = value;
+    return reports_ready(answer.dump());
+  };
+  EXPECT_FALSE(with("health", {{"ready", false}}).value());
+  // A response without a status is one that succeeded, as for every unary answer.
+  Json unstated = recorded;
+  unstated.erase("status");
+  EXPECT_TRUE(reports_ready(unstated.dump()).value());
+
+  for (const auto& [field, value] :
+       std::vector<std::pair<const char*, Json>>{{"kind", "prime_response"},
+                                                 {"kind", 7},
+                                                 {"schema_version", "0.2"},
+                                                 {"status", "error"},
+                                                 {"status", 1},
+                                                 {"health", nullptr},
+                                                 {"health", "ready"},
+                                                 {"health", Json::object()},
+                                                 {"health", {{"ready", 1}}},
+                                                 {"health", {{"ready", "true"}}}}) {
+    const auto refused = with(field, value);
+    ASSERT_FALSE(refused.has_value()) << field << " " << value;
+    EXPECT_EQ(refused.error().code, Error::Code::InferenceFailed);
+    EXPECT_EQ(refused.error().context.value_or(""), kHealthResponseMalformed);
+  }
+  EXPECT_FALSE(reports_ready("[").has_value());
+  EXPECT_FALSE(reports_ready("[]").has_value());
 }
 
 }  // namespace

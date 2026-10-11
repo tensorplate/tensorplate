@@ -184,6 +184,23 @@ TEST_F(JobChannelRunner, StoppingWithAJobOpenFailsItAndReleasesItOnceTheRunnerIs
   EXPECT_FALSE(released_before_the_reap);
 }
 
+// The runner's reader answers a `health_check` at once, beside the job its
+// backend holds.
+TEST_F(JobChannelRunner, TheRunnerAnswersTheChannelsHealthProbeBesideAHeldJob) {
+  up(kHeld);
+  const auto patient = [] {
+    return JobChannel::TimePoint::clock::now() + JobChannelHarness::kPatience;
+  };
+  EXPECT_TRUE(h.channel.probe_health(patient()).has_value());
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
+  const auto beside = h.channel.probe_health(patient());
+  EXPECT_TRUE(beside.has_value()) << beside.error().message;
+  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted})) << "the job is still held";
+  EXPECT_EQ(h.channel.counters(), JobChannelCounters{});
+  h.stop(kSessionUnloaded);
+}
+
 }  // namespace
 }  // namespace tensorplate::adapters::python_pytorch
 
