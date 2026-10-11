@@ -630,27 +630,29 @@ TEST_P(BoundedJobBridgeConformance, AMissingSinkIsRefusedAheadOfABackendThatIsNo
   expect_refused(resubmit(decode(1, 5)), Error::Code::NotReady, "event_sink_missing");
 }
 
-// "Error::Code::NotReady, "backend_not_ready": the backend cannot run jobs
-// yet, for example before its session is primed", then
 // "Error::Code::Unavailable, "backend_unavailable": the backend was reset, its
-// session was unloaded or destroyed, or it is shutting down". The header does
-// not say whether the first still applies to a backend that is gone, so
-// either is accepted, and nothing later in the list: the class of
+// session was unloaded or destroyed, or it is shutting down". The entry names
+// an unloaded session, primed or not, so a session unloaded before its prime
+// answers it, and nothing later in the list: the class of
 // BridgeUnderTest::Choices::refuses_vad_frames is refused the same way.
 // BridgeUnderTest::unload() before the prime.
-TEST_P(BoundedJobBridgeConformance, ASessionUnloadedBeforeItsPrimeIsNotReadyOrUnavailable) {
+TEST_P(BoundedJobBridgeConformance, ASessionUnloadedBeforeItsPrimeIsUnavailable) {
   ASSERT_TRUE(set_sink(sink).has_value());
   under->unload();
-  expect_not_ready_or_unavailable(resubmit(decode(1, 5)));
+  expect_refused(resubmit(decode(1, 5)), Error::Code::Unavailable, "backend_unavailable");
   if (choices.refuses_vad_frames) {
-    expect_not_ready_or_unavailable(resubmit(vad(2, 5)));
+    expect_refused(resubmit(vad(2, 5)), Error::Code::Unavailable, "backend_unavailable");
   }
 }
 
-// The same two entries, "Error::Code::NotReady, "backend_not_ready"" and
-// "Error::Code::Unavailable, "backend_unavailable"", for a backend that
-// BridgeUnderTest::lose_backend() took away before the prime; the class is
-// that of Choices::refuses_vad_frames.
+// "Error::Code::NotReady, "backend_not_ready": the backend cannot run jobs
+// yet, for example before its session is primed", then
+// "Error::Code::Unavailable, "backend_unavailable": the backend was reset, its
+// session was unloaded or destroyed, or it is shutting down", for a backend
+// that BridgeUnderTest::lose_backend() took away before the prime. The header
+// does not say whether the first still applies to a backend that is gone, so
+// either is accepted, and nothing later in the list: the class is that of
+// Choices::refuses_vad_frames.
 TEST_P(BoundedJobBridgeConformance, ABackendLostBeforeThePrimeIsNotReadyOrUnavailable) {
   ASSERT_TRUE(set_sink(sink).has_value());
   under->lose_backend();

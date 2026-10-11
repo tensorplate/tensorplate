@@ -258,9 +258,13 @@ header allows two outcomes the cases accept both: a cancelled job ends
 `cancel_acknowledged`; a job that fails may do so without `accepted`; a job
 beyond the bound is refused by `submit` or ended by `failed`; a session
 release before the prime succeeds or answers `backend_unavailable`; a
-backend that is gone before its prime answers `backend_not_ready` or
-`backend_unavailable`. Which of them a backend produces is for its
-binding's own tests.
+backend lost before its prime answers `backend_not_ready` or
+`backend_unavailable`, because the header lists "before its session is
+primed" under the first and does not say whether that still holds for a
+backend that is gone. Which of them a backend produces is for its
+binding's own tests. A session unloaded before its prime is not among
+them: the header names an unloaded session under `backend_unavailable`,
+and the cases accept nothing else.
 
 The order of `submit`'s refusals is held one pair at a time, with two
 entries of the header's list applying at once: a missing sink ahead of a

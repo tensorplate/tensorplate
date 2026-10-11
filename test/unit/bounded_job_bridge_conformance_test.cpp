@@ -447,8 +447,9 @@ TEST(FixtureJobBridge, HealthAnswersWhatItWasSetToWhileTheBackendRunsJobs) {
   EXPECT_EQ(bench.bridge.health().error().context.value_or(""), "backend_unavailable");
 }
 
-// Where the header's order of refusals leaves it open: a backend that is gone
-// before its prime is unavailable, not "not ready".
+// A backend lost before its prime is unavailable, not "not ready", where the
+// header's order of refusals leaves that open; a session unloaded before its
+// prime is unavailable by the header's own entry.
 TEST(FixtureJobBridge, BeforeItsPrimeALostOrAnUnloadedBackendIsUnavailable) {
   Bench lost(make_buffers(), fixture_job_result, {}, /*primed=*/false);
   lost.bridge.lose_backend();
