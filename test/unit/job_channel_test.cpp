@@ -19,6 +19,7 @@ TEST(JobChannel, FeatureFlagDisabled) {
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <set>
@@ -594,34 +595,92 @@ TEST_F(JobChannelTest, AReleaseTheSidecarRefusesAfterAnUnloadStaysPendingUntilTh
   EXPECT_EQ(h.sink->session_releases().size(), 1U);
 }
 
-TEST(JobChannelSessions, OnlyTheLastAcknowledgedSessionsAreRemembered) {
+TEST(JobChannelSessions, AReleasedSessionStaysReleasedHoweverManyFollowIt) {
   ScriptedSidecar peer;
   JobChannelHarness h;
   ASSERT_TRUE(h.connect(peer.launcher()).has_value());
   ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
-  for (std::uint64_t session = 1; session <= kMaxRememberedSessions + 1; ++session) {
-    ASSERT_TRUE(h.channel.release_session(session, 1).has_value());
+  constexpr std::uint64_t kLater = 1'025;
+  for (std::uint64_t session = 1; session <= 1 + kLater; ++session) {
+    ASSERT_TRUE(h.release(session).has_value());
     ASSERT_TRUE(h.wait([&] { return h.sink->session_releases().size() == session; })) << session;
   }
-  // The second is still remembered. The first is past the memory the header
-  // states, so its key is a new session's: a job for it is taken, and its
-  // release is sent again and acknowledged again by the sidecar, which forgot
-  // it too. The recording sink holds "at most once", as the caller has to.
+  EXPECT_EQ(h.channel.released_session_runs(), 1U);
+
   h.channel.admit_jobs();
-  expect_refused(h.channel.submit(JobChannelHarness::tts(1, 2)), Error::Code::NotReady,
+  expect_refused(h.channel.submit(JobChannelHarness::tts(1, 1)), Error::Code::NotReady,
                  "session_releasing");
-  ASSERT_TRUE(h.submit(JobChannelHarness::tts(2, 1)).has_value());
-  ASSERT_TRUE(h.wait_kinds(2, {Accepted}));
-  ASSERT_TRUE(h.channel.release_session(2, 1).has_value());
-  ASSERT_TRUE(h.release(1).has_value());
-  EXPECT_EQ(peer.sent("session_release", kMaxRememberedSessions + 2).size(),
-            kMaxRememberedSessions + 2);
-  ASSERT_TRUE(
-      h.wait([&] { return h.sink->session_releases().size() == kMaxRememberedSessions + 2; }));
-  EXPECT_EQ(h.sink->session_releases().back(), (std::pair<std::uint64_t, std::uint64_t>{1, 1}));
-  EXPECT_EQ(h.sink->kinds_for(2), (Kinds{Accepted, CancelAcknowledged, Failed, Released}));
-  h.expected_violations = {"duplicate_session_released 1"};
-  EXPECT_EQ(h.sink->violations(), h.expected_violations);
+  ASSERT_TRUE(h.channel.release_session(1, 1).has_value());
+  // Health is answered in arrival order: a repeat that was sent has arrived.
+  ASSERT_TRUE(h.unary("health_check").has_value());
+  EXPECT_EQ(peer.sent("session_release", 1 + kLater).size(), 1 + kLater);
+  EXPECT_EQ(h.sink->session_releases().size(), 1 + kLater);
+}
+
+TEST(JobChannelSessions, ReleasesAcknowledgedOutOfOrderJoinIntoOneRun) {
+  ScriptedSidecar peer;
+  JobChannelHarness h;
+  ASSERT_TRUE(h.connect(peer.launcher()).has_value());
+  ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
+  const std::vector<std::pair<std::uint64_t, std::size_t>> runs_after{
+      {5, 1}, {1, 2}, {3, 3}, {2, 2}, {4, 1}, {7, 2}, {6, 1}};
+  std::size_t acknowledged = 0;
+  for (const auto& [session, runs] : runs_after) {
+    ASSERT_TRUE(h.release(session).has_value());
+    ++acknowledged;
+    ASSERT_TRUE(h.wait([&] { return h.sink->session_releases().size() == acknowledged; }));
+    EXPECT_EQ(h.channel.released_session_runs(), runs) << session;
+  }
+  h.channel.admit_jobs();
+  for (std::uint64_t session = 1; session <= 7; ++session) {
+    expect_refused(h.channel.submit(JobChannelHarness::tts(session, session)),
+                   Error::Code::NotReady, "session_releasing");
+  }
+  EXPECT_TRUE(h.submit(JobChannelHarness::tts(8, 8)).has_value());
+}
+
+TEST(ReleasedSessionKeys, AKeyJoinsTheRunsItTouchesAndNoOther) {
+  ReleasedSessionKeys keys;
+  EXPECT_FALSE(keys.contains(4));
+  keys.insert(4);
+  keys.insert(4);
+  EXPECT_EQ(keys.runs(), 1U);
+  EXPECT_TRUE(keys.contains(4));
+  EXPECT_FALSE(keys.contains(3));
+  EXPECT_FALSE(keys.contains(5));
+
+  keys.insert(6);  // touches nothing
+  EXPECT_EQ(keys.runs(), 2U);
+  EXPECT_FALSE(keys.contains(5));
+  keys.insert(7);  // the end of a run
+  keys.insert(3);  // the start of one
+  EXPECT_EQ(keys.runs(), 2U);
+  keys.insert(5);  // both
+  EXPECT_EQ(keys.runs(), 1U);
+  for (std::uint64_t key = 3; key <= 7; ++key) {
+    EXPECT_TRUE(keys.contains(key)) << key;
+  }
+  EXPECT_FALSE(keys.contains(2));
+  EXPECT_FALSE(keys.contains(8));
+  keys.insert(5);  // inside a run
+  EXPECT_EQ(keys.runs(), 1U);
+}
+
+TEST(ReleasedSessionKeys, TheEndsOfTheKeySpaceDoNotWrap) {
+  constexpr std::uint64_t kLast = std::numeric_limits<std::uint64_t>::max();
+  ReleasedSessionKeys keys;
+  keys.insert(kLast);
+  keys.insert(0);
+  EXPECT_EQ(keys.runs(), 2U) << "the last key and the first are not neighbours";
+  EXPECT_TRUE(keys.contains(kLast));
+  EXPECT_TRUE(keys.contains(0));
+  EXPECT_FALSE(keys.contains(1));
+  EXPECT_FALSE(keys.contains(kLast - 1));
+  keys.insert(kLast - 1);
+  keys.insert(1);
+  EXPECT_EQ(keys.runs(), 2U);
+  EXPECT_TRUE(keys.contains(kLast - 1));
+  EXPECT_TRUE(keys.contains(1));
 }
 
 TEST_F(JobChannelTest, ASessionAcknowledgedBeforeItsLastJobWaitsForThatJob) {
@@ -902,6 +961,9 @@ TEST_F(JobChannelTest, StopFailsOpenJobsWithItsReasonAndTheChannelStartsAgain) {
   h.channel.admit_jobs();
   ASSERT_TRUE(h.submit(h.stt(3, 1)).has_value());
   ASSERT_TRUE(h.wait_kinds(3, {Accepted}));
+  // The session the stop acknowledged is still released on this connection.
+  expect_refused(h.channel.submit(h.stt(5, 4)), Error::Code::NotReady, "session_releasing");
+  EXPECT_TRUE(h.channel.release_session(4, 1).has_value());
   settle();
   EXPECT_TRUE(next.sent("session_release", 0).empty());
   EXPECT_EQ(h.channel.counters(), JobChannelCounters{});

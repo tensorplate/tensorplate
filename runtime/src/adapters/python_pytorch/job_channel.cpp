@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <iterator>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -93,6 +95,34 @@ bool read_payload(const JobRequest& request, const BufferManager& manager,
 }
 
 }  // namespace
+
+bool ReleasedSessionKeys::contains(std::uint64_t key) const noexcept {
+  const auto after = runs_.upper_bound(key);
+  return after != runs_.begin() && std::prev(after)->second >= key;
+}
+
+void ReleasedSessionKeys::insert(std::uint64_t key) {
+  const auto after = runs_.upper_bound(key);
+  const auto before = after == runs_.begin() ? runs_.end() : std::prev(after);
+  if (before != runs_.end() && before->second >= key) {
+    return;
+  }
+  // `before` ends below `key` and `after` begins above it: neither sum wraps.
+  const bool joins_before = before != runs_.end() && before->second + 1 == key;
+  const bool joins_after = after != runs_.end() && key + 1 == after->first;
+  if (joins_before && joins_after) {
+    before->second = after->second;
+    runs_.erase(after);
+  } else if (joins_before) {
+    before->second = key;
+  } else if (joins_after) {
+    auto run = runs_.extract(after);
+    run.key() = key;
+    runs_.insert(std::move(run));
+  } else {
+    runs_.emplace(key, key);
+  }
+}
 
 JobChannel::JobChannel(BufferManager* manager, std::chrono::milliseconds write_timeout)
     : manager_(manager), write_timeout_(write_timeout) {}
@@ -266,8 +296,7 @@ Result<void> JobChannel::submit(const JobRequest& request) {
     return refuse(Error::Code::Unsupported, "job_class_unsupported");
   }
   if (releasing_.contains(identity.session_key) ||
-      std::find(remembered_sessions_.begin(), remembered_sessions_.end(), identity.session_key) !=
-          remembered_sessions_.end()) {
+      released_sessions_.contains(identity.session_key)) {
     return refuse(Error::Code::NotReady, "session_releasing");
   }
   if (jobs_.contains(identity.job_id)) {
@@ -336,9 +365,7 @@ Result<void> JobChannel::release_session(std::uint64_t session_key, std::uint64_
   if (!live_locked()) {
     return refuse(Error::Code::Unavailable, "backend_unavailable");
   }
-  if (releasing_.contains(session_key) ||
-      std::find(remembered_sessions_.begin(), remembered_sessions_.end(), session_key) !=
-          remembered_sessions_.end()) {
+  if (releasing_.contains(session_key) || released_sessions_.contains(session_key)) {
     return Result<void>{};
   }
   if (releasing_.size() >= kMaxPendingSessionReleases) {
@@ -369,6 +396,11 @@ Result<void> JobChannel::release_session(std::uint64_t session_key, std::uint64_
 JobChannelCounters JobChannel::counters() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return counters_;
+}
+
+std::size_t JobChannel::released_session_runs() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return released_sessions_.runs();
 }
 
 // -- The threads. ----------------------------------------------------------------
@@ -606,10 +638,7 @@ void JobChannel::settle_locked(std::uint64_t session_key, std::vector<Delivery>&
 void JobChannel::acknowledge_locked(std::map<std::uint64_t, PendingRelease>::iterator pending,
                                     std::vector<Delivery>& out) {
   out.emplace_back(SessionReleased{pending->first, pending->second.generation});
-  remembered_sessions_.push_back(pending->first);
-  if (remembered_sessions_.size() > kMaxRememberedSessions) {
-    remembered_sessions_.pop_front();
-  }
+  released_sessions_.insert(pending->first);
   releasing_.erase(pending);
 }
 

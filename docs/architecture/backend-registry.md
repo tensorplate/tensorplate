@@ -318,15 +318,23 @@ declared neither class a lane runs (`unsupported`,
   outlive what it was queued for: a cancel whose job the sidecar released
   first, the request of an exchange that timed out.
   The `message_id` of a job's submit and cancel is kept until the job is
-  released, because the sidecar's `error_event` names only that id. The last
-  1,024 acknowledged sessions are remembered: the sidecar forgets a session
-  it released and would answer a repeated `session_release` again, so a
-  repeat for a remembered session is not sent. That memory is the whole of
-  the channel's "once per session". After 1,024 later acknowledgements the
-  channel has forgotten the session as well and takes its key as a new
-  session's: a repeated release is sent, answered and delivered to the sink
-  again, and a job submitted for it is taken. Holding "at most once" beyond
-  that is the caller's, which knows its sessions.
+  released, because the sidecar's `error_event` names only that id.
+- **A released session stays released.** The sidecar forgets a session it
+  released and would answer a repeated `session_release` again, so the
+  channel records every session key whose release was acknowledged, for as
+  long as it lives, a stop and a new start included: a repeat is not sent,
+  and a job for the key is refused (`session_releasing`). The record holds
+  runs of consecutive keys, not single keys. Between two runs lies a key
+  that is not in the record, so the runs number at most the keys below the
+  highest recorded one that are not in it, plus one. A session manager
+  issues its keys in increasing order and reuses none, so those keys are
+  its sessions that still hold a slot, which it bounds, and the keys whose
+  release was never acknowledged here: a session its holder did not release
+  through this channel, or one it released while the channel had no live
+  connection. That release is refused with `backend_unavailable` and
+  recorded nowhere, and the bridge's header tells the caller to treat the
+  session as released. Each such key keeps the runs on its two sides apart
+  for good, so the record grows by at most one run for each.
 - **Each frame goes one way.** A job event is checked by its job's
   `JobEventSequence` and delivered; one the check refuses fails the job with
   the refusal in its place when the job has no terminal event yet, and a

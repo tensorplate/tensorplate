@@ -90,16 +90,25 @@ inline constexpr std::size_t kMaxPendingSessionReleases = 64;
 /// Most frames that wait for the writer.
 inline constexpr std::size_t kMaxQueuedFrames = 2 * kMaxOpenJobs + kMaxPendingSessionReleases + 1;
 
-/// Sessions whose release the sidecar acknowledged that the channel still
-/// remembers, oldest forgotten first. The sidecar forgets a session it
-/// released, so a release repeated for a remembered one is not sent again.
+/// Every session key whose release was acknowledged, as runs of consecutive
+/// keys. The sidecar forgets a session it released, so this record is what
+/// keeps a repeated release from being sent and a job from being taken for a
+/// released session.
 ///
-/// That memory is the whole of the channel's "once per session": after this
-/// many later acknowledgements the session is forgotten here too, and the
-/// channel takes its key as a new session's. A repeated release is then sent,
-/// answered and delivered again, and a job submitted for it is taken. Holding
-/// "at most once" beyond the memory is the caller's, which knows its sessions.
-inline constexpr std::size_t kMaxRememberedSessions = 1'024;
+/// Its size is its number of runs: at most the keys below the highest
+/// recorded one that are not in it, plus one. With keys issued in increasing
+/// order those are the sessions that still hold a slot and the keys whose
+/// release was never acknowledged here; the adapter's page says which.
+class ReleasedSessionKeys {
+ public:
+  void insert(std::uint64_t key);
+  [[nodiscard]] bool contains(std::uint64_t key) const noexcept;
+  [[nodiscard]] std::size_t runs() const noexcept { return runs_.size(); }
+
+ private:
+  /// A run's first key to its last.
+  std::map<std::uint64_t, std::uint64_t> runs_;
+};
 
 /// Largest payload of a frame the reader takes: the longest synthesized
 /// segment a job returns (kMaxAudioChunkBytes), which no frame the sidecar
@@ -226,9 +235,9 @@ class JobChannel {
   ///   Error::Code::ResourceExhausted, "send_queue_full".
   [[nodiscard]] Result<void> cancel(std::uint64_t job_id);
 
-  /// Queues a `session_release`, once per session key; a repeat while it is
-  /// pending or remembered changes nothing, and one for a session the channel
-  /// has forgotten (kMaxRememberedSessions) is a new release. The sink's
+  /// Queues a `session_release`, once per session key for as long as the
+  /// channel lives: a repeat changes nothing, while the release is pending and
+  /// after it was acknowledged (ReleasedSessionKeys). The sink's
   /// on_session_released follows the `released` of the session's last job. A
   /// sidecar whose jobs an unload has closed refuses the release; that refusal
   /// is counted and the release stays pending until stop() acknowledges it.
@@ -242,6 +251,9 @@ class JobChannel {
   [[nodiscard]] Result<void> release_session(std::uint64_t session_key, std::uint64_t generation);
 
   [[nodiscard]] JobChannelCounters counters() const;
+
+  /// Runs of consecutive keys in the record of released sessions.
+  [[nodiscard]] std::size_t released_session_runs() const;
 
  private:
   enum class Phase : std::uint8_t { Idle, Started, Admitting, Closing, Stopped };
@@ -322,7 +334,7 @@ class JobChannel {
   /// The adapter's `message_id` of each unreleased job's submit and cancel.
   std::map<std::string, std::uint64_t, std::less<>> message_jobs_;
   std::map<std::uint64_t, PendingRelease> releasing_;
-  std::deque<std::uint64_t> remembered_sessions_;
+  ReleasedSessionKeys released_sessions_;
 
   std::deque<std::vector<std::byte>> outbox_;
 
