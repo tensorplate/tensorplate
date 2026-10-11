@@ -227,10 +227,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   one reader thread and one writer thread on a sidecar connection, a bounded
   table of unreleased jobs that delivers their events to a `JobEventSink`,
   and a slot for the unary exchange. Submit, cancel and session release only
-  queue, so the adapter keeps reading while it writes; the queue is bounded,
-  and a caller that finds it full is refused, not made to wait. Every way a
-  connection ends fails the open jobs with a typed reason, and they are
-  released only once the sidecar process has been reaped.
+  queue, so the adapter keeps reading while it writes; the queue is bounded
+  by what the job table and the pending releases can own, and nobody waits
+  for room in it. Every way a connection ends fails the open jobs with a
+  typed reason, and they are released only once the sidecar process has
+  been reaped.
   (V030-E04-F03-T01)
 - The Python/PyTorch adapter's session runs speech jobs when it is built for
   them (`PythonPytorchConfig::speech_jobs`, a field of the adapter's
@@ -476,6 +477,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   count has its own message. (V030-E06-F02-T01)
 
 ### Changed
+
+- The Python/PyTorch adapter's job channel records every session whose
+  release was acknowledged, where it remembered the last 1,024: a repeated
+  `session_release` is never sent again and a job for a released session is
+  refused (`session_releasing`) however many releases followed. The record
+  holds runs of consecutive session keys, so its size is the number of
+  unreleased keys below the highest released one, plus one, at most.
+  The channel's send queue is exact: a frame still queued when what it was
+  queued for is gone (a released job's submit or cancel, an acknowledged
+  release, the request of an exchange that was answered, gave up or failed
+  with the connection) leaves the queue, so the queue holds at most a
+  submit and a cancel for each job
+  in the table, a release for each pending release and one unary request,
+  and `cancel`, `release_session`, `submit` and the unary exchange are no
+  longer refused with `send_queue_full`. A frame the writer has begun is
+  still written whole. The bound on pending session releases rises from 64
+  to 2,048, the ceiling on logical sessions, so a session manager cannot
+  exceed it. (V030-E04-F03-T03)
 
 - The hosted format and tidy jobs state and assert the version of their tool.
   They installed `clang-format-15` and `clang-tidy-15` and registered them as
