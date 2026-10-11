@@ -398,10 +398,8 @@ gh workflow run release-dependencies.yml --ref <tag>
 ```
 
 A new `builtin-baseline` opens a new key for the amd64 release cache and
-leaves the ARM64 runner's cache not ready. Choose a commit the hosted C++
-image's vcpkg checkout already contains
-([`cmake/features/README.md`](../../cmake/features/README.md) says why),
-and record the native-closure fixture again in the same change
+leaves the ARM64 runner's cache not ready. Record the native-closure
+fixture again in the same change
 (`test/release/fixtures/native-sbom/README.md`). The merge to `develop`
 starts the Release dependencies workflow; until both of its jobs have
 passed, a run that publishes fails at its restore and the release-profile

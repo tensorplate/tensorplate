@@ -41,14 +41,9 @@ Generated files are never committed.
 Source: the ports and triplets at the
 [pinned vcpkg revision](https://github.com/microsoft/vcpkg/tree/e182cb4dd2df2ab02f66a1aabd5f35bbdc9522c7).
 
-Hosted C++ tests build with the runner image's own vcpkg checkout. vcpkg
-does not fetch a baseline that checkout lacks, and it looks every port
-version the baseline names up in the checkout's `versions/` files, so the
-baseline must be a commit the image's checkout already contains. This one
-is contained in the checkout of the `ubuntu-22.04` image 20261004.315.1 and
-not in that of the image before it. Release builds, the CPU-only smoke and
-the supply-chain native leg check vcpkg out at the baseline themselves and
-do not depend on the image.
+Hosted C++ tests, release builds, the CPU-only smoke and the supply-chain
+native leg check vcpkg out at that baseline themselves, so none depends on a
+runner image's vcpkg.
 
 For a build with no streaming dependencies, omit `VCPKG_MANIFEST_FEATURES`
 and set `-DTP_ENABLE_STREAMING_GRPC=OFF`. Worker config `streaming.enabled`
