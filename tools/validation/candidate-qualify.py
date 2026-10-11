@@ -9,8 +9,9 @@ negative paths, checks status, tears the candidate down by rollback and
 writes one record conforming to
 `config/schemas/candidate_qualification_record.json`.
 
-Memory comes only from the platform sampler behind
-`tools/validation/memory-sample.sh`; this tool never reads a device itself.
+Memory windows come only from the platform sampler behind
+`tools/validation/memory-sample.sh`, and the out-of-memory case's free-memory
+figures from the ballast process; this tool never reads a device itself.
 A record describes a candidate run on one machine and is never presented as
 Production evidence. See docs/validation/speech-candidate-recipes.md.
 """
@@ -22,12 +23,14 @@ import base64
 import datetime as _dt
 import json
 import os
+import select
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
@@ -35,6 +38,7 @@ sys.path.insert(0, str(HERE))
 
 import candidate_audio as audio  # noqa: E402
 import candidate_record as record_mod  # noqa: E402
+import vram_ballast as ballast_mod  # noqa: E402
 
 try:
     import tensorplate  # noqa: F401
@@ -60,6 +64,17 @@ BUSY_POLL_S = 1.0
 UNDECLARED_LANGUAGE_CANDIDATES = ("zz", "qq", "xx")
 UNDECLARED_VOICE = "undeclared_voice"
 MAX_RESULT_JSON_BYTES = 1 << 20
+BALLAST_WAIT_S = 30
+# The default of --oom-ballast-report-wait-s: an interpreter start, a device context and
+# the allocation, none of them timed on a device yet.
+BALLAST_REPORT_WAIT_S = 120
+BALLAST_LINE_BYTES = 4096
+BALLAST_ERROR_CHARS = 200
+BALLAST_REFUSALS = {
+    ballast_mod.EXIT_NO_DEVICE: "found no device to hold memory on",
+    ballast_mod.EXIT_ALLOCATION_REFUSED: "was refused its allocation by the device",
+    ballast_mod.EXIT_FREE_UNREADABLE: "could not read the device's free memory",
+}
 
 
 class RecipeError(Exception):
@@ -99,6 +114,38 @@ def source_commit(explicit: str | None) -> str | None:
         return None
     value = out.stdout.strip()
     return value if out.returncode == 0 and len(value) == 40 else None
+
+
+def first_line(stream: IO[bytes], wait_s: float) -> tuple[str, bool]:
+    """What a process wrote up to its first newline, and whether the wait ran out first.
+
+    The end of the stream ends the read too, so a process that exits silent costs no wait.
+    """
+    deadline = time.monotonic() + wait_s
+    data = b""
+    while b"\n" not in data and len(data) < BALLAST_LINE_BYTES:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([stream], [], [], remaining)[0]:
+            return data.decode("utf-8", "replace"), True
+        chunk = os.read(stream.fileno(), BALLAST_LINE_BYTES)
+        if not chunk:
+            break
+        data += chunk
+    line, newline, _ = data.partition(b"\n")
+    return (line + newline).decode("utf-8", "replace"), False
+
+
+def error_note(stream: IO[bytes]) -> str:
+    """A reason's ending that quotes the last non-empty line of a stderr file, shortened."""
+    size = stream.seek(0, os.SEEK_END)
+    stream.seek(max(0, size - BALLAST_LINE_BYTES))
+    lines = stream.read().decode("utf-8", "replace").splitlines()
+    last = next((line.strip() for line in reversed(lines) if line.strip()), "")
+    return f"; its last error line: {last[:BALLAST_ERROR_CHARS]}" if last else ""
+
+
+def ended(code: int) -> str:
+    return f"exit {code}" if code >= 0 else f"signal {-code}"
 
 
 # --- bundle reading ----------------------------------------------------------
@@ -488,6 +535,7 @@ class Recipe:
         record_mod.finalize(self.record, stop_reason)
         record_mod.validate_record(self.record)
         record_mod.validate_error_codes(self.record, self.error_codes)
+        record_mod.validate_ballast(self.record)
         (self.evidence_dir / "record.json").write_text(
             record_mod.dump(self.record), encoding="utf-8"
         )
@@ -1286,15 +1334,17 @@ class Recipe:
         self.cancel_case(cancel)
         negatives.append(cancel)
         oom = self.negative(
-            "oom_at_load",
+            record_mod.OOM_CASE,
             "deploy the candidate again while a ballast process holds device memory",
             "must_match",
             ["oom_error"],
         )
-        if self.args.oom_ballast_bytes:
-            self.oom_case(oom)
+        if self.args.oom_ballast_leave_free:
+            self.oom_case(oom, ballast_mod.LEAVE_FREE, self.args.oom_ballast_leave_free)
+        elif self.args.oom_ballast_bytes:
+            self.oom_case(oom, ballast_mod.BYTES, self.args.oom_ballast_bytes)
         else:
-            oom["reason"] = "no --oom-ballast-bytes given"
+            oom["reason"] = "no --oom-ballast-bytes or --oom-ballast-leave-free given"
         negatives.append(oom)
         self.record["negatives"] = negatives
 
@@ -1387,34 +1437,102 @@ class Recipe:
                 f"the asynchronous route did not answer as expected ({exc.__class__.__name__})"
             )
 
-    def oom_case(self, negative: dict[str, Any]) -> None:
+    def oom_case(self, negative: dict[str, Any], rule: str, count: int) -> None:
+        figures: dict[str, Any] = {
+            "rule": rule,
+            "requested_bytes": count,
+            "free_bytes": None,
+            "held_bytes": None,
+            "left_bytes": None,
+            "reason": None,
+        }
+        negative["ballast"] = figures
+        python = self.args.oom_ballast_python
         command = [
-            self.args.oom_ballast_python,
+            python,
             str(HERE / "vram_ballast.py"),
-            str(self.args.oom_ballast_bytes),
+            *ballast_mod.command_arguments(rule, count),
         ]
-        ballast = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        try:
-            line = ballast.stdout.readline() if ballast.stdout else ""
-            if not line.startswith("held "):
-                ballast.kill()
-                _, stderr = ballast.communicate()
-                negative["reason"] = (
-                    f"the ballast did not report holding memory (exit {ballast.returncode})"
+        with tempfile.TemporaryFile() as errors:
+            try:
+                ballast = subprocess.Popen(
+                    command, stdout=subprocess.PIPE, stderr=errors, bufsize=0
                 )
-                return
-            self.log(f"oom ballast holds {line.split()[1]} bytes")
-            self.deploy_negative(negative, self.candidate["dir"], f"{self.deployment_id}-oom")
-        finally:
-            if ballast.poll() is None:
-                ballast.terminate()
+            except OSError as exc:
+                not_run = (
+                    f"the ballast interpreter {python} could not be started "
+                    f"({exc.__class__.__name__}: {exc.strerror})"
+                )
+            else:
                 try:
-                    ballast.communicate(timeout=30)
-                except subprocess.TimeoutExpired:
-                    ballast.kill()
-                    ballast.communicate()
+                    not_run = self.deploy_under_ballast(negative, ballast, errors)
+                finally:
+                    if ballast.poll() is None:
+                        ballast.terminate()
+                        self.end_ballast(ballast)
+                    ballast.stdout.close()  # type: ignore[union-attr]
+        if not_run is not None:
+            negative["status"] = "not_run"
+            negative["reason"] = figures["reason"] = not_run
+
+    def deploy_under_ballast(
+        self, negative: dict[str, Any], ballast: subprocess.Popen[bytes], errors: IO[bytes]
+    ) -> str | None:
+        """Deploy once the ballast reports what it holds. Why the case did not run, or None."""
+        figures = negative["ballast"]
+        wait_s = self.args.oom_ballast_report_wait_s
+        line, expired = first_line(ballast.stdout, wait_s)  # type: ignore[arg-type]
+        report = ballast_mod.parse_report(line)
+        if report is not None:
+            figures.update({f"{name}_bytes": value for name, value in report.items()})
+        contradiction = record_mod.ballast_contradiction(negative)
+        if contradiction is not None:
+            figures.update(free_bytes=None, held_bytes=None, left_bytes=None)
+            return (
+                "the ballast's report contradicts itself and is not recorded "
+                f"({line.strip()}: {contradiction})"
+            )
+        if figures["held_bytes"] is None:
+            stopped = report is None and (expired or bool(line))
+            if stopped:
+                # Whatever it holds is unknown, so it is not left to end by itself.
+                ballast.terminate()
+            # Otherwise it holds nothing and ends by itself; its status says why.
+            code = self.end_ballast(ballast)
+            if expired:
+                why = f"did not report within {wait_s} s and was stopped"
+            elif stopped:
+                shown = line.strip()[:BALLAST_ERROR_CHARS]
+                why = f"printed a first line that is not a report ({shown!r}) and was stopped"
+            elif code == ballast_mod.EXIT_NOTHING_TO_HOLD and figures["free_bytes"] is not None:
+                why = (
+                    f"held nothing: {figures['free_bytes']} bytes were free, not more "
+                    f"than the {figures['requested_bytes']} to leave free"
+                )
+            else:
+                why = BALLAST_REFUSALS.get(code, "did not report holding memory")
+            # A refusal it reported needs no more said; otherwise its stderr may say why.
+            said = "" if report is not None else error_note(errors)
+            return f"the ballast {why} ({ended(code)}){said}"
+        if figures["free_bytes"] is None or figures["left_bytes"] is None:
+            figures["reason"] = "the ballast could not read the device's free memory"
+        self.log(f"oom ballast ({figures['rule']} {figures['requested_bytes']}): {line.strip()}")
+        self.deploy_negative(negative, self.candidate["dir"], f"{self.deployment_id}-oom")
+        code = ballast.poll()
+        if code is not None:
+            # The load met no ballast for some or all of its time, so its outcome judges nothing.
+            said = error_note(errors)
+            return f"the ballast exited before the deploy was judged ({ended(code)}){said}"
+        return None
+
+    @staticmethod
+    def end_ballast(ballast: subprocess.Popen[bytes]) -> int:
+        try:
+            ballast.wait(timeout=BALLAST_WAIT_S)
+        except subprocess.TimeoutExpired:
+            ballast.kill()
+            ballast.wait()
+        return ballast.returncode
 
     # -- the run --
 
@@ -1625,11 +1743,26 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=sys.executable,
         help="interpreter that can import the runtime's torch, for the ballast",
     )
-    parser.add_argument(
+    sizing = parser.add_mutually_exclusive_group()
+    sizing.add_argument(
         "--oom-ballast-bytes",
         type=int,
         default=0,
         help="device bytes the ballast holds; 0 skips the OOM case",
+    )
+    sizing.add_argument(
+        "--oom-ballast-leave-free",
+        type=int,
+        default=0,
+        help="device bytes the ballast leaves free: it holds the memory that is free when "
+        "it starts, less this many bytes; 0 skips the OOM case",
+    )
+    parser.add_argument(
+        "--oom-ballast-report-wait-s",
+        type=int,
+        default=BALLAST_REPORT_WAIT_S,
+        help="seconds the ballast has to report what it holds before it is stopped and the "
+        "OOM case recorded as not run",
     )
     parser.add_argument("--source-commit")
     parser.add_argument("--provenance", choices=("recorded", "synthetic"), default="recorded")
@@ -1640,9 +1773,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         or args.deploy_wait_timeout_ms <= 0
         or args.agent_timeout_ms <= 0
         or args.teardown_busy_wait_ms < 0
-        or args.oom_ballast_bytes < 0
+        or args.oom_ballast_report_wait_s <= 0
     ):
         parser.error("timeouts and iteration counts must be positive")
+    for option, count in (
+        ("--oom-ballast-bytes", args.oom_ballast_bytes),
+        ("--oom-ballast-leave-free", args.oom_ballast_leave_free),
+    ):
+        if count < 0:
+            parser.error(f"{option} takes a count of bytes, 0 to skip the case, not {count}")
     return args
 
 

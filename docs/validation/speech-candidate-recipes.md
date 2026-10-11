@@ -129,8 +129,9 @@ as Production evidence; the record says so in its `qualification` block.
    asynchronous policy route (recorded, never judged: the Python-backed worker
    refuses that route today, and a sidecar that serves one request at a time
    could not honour the cancel if it did), and, with
-   `--oom-ballast-bytes`, a second deploy while `tools/validation/vram_ballast.py`
-   holds device memory.
+   `--oom-ballast-bytes` or `--oom-ballast-leave-free`, a second deploy while
+   `tools/validation/vram_ballast.py` holds device memory
+   ([below](#the-out-of-memory-ballast)).
 7. Takes a second status snapshot, which expects the agent `degraded` with the
    last failed deploy as its `last_error`, tears the candidate down with
    `tensorplate rollback`, retrying for up to `--teardown-busy-wait-ms` while
@@ -146,7 +147,7 @@ not sampled is incomplete, never a pass.
 
 ### Memory
 
-The record's memory fields come only from the platform sampler described
+The record's memory windows come only from the platform sampler described
 above, invoked through `tools/validation/memory-sample.sh`; this tool never
 runs `nvidia-smi` itself. Pass the built `memory_sample` binary with
 `--sampler`. Each window runs two sampler invocations over the same
@@ -163,6 +164,97 @@ maxima, not continuous-time peaks.
 
 Until the qualification runs happen, a record produced without hardware
 carries every memory window as `not_run` with the reason `pending hardware`.
+
+### The out-of-memory ballast
+
+The out-of-memory case is the last negative case. When it starts, the
+candidate deployed in step 3 is the active deployment in the predecessor's
+place, loaded and past its load window. The tool starts
+`tools/validation/vram_ballast.py` under `--oom-ballast-python`, an
+interpreter that imports the runtime's torch, waits for it to report what it
+holds, and only then deploys the candidate a second time. The agent warms
+that second worker and sidecar while the active one stays, and the case
+holds when the second load does not fit in what the ballast left free and
+the deploy reports `oom_error`.
+
+The ballast is sized in one of two ways, and giving both is refused:
+
+| Option | The ballast holds |
+| --- | --- |
+| `--oom-ballast-bytes N` | N bytes |
+| `--oom-ballast-leave-free N` | the device memory that is free when the ballast starts, less N bytes |
+
+A byte count has to be worked out from everything else on the device: the
+active candidate, the ballast process's own use of the device and any other
+tenant. A figure sized on one build stops fitting when the candidate's
+footprint moves. With `--oom-ballast-leave-free` the ballast process reads
+the free figure itself, through `torch.cuda.mem_get_info`, when all of that
+is already resident, so N is the one quantity left to choose. The rule has
+run only against the test's fake device: the real device calls, the free
+figure and the allocation, run for the first time on the next hardware pass.
+
+- N must be smaller than the device memory a second load of the candidate
+  takes to become ready, or the load fits, the deploy succeeds and the case
+  is `mismatched`. The record then shows that deploy as it went: the run's
+  result is `fail`, the status check after the negatives fails, and the
+  teardown reads `failed` with `restored '<the candidate's id>', expected
+  '<the predecessor's id>'`, because the rollback undid only the second
+  deploy and did not reach the predecessor, so the machine is left with the
+  candidate active. The sidecar's device figure in the `candidate_warm_idle`
+  window of an earlier record of the same bundle on the same machine type
+  shows what a loaded sidecar keeps, which a load has to reach at least.
+- N must be larger than what the ballast's allocator takes beyond the bytes
+  it is asked for, or the device refuses the ballast and the case is
+  `not_run`.
+
+Both bounds are the rule as written, not as measured: what happens when N is
+below the size of a device context alone is unobserved. There is no default,
+and no figure from one machine is a rule for another.
+
+The case's entry in `negatives` carries a `ballast` object whenever a
+ballast was asked for: the `rule` (`bytes` or `leave_free`), the
+`requested_bytes` it was given, `free_bytes` read before anything was held,
+`held_bytes`, and `left_bytes`, the free figure read again while holding.
+`held_bytes` is the size asked of the allocator and given, not what the
+allocator reserved to give it. `left_bytes` is an observation, so it shows
+what the allocator really left rather than repeating N. A figure the ballast
+could not read is null and `reason` says why. The case is `not_run`, with
+nothing held and no size guessed, when the free figure cannot be read under
+`--oom-ballast-leave-free`, when free memory is not above N, when the device
+refuses the allocation, and when the interpreter finds no device. The tool
+takes every figure from the ballast's one report line and reads the device
+itself no more than it does for the windows.
+
+A ballast that goes wrong leaves the case `not_run` too, and the run goes on
+to its teardown and its record:
+
+- `--oom-ballast-python` cannot be started: the reason names it and the
+  error.
+- The ballast prints no report within `--oom-ballast-report-wait-s` seconds
+  (120 unless given), or its first line is not a report: it is stopped, at
+  once in the second case. The 120 seconds are chosen, not timed on a
+  device: raise the wait where a device needs longer.
+- The report contradicts itself, as when another tenant frees memory between
+  the two reads and more is left than was free: no figure is recorded, and
+  the reason quotes the line.
+- The ballast has exited by the time the deploy has answered: the load met
+  no ballast for some or all of its time, so the deploy's answer stays in
+  the case as what was observed and judges nothing. Where that deploy
+  succeeded the case is `not_run` and the run's result is still `fail`, as
+  for a load that fit under the first bound on N: the teardown reads
+  `failed`, its rollback did not reach the predecessor, and the machine is
+  left with the candidate active.
+
+Where the ballast gave no report or exited early, the reason ends with the
+last line of its stderr, shortened.
+
+The record's check holds the figures to each other: no more held or left
+than was free; `held_bytes` equal to `requested_bytes` under `bytes`, and to
+`free_bytes` less `requested_bytes` under `leave_free`, where no more is
+left than `requested_bytes` either (the allocator rounds only upward, so
+more left than N means the load was not bounded by N); bytes held in a case
+that is `matched` or `mismatched`; and a `ballast` object on no case but
+`oom_at_load`.
 
 ### Fixtures
 
@@ -230,7 +322,10 @@ recorded evidence too, and states only what the digested files show.
 `test/validation/candidate_qualify_test.py` runs the tool against a fake
 appliance (a CLI, worker, sampler and ballast that answer in the real shapes)
 for both suites, compares a fresh run with the committed synthetic record in
-`test/validation/fixtures/`, and breaks each guard once. The synthetic record
+`test/validation/fixtures/`, and breaks each guard once. Its ballast is
+`vram_ballast.py` itself on a fake device that reports its free memory, and
+its CLI answers `oom_error` only when a load needs more than the ballast
+left, so both bounds on N above are cases it runs. The synthetic record
 measures nothing; its `provenance` says so.
 
 ## The clips of the 2026-10-01 run

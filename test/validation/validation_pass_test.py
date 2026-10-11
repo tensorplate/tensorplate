@@ -187,6 +187,21 @@ def check_derivation_guards() -> None:
     assert statuses(findings)[key] == "missing"
     assert index_mod.verdict(findings) == index_mod.EXIT_NOT_COMPARABLE
 
+    # A line reads a negative's case, status and code: the ballast's figures change none.
+    sized = copy.deepcopy(record)
+    oom = next(n for n in sized["negatives"] if n["case"] == "oom_at_load")
+    oom["ballast"] = {
+        "rule": "leave_free",
+        "requested_bytes": 4000,
+        "free_bytes": 10000,
+        "held_bytes": 6000,
+        "left_bytes": 3984,
+        "reason": None,
+    }
+    assert index_mod.qualification_line(sized, envelope(), "stt-whisper") == whole
+    oom["ballast"]["left_bytes"] = None
+    refused(lambda: index_mod.qualification_line(sized, envelope(), "stt-whisper"), "malformed")
+
     failed_deploy = copy.deepcopy(record)
     failed_deploy["lifecycle"]["deploy"]["status"] = "failed"
     line = index_mod.qualification_line(failed_deploy, envelope(), "stt-whisper")
