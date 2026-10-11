@@ -19,6 +19,7 @@ TEST(JobChannel, FeatureFlagDisabled) {
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <set>
@@ -34,6 +35,7 @@ TEST(JobChannel, FeatureFlagDisabled) {
 #include "tensorplate/core/job_result.hpp"
 #include "tensorplate/ipc/sidecar_codec.hpp"
 #include "tensorplate/ipc/unix_socket.hpp"
+#include "tensorplate/serving/session.hpp"
 
 #include "adapters/python_pytorch/job_wire.hpp"
 #include "job_channel_harness.hpp"
@@ -73,6 +75,42 @@ void expect_refused(const Result<void>& result, Error::Code code, std::string_vi
   EXPECT_EQ(result.error().context.value_or(""), reason);
 }
 
+// A job message as a sidecar writes it; the jobs of these tests have
+// generation 1.
+Json job_message(const std::string& kind, std::uint64_t job_id, std::uint64_t session_key) {
+  return Json{{"schema_version", "0.1"}, {"message_id", "s90"},        {"kind", kind},
+              {"job_id", job_id},        {"session_key", session_key}, {"generation", 1}};
+}
+
+// An exchange that waits on a thread of its own, joined before it goes.
+class WaitingExchange {
+ public:
+  WaitingExchange(JobChannelHarness& harness, std::string kind)
+      : thread_([this, &harness, kind = std::move(kind)] { outcome_ = harness.unary(kind); }) {}
+  ~WaitingExchange() {
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+  WaitingExchange(const WaitingExchange&) = delete;
+  WaitingExchange& operator=(const WaitingExchange&) = delete;
+  WaitingExchange(WaitingExchange&&) = delete;
+  WaitingExchange& operator=(WaitingExchange&&) = delete;
+
+  // Waits for the exchange to end.
+  [[nodiscard]] const Result<Json>& outcome() {
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+    return outcome_;
+  }
+
+ private:
+  Result<Json> outcome_ = unexpected(Error::Code::Internal, "the exchange did not end");
+  std::thread thread_;
+};
+
 class JobChannelTest : public ::testing::Test {
  protected:
   // The sidecar is loaded with jobs enabled, primed, and the channel admits.
@@ -90,6 +128,23 @@ class JobChannelTest : public ::testing::Test {
     const auto health = h.unary("health_check");
     ASSERT_TRUE(health.has_value()) << health.error().message;
     ASSERT_EQ(health.value().value("kind", ""), "health_check_response");
+  }
+
+  // Leaves the writer inside the submit of `job_id`, a frame larger than the
+  // socket holds, with the sidecar reading nothing: whatever is queued from
+  // here on stays queued until the sidecar reads again.
+  void hold_the_writer(std::uint64_t job_id, std::uint64_t session_key) {
+    peer.stop_reading();
+    ASSERT_TRUE(h.submit(h.stt(job_id, session_key, kLargestWindow)).has_value());
+    ASSERT_TRUE(h.wait([&] { return peer.unread_bytes() >= 65'536; }));
+    ASSERT_EQ(h.channel.queued_frames(), 0U) << "the frame the writer took is not queued";
+  }
+
+  [[nodiscard]] bool released(std::uint64_t job_id) {
+    return h.wait([&] {
+      const Kinds kinds = h.sink->kinds_for(job_id);
+      return !kinds.empty() && kinds.back() == Released;
+    });
   }
 
   // What a sink callback notes. A member, declared before the harness: a
@@ -432,51 +487,185 @@ TEST_F(JobChannelTest, ASubmitCarriesTheBytesOfItsWindowAndOfItsText) {
   EXPECT_TRUE(h.wait_kinds(1, {Accepted})) << "its length is the one the header gives";
 }
 
-TEST_F(JobChannelTest, TheTableAndThePendingReleasesAreBounded) {
-  up();
-  peer.stop_reading();  // nothing is read, so nothing leaves the table
-  for (std::uint64_t job = 1; job <= kMaxOpenJobs; ++job) {
-    ASSERT_TRUE(h.submit(JobChannelHarness::tts(job, 1000 + job)).has_value()) << job;
+// -- The send queue. -------------------------------------------------------------
+
+TEST_F(JobChannelTest, TheQueueHasAPlaceForEveryFrameOfEveryRecordAndRefusesNoCancelOrRelease) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  constexpr std::uint64_t kHeld = 100;
+  constexpr std::uint64_t kJobsSession = 5'000;
+  constexpr std::uint64_t kLastJob = kMaxOpenJobs;
+  constexpr std::uint64_t kLastSession = kMaxPendingSessionReleases;
+  // On the reader thread, as the held job leaves the table: the last job, its
+  // cancel and the last release take the last three places in the queue.
+  h.on_event = [this](const JobEvent& event) {
+    if (event.kind() != Released || event.identity().job_id != kHeld) {
+      return;
+    }
+    EXPECT_TRUE(h.submit(JobChannelHarness::tts(kLastJob, kJobsSession)).has_value());
+    EXPECT_TRUE(h.cancel(kLastJob).has_value());
+    EXPECT_TRUE(h.release(kLastSession).has_value());
+    noted = true;
+  };
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(kHeld, kJobsSession));
+  for (std::uint64_t job = 1; job < kLastJob; ++job) {
+    ASSERT_TRUE(h.submit(JobChannelHarness::tts(job, kJobsSession)).has_value()) << job;
+    ASSERT_TRUE(h.cancel(job).has_value()) << job;
   }
-  expect_refused(h.channel.submit(JobChannelHarness::tts(99, 99)), Error::Code::ResourceExhausted,
-                 "job_capacity_exhausted");
-  for (std::uint64_t session = 1; session <= kMaxPendingSessionReleases; ++session) {
-    ASSERT_TRUE(h.channel.release_session(session, 1).has_value()) << session;
+  expect_refused(h.channel.submit(JobChannelHarness::tts(99, kJobsSession)),
+                 Error::Code::ResourceExhausted, "job_capacity_exhausted");
+  for (std::uint64_t session = 1; session < kLastSession; ++session) {
+    ASSERT_TRUE(h.release(session).has_value()) << session;
   }
-  expect_refused(h.channel.release_session(999, 1), Error::Code::ResourceExhausted,
+  WaitingExchange health(h, "health_check");
+  ASSERT_TRUE(h.wait([&] { return h.channel.queued_frames() == kMaxQueuedFrames - 3; }));
+
+  // No runner lets go of a job it has not read. The channel forgets the job
+  // all the same, and the frame the writer began outlives it.
+  peer.write(job_message("job_released", kHeld, kJobsSession));
+  ASSERT_TRUE(h.wait([&] { return noted.load(); }));
+  EXPECT_EQ(h.channel.queued_frames(), kMaxQueuedFrames);
+
+  // Only the two tables refuse, and a repeat asks for no second place.
+  expect_refused(h.channel.submit(JobChannelHarness::tts(99, kJobsSession)),
+                 Error::Code::ResourceExhausted, "job_capacity_exhausted");
+  expect_refused(h.channel.release_session(kLastSession + 1, 1), Error::Code::ResourceExhausted,
                  "session_release_capacity_exhausted");
-  EXPECT_TRUE(h.channel.release_session(1, 1).has_value()) << "a repeat is not a new release";
-}
-
-TEST_F(JobChannelTest, AFullQueueRefusesTheCallerAndKeepsNothingOfTheCall) {
-  up();
-  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
-  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
-  peer.stop_reading();
-  // The writer is inside a frame larger than the socket holds, so whatever
-  // is queued from here on stays queued.
-  ASSERT_TRUE(h.submit(h.stt(2, 1, kLargestWindow)).has_value());
-  ASSERT_TRUE(h.wait([&] { return peer.unread_bytes() >= 65'536; }));
-  // An exchange that gives up leaves its request behind.
-  const std::chrono::milliseconds at_once{0};
-  for (std::size_t queued = 0; queued < kMaxQueuedFrames; ++queued) {
-    ASSERT_EQ(h.unary("health_check", at_once).error().code, Error::Code::Timeout) << queued;
-  }
-
-  expect_refused(h.channel.submit(h.stt(3, 1)), Error::Code::ResourceExhausted, "send_queue_full");
-  expect_refused(h.channel.cancel(1), Error::Code::ResourceExhausted, "send_queue_full");
-  expect_refused(h.channel.release_session(5, 1), Error::Code::ResourceExhausted,
-                 "send_queue_full");
-  const auto health = h.unary("health_check", at_once);
-  ASSERT_FALSE(health.has_value());
-  EXPECT_EQ(health.error().code, Error::Code::ResourceExhausted);
-  EXPECT_EQ(health.error().context.value_or(""), "send_queue_full");
+  EXPECT_TRUE(h.channel.cancel(1).has_value());
+  EXPECT_TRUE(h.channel.release_session(1, 1).has_value());
+  EXPECT_EQ(h.channel.queued_frames(), kMaxQueuedFrames);
 
   h.stop(kSessionUnloaded);
-  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
-  EXPECT_EQ(h.sink->kinds_for(2), (Kinds{Failed, Released}));
-  EXPECT_EQ(h.sink->events().size(), 5U) << "the refused job was not kept";
-  EXPECT_TRUE(h.sink->session_releases().empty()) << "nor the refused release";
+  EXPECT_FALSE(health.outcome().has_value());
+  EXPECT_EQ(h.channel.queued_frames(), 0U);
+  EXPECT_EQ(h.sink->session_releases().size(), kMaxPendingSessionReleases);
+  EXPECT_EQ(h.sink->kinds_for(kLastJob), (Kinds{Failed, Released}));
+}
+
+TEST(JobChannelBounds, ThePendingReleasesAreTheMostSessionsASessionManagerAdmits) {
+  using namespace std::chrono_literals;
+  const auto most = static_cast<std::uint32_t>(kMaxPendingSessionReleases);
+  const auto at_the_ceiling = serving::SessionLimits::create(60s, 10s, 30s, 60min, most);
+  ASSERT_TRUE(at_the_ceiling.has_value());
+  EXPECT_EQ(at_the_ceiling->max_sessions(), kMaxPendingSessionReleases);
+  EXPECT_FALSE(serving::SessionLimits::create(60s, 10s, 30s, 60min, most + 1).has_value());
+}
+
+TEST_F(JobChannelTest, ACancelStillQueuedWhenItsJobIsReleasedLeavesTheQueue) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_EQ(peer.take_job(), 1U);
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(2, 1));
+  ASSERT_TRUE(h.cancel(1).has_value());
+  EXPECT_EQ(h.channel.queued_frames(), 1U);
+  // The job ends by itself before the sidecar has read its cancel.
+  peer.complete(1, transcript());
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted, Completed, Released}));
+  EXPECT_EQ(h.channel.queued_frames(), 0U);
+
+  peer.resume_reading();
+  ASSERT_NO_FATAL_FAILURE(settle());
+  EXPECT_TRUE(peer.sent("job_cancel", 0).empty());
+}
+
+TEST_F(JobChannelTest, AFrameTheWriterHasBegunIsWrittenWholeThoughItsJobIsReleased) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(1, 1));
+  ASSERT_TRUE(h.cancel(1).has_value());
+  ASSERT_TRUE(h.submit(JobChannelHarness::tts(2, 1)).has_value());
+  EXPECT_EQ(h.channel.queued_frames(), 2U);
+  // The writer is inside job 1's submit when the job leaves the table.
+  peer.write(job_message("job_released", 1, 1));
+  ASSERT_TRUE(released(1));
+  EXPECT_EQ(h.channel.queued_frames(), 1U) << "its cancel left; the other job's submit stayed";
+
+  peer.resume_reading();
+  const auto submits = peer.sent("job_submit", 2);
+  ASSERT_EQ(submits.size(), 2U);
+  EXPECT_EQ(submits.at(0).value("job_id", std::uint64_t{0}), 1U);
+  EXPECT_EQ(peer.payload("job_submit", 0).size(), kLargestWindow);
+  EXPECT_EQ(submits.at(1).value("job_id", std::uint64_t{0}), 2U);
+  ASSERT_NO_FATAL_FAILURE(settle());
+  EXPECT_TRUE(peer.sent("job_cancel", 0).empty());
+}
+
+TEST_F(JobChannelTest, ASubmitStillQueuedWhenItsJobIsReleasedLeavesTheQueue) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(1, 1));
+  ASSERT_TRUE(h.submit(JobChannelHarness::tts(2, 1)).has_value());
+  ASSERT_TRUE(h.cancel(2).has_value());
+  EXPECT_EQ(h.channel.queued_frames(), 2U);
+  peer.write(job_message("job_released", 2, 1));
+  ASSERT_TRUE(released(2));
+  EXPECT_EQ(h.channel.queued_frames(), 0U);
+
+  peer.resume_reading();
+  ASSERT_NO_FATAL_FAILURE(settle());
+  EXPECT_EQ(peer.sent("job_submit", 0).size(), 1U) << "only the job the writer had begun";
+  EXPECT_TRUE(peer.sent("job_cancel", 0).empty());
+}
+
+TEST_F(JobChannelTest, AReleaseStillQueuedWhenItIsAcknowledgedLeavesTheQueue) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(1, 1));
+  ASSERT_TRUE(h.release(7).has_value());
+  EXPECT_EQ(h.channel.queued_frames(), 1U);
+  peer.write(Json{{"schema_version", "0.1"},
+                  {"message_id", "s90"},
+                  {"kind", "session_released"},
+                  {"session_key", 7},
+                  {"generation", 1}});
+  ASSERT_TRUE(h.wait([&] { return h.sink->session_releases().size() == 1; }));
+  EXPECT_EQ(h.channel.queued_frames(), 0U);
+
+  peer.resume_reading();
+  ASSERT_NO_FATAL_FAILURE(settle());
+  EXPECT_TRUE(peer.sent("session_release", 0).empty());
+}
+
+TEST_F(JobChannelTest, AnExchangeThatGivesUpTakesItsRequestOutOfTheQueue) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(1, 1));
+  // The writer is held, so no answer can come: a deadline that has passed
+  // ends each exchange with its request still queued.
+  for (int asked = 0; asked < 3; ++asked) {
+    ASSERT_EQ(h.unary("prime", std::chrono::milliseconds{0}).error().code, Error::Code::Timeout);
+    ASSERT_EQ(h.channel.queued_frames(), 0U) << asked;
+  }
+
+  // The sidecar logs a frame after it has answered it, so only what arrived
+  // ahead of settle()'s request is certain to be in the log.
+  peer.resume_reading();
+  ASSERT_NO_FATAL_FAILURE(settle());
+  EXPECT_EQ(peer.sent("prime", 0).size(), 1U) << "the one up() sent";
+}
+
+TEST_F(JobChannelTest, AnExchangeThatFailsWithTheConnectionTakesItsRequestOutOfTheQueue) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(1, 1));
+  WaitingExchange prime(h, "prime");
+  ASSERT_TRUE(h.wait([&] { return h.channel.queued_frames() == 1; }));
+  peer.write_raw("not a header");
+  ASSERT_FALSE(prime.outcome().has_value());
+  EXPECT_EQ(prime.outcome().error().code, Error::Code::InferenceFailed);
+  EXPECT_EQ(h.channel.queued_frames(), 0U) << "before any stop";
+}
+
+TEST_F(JobChannelTest, AnExchangeAnsweredBeforeItsRequestWasBegunTakesItOutOfTheQueue) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(hold_the_writer(1, 1));
+  WaitingExchange prime(h, "prime");
+  ASSERT_TRUE(h.wait([&] { return h.channel.queued_frames() == 1; }));
+  // No frame is matched to a request: this one answers the exchange that
+  // waits, whose request the sidecar has not read.
+  peer.write(Json{{"schema_version", "0.1"}, {"message_id", "s90"}, {"kind", "prime_response"}});
+  ASSERT_TRUE(prime.outcome().has_value());
+  EXPECT_EQ(prime.outcome().value().value("kind", ""), "prime_response");
+  EXPECT_EQ(h.channel.queued_frames(), 0U);
+
+  peer.resume_reading();
+  ASSERT_NO_FATAL_FAILURE(settle());
+  EXPECT_EQ(peer.sent("prime", 0).size(), 1U) << "the one up() sent";
 }
 
 // -- Cancel and session release. -------------------------------------------------
@@ -523,39 +712,6 @@ TEST_F(JobChannelTest, ACallbackCancelsAndReleasesWhileTheReaderReadsOn) {
   EXPECT_EQ(h.channel.counters(), JobChannelCounters{});
 }
 
-TEST_F(JobChannelTest, ACallbackThatFindsTheQueueFullIsRefusedLikeAnyOtherCaller) {
-  up();
-  h.on_event = [this](const JobEvent& event) {
-    if (event.kind() != Progress) {
-      return;
-    }
-    expect_refused(h.channel.cancel(1), Error::Code::ResourceExhausted, "send_queue_full");
-    expect_refused(h.channel.release_session(5, 1), Error::Code::ResourceExhausted,
-                   "send_queue_full");
-    noted = true;
-  };
-  ASSERT_TRUE(h.submit(h.stt(1, 1, 3'200, /*progress_limit=*/1)).has_value());
-  ASSERT_EQ(peer.take_job(), 1U);
-  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
-  peer.stop_reading();
-  // The writer is inside a frame larger than the socket holds, and the queue
-  // behind it is filled by exchanges that give up.
-  ASSERT_TRUE(h.submit(h.stt(2, 1, kLargestWindow)).has_value());
-  ASSERT_TRUE(h.wait([&] { return peer.unread_bytes() >= 65'536; }));
-  for (std::size_t queued = 0; queued < kMaxQueuedFrames; ++queued) {
-    ASSERT_EQ(h.unary("health_check", std::chrono::milliseconds{0}).error().code,
-              Error::Code::Timeout)
-        << queued;
-  }
-  // The sidecar still writes, and the reader still reads: the callback above
-  // runs on the job's one progress event.
-  peer.emit("job_progress", 1, {{"progress_sequence", 1}, {"result", transcript()}});
-  ASSERT_TRUE(h.wait([&] { return noted.load(); }));
-  h.stop(kSessionUnloaded);
-  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Progress, Failed, Released}));
-  EXPECT_TRUE(h.sink->session_releases().empty()) << "the refused release was not kept";
-}
-
 TEST_F(JobChannelTest, ASessionIsReleasedOnceAndNeverAskedAgain) {
   up();
   expect_refused(h.channel.release_session(0, 1), Error::Code::ConfigInvalid, "session_key_zero");
@@ -594,34 +750,92 @@ TEST_F(JobChannelTest, AReleaseTheSidecarRefusesAfterAnUnloadStaysPendingUntilTh
   EXPECT_EQ(h.sink->session_releases().size(), 1U);
 }
 
-TEST(JobChannelSessions, OnlyTheLastAcknowledgedSessionsAreRemembered) {
+TEST(JobChannelSessions, AReleasedSessionStaysReleasedHoweverManyFollowIt) {
   ScriptedSidecar peer;
   JobChannelHarness h;
   ASSERT_TRUE(h.connect(peer.launcher()).has_value());
   ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
-  for (std::uint64_t session = 1; session <= kMaxRememberedSessions + 1; ++session) {
-    ASSERT_TRUE(h.channel.release_session(session, 1).has_value());
+  constexpr std::uint64_t kLater = 1'025;
+  for (std::uint64_t session = 1; session <= 1 + kLater; ++session) {
+    ASSERT_TRUE(h.release(session).has_value());
     ASSERT_TRUE(h.wait([&] { return h.sink->session_releases().size() == session; })) << session;
   }
-  // The second is still remembered. The first is past the memory the header
-  // states, so its key is a new session's: a job for it is taken, and its
-  // release is sent again and acknowledged again by the sidecar, which forgot
-  // it too. The recording sink holds "at most once", as the caller has to.
+  EXPECT_EQ(h.channel.released_session_runs(), 1U);
+
   h.channel.admit_jobs();
-  expect_refused(h.channel.submit(JobChannelHarness::tts(1, 2)), Error::Code::NotReady,
+  expect_refused(h.channel.submit(JobChannelHarness::tts(1, 1)), Error::Code::NotReady,
                  "session_releasing");
-  ASSERT_TRUE(h.submit(JobChannelHarness::tts(2, 1)).has_value());
-  ASSERT_TRUE(h.wait_kinds(2, {Accepted}));
-  ASSERT_TRUE(h.channel.release_session(2, 1).has_value());
-  ASSERT_TRUE(h.release(1).has_value());
-  EXPECT_EQ(peer.sent("session_release", kMaxRememberedSessions + 2).size(),
-            kMaxRememberedSessions + 2);
-  ASSERT_TRUE(
-      h.wait([&] { return h.sink->session_releases().size() == kMaxRememberedSessions + 2; }));
-  EXPECT_EQ(h.sink->session_releases().back(), (std::pair<std::uint64_t, std::uint64_t>{1, 1}));
-  EXPECT_EQ(h.sink->kinds_for(2), (Kinds{Accepted, CancelAcknowledged, Failed, Released}));
-  h.expected_violations = {"duplicate_session_released 1"};
-  EXPECT_EQ(h.sink->violations(), h.expected_violations);
+  ASSERT_TRUE(h.channel.release_session(1, 1).has_value());
+  // Health is answered in arrival order: a repeat that was sent has arrived.
+  ASSERT_TRUE(h.unary("health_check").has_value());
+  EXPECT_EQ(peer.sent("session_release", 1 + kLater).size(), 1 + kLater);
+  EXPECT_EQ(h.sink->session_releases().size(), 1 + kLater);
+}
+
+TEST(JobChannelSessions, ReleasesAcknowledgedOutOfOrderJoinIntoOneRun) {
+  ScriptedSidecar peer;
+  JobChannelHarness h;
+  ASSERT_TRUE(h.connect(peer.launcher()).has_value());
+  ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
+  const std::vector<std::pair<std::uint64_t, std::size_t>> runs_after{
+      {5, 1}, {1, 2}, {3, 3}, {2, 2}, {4, 1}, {7, 2}, {6, 1}};
+  std::size_t acknowledged = 0;
+  for (const auto& [session, runs] : runs_after) {
+    ASSERT_TRUE(h.release(session).has_value());
+    ++acknowledged;
+    ASSERT_TRUE(h.wait([&] { return h.sink->session_releases().size() == acknowledged; }));
+    EXPECT_EQ(h.channel.released_session_runs(), runs) << session;
+  }
+  h.channel.admit_jobs();
+  for (std::uint64_t session = 1; session <= 7; ++session) {
+    expect_refused(h.channel.submit(JobChannelHarness::tts(session, session)),
+                   Error::Code::NotReady, "session_releasing");
+  }
+  EXPECT_TRUE(h.submit(JobChannelHarness::tts(8, 8)).has_value());
+}
+
+TEST(ReleasedSessionKeys, AKeyJoinsTheRunsItTouchesAndNoOther) {
+  ReleasedSessionKeys keys;
+  EXPECT_FALSE(keys.contains(4));
+  keys.insert(4);
+  keys.insert(4);
+  EXPECT_EQ(keys.runs(), 1U);
+  EXPECT_TRUE(keys.contains(4));
+  EXPECT_FALSE(keys.contains(3));
+  EXPECT_FALSE(keys.contains(5));
+
+  keys.insert(6);  // touches nothing
+  EXPECT_EQ(keys.runs(), 2U);
+  EXPECT_FALSE(keys.contains(5));
+  keys.insert(7);  // the end of a run
+  keys.insert(3);  // the start of one
+  EXPECT_EQ(keys.runs(), 2U);
+  keys.insert(5);  // both
+  EXPECT_EQ(keys.runs(), 1U);
+  for (std::uint64_t key = 3; key <= 7; ++key) {
+    EXPECT_TRUE(keys.contains(key)) << key;
+  }
+  EXPECT_FALSE(keys.contains(2));
+  EXPECT_FALSE(keys.contains(8));
+  keys.insert(5);  // inside a run
+  EXPECT_EQ(keys.runs(), 1U);
+}
+
+TEST(ReleasedSessionKeys, TheEndsOfTheKeySpaceDoNotWrap) {
+  constexpr std::uint64_t kLast = std::numeric_limits<std::uint64_t>::max();
+  ReleasedSessionKeys keys;
+  keys.insert(kLast);
+  keys.insert(0);
+  EXPECT_EQ(keys.runs(), 2U) << "the last key and the first are not neighbours";
+  EXPECT_TRUE(keys.contains(kLast));
+  EXPECT_TRUE(keys.contains(0));
+  EXPECT_FALSE(keys.contains(1));
+  EXPECT_FALSE(keys.contains(kLast - 1));
+  keys.insert(kLast - 1);
+  keys.insert(1);
+  EXPECT_EQ(keys.runs(), 2U);
+  EXPECT_TRUE(keys.contains(kLast - 1));
+  EXPECT_TRUE(keys.contains(1));
 }
 
 TEST_F(JobChannelTest, ASessionAcknowledgedBeforeItsLastJobWaitsForThatJob) {
@@ -902,6 +1116,9 @@ TEST_F(JobChannelTest, StopFailsOpenJobsWithItsReasonAndTheChannelStartsAgain) {
   h.channel.admit_jobs();
   ASSERT_TRUE(h.submit(h.stt(3, 1)).has_value());
   ASSERT_TRUE(h.wait_kinds(3, {Accepted}));
+  // The session the stop acknowledged is still released on this connection.
+  expect_refused(h.channel.submit(h.stt(5, 4)), Error::Code::NotReady, "session_releasing");
+  EXPECT_TRUE(h.channel.release_session(4, 1).has_value());
   settle();
   EXPECT_TRUE(next.sent("session_release", 0).empty());
   EXPECT_EQ(h.channel.counters(), JobChannelCounters{});
@@ -935,13 +1152,12 @@ TEST_F(JobChannelTest, AFrameNobodyCanAttributeEndsTheConnection) {
   peer.write_raw("not a header");
   ASSERT_TRUE(h.wait_kinds(1, {Accepted, Failed}));
   EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kBackendReset);
-  // However often it is asked, an exchange gets the error the connection
-  // ended with: nothing is queued for a connection that has ended.
-  for (std::size_t asked = 0; asked <= kMaxQueuedFrames; ++asked) {
-    const auto health = h.unary("health_check");
-    ASSERT_FALSE(health.has_value());
-    ASSERT_EQ(health.error().code, Error::Code::InferenceFailed) << asked;
-  }
+  // An exchange gets the error the connection ended with, and nothing is
+  // queued for a connection that has ended.
+  const auto health = h.unary("health_check");
+  ASSERT_FALSE(health.has_value());
+  EXPECT_EQ(health.error().code, Error::Code::InferenceFailed);
+  EXPECT_EQ(h.channel.queued_frames(), 0U);
 }
 
 TEST_F(JobChannelTest, AnEndTheReaderDecidesIsEndOfFileForTheSidecarBeforeAnyStop) {
