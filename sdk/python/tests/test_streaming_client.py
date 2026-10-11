@@ -38,7 +38,7 @@ except MissingDependencyError as missing:
 import grpc
 import grpc.aio
 
-from stream_server import Playback, StreamServer, frames, recorded
+from stream_server import REPOSITORY, Playback, StreamServer, frames, recorded
 from tensorplate.speech import _session, client
 from tensorplate.speech._buffer import EventBuffer
 from tensorplate.stream.v1 import session_pb2 as pb
@@ -827,6 +827,27 @@ def test_a_reader_cancelled_while_it_is_held_still_ends_the_session() -> None:
         await fake.until(lambda: fake.live == 0)
 
     play(scenario)
+
+
+def test_the_documented_example_reads_events_while_it_sends(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    page = (REPOSITORY / "docs/sdk/python.md").read_text(encoding="utf-8")
+    section = page[page.index("## Streaming speech client") :]
+    example: dict[str, Any] = {}
+    exec(section.split("```python\n", 1)[1].split("```", 1)[0], example)
+    # Forty frames draw 40 KiB of partial transcripts, more than a session holds unread.
+    fake = StreamServer(
+        deployment_id="my-deployment", generation=0, descriptor_digest="", partial_bytes=1000
+    )
+
+    async def main() -> Any:
+        async with fake.serving() as endpoint:
+            return await example["transcribe"](endpoint, [FRAME] * 40)
+
+    assert run(main) == "synthetic transcript"
+    assert capsys.readouterr().out.count("x" * 1000) == 40
+    assert fake.bodies() == ["open", *["audio"] * 40, "finalize"]
 
 
 def test_a_session_whose_events_are_left_unread_ends_with_a_typed_error() -> None:

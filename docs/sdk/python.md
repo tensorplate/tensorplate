@@ -279,52 +279,112 @@ been run against an in-process server built from the same schema, not yet
 against a worker: no worker serves speech sessions over it yet.
 
 ```python
-from tensorplate.speech import AudioFormat, SpeechClient, Target
+import asyncio
+
+from tensorplate.speech import (
+    AudioFormat,
+    PartialTranscript,
+    SpeechClient,
+    SpeechToTextSession,
+    Target,
+)
 
 
 async def transcribe(endpoint: str, frames: list[bytes]) -> str:
     target = Target("my-deployment")
     audio = AudioFormat("pcm_s16le", sample_rate_hz=16000)
     async with SpeechClient(endpoint) as client:
-        async with client.transcribe(target, language="en", input_format=audio) as session:
+        session = client.transcribe(target, language="en", input_format=audio)
+        async with session:
+            # Events are read while audio is sent, in a task of their own.
+            reader = asyncio.create_task(show_partials(session))
             for frame in frames:  # 20 ms of audio each
                 await session.send_audio(frame)
             final = await session.finalize()
+        await reader
     return final.text
+
+
+async def show_partials(session: SpeechToTextSession) -> None:
+    async for event in session:
+        if isinstance(event, PartialTranscript):
+            print(event.text)
 ```
 
+- **Read events while sending.** This is the one rule of a session. Input
+  credit, the answer to a `finalize()` and the end of the session all arrive
+  on the stream the events arrive on, behind the events sent before them.
+  A session holds up to 16 KiB of events its caller has not taken and then
+  reads nothing more from the server, so `send_audio()`, `finalize()` and
+  `close()` wait until some are taken. Iterate the session in a task of its
+  own, as above. A session whose held events stay untaken for the server's
+  output stall time (`session.limits.output_stall_timeout_ms`, five seconds
+  by default) is ended by the client with `ResourceExhaustedError`, the
+  error the server's own limit on unread output ends it with; no call waits
+  for ever on events nobody reads. The iteration ends when the session
+  does, and raises the session's error if it failed.
 - **Endpoint and target.** `SpeechClient(endpoint)` takes the `host:port` of
   the worker's stream endpoint, on loopback or forwarded to it, and opens one
-  cleartext channel; create it inside a running event loop. A `Target` is a
-  deployment id with the generation and descriptor digest the worker serves,
-  or the id alone for a worker started without a generation.
+  cleartext channel, which it closes with itself; create it inside a running
+  event loop. `SpeechClient(channel=...)` takes a `grpc.aio` channel the
+  caller made instead: the client never closes it, and its options are the
+  caller's to set, `("grpc.http2.bdp_probe", 0)` among them (see the last
+  paragraph of this section). A `Target` is a deployment id with the
+  generation and descriptor digest the worker serves, or the id alone for a
+  worker started without a generation. `aclose()`, or leaving `async with`,
+  ends every session made from the client: an open one has its call
+  cancelled, and all of them raise `SessionClosedError` from then on.
 - **Sessions.** `client.transcribe(target, *, language, input_format,
-  trace_id="", turn_id="", open_timeout=10.0)` returns a session that
-  `async with` opens. Leaving the block closes the sending half and waits for
-  the server to finish what it accepted; `close()` does the same and returns
-  the session's `SessionTotals`. Leaving it on an exception cancels the
-  session, as `cancel()` does: the server is told, and every event not yet
-  taken is dropped. `session.limits` holds the timers and frame bounds the
-  server reported.
+  trace_id="", turn_id="", open_timeout=10.0, close_timeout=30.0,
+  cancel_timeout=5.0)` returns a session that `async with` opens; a session
+  is never constructed directly. Leaving the block closes the sending half
+  and waits for the server to finish what it accepted; `close()` does the
+  same and returns the session's `SessionTotals`. Leaving it on an exception
+  or a cancellation cancels the session, as `cancel()` does: the server is
+  told, and every event not yet taken is dropped. `session.limits` holds the
+  timers and frame bounds the server reported.
+- **Bounds.** Every wait for the server but one has a bound, in seconds,
+  counted from the call on the event loop's clock and covering all of it:
+  the wait behind another task's write, the write, and the answer.
+  `open_timeout` bounds the open. `close(timeout=...)` and a clean exit are
+  bounded by `close_timeout` unless a timeout is given. `finalize(timeout=...)`
+  is unbounded unless one is given. Past any of them the session is ended:
+  the call is cancelled and `SessionTimeoutError` raised, then and from every
+  later use, since a Finalize without its answer or a drain without its end
+  leaves nothing to continue. `cancel(timeout=...)` and an exit on an
+  exception wait `cancel_timeout` for the server to end the session and then
+  cancel the call. `send_audio()` has no timeout of its own: it ends with
+  credit or with the session, and can be cancelled like any other await.
+- **Cancellation.** A task cancelled while it is inside a session method gets
+  its `CancelledError`, and the session stays open. A frame or a Finalize it
+  was writing at that moment is still sent, because gRPC cancels a call
+  whose write is cancelled; one it was still waiting to send is not.
 - **Input and credit.** `send_audio(data)` sends one frame in the session's
   input format and waits while the server's input credit does not admit it.
-  The client takes its credit from the server's messages only, never from
-  time. A frame outside the session's frame bounds raises `ValueError` before
-  anything is sent; a frame shorter than the least one is allowed only as the
-  last before `finalize()` or `close()`.
+  `data` is any bytes-like object (`bytes`, `bytearray`, `memoryview`); one
+  that is not `bytes` is copied once. The client takes its credit from the
+  server's messages only, never from time. A frame outside the session's
+  frame bounds raises `ValueError` before anything is sent; a frame shorter
+  than the least one is allowed only as the last before `finalize()` or
+  `close()`.
 - **Events.** Iterating a session (`async for event in session`) yields
   `PartialTranscript`, `EndpointDetected` and `FinalTranscript` in the order
   the server sent them, and ends when the session does. They are frozen
-  dataclasses of the SDK; no generated class appears in the client's
-  interface. `finalize()` ends the open utterance and returns the
+  dataclasses of the SDK; no generated class and no gRPC type appears in the
+  client's interface. The server may end an utterance itself (an endpoint
+  with reason `"silence"` or `"duration_limit"`); its final transcript has a
+  `finalize_sequence` of zero, and the next utterance's endpoint may arrive
+  before it. A server event of a kind this client does not know, audio in a
+  speech-to-text session included, is passed over and counted in
+  `session.unknown_events`.
+- **Finalize.** `finalize()` ends the open utterance and returns the
   `FinalTranscript` that names it in `finalize_sequence`; iteration yields
-  that transcript too. A server event of a kind this client does not know is
-  passed over and counted in `session.unknown_events`.
-- **Unread events.** A session holds up to 16 KiB of events its caller has
-  not taken and then stops reading from the call, so take events as they
-  arrive: the server ends a session whose output stays unread.
+  that transcript too. The server refuses audio sent before that answer, so
+  `send_audio()` waits for it, also when the `finalize()` that asked was
+  cancelled meanwhile, and a second `finalize()` waits its turn the same way.
 - **Liveness.** The session sends the schema's `Ping` at the interval the
-  server gave when the session became ready.
+  server gave when the session became ready, and none when it gave no
+  interval.
 - **No retry.** The client never reopens, resends or replays. A session that
   was refused, failed or lost is reported once, and opening another is the
   caller's decision.
@@ -335,17 +395,18 @@ exception. Its class follows the final status of the call:
 | Exception | Raised when |
 | --- | --- |
 | `InvalidEventError` | The server found an event or its input invalid. |
-| `PreconditionFailedError` | The deployment does not serve what was asked: a language or format it does not declare, another deployment or descriptor, a stale generation. |
-| `ResourceExhaustedError` | A bound was reached: the session count, the input credit, or output left unread too long. |
-| `SessionTimeoutError` | One of the server's timers ended the session, or the client's own wait for the open or for a `finalize()` passed. |
+| `PreconditionFailedError` | The deployment does not serve what was asked: a language or format it does not declare, another deployment or descriptor, a stale generation, input the session's state does not permit; or the endpoint does not serve stream sessions at all (`UNIMPLEMENTED`). |
+| `ResourceExhaustedError` | A bound was reached: the session count, the input credit, or output left unread too long, by the server's limit or by the client's own. |
+| `SessionTimeoutError` | One of the server's timers ended the session, or one of the client's own bounds passed. |
 | `ServiceUnavailableError` | Admission is closed, the worker is shutting down or retiring the deployment, the backend was lost, or the endpoint cannot be reached. |
 | `SessionCancelledError` | The call was cancelled by something other than the session's own `cancel()`. |
-| `ServerInternalError` | The server failed, or ended the call with a status no other class stands for. |
+| `ServerInternalError` | The server failed, or ended the call with a status no other class stands for. `PERMISSION_DENIED` and `UNAUTHENTICATED` land here: the stream listener has no authorization, so no rule of the schema produces them. |
 | `StreamProtocolError` (also a `ProtocolError`) | The server sent something the schema does not allow; the client ended the call. |
-| `SessionClosedError` | The session was used after it ended. |
+| `SessionClosedError` | The session was used after it ended, opened twice, or its client or channel was closed. |
 
 A `SpeechError` carries `reason` and `code` when the server stated a cause
-(for example `"worker_shutdown"` and `ErrorCode.UNAVAILABLE`), `grpc_status`,
+(for example `"worker_shutdown"` and `ErrorCode.UNAVAILABLE`), `grpc_status`
+(the status's name, or `None` when the client ended the session itself),
 and `admitted`, which has three values. `True`: the server reserved a session
 slot, so the call ran. `False`: the server stated that it reserved none.
 `None`: unknown. An open that ends with a status and no event is always
@@ -353,11 +414,24 @@ slot, so the call ran. `False`: the server stated that it reserved none.
 refusal cannot be told from a session that was admitted and then lost, and
 `reason` is `None` too. Do not treat such a call as one that never ran.
 
-The channel is opened with gRPC's bandwidth probe off
-(`grpc.http2.bdp_probe` 0), which keeps HTTP/2's receive window at its 64 KiB
-default, and with sent and received messages capped at 64 KiB. With the probe
-on, gRPC widens the window to megabytes, and a session that stopped reading
-would not hold the server back until that much had been sent.
+None of them is a `TransportError` or a `RequestTimeoutError`. Those belong
+to the unary HTTP client, where they mean that the worker was not reached or
+did not answer in time. A session's status does not separate those cases:
+`UNAVAILABLE` ends a call to an endpoint that cannot be reached and a call
+the worker refused or drained, and `DEADLINE_EXCEEDED` is one of the
+server's timers. There is no `retryable` flag either. The schema states one
+thing about sending a call again, that an Open the server did not admit
+(`admitted is False`) may be sent to another server, and gives no rule for
+which reasons pass; a call that was admitted, or whose admission is unknown,
+must not be sent again as if it had not run.
+
+The client's own channel is opened with gRPC's bandwidth probe off
+(`grpc.http2.bdp_probe` 0), which keeps HTTP/2's receive window at its
+default of about 64 KiB, and with sent and received messages capped at
+64 KiB. With the probe on, gRPC widens the window to megabytes, and a
+session that stopped reading would not hold the server back until that much
+had been sent. A channel passed in with `channel=` has whatever options its
+owner gave it.
 
 ## Endpoint resolution
 
