@@ -16,7 +16,7 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use tensorplate_agent::config::AgentConfig;
@@ -650,4 +650,156 @@ fn memory_schema_and_reader_refuse_missing_null_unknown_and_invalid_values() {
     over_cap["memory_admission"]["domains"]["device_vram"]["cap_bytes"] = json!(1);
     assert!(validator.is_valid(&over_cap));
     assert!(AgentConfig::parse_json(&over_cap.to_string()).is_err());
+}
+
+/// Every integer key of the schema, as a JSON pointer, with a value both
+/// sides accept. A key the schema gains must be added here.
+const INTEGER_KEYS: &[(&str, u64)] = &[
+    ("/tcp_bind_port", 18080),
+    ("/device_memory_bytes", 8_589_934_592),
+    ("/memory_admission/domains/guest_ram/cap_bytes", 4096),
+    ("/memory_admission/domains/guest_ram/reserve_bytes", 1024),
+    ("/memory_admission/domains/device_vram/cap_bytes", 4096),
+    ("/memory_admission/domains/device_vram/reserve_bytes", 1024),
+    ("/worker/serving_bind_port", 18080),
+    ("/worker/serving_candidate_bind_port", 18081),
+    ("/worker/serving_port_range/first", 18100),
+    ("/worker/serving_port_range/last", 18107),
+    ("/worker/warm_timeout_ms", 30_000),
+    ("/worker/prepare_timeout_ms", 60_000),
+    ("/worker/status_poll_interval_ms", 250),
+    ("/supervision/control_port", 18090),
+    ("/supervision/startup_timeout_ms", 30_000),
+    ("/supervision/graceful_stop_timeout_ms", 5000),
+    ("/supervision/kill_timeout_ms", 2000),
+    ("/supervision/status_poll_interval_ms", 1000),
+    ("/supervision/restart_policy/backoff/initial_delay_ms", 500),
+    ("/supervision/restart_policy/backoff/multiplier_hundredths", 200),
+    ("/supervision/restart_policy/backoff/max_delay_ms", 30_000),
+    ("/supervision/restart_policy/backoff/window_ms", 300_000),
+    ("/supervision/restart_policy/backoff/threshold", 5),
+    ("/supervision/restart_policy/backoff/stable_reset_ms", 120_000),
+    ("/supervision/event_sink/queue_capacity", 256),
+];
+
+/// JSON pointers of every `"type": "integer"` node reachable through
+/// `properties` alone, and the count of integer nodes anywhere.
+fn schema_integer_pointers(
+    node: &serde_json::Value,
+    pointer: &str,
+    keys: &mut BTreeMap<String, serde_json::Value>,
+) -> usize {
+    let Some(object) = node.as_object() else {
+        return node.as_array().map_or(0, |items| {
+            items
+                .iter()
+                .map(|item| schema_integer_pointers(item, "?", keys))
+                .sum()
+        });
+    };
+    let mut found = 0;
+    if object.get("type").and_then(serde_json::Value::as_str) == Some("integer") {
+        found += 1;
+        keys.insert(pointer.to_string(), node.clone());
+    }
+    for (name, child) in object {
+        if name == "properties" {
+            for (property, schema) in child.as_object().expect("properties is an object") {
+                found += schema_integer_pointers(schema, &format!("{pointer}/{property}"), keys);
+            }
+        } else {
+            found += schema_integer_pointers(child, "?", keys);
+        }
+    }
+    found
+}
+
+fn set_pointer(document: &mut serde_json::Value, pointer: &str, value: serde_json::Value) {
+    let mut cursor = document;
+    let mut parts = pointer.split('/').skip(1).peekable();
+    while let Some(part) = parts.next() {
+        let object = cursor.as_object_mut().expect("the path runs through objects");
+        if parts.peek().is_none() {
+            object.insert(part.to_string(), value);
+            return;
+        }
+        cursor = object
+            .entry(part.to_string())
+            .or_insert_with(|| serde_json::json!({}));
+    }
+}
+
+/// A config with every integer key set to its accepted value, and the
+/// structure the sections around them need.
+fn integer_baseline() -> serde_json::Value {
+    let mut document = memory_config();
+    set_pointer(&mut document, "/worker/mode", "mock".into());
+    for (path, value) in [
+        ("binary_path", "/b"),
+        ("working_dir", "/w"),
+        ("serving_config_path", "/c"),
+    ] {
+        set_pointer(&mut document, &format!("/supervision/{path}"), value.into());
+    }
+    for (pointer, value) in INTEGER_KEYS {
+        set_pointer(&mut document, pointer, (*value).into());
+    }
+    document
+}
+
+#[test]
+fn the_integer_key_table_lists_exactly_the_schemas_integer_keys() {
+    let body = std::fs::read_to_string(repo_path("config/schemas/agent.json")).expect("schema");
+    let schema: serde_json::Value = serde_json::from_str(&body).expect("schema parses");
+    let mut keys = BTreeMap::new();
+    let total = schema_integer_pointers(&schema, "", &mut keys);
+    assert_eq!(
+        total,
+        keys.len(),
+        "an integer is declared where the walk does not follow; teach it that shape"
+    );
+    let listed: BTreeSet<&str> = INTEGER_KEYS.iter().map(|(pointer, _)| *pointer).collect();
+    let declared: BTreeSet<&str> = keys.keys().map(String::as_str).collect();
+    assert_eq!(listed, declared);
+}
+
+#[test]
+fn every_integer_key_reads_a_number_with_a_zero_fraction_as_the_schema_does() {
+    let body = std::fs::read_to_string(repo_path("config/schemas/agent.json")).expect("schema");
+    let declared: serde_json::Value = serde_json::from_str(&body).expect("schema parses");
+    let mut keys = BTreeMap::new();
+    schema_integer_pointers(&declared, "", &mut keys);
+    let schema = compiled_schema();
+    let baseline = integer_baseline();
+    assert!(schema.is_valid(&baseline));
+    AgentConfig::parse_json(&baseline.to_string()).expect("the baseline is a valid config");
+
+    for (pointer, value) in INTEGER_KEYS {
+        let node = &keys[*pointer];
+        // (spelling, both sides must accept)
+        let mut cases: Vec<(String, bool)> = vec![
+            (format!("{value}"), true),
+            (format!("{value}.0"), true),
+            (format!("{value}.5"), false),
+            (format!("\"{value}\""), false),
+            ("-1".to_string(), false),
+        ];
+        if let Some(maximum) = node.get("maximum").and_then(serde_json::Value::as_u64) {
+            cases.push((format!("{}", maximum + 1), false));
+            cases.push((format!("{}.0", maximum + 1), false));
+        }
+        for (spelling, accepted) in cases {
+            let mut document = baseline.clone();
+            let replacement: serde_json::Value =
+                serde_json::from_str(&spelling).expect("the spelling is JSON");
+            set_pointer(&mut document, pointer, replacement);
+            let schema_ok = schema.is_valid(&document);
+            let runtime_ok = AgentConfig::parse_json(&document.to_string()).is_ok();
+            assert_eq!(
+                (schema_ok, runtime_ok),
+                (accepted, accepted),
+                "`{pointer}` = {spelling}: schema {schema_ok}, runtime {runtime_ok}, expected both {accepted}"
+            );
+        }
+    }
 }
