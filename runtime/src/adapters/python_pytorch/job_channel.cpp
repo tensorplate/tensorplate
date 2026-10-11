@@ -127,7 +127,7 @@ Result<void> JobChannel::start(ipc::UnixSocket& socket, const std::vector<JobCla
     writer_ = std::thread(&JobChannel::write_loop, this);
     reader_ = std::thread(&JobChannel::read_loop, this);
   } catch (const std::system_error&) {
-    // Only the reader can be missing; the writer leaves an ended connection.
+    // A writer that was created leaves an ended connection.
     ended_ = true;
     lock.unlock();
     outbox_cv_.notify_all();

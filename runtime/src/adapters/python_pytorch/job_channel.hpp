@@ -41,8 +41,9 @@
 // error the connection ended with.
 //
 // One mutex guards all state. It is never held across socket I/O or a sink
-// callback. submit() copies the request's PCM window while holding it: the
-// channel's mutex, then the buffer manager's, which never calls back.
+// callback. submit() copies the request's PCM window twice while holding it,
+// out of the buffer manager and then into the encoded frame: the channel's
+// mutex, then the buffer manager's, which never calls back.
 //
 // Internal: nothing outside the adapter includes this header.
 
@@ -133,7 +134,9 @@ class JobChannel {
   JobChannel(JobChannel&&) = delete;
   JobChannel& operator=(JobChannel&&) = delete;
 
-  // -- The session's side: one thread at a time, never a sink callback. ------
+  // -- The session's side: never from a sink callback. One call at a time,
+  // except that stop() may run on another thread while an exchange waits;
+  // that exchange returns the error the connection ended with.
 
   /// Takes over `socket` after a load that enabled kSpeechJobsCapability and
   /// declared `job_classes`. The socket stays the caller's and must outlive
