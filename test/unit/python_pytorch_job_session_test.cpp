@@ -158,6 +158,13 @@ TEST(JobSessionNegotiation, ASessionNotBuiltForJobsEnablesNothingTheSidecarLists
   EXPECT_TRUE(peer.reaped());
 }
 
+TEST(JobSessionNegotiation, ASessionNotBuiltForJobsLoadsOnASidecarThatListsNothing) {
+  ScriptedSidecar peer(ScriptedSidecar::Options{.capabilities = {}});
+  JobSessionHarness h(PythonPytorchConfig{}, peer.launcher());
+  ASSERT_TRUE(h.session->load(recorded_spec()).has_value());
+  EXPECT_TRUE(h.session->prime().has_value());
+}
+
 TEST(JobSessionNegotiation, ASidecarThatDoesNotListTheCapabilityIsNotAskedToLoad) {
   ScriptedSidecar peer(ScriptedSidecar::Options{.capabilities = {}});
   JobSessionHarness h(with_jobs(), peer.launcher());

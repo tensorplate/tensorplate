@@ -145,7 +145,9 @@ class JobBench {
 
   std::unique_ptr<BufferManager> manager;
   std::shared_ptr<RecordingJobEventSink> sink;
-  /// Runs inside every job callback, after the event is recorded.
+  /// Runs inside every job callback, after the event is recorded. Both hooks
+  /// are read on the channel's reader without a lock: a test sets them
+  /// before it submits its first job.
   std::function<void(const JobEvent&)> on_event;
   /// Runs inside every session release callback, after it is recorded.
   std::function<void(std::uint64_t, std::uint64_t)> on_session_release;

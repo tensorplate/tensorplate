@@ -535,6 +535,15 @@ TEST_F(JobChannelTest, ACallbackCancelsAndReleasesWhileTheReaderReadsOn) {
 
 TEST_F(JobChannelTest, ACallbackThatFindsTheQueueFullIsRefusedLikeAnyOtherCaller) {
   up();
+  h.on_event = [this](const JobEvent& event) {
+    if (event.kind() != Progress) {
+      return;
+    }
+    expect_refused(h.channel.cancel(1), Error::Code::ResourceExhausted, "send_queue_full");
+    expect_refused(h.channel.release_session(5, 1), Error::Code::ResourceExhausted,
+                   "send_queue_full");
+    noted = true;
+  };
   ASSERT_TRUE(h.submit(h.stt(1, 1, 3'200, /*progress_limit=*/1)).has_value());
   ASSERT_EQ(peer.take_job(), 1U);
   ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
@@ -548,16 +557,8 @@ TEST_F(JobChannelTest, ACallbackThatFindsTheQueueFullIsRefusedLikeAnyOtherCaller
               Error::Code::Timeout)
         << queued;
   }
-  h.on_event = [this](const JobEvent& event) {
-    if (event.kind() != Progress) {
-      return;
-    }
-    expect_refused(h.channel.cancel(1), Error::Code::ResourceExhausted, "send_queue_full");
-    expect_refused(h.channel.release_session(5, 1), Error::Code::ResourceExhausted,
-                   "send_queue_full");
-    noted = true;
-  };
-  // The sidecar still writes, and the reader still reads.
+  // The sidecar still writes, and the reader still reads: the callback above
+  // runs on the job's one progress event.
   peer.emit("job_progress", 1, {{"progress_sequence", 1}, {"result", transcript()}});
   ASSERT_TRUE(h.wait([&] { return noted.load(); }));
   h.stop(kSessionUnloaded);
