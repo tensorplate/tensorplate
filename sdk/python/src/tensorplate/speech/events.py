@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 _SAMPLE_BYTES = {"pcm_s16le": 2, "mulaw": 1}
 
@@ -47,6 +47,16 @@ class SpeechToTextLimits:
 
 
 @dataclass(frozen=True)
+class TextToSpeechLimits:
+    """Bounds on one text segment, and on the segments between two finalizes together."""
+
+    max_segment_text_bytes: int
+    max_segment_audio_ms: int
+    max_synthesis_text_bytes: int
+    max_synthesis_audio_ms: int
+
+
+@dataclass(frozen=True)
 class SessionLimits:
     """The timers the server runs for a session, in milliseconds, and its mode's bounds."""
 
@@ -57,6 +67,7 @@ class SessionLimits:
     finalize_deadline_ms: int
     output_stall_timeout_ms: int
     speech_to_text: SpeechToTextLimits | None = None
+    text_to_speech: TextToSpeechLimits | None = None
 
 
 @dataclass(frozen=True)
@@ -117,3 +128,44 @@ class FinalTranscript:
     def text(self) -> str:
         """The segments' text in order, with nothing added between them."""
         return "".join(segment.text for segment in self.segments)
+
+
+@dataclass(frozen=True)
+class AudioChunk:
+    """Audio of one text segment: 20 ms of ``format``, or less as the segment's last chunk.
+
+    ``chunk_index`` counts the segment's chunks from zero, and
+    ``segment_sample_offset`` its samples before this chunk.
+    """
+
+    segment_id: int
+    chunk_index: int
+    segment_sample_offset: int
+    format: AudioFormat
+    data: bytes = field(repr=False)
+
+    @property
+    def sample_count(self) -> int:
+        """Samples in ``data``, each counted once across the format's channels."""
+        return len(self.data) // self.format.sample_width
+
+
+@dataclass(frozen=True)
+class SegmentCompleted:
+    """A segment's audio was sent whole: ``total_samples`` in ``chunk_count`` chunks."""
+
+    segment_id: int
+    total_samples: int
+    chunk_count: int
+
+
+@dataclass(frozen=True)
+class SynthesisCompleted:
+    """The answer to a ``finalize()``: the segments completed since the one before it.
+
+    ``total_samples`` is those segments' samples together.
+    """
+
+    segment_count: int
+    total_samples: int
+    finalize_sequence: int

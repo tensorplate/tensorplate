@@ -25,7 +25,13 @@ from tensorplate.speech.errors import (
     SpeechError,
     StreamProtocolError,
 )
-from tensorplate.speech.events import SessionLimits, SessionTotals, SpeechToTextLimits, Target
+from tensorplate.speech.events import (
+    SessionLimits,
+    SessionTotals,
+    SpeechToTextLimits,
+    Target,
+    TextToSpeechLimits,
+)
 from tensorplate.stream.v1 import session_pb2 as pb
 
 EventT = TypeVar("EventT")
@@ -133,7 +139,8 @@ class Session(Generic[EventT]):
     Events must be read while the session sends. Credit, the answer to a
     Finalize and the end of the session all arrive on the stream the events
     arrive on, and the session stops reading it once it holds 16 KiB of
-    events its caller has not taken. A session left that way for the
+    events its caller has not taken, or two seconds of audio in a
+    text-to-speech session. A session left that way for the
     server's output stall time (``limits.output_stall_timeout_ms``) is ended
     with ``ResourceExhaustedError``. That timer runs only while the session
     has stopped reading for such events and starts again with each one
@@ -142,6 +149,9 @@ class Session(Generic[EventT]):
     A task cancelled inside a method gets its ``CancelledError`` and the
     session stays open; an event it was writing at that moment is still sent.
     """
+
+    # Whether the session's input is text segments, which the waiting-segment credit bounds.
+    _sends_segments = False
 
     def __init__(self) -> None:
         raise TypeError("a session is obtained from a SpeechClient, not constructed")
@@ -178,6 +188,7 @@ class Session(Generic[EventT]):
         self._half_closed = False
         self._write_failed = False
         self._credit_used = self._credit_limit = 0
+        self._segments_waiting = self._segment_limit = 0
         self._unaccepted: dict[int, int] = {}
         self._last_input = self._accepted = 0
         # The Finalize whose answer has not arrived, whoever waits for it, and the last answer.
@@ -196,6 +207,12 @@ class Session(Generic[EventT]):
     def _task_event(self, event: pb.ServerEvent) -> EventT | None:
         """The caller's event for a task body, or ``None`` for a body this session does not know."""
         raise NotImplementedError
+
+    def _sending(self, event: pb.ClientEvent) -> None:
+        """Called with the write lock held, just before `event` is written."""
+
+    def _check_closed(self, closed: pb.SessionClosed) -> None:
+        """Hold the server to what the session read before its ``SessionClosed``."""
 
     # --- the caller's view ----------------------------------------------------
 
@@ -217,6 +234,15 @@ class Session(Generic[EventT]):
             stt = SpeechToTextLimits(
                 bounds.min_frame_ms, bounds.max_frame_ms, bounds.max_utterance_ms
             )
+        tts = None
+        if limits.HasField("text_to_speech"):
+            text = limits.text_to_speech
+            tts = TextToSpeechLimits(
+                text.max_segment_text_bytes,
+                text.max_segment_audio_ms,
+                text.max_synthesis_text_bytes,
+                text.max_synthesis_audio_ms,
+            )
         return SessionLimits(
             idle_timeout_ms=limits.idle_timeout_ms,
             heartbeat_interval_ms=limits.heartbeat_interval_ms,
@@ -225,6 +251,7 @@ class Session(Generic[EventT]):
             finalize_deadline_ms=limits.finalize_deadline_ms,
             output_stall_timeout_ms=limits.output_stall_timeout_ms,
             speech_to_text=stt,
+            text_to_speech=tts,
         )
 
     @property
@@ -446,6 +473,7 @@ class Session(Generic[EventT]):
             if finalize:
                 self._finalizing = sequence
             event.sequence, event.session_id = sequence, self._session_id
+            self._sending(event)
             self._writer = asyncio.current_task()
             try:
                 await self._call.write(event)
@@ -462,8 +490,14 @@ class Session(Generic[EventT]):
             return sequence
 
     def _fits(self, size: int) -> bool:
-        """Whether the credit last reported, less what was sent since, admits `size` more bytes."""
-        return self._credit_used + sum(self._unaccepted.values()) + size <= self._credit_limit
+        """Whether the credit last reported, less what was sent since, admits `size` more bytes.
+
+        In a text-to-speech session those bytes are one more waiting segment.
+        """
+        sent = self._unaccepted
+        if self._credit_used + sum(sent.values()) + size > self._credit_limit:
+            return False
+        return not self._sends_segments or self._segments_waiting + len(sent) < self._segment_limit
 
     async def _send_finalize(self) -> int:
         """Send a Finalize once none is unanswered; the caller holds the input gate."""
@@ -567,6 +601,7 @@ class Session(Generic[EventT]):
                 raise self._violation("SessionClosed in a state that is not an end")
             if message.admission != pb.ADMISSION_ADMITTED:
                 raise self._violation("SessionClosed for a call that was not admitted")
+            self._check_closed(message)
             self._closed = message
         elif body == "cancel_accepted":
             if not self._cancelling:
@@ -577,14 +612,15 @@ class Session(Generic[EventT]):
                 self._unknown_events += 1
             else:
                 self._changed.notify()
-                await self._hold(item, event.ByteSize())
+                audio = body == "audio_chunk"
+                await self._hold(item, len(message.data) if audio else event.ByteSize(), audio)
         self._changed.notify()
 
-    async def _hold(self, item: EventT, size: int) -> None:
+    async def _hold(self, item: EventT, size: int, audio: bool) -> None:
         """Keep `item` for the caller, waiting for room no longer than the server would."""
         patience = self._opened().limits.output_stall_timeout_ms / 1000 or None
         try:
-            await self._events.put(item, size, patience)
+            await self._events.put(item, size, patience, audio=audio)
         except asyncio.TimeoutError:
             raise ResourceExhaustedError(
                 f"the session's events were left unread for {patience} s; "
@@ -620,7 +656,11 @@ class Session(Generic[EventT]):
     def _take_credit(self, credit: pb.InputCredit) -> None:
         if not credit.bytes.limit:
             raise self._violation("no byte budget in the input credit")
+        waiting = credit.waiting_segments
+        if self._sends_segments and not waiting.limit:
+            raise self._violation("no waiting-segment budget in the input credit")
         self._credit_used, self._credit_limit = credit.bytes.used, credit.bytes.limit
+        self._segments_waiting, self._segment_limit = waiting.used, waiting.limit
 
     async def _conclude(self) -> None:
         """Fix the session's outcome from the ended call and wake everything that waits on it."""

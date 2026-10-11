@@ -167,3 +167,4 @@ jobs:
           pytest -q tests/test_import_safety.py tests/test_speech_import.py
           tests/test_stream_modules.py tests/test_distribution.py
           tests/test_streaming_server.py tests/test_streaming_client.py
+          tests/test_streaming_tts.py

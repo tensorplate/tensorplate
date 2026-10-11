@@ -198,9 +198,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   known; the client never retries. The client's own channel turns gRPC's
   bandwidth probe off so that a session that stops reading holds the
   server back within HTTP/2's window of about 64 KiB.
-  Text-to-speech sessions and discovery of the stream endpoint are not in
-  the package yet, and the client has been run against an in-process server
-  built from the schema, not against a worker. (V030-E04-F02-T03)
+  Discovery of the stream endpoint is not in the package yet, and the
+  client has been run against an in-process server built from the schema,
+  not against a worker. (V030-E04-F02-T03)
+
+- The Python SDK's streaming speech client opens text-to-speech sessions:
+  `SpeechClient.synthesize()` returns a `TextToSpeechSession`.
+  `send_text()` sends one text segment under the server's input credit
+  (its bytes, and its place among the segments that wait for synthesis)
+  and returns the segment's id. Iterating yields each segment's
+  `AudioChunk` events, 20 ms of `session.output_format` each, and then its
+  `SegmentCompleted`; `finalize()` returns the `SynthesisCompleted` that
+  names it. Audio the caller has not taken is held in a playback buffer of
+  two seconds of the output format, counted in bytes. At that bound the
+  session reads nothing more from the server, which holds the server's
+  synthesis and its credit back, so a caller that plays audio as it takes
+  it keeps the session at the pace of playback; audio left untaken for the
+  server's output stall time ends the session with
+  `ResourceExhaustedError`. Audio that is not in the format `Ready`
+  declared, out of order, or not what a completion or the closing totals
+  count ends the session with `StreamProtocolError`. Text the server would
+  refuse raises `ValueError` before it is sent. `close_timeout` defaults
+  to 150 seconds for these sessions. Run against an in-process server
+  only, like the rest of the client. (V030-E04-F02-T03)
 
 - A gRPC stream listener in the serving worker that binds and refuses every
   `Open`: the worker does not serve stream sessions yet. In builds with

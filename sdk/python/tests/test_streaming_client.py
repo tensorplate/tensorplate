@@ -172,9 +172,11 @@ async def fill(fake: StreamServer, session: speech.SpeechToTextSession) -> list[
     waits: list[float | None] = []
     put = session._events.put
 
-    async def spy(item: Any, size: int, patience: float | None = None) -> None:
+    async def spy(
+        item: Any, size: int, patience: float | None = None, *, audio: bool = False
+    ) -> None:
         waits.append(patience)
-        await put(item, size, patience)
+        await put(item, size, patience, audio=audio)
 
     session._events.put = spy  # type: ignore[method-assign]
     for size in (*[1000] * 16, 3000):
@@ -1458,6 +1460,7 @@ def _surface(exported: type) -> Iterator[tuple[str, Any]]:
 
 def test_the_public_names_are_the_sdks_own_types() -> None:
     assert not _foreign(speech.SpeechToTextEvent)
+    assert not _foreign(speech.TextToSpeechEvent)
     assert _foreign(pb.Open | None)
     assert _foreign(type(grpc.StatusCode.OK))
     for name in speech.__all__:
