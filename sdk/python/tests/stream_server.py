@@ -18,6 +18,11 @@ session (``end()``). A `fault` makes it break one rule, for the tests of
 what the client does then. ``test_streaming_server.py`` holds it to the
 recorded frames under ``test/contract/fixtures/stream/v1``.
 
+It does not enforce, so no client is tested against: the two output budgets
+and every timer; the bounds on the audio of a segment and of a synthesis;
+the schema's 4,096-byte ceiling on a segment's text; ids above 2^53 - 1;
+``trace_id``, capabilities, message size and compression.
+
 ``Playback`` serves one call from a recording instead: the recorded server
 frames, byte for byte or with a test's `changes`, each run after the client
 frames that precede it.

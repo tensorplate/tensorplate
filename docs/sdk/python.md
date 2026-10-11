@@ -525,6 +525,23 @@ async def play_audio(
             await play(event.data)  # 20 ms of session.output_format
 ```
 
+- **Read audio while text is sent.** The one rule has less room here,
+  because audio is large. The credit `send_text()` waits for, the answer to
+  `finalize()` and the end `close()` waits for all arrive behind the audio
+  sent before them, and the session stops reading at two seconds of audio
+  its caller has not taken. A caller that sends first and reads afterwards
+  gets through only while everything fits. Against the in-process server,
+  `finalize()` or `close()` with nobody reading returns for up to two
+  seconds of audio in all (2.00 s returns, 2.02 s does not), and
+  `send_text()` returns for three segments of ten seconds, the one being
+  delivered and the two that may wait, and waits with a fourth. Past that the call waits, and
+  once the audio has gone untaken for the output stall time
+  (`session.limits.output_stall_timeout_ms`, five seconds by default) the
+  session ends and the call raises `ResourceExhaustedError`. So take the
+  audio in a task of its own, as `speak()` does. When that task fails, stop
+  the sender and raise the task's error, as `speak()` also does: a sender
+  left alone would wait out the stall time and raise
+  `ResourceExhaustedError` in place of the error that caused it.
 - **Sessions.** `client.synthesize(target, *, language, voice, trace_id="",
   turn_id="", open_timeout=10.0, close_timeout=<follows the server>,
   cancel_timeout=5.0)`.
@@ -568,7 +585,8 @@ async def play_audio(
   segment is whole only once its `SegmentCompleted` was read.
 - **The playback buffer.** Audio the caller has not taken is held in the
   session, up to two seconds of the output format counted in bytes of audio
-  (96,000 bytes of 24 kHz 16-bit mono). Other events are held up to 16 KiB,
+  (`PLAYBACK_BUFFER_MS` in `tensorplate.speech.tts`, 2000: 96,000 bytes of
+  24 kHz 16-bit mono). Other events are held up to 16 KiB,
   as in every session. At either bound the session reads nothing more from
   the server until something is taken. The transport's window then fills
   and the server's writes stop. A worker holds no more than two seconds of
@@ -576,13 +594,18 @@ async def play_audio(
   ([serving-worker.md](../architecture/serving-worker.md#logical-sessions)),
   so it stops synthesizing and drops nothing, and its credit stops
   returning, so `send_text()` waits. A caller that plays audio as it takes
-  it therefore keeps the session at the pace of playback, with about two
-  seconds ahead in the session, what the transport's window lets through
-  beyond that (64 to 96 KB in runs on one machine), and two seconds in the
-  server. Taking nothing for the server's output stall time ends the
-  session with `ResourceExhaustedError`, by the client's timer or by the
-  server's own limit (`reason == "slow_consumer"`), whichever is first;
-  audio already held is still yielded before the error.
+  it therefore keeps the session at the pace of playback. The two seconds
+  are the session's buffer alone, not all the audio ahead of the player.
+  Beyond it the transport holds what its window let through, which is a
+  number of bytes and so a longer time in a format of fewer bytes a second:
+  in runs on one machine, 1.3 to 1.4 seconds more of 24 kHz 16-bit mono and
+  6.5 seconds more of 8 kHz mu-law. The server holds up to two seconds
+  beyond that. Taking nothing for the server's output stall time ends the
+  session with `ResourceExhaustedError`, and audio already held is still
+  yielded before the error. That end is the client's timer's unless the
+  caller takes audio again first: a session that has stopped reading does
+  not read the server's end either, so the end the server's own limit makes
+  (`reason == "slow_consumer"`) is seen only by a caller that resumes.
 - **Finalize.** `finalize()` completes the segments sent so far and returns
   the `SynthesisCompleted` that names it, which counts those segments and
   their samples; iteration yields it too, after their audio. The server

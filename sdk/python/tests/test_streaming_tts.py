@@ -27,7 +27,7 @@ from stream_server import REPOSITORY, Playback, StreamServer, frames, recorded
 from tensorplate.speech import tts
 from tensorplate.speech._buffer import EventBuffer
 from tensorplate.stream.v1 import session_pb2 as pb
-from test_streaming_client import at_once, run, turns
+from test_streaming_client import at_once, run, stopped_clock, turns
 
 TARGET = speech.Target("synthetic-deployment", 7, "sha256:" + "0" * 64)
 PCM = speech.AudioFormat("pcm_s16le", 24000)
@@ -547,7 +547,7 @@ def test_a_reader_that_stops_holds_two_seconds_of_audio_and_holds_the_server_bac
         assert events[-1] == speech.SegmentCompleted(1, LONG, 500)
         assert totals.output_audio_samples == LONG
 
-    play(scenario, StreamServer(segment_samples=LONG))
+    play(scenario, StreamServer(segment_samples=LONG, output_stall_timeout_ms=NO_STALL_MS))
     assert PCM.sample_width * PCM.sample_rate_hz * tts.PLAYBACK_BUFFER_MS // 1000 == HELD
 
 
@@ -584,7 +584,11 @@ def test_the_playback_buffer_is_two_seconds_of_whatever_format_ready_declares() 
 
     play(
         scenario,
-        StreamServer(output_format=(pb.AUDIO_ENCODING_MULAW, 8000, 2), segment_samples=LONG),
+        StreamServer(
+            output_format=(pb.AUDIO_ENCODING_MULAW, 8000, 2),
+            segment_samples=LONG,
+            output_stall_timeout_ms=NO_STALL_MS,
+        ),
     )
 
 
@@ -603,7 +607,7 @@ def test_a_sender_held_back_by_audio_nobody_takes_resumes_when_it_is_taken() -> 
             assert (await session.close()).segments_completed == 4
             assert len(await reader) == 4 * 501
 
-    play(scenario, StreamServer(segment_samples=LONG))
+    play(scenario, StreamServer(segment_samples=LONG, output_stall_timeout_ms=NO_STALL_MS))
 
 
 def test_the_servers_slow_consumer_end_follows_the_audio_the_session_held() -> None:
@@ -625,7 +629,7 @@ def test_the_servers_slow_consumer_end_follows_the_audio_the_session_held() -> N
         with pytest.raises(speech.ResourceExhaustedError):
             await session.send_text(TEXT)
 
-    play(scenario, StreamServer(segment_samples=LONG))
+    play(scenario, StreamServer(segment_samples=LONG, output_stall_timeout_ms=NO_STALL_MS))
 
 
 def test_audio_left_untaken_for_the_servers_stall_time_ends_the_session() -> None:
@@ -645,6 +649,74 @@ def test_audio_left_untaken_for_the_servers_stall_time_ends_the_session() -> Non
     play(scenario, StreamServer(segment_samples=LONG, output_stall_timeout_ms=50))
 
 
+def test_the_stall_timer_for_audio_lasts_what_ready_gives_and_restarts_with_a_chunk_taken() -> None:
+    async def scenario(fake: StreamServer, session: speech.TextToSpeechSession) -> None:
+        await session.open()
+        assert session.limits.output_stall_timeout_ms == 8000
+
+        # Two segments of one short chunk, then a long one: the two short chunks and 99 whole
+        # ones are held, and the hundredth has no room, also once a short one is taken.
+        def short_segment() -> None:
+            fake.start()
+            fake.speak(40)
+            fake.complete()
+
+        await send(session, 2)
+        await texts(fake, 2)
+        short_segment()
+        # The first segment's start left its waiting place to a third.
+        await session.send_text(TEXT)
+        await texts(fake, 3)
+        short_segment()
+        fake.start()
+        fake.speak(LONG)
+        # Ready, six Accepted, the short chunks with their completions, and a hundred chunks.
+        await read(session, 111)
+        await turns()
+        assert session._events.audio_used == HELD - 800
+        with stopped_clock() as advance:
+            # The take restarts the timer, here on the stopped clock.
+            short = await anext(session)
+            assert isinstance(short, speech.AudioChunk)
+            assert len(short.data) == 80
+            await turns()
+            assert (session._received, session._events.audio_used) == (111, HELD - 880)
+            await advance(7.9)
+            assert not session._ended
+            await advance(0.2)
+            assert session._ended
+        with pytest.raises(speech.ResourceExhaustedError, match=r"left unread for 8\.0 s"):
+            await session.close()
+
+    play(
+        scenario,
+        StreamServer(hold_synthesis=True, output_stall_timeout_ms=8000, heartbeat_interval_ms=0),
+    )
+
+
+@pytest.mark.parametrize("use", ["finalize", "close"])
+@pytest.mark.parametrize(("samples", "fits"), [(48_000, True), (48_480, False)])
+def test_sending_everything_before_reading_works_only_while_the_audio_fits_the_buffer(
+    use: str, samples: int, fits: bool
+) -> None:
+    async def scenario(fake: StreamServer, session: speech.TextToSpeechSession) -> None:
+        await session.open()
+        await session.send_text(TEXT)
+        if not fits:
+            # The 101st chunk waits for room, and the answer or the end is behind it.
+            with pytest.raises(speech.ResourceExhaustedError, match="left unread"):
+                await getattr(session, use)()
+            return
+        # Two seconds exactly: a hundred chunks are held, and what follows them is not audio.
+        await getattr(session, use)()
+        await session.close()
+        events = await taken(session)
+        assert [type(event) for event in events].count(speech.AudioChunk) == 100
+        assert len(events) == (102 if use == "finalize" else 101)
+
+    play(scenario, StreamServer(segment_samples=samples, output_stall_timeout_ms=50))
+
+
 def test_cancel_drops_the_audio_held_and_stops_the_server_where_it_is() -> None:
     async def scenario(fake: StreamServer, session: speech.TextToSpeechSession) -> None:
         await session.open()
@@ -658,7 +730,7 @@ def test_cancel_drops_the_audio_held_and_stops_the_server_where_it_is() -> None:
         assert 0 < closed.totals.output_audio_samples < LONG
         assert closed.totals.segments_completed == 0
 
-    play(scenario, StreamServer(segment_samples=LONG))
+    play(scenario, StreamServer(segment_samples=LONG, output_stall_timeout_ms=NO_STALL_MS))
 
 
 def test_a_session_the_server_ends_in_a_segment_raises_the_cause_after_its_audio() -> None:
