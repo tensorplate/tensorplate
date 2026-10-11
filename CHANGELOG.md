@@ -8,6 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The doctor's runner-profile unit tests no longer fail now and then with
+  "Text file busy". They wrote an interpreter script and ran it, and a test
+  thread that forked in between held the file open for writing until its
+  own exec. The interpreter is now a link to a checked-in script that is
+  never written; the test's script sits beside it as data. (V030-E01-F03)
+
 - Every integer key of the agent configuration now accepts a number written
   with a zero fraction (`18100.0`), as the configuration schema does. Only
   the port range did; elsewhere the agent refused a file the schema
