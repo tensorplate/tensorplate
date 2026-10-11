@@ -505,15 +505,24 @@ before the first document is written.
 - **Write.** Inside the state update that names the descriptor, after the
   update has set the identity in the next state and before the store writes
   that state: a `.tmp` file, `fsync`, `rename(2)`, then a sync of the
-  directory. A document that cannot be written fails the update. A crash
-  between the two writes leaves a document no record names.
+  directory. A document that cannot be written fails the update, and the
+  failed write removes its `.tmp`: nothing is named. A deploy's update,
+  which takes the generation in that same update, then spends none; a
+  restart's generation was allocated by the registry in its earlier state
+  write, so a restart whose stamp cannot write the document has spent one.
+  A crash between the two writes leaves a document no record names.
 - **Read.** By deployment id and the identity a record or candidate
-  reference carries. The document must verify and be that deployment's
-  descriptor at that generation with those digests; a missing or different
-  one is refused with `load_failed`, not recoverable, naming the file.
+  reference carries. The document must be a regular file of at most 1 MiB
+  of UTF-8 (a directory, a FIFO or a symlink at its name is refused without
+  being opened, since the read can run inside a state update), verify, and
+  be that deployment's descriptor at that generation with those digests;
+  anything else, a missing document included, is refused with
+  `load_failed`, not recoverable, naming the file. A candidate reference
+  must also state the descriptor's bundle digest, staged path, model class
+  and backend, or the candidate is refused the same way, naming the field.
 - **Prune.** `DescriptorStore::prune` removes every document that no
   singleton record, in-flight transaction or resident-set member (with the
-  generation it retains) names, and every `.tmp` a write left; no other
+  generation it retains) names, and every `.tmp` a crash left; no other
   file, and nothing when a record's identity cannot be read. It is for a
   start, before anything writes a document. Nothing calls it yet, so the
   document of a generation a restart replaced stays where it is.
@@ -557,9 +566,11 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   so it happens on the first start that has a deployment to restore. A
   deploy's candidate reference that names a
   [descriptor](#deployment-descriptor-documents) hands over its generation
-  instead: the launch is that generation and takes none from the counter,
-  and a generation the registry is running is refused. A restart always
-  takes a new one, whatever its recipe names.
+  instead: the launch is that generation and takes none from the counter.
+  A handed generation must be above every generation the registry holds,
+  its members' and the one a restart is owed for, or the candidate is
+  refused with `load_failed`. A restart always takes a new one, whatever
+  its recipe names.
 - **Start.** The registry renders the serving config with
   `deployment.generation` and `deployment.endpoint` set to the deployment id,
   hands the worker its control socket on fd 0 in the same launch, and starts

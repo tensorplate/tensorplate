@@ -108,12 +108,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   (temporary file, `fsync`, rename, directory sync) inside the state update
   that names it, and verified against the generation and digests a record
   or candidate reference carries when it is read. A candidate that names a
-  descriptor is started as the generation it names and rendered with the
+  descriptor must state its bundle digest, staged path, model class and
+  backend, is started as the generation it names, which must be above
+  every generation the registry holds, and is rendered with the
   descriptor's runner profile; a restart re-stamps the descriptor for its
   new generation and names it on the active record in the same state
-  update. A missing or different document is `load_failed`, not
-  recoverable. No deploy records a descriptor yet, so a deployed agent
-  behaves as before. (V030-E02-F01-T04)
+  update. A missing or different document, or one that is not a regular
+  file of at most 1 MiB of UTF-8, is `load_failed`, not recoverable. No
+  deploy records a descriptor yet, so a deployed agent behaves as before.
+  (V030-E02-F01-T04)
 
 - A deployment record, the in-flight transaction and a candidate reference
   can name the deployment descriptor of their generation. Three optional
