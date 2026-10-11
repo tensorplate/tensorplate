@@ -53,6 +53,28 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Conformance cases for the job bridge and an in-process fixture bridge to
+  run them against, both test-only. The cases
+  (`test/contract/bounded_job_bridge_conformance.hpp`) hold what the bridge
+  header promises the caller of a bridge whose backend runs `stt_decode`
+  and `tts_synthesis`: the refusals of each method, each job's events and
+  results, the order of `submit`'s refusals as far as a binding can reach
+  it, a health check beside a running job, cancellation of a waiting and
+  of a running job, a session release and its acknowledgement, callbacks
+  of every kind that call back, an unload and a lost backend, also with a
+  cancellation or a session release pending. A binding supplies the
+  bridge, a hold on its backend's jobs, so no case waits on the clock, and
+  what its backend does where the header leaves a choice; where the header
+  allows two outcomes a case accepts both. `FixtureJobBridge`
+  (`test/mocks/`, test library `tp::fixture_job_bridge`) runs jobs on a
+  thread of its own by the sidecar runner's rules, with the fixture
+  backend's results or a result function the test passes, and lets a test
+  hold started jobs, fail the next one, ask whether it has settled, and
+  select the other of two allowed outcomes: a full backend refused by
+  `submit` itself, and a cancelled job that completes unacknowledged. No
+  production binary contains either, and the Python/PyTorch adapter does
+  not implement the bridge yet. (V030-E04-F03-T03)
+
 - The Python SDK gains a streaming speech client, `tensorplate.speech`
   (the `speech` extra), over the draft stream session schema. It is
   asyncio only. `SpeechClient(endpoint)`, or `SpeechClient(channel=...)` on
