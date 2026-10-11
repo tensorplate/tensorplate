@@ -277,6 +277,8 @@ jobs:
           tools/ci/apt-get.sh update
           tools/ci/apt-get.sh install -y --no-install-recommends clang-format-15
           sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-15 100
+          readlink -f "$(command -v clang-format)"
+          clang-format --version
       - name: Check formatting
         shell: bash
         run: |
@@ -325,6 +327,8 @@ jobs:
             clang-tidy-15
           tools/ci/select-clang.sh
           sudo update-alternatives --install /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-15 100
+          readlink -f "$(command -v clang-tidy)"
+          clang-tidy --version
 
       - name: Check out vcpkg at the manifest's baseline
         run: tools/ci/checkout-vcpkg.sh
