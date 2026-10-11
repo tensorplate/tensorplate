@@ -485,18 +485,30 @@ async def speak(
     async with SpeechClient(endpoint) as client:
         session = client.synthesize(target, language="en", voice="my-voice")
         async with session:
-            # Audio is taken while text is sent, in a task of its own.
+            # Audio is taken while text is sent, each in a task of its own.
             player = asyncio.create_task(play_audio(session, play))
+            sender = asyncio.create_task(send(session, sentences))
             try:
-                for sentence in sentences:
-                    await session.send_text(sentence)
-                done = await session.finalize()
-                await session.close()
-                await player
+                # Until both are done or one has failed. A player that failed takes no
+                # more audio, and the sender would wait behind the audio nobody takes.
+                await asyncio.wait({player, sender}, return_when=asyncio.FIRST_EXCEPTION)
             finally:
-                # A session that fails fails its player too: take that outcome on every path.
+                # Take both outcomes on every path.
                 player.cancel()
-                await asyncio.gather(player, return_exceptions=True)
+                sender.cancel()
+                outcomes = await asyncio.gather(player, sender, return_exceptions=True)
+            # The player's error first: the sender's, if it has one too, came of it.
+            for outcome in outcomes:
+                if isinstance(outcome, Exception):
+                    raise outcome
+    return sender.result()
+
+
+async def send(session: TextToSpeechSession, sentences: list[str]) -> int:
+    for sentence in sentences:
+        await session.send_text(sentence)
+    done = await session.finalize()
+    await session.close()
     return done.total_samples
 
 

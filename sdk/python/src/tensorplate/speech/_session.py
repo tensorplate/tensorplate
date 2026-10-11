@@ -407,10 +407,10 @@ class Session(Generic[EventT]):
         try:
             done, _ = await asyncio.wait({task}, timeout=timeout)
         finally:
-            if not task.done():
-                if task is not self._writer:
-                    task.cancel()
-                task.add_done_callback(_retrieve)
+            if not task.done() and task is not self._writer:
+                task.cancel()
+            # A caller cancelled here leaves the work's outcome, which may already be there.
+            task.add_done_callback(_retrieve)
         if not done:
             raise asyncio.TimeoutError
         return task.result()

@@ -1232,6 +1232,27 @@ def test_a_sender_cancelled_while_the_session_is_cancelled_reads_as_cancelled() 
     play(scenario, deaf(), input_format=STEREO)
 
 
+@pytest.mark.parametrize("turns_before_the_cancel", [1, 2, 3, 4])
+def test_a_caller_cancelled_as_its_call_fails_leaves_asyncio_nothing_to_report(
+    turns_before_the_cancel: int,
+) -> None:
+    async def fail() -> None:
+        raise KeyError("the work's own failure")
+
+    async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
+        async with session:
+            caller = asyncio.create_task(session._within(fail(), None))
+            # On one of these turns the work has failed and its caller has not yet run again.
+            for _ in range(turns_before_the_cancel):
+                await asyncio.sleep(0)
+            caller.cancel()
+            await asyncio.wait({caller})
+            assert caller.cancelled() or isinstance(caller.exception(), KeyError)
+
+    # `run` fails on a task whose exception nobody took.
+    play(scenario)
+
+
 def test_a_sender_cancelled_in_a_write_leaves_the_session_open_and_its_frame_sent() -> None:
     async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
         async with session:

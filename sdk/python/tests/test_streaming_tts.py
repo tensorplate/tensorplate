@@ -773,6 +773,27 @@ def test_the_documented_example_plays_audio_while_it_sends() -> None:
     assert fake.bodies() == ["open", *["text_segment"] * 4, "finalize"]
 
 
+def test_the_documented_example_raises_its_players_error_when_playing_fails() -> None:
+    # Four segments of ten seconds and no stall timer to speak of: an example that left
+    # its sender waiting behind the audio nobody takes would not return.
+    example, fake = documented(segment_samples=LONG, output_stall_timeout_ms=NO_STALL_MS)
+    failure = RuntimeError("the audio device failed")
+
+    async def play_chunk(data: bytes) -> None:
+        raise failure
+
+    async def main() -> None:
+        async with fake.serving() as endpoint:
+            with pytest.raises(RuntimeError) as caught:
+                await example["speak"](endpoint, [TEXT] * 4, play_chunk)
+            assert caught.value is failure
+            await fake.until(lambda: fake.live == 0)
+            assert fake.closed[0].cause.reason == pb.FAILURE_REASON_CLIENT_CANCELLED
+
+    # `run` fails on a task whose exception nobody took.
+    run(main)
+
+
 def test_the_documented_example_takes_its_players_outcome_when_the_session_fails() -> None:
     example, fake = documented(hold_synthesis=True)
 
