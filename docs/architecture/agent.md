@@ -516,10 +516,13 @@ before the first document is written.
   of UTF-8 (a directory, a FIFO or a symlink at its name is refused without
   being opened, since the read can run inside a state update), verify, and
   be that deployment's descriptor at that generation with those digests;
-  anything else, a missing document included, is refused with
-  `load_failed`, not recoverable, naming the file. A candidate reference
-  must also state the descriptor's bundle digest, staged path, model class
-  and backend, or the candidate is refused the same way, naming the field.
+  anything else, a missing document or one the agent cannot read
+  included, is refused with `load_failed`, not recoverable, naming the
+  file and, for a read that failed, the operating system's error. A
+  candidate reference must also state the descriptor's bundle digest,
+  staged path, model class and backend and, where it carries them, its
+  model artifact's path, bundle name and bundle version, or the candidate
+  is refused the same way, naming the field.
 - **Prune.** `DescriptorStore::prune` removes every document that no
   singleton record, in-flight transaction or resident-set member (with the
   generation it retains) names, and every `.tmp` a crash left; no other
@@ -637,8 +640,15 @@ three restarts available; until then status reports the member as failed.
 A restart never starts while a deploy holds the member: from the moment
 `prepare` begins until its candidate is promoted or fails, its `warm`
 gives up, or the transaction returns without promoting it for any other
-reason, such as a state write that failed. A promoted generation is therefore never older than the one it
-replaces, and a promotion drops the restart that was owed and gives the
+reason, such as a state write that failed. A promoted generation the
+registry allocated is therefore never older than the one it replaces. A
+generation handed with a descriptor is compared, at its launch, with the
+generations the registry holds then: while a restart is being stamped, a
+reference handing a lower generation can still be prepared and promoted.
+Nothing hands a generation yet; the change that makes deploys hand them
+closes that window, by holding restarts before the generation is allocated
+or by refusing at promote, and decides whether that refusal is
+recoverable. A promotion drops the restart that was owed and gives the
 member its three restarts back. A candidate whose `warm` gave up is left
 where it was, as before, but is not promoted afterwards.
 

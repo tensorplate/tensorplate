@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
 use tensorplate_protocol::agent_state::AgentState;
 use tensorplate_protocol::worker_control::CandidateRef;
-use tensorplate_protocol::{DeploymentDescriptor, DescriptorIdentity, ErrorCode};
+use tensorplate_protocol::{ArtifactRole, DeploymentDescriptor, DescriptorIdentity, ErrorCode};
 
 use crate::error::{AgentError, AgentResult};
 
@@ -88,7 +88,8 @@ pub fn identity_of(candidate: &CandidateRef) -> AgentResult<Option<DescriptorIde
 /// [`AgentError::DeploymentDescriptor`] when the candidate names another
 /// generation's descriptor, there is no store, the read is refused, or the
 /// candidate states another bundle digest, staged path, model class or
-/// backend than the descriptor.
+/// backend than the descriptor, or carries another model artifact path,
+/// bundle name or bundle version.
 pub fn resolve(
     store: Option<&DescriptorStore>,
     candidate: &CandidateRef,
@@ -115,29 +116,44 @@ pub fn resolve(
             "of `{id}` generation {named} is not the candidate's: its `{field}` is `{described}`, and the reference's is `{referenced}`"
         ))
     };
-    let bundle = &configuration.bundle.bundle_digest;
-    if !crate::bundle::bundle_digests_equal(bundle, &candidate.bundle_digest) {
-        return Err(disagrees("bundle_digest", bundle, &candidate.bundle_digest));
+    let digest = &configuration.bundle.bundle_digest;
+    if !crate::bundle::bundle_digests_equal(digest, &candidate.bundle_digest) {
+        return Err(disagrees("bundle_digest", digest, &candidate.bundle_digest));
     }
+    let mut artifacts = configuration.artifacts.iter();
+    let model = artifacts.find(|artifact| artifact.role == ArtifactRole::Model);
+    let (bundle, carried) = (&configuration.bundle, candidate);
+    // The last three are compared when the reference carries them.
     let stated = [
         (
             "staged_path",
             &*descriptor.staged_path,
-            &*candidate.staged_path,
+            Some(&*carried.staged_path),
         ),
         (
             "model_class",
             configuration.model_class.as_str(),
-            &*candidate.model_class,
+            Some(&*carried.model_class),
         ),
         (
             "backend_hint",
             &*configuration.backend_hint,
-            &*candidate.backend_hint,
+            Some(&*carried.backend_hint),
+        ),
+        (
+            "artifact_relative_path",
+            model.map_or("", |model| &*model.path),
+            carried.artifact_relative_path.as_deref(),
+        ),
+        ("bundle_name", &*bundle.name, carried.bundle_name.as_deref()),
+        (
+            "bundle_version",
+            &*bundle.version,
+            carried.bundle_version.as_deref(),
         ),
     ];
     for (field, described, referenced) in stated {
-        if described != referenced {
+        if let Some(referenced) = referenced.filter(|referenced| *referenced != described) {
             return Err(disagrees(field, described, referenced));
         }
     }
@@ -223,12 +239,13 @@ impl DescriptorStore {
     }
 
     /// The text of the document at `path`. Only a regular file is opened:
-    /// a FIFO there would block the state update the read runs in.
+    /// a FIFO there would block the state update the read runs in. A
+    /// document that cannot be read cannot be verified.
     fn text(path: &Path) -> AgentResult<String> {
         let unverified = |reason: String| refused(path, format!("does not verify: {reason}"));
         let unread = |e: io::Error| match e.kind() {
             ErrorKind::NotFound => refused(path, "is missing"),
-            kind => io::Error::new(kind, format!("{}: {e}", path.display())).into(),
+            _ => unverified(format!("it cannot be read: {e}")),
         };
         if !fs::symlink_metadata(path).map_err(unread)?.is_file() {
             return Err(unverified("it is not a regular file".into()));
@@ -252,9 +269,9 @@ impl DescriptorStore {
     /// # Errors
     ///
     /// [`AgentError::DeploymentDescriptor`] when the document is missing,
-    /// is not a regular file of at most [`MAX_DOCUMENT_BYTES`] of UTF-8,
-    /// does not verify, or is not the one named; [`AgentError::Io`] when
-    /// reading it fails otherwise.
+    /// cannot be read, is not a regular file of at most
+    /// [`MAX_DOCUMENT_BYTES`] of UTF-8, does not verify, or is not the one
+    /// named.
     pub fn read(
         &self,
         deployment_id: &str,

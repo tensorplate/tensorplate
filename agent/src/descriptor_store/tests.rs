@@ -292,6 +292,27 @@ fn a_document_that_is_not_utf8_is_a_directory_or_is_over_the_bound_does_not_veri
 
 #[cfg(unix)]
 #[test]
+fn a_document_the_agent_may_not_read_does_not_verify_and_says_why() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: root reads a file of mode 000");
+        return;
+    }
+    let f = fixture();
+    let named = derive("stt", 3, STAGED);
+    f.descriptors.write(&named).unwrap();
+    let path = f.path("descriptor-stt-3.json");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    let denied = File::open(&path).unwrap_err().to_string();
+
+    let message = unverified(&f, &named);
+
+    let says = format!("it cannot be read: {denied}");
+    assert!(message.contains(&says), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
 fn a_fifo_or_a_symlink_at_a_documents_name_is_refused_without_being_opened() {
     let f = fixture();
     let named = derive("stt", 3, STAGED);
@@ -558,6 +579,61 @@ fn a_candidate_resolves_to_its_document_only_when_it_states_what_the_descriptor_
         let theirs = format!("and the reference's is `{other}`");
         assert!(message.contains(&theirs), "{message}");
     }
+}
+
+/// Resolve a reference to the descriptor of `stt` generation 3 that carries
+/// what `edit` leaves of the fields a reference may omit.
+fn resolved(edit: fn(&mut CandidateRef)) -> AgentResult<Option<DeploymentDescriptor>> {
+    let f = fixture();
+    let descriptor = derive("stt", 3, STAGED);
+    f.descriptors.write(&descriptor).unwrap();
+    let mut carried = reference(&descriptor);
+    edit(&mut carried);
+    resolve(Some(&*f.descriptors), &carried, 3)
+}
+
+/// The refusal of a reference whose `field` is `other`, not the descriptor's.
+fn contradicted(
+    field: &str,
+    described: &str,
+    other: &str,
+    result: AgentResult<impl std::fmt::Debug>,
+) {
+    let message = refusal(result);
+    let says = format!(
+        "is not the candidate's: its `{field}` is `{described}`, and the reference's is `{other}`"
+    );
+    assert!(message.contains(&says), "{message}");
+}
+
+#[test]
+fn a_candidate_that_carries_none_of_the_optional_fields_resolves() {
+    let none = resolved(|carried| {
+        carried.artifact_relative_path = None;
+        carried.bundle_name = None;
+        carried.bundle_version = None;
+    });
+    assert!(none.unwrap().is_some());
+}
+
+#[test]
+fn a_candidate_that_carries_another_artifact_path_than_the_descriptors_model_is_refused() {
+    let result = resolved(|carried| carried.artifact_relative_path = Some("absent.bin".into()));
+    contradicted("artifact_relative_path", "entry.json", "absent.bin", result);
+}
+
+#[test]
+fn a_candidate_that_carries_another_bundle_name_than_the_descriptors_is_refused() {
+    let described = derive("stt", 3, STAGED).configuration.bundle.name;
+    let result = resolved(|carried| carried.bundle_name = Some("another".into()));
+    contradicted("bundle_name", &described, "another", result);
+}
+
+#[test]
+fn a_candidate_that_carries_another_bundle_version_than_the_descriptors_is_refused() {
+    let described = derive("stt", 3, STAGED).configuration.bundle.version;
+    let result = resolved(|carried| carried.bundle_version = Some("9.9.9".into()));
+    contradicted("bundle_version", &described, "9.9.9", result);
 }
 
 #[cfg(unix)]
