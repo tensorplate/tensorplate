@@ -734,6 +734,26 @@ second finds the session active again and fails it. The sink's order tells a dis
 come back through the sink starts a new finalization, and one it is
 shown before that was answered by the completion.
 
+A Finalize that joined a finalization is still answered by a final of
+its own: the final of the utterance it ends, which carries its client
+sequence. The final of an utterance an automatic endpoint ended carries
+none. The sequence reaches the dispatch only with the hand-over, and
+until then the finalization is what covers the Finalize: its deadline
+ends a session whose hand-over never arrives. A dispatch therefore does
+not begin the report of the one completion while a client Finalize it
+has recorded from the sink is still to be handed over. The session stays
+`finalizing` across the endpoint's final; more input then fails the
+session, and the deadline is the one that started at the endpoint, which
+a take-over does not restart. Once the Finalize was handed over the
+completion is reported, at the latest before the Finalize's final is
+offered. It may precede that final by the length of a backend job, with
+the session `active` and no finalize deadline over the answer still
+owed. A dispatch that had begun the report before it recorded the
+Finalize cannot hold it back: the manager applies the completion after
+the Finalize, and the session is `active` again before the hand-over.
+In every case a binding hands the Finalize over, and reads the final
+that carries the sequence as its answer, never the return to `active`.
+
 **Hand-overs and drains.** Input and a client Finalize are handed over
 after the manager's call returns, outside its serialized section, so a
 drain can reach the dispatch first. A drain is not complete while the
@@ -759,7 +779,8 @@ over; `audio` copies the frame before it returns. Audio credit returns
 when a frame joins the utterance being collected, not when the utterance
 is decoded. The dispatch keeps that utterance within the longest the
 terms grant by ending it itself: an `automatic_endpoint`, with the
-duration-limit reason on its endpoint. What it collected stays readable
+duration-limit reason on its endpoint, as soon as the utterance holds
+that much and without waiting for more audio. What it collected stays readable
 for as long as a backend job may read it, which is until the backend
 reports that job released, and is dropped then. A text segment's waiting
 credit returns when its work starts and its active slot when the last
@@ -801,13 +822,42 @@ thread itself. Slots still held at `stop()` are released by nobody: they
 end with the manager.
 
 `SyntheticSessionDispatch` is a dispatch with no backend, for exercising
-a binding: each utterance yields its endpoint and a fixed transcript,
-each text segment a fixed PCM pattern, under the same credit,
-backpressure, drain and cleanup rules. It serves both input kinds on one
-thread, confirms cleanup at once, accepts any language and voice, and
-keeps no audio, so it never ends an utterance itself. The dispatch that
-runs backend jobs is not built yet, and the serving worker constructs
-neither.
+a binding. It is not part of the runtime: it lives in
+`test/mocks/synthetic_session_dispatch.hpp` and is built as the test
+library `tp_synthetic_session_dispatch`, which a test of a binding links.
+What it yields is a function of the bytes handed over, so a binding that
+hands over the wrong bytes of the right size is caught: an utterance's
+transcript is a digest of its audio (`transcript_of`), and a segment's
+PCM follows its text byte by byte (`sample_of`). It serves both input
+kinds on one thread under the credit, backpressure, drain and cleanup
+rules above, grants a fixed set of languages and voices and refuses any
+other, and ends an utterance at the longest its terms grant with an
+automatic endpoint. It can be paused at two points. Before work: the
+thread parks at the next hand-over, so input stays accepted with its
+credit not returned. In a job: an utterance being transcribed or a
+segment being synthesized does not complete, and the cleanup of a
+session that has one stays unanswered, as with a backend that has not
+confirmed a release.
+
+`ReferenceBinding` (`test/mocks/session_dispatch_binding.hpp`) is a
+binding with no wire. It keeps what the cases need of the binding's side
+of this section: the calls and their order, credit reported from the
+sink while input is taken, and no audio after a short frame. It does not
+check frame bounds, sample offsets, segment ids or text limits. The
+cases written against it (`SessionDispatchContract`, in
+`test/unit/session_dispatch_test.cpp`) hold for every dispatch: that
+test binary instantiates the suite once for each dispatch it builds,
+with what the dispatch serves, what it yields for given input and how
+its jobs are held. They take every frame size, sample width and limit
+from the terms the dispatch grants, and assert the order of what the
+sink shows rather than a count of it. The cases that need the synthetic
+dispatch's own gates or reason strings are its own, outside the suite.
+The binding can run a hook inside the sink call of a chosen transition,
+which is how a case releases a held job inside the manager call that
+applies a Finalize: the synthetic dispatch then reports the completion
+before it has recorded the Finalize, and another dispatch may take
+either order. The dispatch that runs backend jobs is not built yet, and
+the serving worker constructs none.
 
 ## Test surface
 

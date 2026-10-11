@@ -103,6 +103,7 @@ struct TranscriptSegment {
 
 /// The one final of an utterance. No segments means silence.
 struct FinalTranscriptOutput {
+  /// The session's utterances are numbered from 1, in the order they end.
   std::uint64_t utterance_id = 0;
   std::vector<TranscriptSegment> segments;
   /// Exclusive end of the utterance's input, in samples of the input format
@@ -116,6 +117,7 @@ struct FinalTranscriptOutput {
 struct AudioChunkOutput {
   /// The client's segment id, unchanged.
   std::uint64_t segment_id = 0;
+  /// From 0 within the segment.
   std::uint32_t chunk_index = 0;
   std::uint64_t segment_sample_offset = 0;
   std::vector<std::byte> pcm;
@@ -249,7 +251,8 @@ class SessionDispatch {
   /// automatic endpoint in between or not. The bytes are copied before the
   /// call returns. The frame's credit returns when it joins the utterance
   /// being collected, which the dispatch ends itself (`automatic_endpoint`,
-  /// DurationLimit) at SessionTerms::max_utterance; what it collected stays
+  /// DurationLimit) as soon as it holds SessionTerms::max_utterance, without
+  /// waiting for more audio; what it collected stays
   /// readable for as long as a backend job may read it.
   virtual void audio(std::uint64_t session_key, std::span<const std::byte> frame) = 0;
 
@@ -268,7 +271,10 @@ class SessionDispatch {
   /// is reported before the answer is offered. A Finalize or an automatic
   /// endpoint applied while a finalization runs joins it: the manager counts
   /// one finalization, so exactly one `finalize_completed` is applied for
-  /// all of them, and a second fails the session.
+  /// all of them, and a second fails the session. A joined Finalize is still
+  /// answered by the final that carries `client_sequence`, and a dispatch
+  /// does not begin the report of the completion while a Finalize it has
+  /// recorded from the sink is still to be handed over.
   virtual void finalize(std::uint64_t session_key, std::uint64_t client_sequence) = 0;
 
   /// The transport delivered an item of `kind`, task output or not: call it
