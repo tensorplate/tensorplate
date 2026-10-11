@@ -176,7 +176,8 @@ A fourth narrow pre-1.0 exception covers the Python/PyTorch sidecar IPC,
 optional fields that only negotiated peers exchange. The speech job and
 session messages are the first. A sidecar lists the capabilities it
 implements on its `ready_event`; the adapter enables `speech_jobs_v1` on
-`load_model` only when that list names it, and neither peer sends a job or
+`load_model` only for a session built to run speech jobs and only when that
+list names it, and neither peer sends a job or
 session message on a connection whose load did not enable it. So no peer
 receives them unless it asked for them. An adapter that predates the
 capability reads the `ready_event` fields it uses by name and ignores the

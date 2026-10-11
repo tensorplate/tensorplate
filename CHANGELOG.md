@@ -231,9 +231,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   queue, so the adapter keeps reading while it writes; the queue is bounded,
   and a caller that finds it full is refused, not made to wait. Every way a
   connection ends fails the open jobs with a typed reason, and they are
-  released only once the sidecar process has been reaped. Nothing starts the
-  channel yet: the session's load does not enable `speech_jobs_v1`.
+  released only once the sidecar process has been reaped.
   (V030-E04-F03-T01)
+- The Python/PyTorch adapter's session runs speech jobs when it is built for
+  them (`PythonPytorchConfig::speech_jobs`, a field of the adapter's
+  internal configuration, off by default; the serving configuration has no
+  key for it and the registered backend does not set it). Its load enables
+  `speech_jobs_v1` where the sidecar's `ready_event` lists it, reads the
+  declared job classes and starts the job channel on the socket. From then
+  on prime, the health check and unload go through the channel's exchange
+  slot; jobs are admitted once prime's health check has passed; unload
+  closes admission before it sends the unload; and unload, destruction and
+  every failed exchange stop the channel before the sidecar process is
+  ended, so an open job fails with `session_unloaded` or `backend_reset`
+  and is released afterwards. Such a session refuses a tensor `infer`
+  (`unsupported`, `tensor_inference_unsupported`). The channel does not
+  start for a load that declared no job class a lane runs, and its reader
+  takes no frame that declares a payload larger than the longest
+  synthesized segment. Additive inside protocol 0.1; version constants
+  unchanged. (V030-E04-F03-T01)
 - A measurement client for the streaming path,
   `tools/validation/slice_measure.py`. It runs paced speech-to-text sessions
   and text-to-speech segments over the stream session envelope and takes a
