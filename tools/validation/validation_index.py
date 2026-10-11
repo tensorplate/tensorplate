@@ -2,10 +2,10 @@
 """The validation run index: derive a line from what a run recorded, and compare two.
 
 A line's shape is `config/schemas/validation_run_index_line.json`. A line is
-derived from a lifecycle report, a candidate qualification record or doctor's
-JSON output. A field the source's own schema requires and that is absent is
-an error; a value that was not measured yields no metric, so the comparison
-reports it as missing instead of unchanged.
+derived from a lifecycle report, a candidate qualification record, a streaming
+slice measurement record or doctor's JSON output. A field the source's own
+schema requires and that is absent is an error; a value that was not measured
+yields no metric, so the comparison reports it as missing instead of unchanged.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import candidate_record
+import slice_measurement_record as slice_record
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = REPO_ROOT / "config/schemas/validation_run_index_line.json"
@@ -41,6 +42,9 @@ DOCTOR_REQUIREMENTS: dict[str, dict[str, tuple[str, ...]]] = {
     },
 }
 SPEECH_FAMILY_MODES = {"in-assets": "installed", "host-built": "installed", "none": "none"}
+STREAMING_SUBJECT = "streaming-latency"
+# What a mode's sessions were sent, as its record section states it.
+STREAMING_INPUT_SETTINGS = {"stt": ("samples", "audio_bytes", "frame_ms"), "tts": ("text_bytes",)}
 
 
 class IndexLineError(Exception):
@@ -248,6 +252,55 @@ def _cold_deploy(
     # Without both digests nothing says the two deploys were of one bundle.
     if ours is not None and theirs is not None:
         metrics["deploy_wall_cold_cache_ms"] = outcome["wall_ms"]
+
+
+def streaming_line(record: dict[str, Any], envelope: dict[str, Any]) -> dict[str, Any]:
+    """A line from a slice measurement record, after the record's own check."""
+    status, detail = slice_record.check_record(record)
+    if status == "invalid":
+        raise IndexLineError(f"{STREAMING_SUBJECT}: the measurement record is invalid: {detail}")
+    if record["provenance"] != "recorded":
+        raise IndexLineError(
+            f"{STREAMING_SUBJECT}: a {record['provenance']} record measured nothing"
+        )
+    metrics: dict[str, float] = {}
+    checks: dict[str, str] = {}
+    for mode in slice_record.MODES:
+        section = record[mode]
+        if section is None:
+            checks[f"{mode}.sessions"] = "not run"
+            continue
+        outcomes: dict[str, int] = {}
+        for session in section["sessions"]:
+            outcomes[session["outcome"]] = outcomes.get(session["outcome"], 0) + 1
+        if outcomes:
+            sessions = ", ".join(f"{n} {name}" for name, n in sorted(outcomes.items()))
+        elif section["target"]["connect_ns"] is None:
+            sessions = "none: the channel never became ready"
+        else:
+            sessions = "none: the run ended before a session did"
+        checks[f"{mode}.sessions"] = sessions
+        for name, summary in section["summary"].items():
+            prefix = f"{mode}.{name}"
+            metrics[f"{prefix}.count"] = summary["count"]
+            metrics[f"{prefix}.misses"] = summary["misses"]
+            for percentile in ("p50", "p95", "p99"):
+                nanoseconds = summary[f"{percentile}_ns"]
+                if nanoseconds is not None:
+                    metrics[f"{prefix}.{percentile}_ms"] = round(nanoseconds / 1e6, 3)
+    # Percentiles over different numbers of sessions, or another input, are another measurement.
+    settings = {**envelope["settings"], "streaming_iterations": record["settings"]["iterations"]}
+    for mode, fields in STREAMING_INPUT_SETTINGS.items():
+        if record[mode] is not None:
+            for field in fields:
+                settings[f"streaming_{mode}_{field}"] = record[mode]["input"][field]
+    return new_line(
+        {**envelope, "settings": settings},
+        STREAMING_SUBJECT,
+        record["result"]["status"],
+        metrics,
+        checks,
+    )
 
 
 def doctor_line(

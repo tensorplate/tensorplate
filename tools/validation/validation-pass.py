@@ -5,8 +5,8 @@
   run      run a pass on this machine: the lifecycle harness, the candidate
            build and the speech runtime family, doctor, each candidate through
            the qualification recipe, then index what ran
-  index    derive index lines from a lifecycle report, qualification records and
-           doctor's JSON output
+  index    derive index lines from a lifecycle report, qualification records, a
+           streaming slice measurement record and doctor's JSON output
   compare  report what moved between the newest earlier lines of an index and a
            pass's lines; exit 0 nothing moved, 1 something moved, 2 not comparable
 
@@ -119,6 +119,7 @@ def derive_lines(
     interpreter_override: bool,
     speech_family: str | None,
     cold_deploys: dict[str, str],
+    streaming_record: str | None,
 ) -> list[dict[str, Any]]:
     lines = []
     if lifecycle_report:
@@ -135,6 +136,8 @@ def derive_lines(
         lines.append(
             index_mod.qualification_line(load_json(path), envelope, subject, family_build, cold)
         )
+    if streaming_record:
+        lines.append(index_mod.streaming_line(load_json(streaming_record), envelope))
     if not lines:
         raise index_mod.IndexLineError("nothing to index: no report, record or doctor output")
     run_ids = [line["run_id"] for line in lines]
@@ -162,6 +165,7 @@ def command_index(args: argparse.Namespace) -> int:
         args.interpreter_override == "present",
         args.speech_family,
         dict(cold_deploys),
+        args.streaming_record,
     )
     text = "".join(index_mod.dump_line(line) for line in lines)
     if args.out:
@@ -234,6 +238,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=[],
         metavar="SUBJECT=PATH",
         help="a candidate qualification record.json and the subject it is indexed as",
+    )
+    index.add_argument(
+        "--streaming-record",
+        help="a slice measurement record.json, indexed as the streaming-latency subject",
     )
     index.add_argument("--doctor", help="the output of `tensorplate doctor --output json`")
     index.add_argument(

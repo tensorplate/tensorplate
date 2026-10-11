@@ -39,6 +39,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The validation pass runs the streaming measurement client when
+  `--streaming-arg` names a stream endpoint (`--stt-endpoint` or
+  `--tts-endpoint`), through `--streaming-python`. The pass sets the
+  record's path and the commit, refuses `--provenance` and an endpoint that
+  comes without a `--worker-version` or `--worker-build` value (the client
+  would write a synthetic record, which the step and the index refuse), and
+  indexes the record as the `streaming-latency` subject: per mode and
+  measurement the sample and miss counts and the 50th, 95th and 99th
+  percentiles in milliseconds (none for a measurement no session sampled),
+  each mode's session outcomes, and as settings the iteration count and what
+  each mode was sent (the clip's sample count, byte count and frame length,
+  the segment's byte count). A `failed` record with no session, which is what
+  the client writes when nothing answers at an endpoint, is indexed with
+  `none: the channel never became ready` for that mode. The step's time
+  limit is derived from the client's iterations and event timeout and the
+  clip's length, since the audio is sent in real time. The
+  record's own check runs again before a line is derived, and
+  `validation-pass.py index` takes the record with `--streaming-record`.
+  Without a stream endpoint the step is `not_run` with that reason, as
+  before. (V030-E06-F02-T01)
+
 - Every transition the session manager's sink is shown now carries how
   many text segments are waiting to start, against the count that may
   wait (`ManagedSessionTransition::waiting_segments`), taken in the same
@@ -210,6 +231,29 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   protocol 0.1; version constants unchanged. (V030-E05-F04-T01)
 
 ### Changed
+
+- The validation pass gives each candidate its own out-of-memory ballast and
+  checks its predecessor before anything is deployed. `--oom-ballast
+  SUBJECT=bytes:N` or `SUBJECT=headroom:N` replaces `--oom-ballast-bytes`,
+  which one value could not fit to two models; a headroom is subtracted from
+  the memory `nvidia-smi` reports for device 0, in preflight, and the
+  report's `device_memory` and `oom_ballast` say which rule was used and the
+  bytes it gave. Where `nvidia-smi` reports a device, preflight refuses a
+  candidate that no option names, because its out-of-memory case would not
+  run; `SUBJECT=none` skips the case on purpose and the report records that.
+  A `bytes` or `headroom` rule needs `--oom-ballast-python`, and a `qualify`
+  step whose candidate takes a ballast fails before the recipe runs when
+  that interpreter cannot be run. Where `nvidia-smi` reports a device and
+  the pass samples memory, preflight refuses a predecessor whose entry does
+  not name the CUDA device and a runner profile that loads onto it, since
+  the `predecessor_idle` and `after_teardown` windows sample the sidecar's
+  device memory. It refuses a pass that samples memory where `nvidia-smi`
+  runs and reports no device, and any predecessor whose resolved path the
+  agent's unit cannot read; the report's `predecessor_check` says whether
+  the predecessor check was applied and why not. A
+  `--qualify-arg` that sets `--sampler` or either option the pass passes on
+  is refused. The page's example names the CUDA smoke fixture.
+  (V030-E06-F02-T01)
 
 - The hosted workflows select Clang 14 and say so. They installed Clang 15
   and registered it as an alternative at the priority the runner image gives

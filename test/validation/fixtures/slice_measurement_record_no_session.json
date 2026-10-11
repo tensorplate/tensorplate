@@ -1,0 +1,164 @@
+{
+  "schema_version": "0.1",
+  "record_kind": "slice_measurement",
+  "provenance": "recorded",
+  "tool": {
+    "name": "slice-measure",
+    "source_commit": "c45a2ec072265481f6d6bade469d72641b66a298",
+    "python": "3.12.4",
+    "grpcio": "1.81.1",
+    "protobuf": "6.33.5",
+    "generator": "1.81.1",
+    "stream_schema_sha256": "sha256:9ddc63b6d22d1f5ffbbb02f2835f083f07359156733451714b3582a15e042b27"
+  },
+  "worker": {
+    "source": "operator_stated",
+    "version": "repro",
+    "build": null
+  },
+  "client_platform": {
+    "system": "Darwin",
+    "release": "25.6.0",
+    "machine": "arm64",
+    "cpu_count": 10,
+    "cpu_model": null
+  },
+  "recorded_at_utc": "2026-10-10T20:41:47Z",
+  "clock": {
+    "source": "caller_monotonic",
+    "origin": "run_start",
+    "resolution_ns": 42
+  },
+  "percentile_method": "nearest_rank",
+  "settings": {
+    "iterations": 3,
+    "event_timeout_ms": 500,
+    "max_input_lag_ms": 100
+  },
+  "stt": {
+    "target": {
+      "generation": null,
+      "descriptor_digest": null,
+      "loopback": true,
+      "connect_ns": null
+    },
+    "input": {
+      "audio_sha256": "sha256:56a43ef88ddfcd0f56f7dd973312c0e73d62f59655c01d7b4e59aaa3be8b3fb6",
+      "audio_bytes": 6400,
+      "samples": 3200,
+      "format": {
+        "encoding": "pcm_s16le",
+        "sample_rate_hz": 16000,
+        "channels": 1
+      },
+      "frame_ms": 20,
+      "frames": 10,
+      "language": "en"
+    },
+    "sessions": [],
+    "summary": {
+      "session_initialization": {
+        "count": 0,
+        "misses": 0,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null,
+        "min_ns": null,
+        "max_ns": null
+      },
+      "call_start_to_first_transcript": {
+        "count": 0,
+        "misses": 0,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null,
+        "min_ns": null,
+        "max_ns": null
+      },
+      "last_audio_to_final_transcript": {
+        "count": 0,
+        "misses": 0,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null,
+        "min_ns": null,
+        "max_ns": null
+      }
+    }
+  },
+  "tts": {
+    "target": {
+      "generation": null,
+      "descriptor_digest": null,
+      "loopback": true,
+      "connect_ns": null
+    },
+    "input": {
+      "text_sha256": "sha256:5fb0f4f3b357d944f6ed67510d3e7b6ad0b1dff9142a1f7869cab658702a24aa",
+      "text_bytes": 17,
+      "language": "en",
+      "voice": "v"
+    },
+    "sessions": [],
+    "summary": {
+      "session_initialization": {
+        "count": 0,
+        "misses": 0,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null,
+        "min_ns": null,
+        "max_ns": null
+      },
+      "call_start_to_first_audio": {
+        "count": 0,
+        "misses": 0,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null,
+        "min_ns": null,
+        "max_ns": null
+      },
+      "segment_to_first_audio": {
+        "count": 0,
+        "misses": 0,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null,
+        "min_ns": null,
+        "max_ns": null
+      },
+      "segment_to_completion": {
+        "count": 0,
+        "misses": 0,
+        "p50_ns": null,
+        "p95_ns": null,
+        "p99_ns": null,
+        "min_ns": null,
+        "max_ns": null
+      }
+    }
+  },
+  "gpu": {
+    "status": "not_requested",
+    "reason": null,
+    "scope": "device_wide",
+    "machine": null,
+    "interval_ms": null,
+    "failed_queries": 0,
+    "devices": [],
+    "samples": [],
+    "summary": null
+  },
+  "run": {
+    "ended_by": "completed",
+    "error": null
+  },
+  "result": {
+    "status": "failed",
+    "reasons": [
+      "stt: the channel never became ready",
+      "tts: the channel never became ready"
+    ]
+  }
+}
