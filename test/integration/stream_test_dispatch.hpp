@@ -4,8 +4,8 @@
 // The synthetic session dispatch the stream listener tests run behind the
 // listener: the one place the tests name it.
 
-#include "serving/session/synthetic_dispatch.hpp"
+#include "synthetic_session_dispatch.hpp"
 
 namespace tensorplate::testing {
-using StreamTestDispatch = serving::SyntheticSessionDispatch;
+using StreamTestDispatch = SyntheticSessionDispatch;
 }  // namespace tensorplate::testing

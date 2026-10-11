@@ -76,7 +76,7 @@ if(TP_ENABLE_STREAMING_GRPC AND NOT TP_ENABLE_TSAN)
   # its own because it links the generated protobuf bindings.
   add_executable(tp_test_stream_listener stream_listener_test.cpp stream_mapping_test.cpp)
   # The synthetic session dispatch behind the listener.
-  set(_tp_stream_test_dispatch tp::runtime)
+  set(_tp_stream_test_dispatch tp::synthetic_session_dispatch)
   target_include_directories(tp_test_stream_listener
     PRIVATE ${CMAKE_SOURCE_DIR}/test/mocks ${CMAKE_SOURCE_DIR}/runtime/src)
   target_link_libraries(tp_test_stream_listener
