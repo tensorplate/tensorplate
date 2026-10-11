@@ -4,9 +4,11 @@
 Python SDK for calling models you have **already deployed** with
 TensorPlate, over the v0.1 serving `/infer` HTTP envelope. It is a
 client-side library: it does not deploy, run, or change runtime serving,
-and it provides no in-runtime camera/video ingest, DeepStream sink, or
-streaming session API. Those remain separate, deferred runtime
-capabilities (see [Scope and non-goals](#scope-and-non-goals)).
+and it provides no in-runtime camera/video ingest or DeepStream sink. Those
+remain separate, deferred runtime capabilities (see
+[Scope and non-goals](#scope-and-non-goals)). With the `speech` extra it
+also holds an asyncio [streaming speech client](#streaming-speech-client)
+for a worker's stream listener.
 
 - **Distribution:** `tensorplate-python` (Apache-2.0, Python 3.10+)
 - **Import package:** `tensorplate`
@@ -67,8 +69,9 @@ pip install "./tensorplate_python-${TP_VERSION}-py3-none-any.whl[vision]"
 ### Speech extra
 
 The `speech` extra declares what the streaming speech transport needs:
-`grpcio>=1.81.1,<2` and `protobuf>=6.33.5,<7`. The streaming client is not
-in the package yet; today the extra fixes the dependency range and the
+`grpcio>=1.81.1,<2` and `protobuf>=6.33.5,<7`. The package's
+[streaming speech client](#streaming-speech-client) is built on them; the
+extra also fixes the dependency range and the
 failure mode, and the wheel carries the
 [stream schema's modules](#stream-schema-modules). On the server side, a
 feature-ON serving worker with `streaming.enabled` opens a loopback gRPC
@@ -263,6 +266,99 @@ except TransportError:
     print("serving worker unreachable")
 ```
 
+## Streaming speech client
+
+`tensorplate.speech` (the [`speech` extra](#speech-extra)) is an asyncio
+client for a serving worker's stream endpoint: one gRPC call per session,
+speaking the [stream session schema](../../protocol/README.md#streaming-session-envelope).
+It is asyncio only; there is no synchronous wrapper. Today it opens
+speech-to-text sessions. Text-to-speech sessions and discovery of the stream
+endpoint through the agent are not in the package yet, so the caller names
+the endpoint and the deployment. The schema is a draft, and this client has
+been run against an in-process server built from the same schema, not yet
+against a worker: no worker serves speech sessions over it yet.
+
+```python
+from tensorplate.speech import AudioFormat, SpeechClient, Target
+
+
+async def transcribe(endpoint: str, frames: list[bytes]) -> str:
+    target = Target("my-deployment")
+    audio = AudioFormat("pcm_s16le", sample_rate_hz=16000)
+    async with SpeechClient(endpoint) as client:
+        async with client.transcribe(target, language="en", input_format=audio) as session:
+            for frame in frames:  # 20 ms of audio each
+                await session.send_audio(frame)
+            final = await session.finalize()
+    return final.text
+```
+
+- **Endpoint and target.** `SpeechClient(endpoint)` takes the `host:port` of
+  the worker's stream endpoint, on loopback or forwarded to it, and opens one
+  cleartext channel; create it inside a running event loop. A `Target` is a
+  deployment id with the generation and descriptor digest the worker serves,
+  or the id alone for a worker started without a generation.
+- **Sessions.** `client.transcribe(target, *, language, input_format,
+  trace_id="", turn_id="", open_timeout=10.0)` returns a session that
+  `async with` opens. Leaving the block closes the sending half and waits for
+  the server to finish what it accepted; `close()` does the same and returns
+  the session's `SessionTotals`. Leaving it on an exception cancels the
+  session, as `cancel()` does: the server is told, and every event not yet
+  taken is dropped. `session.limits` holds the timers and frame bounds the
+  server reported.
+- **Input and credit.** `send_audio(data)` sends one frame in the session's
+  input format and waits while the server's input credit does not admit it.
+  The client takes its credit from the server's messages only, never from
+  time. A frame outside the session's frame bounds raises `ValueError` before
+  anything is sent; a frame shorter than the least one is allowed only as the
+  last before `finalize()` or `close()`.
+- **Events.** Iterating a session (`async for event in session`) yields
+  `PartialTranscript`, `EndpointDetected` and `FinalTranscript` in the order
+  the server sent them, and ends when the session does. They are frozen
+  dataclasses of the SDK; no generated class appears in the client's
+  interface. `finalize()` ends the open utterance and returns the
+  `FinalTranscript` that names it in `finalize_sequence`; iteration yields
+  that transcript too. A server event of a kind this client does not know is
+  passed over and counted in `session.unknown_events`.
+- **Unread events.** A session holds up to 16 KiB of events its caller has
+  not taken and then stops reading from the call, so take events as they
+  arrive: the server ends a session whose output stays unread.
+- **Liveness.** The session sends the schema's `Ping` at the interval the
+  server gave when the session became ready.
+- **No retry.** The client never reopens, resends or replays. A session that
+  was refused, failed or lost is reported once, and opening another is the
+  caller's decision.
+
+Every error is a `SpeechError` (a `TensorPlateError`), never a gRPC
+exception. Its class follows the final status of the call:
+
+| Exception | Raised when |
+| --- | --- |
+| `InvalidEventError` | The server found an event or its input invalid. |
+| `PreconditionFailedError` | The deployment does not serve what was asked: a language or format it does not declare, another deployment or descriptor, a stale generation. |
+| `ResourceExhaustedError` | A bound was reached: the session count, the input credit, or output left unread too long. |
+| `SessionTimeoutError` | One of the server's timers ended the session, or the client's own wait for the open or for a `finalize()` passed. |
+| `ServiceUnavailableError` | Admission is closed, the worker is shutting down or retiring the deployment, the backend was lost, or the endpoint cannot be reached. |
+| `SessionCancelledError` | The call was cancelled by something other than the session's own `cancel()`. |
+| `ServerInternalError` | The server failed, or ended the call with a status no other class stands for. |
+| `StreamProtocolError` (also a `ProtocolError`) | The server sent something the schema does not allow; the client ended the call. |
+| `SessionClosedError` | The session was used after it ended. |
+
+A `SpeechError` carries `reason` and `code` when the server stated a cause
+(for example `"worker_shutdown"` and `ErrorCode.UNAVAILABLE`), `grpc_status`,
+and `admitted`, which has three values. `True`: the server reserved a session
+slot, so the call ran. `False`: the server stated that it reserved none.
+`None`: unknown. An open that ends with a status and no event is always
+`None` today: the schema has not fixed how a refusal carries its cause, so a
+refusal cannot be told from a session that was admitted and then lost, and
+`reason` is `None` too. Do not treat such a call as one that never ran.
+
+The channel is opened with gRPC's bandwidth probe off
+(`grpc.http2.bdp_probe` 0), which keeps HTTP/2's receive window at its 64 KiB
+default, and with sent and received messages capped at 64 KiB. With the probe
+on, gRPC widens the window to megabytes, and a session that stopped reading
+would not hold the server back until that much had been sent.
+
 ## Endpoint resolution
 
 `ServingClient` and `VisionClient` resolve the worker URL exactly as
@@ -288,7 +384,9 @@ deliberately do **not** provide:
 
 - in-runtime camera or video ingest;
 - a DeepStream sink or any GStreamer integration;
-- a streaming session API — the SDK is synchronous request/response;
+- a synchronous streaming client, text-to-speech sessions, or discovery of
+  a stream endpoint: the [streaming speech client](#streaming-speech-client)
+  is asyncio and opens speech-to-text sessions on an endpoint it is given;
 - any change to runtime serving behavior or ownership.
 
 These are separate, deferred capabilities tracked outside v0.1.3. The

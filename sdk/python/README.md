@@ -15,7 +15,7 @@ import tensorplate
 ```bash
 pip install tensorplate-python            # core client
 pip install "tensorplate-python[vision]"  # + numpy & Pillow for VisionClient.detect
-pip install "tensorplate-python[speech]"  # + grpcio & protobuf (streaming client not yet included)
+pip install "tensorplate-python[speech]"  # + grpcio & protobuf for the asyncio streaming speech client
 ```
 
 The wheel + sdist are also attached to each signed GitHub Release for
@@ -49,9 +49,10 @@ its build environment; `constraints/build.txt` pins it by hash. See
 ## Scope
 
 The SDK is a client-side library: it calls already-deployed models and
-does not change runtime serving. In-runtime camera/video ingest, a
-DeepStream sink, and a streaming session API are out of scope and are
-not provided here.
+does not change runtime serving. In-runtime camera/video ingest and a
+DeepStream sink are out of scope and are not provided here. With the
+`speech` extra, `tensorplate.speech` holds an asyncio streaming speech
+client; see `docs/sdk/python.md`.
 
 ## License
 
