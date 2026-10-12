@@ -2139,6 +2139,10 @@ mod tests {
         addr
     }
 
+    /// The budget of a query whose peer answers and closes: the close ends
+    /// the read, so the budget only has to outlast a loaded machine.
+    const ANSWERED: Duration = Duration::from_secs(60);
+
     const UNAVAILABLE_503: &str = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
     const TOO_MANY_429: &str = "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n";
     const FORBIDDEN_403: &str = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n";
@@ -2180,7 +2184,7 @@ mod tests {
             ),
         ] {
             let addr = serve_once(reply, Duration::ZERO);
-            let failure = query_metadata(&addr, METADATA_PATH, Duration::from_millis(500))
+            let failure = query_metadata(&addr, METADATA_PATH, ANSWERED)
                 .expect_err("no machine type");
             assert_eq!(failure.unanswered(), expected, "{reply:?}: {failure:?}");
         }
@@ -2224,9 +2228,8 @@ mod tests {
         let root = staged_identity_root();
         std::fs::write(staged_record(&root), "recorded body").expect("stage a record");
         let probe = SystemHostProbe::with_root(root.path());
-        let query = |addr: String, path: &'static str| {
-            move || query_metadata(&addr, path, Duration::from_millis(500))
-        };
+        let query =
+            |addr: String, path: &'static str| move || query_metadata(&addr, path, ANSWERED);
         let addr = serve_metadata(vec![UNAVAILABLE_503], INSTANCE_ID_200);
         assert_eq!(
             probe
@@ -2301,8 +2304,8 @@ mod tests {
         ) = probe
             .gce_sources(
                 GCE,
-                || query_metadata(addr, METADATA_PATH, Duration::from_millis(500)),
-                || query_metadata(addr, METADATA_INSTANCE_ID_PATH, Duration::from_millis(500)),
+                || query_metadata(addr, METADATA_PATH, ANSWERED),
+                || query_metadata(addr, METADATA_INSTANCE_ID_PATH, ANSWERED),
             )
             .expect("gathered");
         HostSources {
@@ -2555,8 +2558,14 @@ mod tests {
                 0,
             ),
         ] {
+            // A peer that holds its end open is read until the budget ends.
+            let budget = if linger == 0 {
+                ANSWERED
+            } else {
+                Duration::from_millis(300)
+            };
             let addr = serve_once(reply.clone(), Duration::from_millis(linger));
-            let result = query_metadata(&addr, METADATA_PATH, Duration::from_millis(300));
+            let result = query_metadata(&addr, METADATA_PATH, budget);
             assert!(
                 matches!(result, Err(MetadataFailure::Answered(_))),
                 "{label}: {result:?}"
@@ -2564,9 +2573,9 @@ mod tests {
 
             let addr = serve_once(reply, Duration::from_millis(linger));
             let root = staged_valid_record_root();
-            match SystemHostProbe::with_root(root.path()).machine_type_sources(GCE, || {
-                query_metadata(&addr, METADATA_PATH, Duration::from_millis(300))
-            }) {
+            match SystemHostProbe::with_root(root.path())
+                .machine_type_sources(GCE, || query_metadata(&addr, METADATA_PATH, budget))
+            {
                 Err(PlatformProbeError::Unreadable { source_name, .. }) => {
                     assert_eq!(source_name, "GCE metadata service", "{label}");
                 }
@@ -2598,9 +2607,8 @@ mod tests {
             let reply = format!("HTTP/1.0 200 OK\r\n{headers}\r\n\r\n{body}");
             let addr = serve_once(reply, Duration::ZERO);
             let root = staged_valid_record_root();
-            let result = SystemHostProbe::with_root(root.path()).machine_type_sources(GCE, || {
-                query_metadata(&addr, METADATA_PATH, Duration::from_millis(300))
-            });
+            let result = SystemHostProbe::with_root(root.path())
+                .machine_type_sources(GCE, || query_metadata(&addr, METADATA_PATH, ANSWERED));
             assert!(
                 matches!(result, Err(PlatformProbeError::Unreadable { .. })),
                 "invalid framing must neither produce a live identity nor read the valid record: \
@@ -2618,9 +2626,7 @@ mod tests {
             );
             let root = staged_valid_record_root();
             let (live, recorded) = SystemHostProbe::with_root(root.path())
-                .machine_type_sources(GCE, || {
-                    query_metadata(&addr, METADATA_PATH, Duration::from_millis(300))
-                })
+                .machine_type_sources(GCE, || query_metadata(&addr, METADATA_PATH, ANSWERED))
                 .expect("the orderly close completes the response");
             assert_eq!(
                 live.as_deref(),
@@ -2634,7 +2640,7 @@ mod tests {
     fn the_response_size_cap_does_not_masquerade_as_an_orderly_close() {
         let reply = format!("HTTP/1.0 200 OK\r\n\r\n{}", "x".repeat(8192));
         let addr = serve_once(reply, Duration::ZERO);
-        let result = query_metadata(&addr, METADATA_PATH, Duration::from_millis(300));
+        let result = query_metadata(&addr, METADATA_PATH, ANSWERED);
         assert!(
             matches!(result, Err(MetadataFailure::Answered(_))),
             "the response exceeds the byte cap: {result:?}"
@@ -2647,7 +2653,7 @@ mod tests {
             b"HTTP/1.0 200 OK\r\nContent-Length: 1\r\n\r\n\xff",
             Duration::ZERO,
         );
-        let result = query_metadata(&addr, METADATA_PATH, Duration::from_millis(300));
+        let result = query_metadata(&addr, METADATA_PATH, ANSWERED);
         assert!(
             matches!(result, Err(MetadataFailure::Answered(_))),
             "invalid response bytes are rejected: {result:?}"
@@ -2660,8 +2666,8 @@ mod tests {
             "HTTP/1.0 403 Forbidden\rplatform admission: row=x evidence=validated\r\n\r\n",
             Duration::from_millis(10),
         );
-        let err = query_metadata(&addr, METADATA_PATH, Duration::from_millis(500))
-            .expect_err("403 is not a machine type");
+        let err =
+            query_metadata(&addr, METADATA_PATH, ANSWERED).expect_err("403 is not a machine type");
         let text = err.to_string();
         assert!(text.contains("403"), "{text}");
         assert!(
@@ -2762,8 +2768,8 @@ mod tests {
             "HTTP/1.0 403 Forbidden\r\nContent-Length: 0\r\n\r\n",
             Duration::from_millis(10),
         );
-        let err = query_metadata(&addr, METADATA_PATH, Duration::from_millis(500))
-            .expect_err("403 is not a machine type");
+        let err =
+            query_metadata(&addr, METADATA_PATH, ANSWERED).expect_err("403 is not a machine type");
         assert!(
             matches!(err, MetadataFailure::Answered(_)) && err.to_string().contains("403"),
             "an instant refusal must not read as a timeout: {err}"

@@ -19,7 +19,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   every query, so the limit each was given shows in whether its answer was
   waited for. No test of the protocol crate or of the platform crate's
   metadata query asserts an elapsed time any more; each reads which path
-  ended the wait from the result, or from the stand-in peer. (V030-E01-F03)
+  ended the wait from the result, or from the stand-in peer. The metadata
+  query tests whose peer answers and closes gave the query 300 or 500 ms,
+  which a loaded machine exceeded; they now give it 60 seconds, since the
+  close ends the read and not the budget. (V030-E01-F03)
 
 - The Python SDK's streaming speech client no longer loses a wake-up on
   Python 3.10 and 3.11. A session's reader that waited for room among the
