@@ -17,6 +17,7 @@
 #include <string>
 #include <string_view>
 
+#include "tensorplate/backend/bounded_job_bridge.hpp"
 #include "tensorplate/backend/capability.hpp"
 #include "tensorplate/backend/registry.hpp"
 #include "tensorplate/core/error.hpp"
@@ -30,6 +31,10 @@ namespace tensorplate::adapters::python_pytorch {
 
 inline constexpr std::string_view kBackendName = "python_pytorch";
 
+/// Longest a health check waits for the sidecar's answer unless a
+/// configuration says otherwise.
+inline constexpr std::chrono::milliseconds kDefaultHealthTimeout{std::chrono::seconds{2}};
+
 /// Adapter configuration tunables. Defaults are chosen for the v0.1.0
 /// SmolVLA validation flow on Jetson Orin Nano 8GB Super.
 struct PythonPytorchConfig {
@@ -40,7 +45,8 @@ struct PythonPytorchConfig {
   std::filesystem::path descriptor_path;
   std::chrono::milliseconds startup_timeout{std::chrono::seconds{15}};
   std::chrono::milliseconds infer_timeout{std::chrono::seconds{30}};
-  std::chrono::milliseconds health_timeout{std::chrono::seconds{2}};
+  /// Bounds prime's health check and the job bridge's health().
+  std::chrono::milliseconds health_timeout{kDefaultHealthTimeout};
   /// The load enables `speech_jobs_v1` and hands the socket to the job
   /// channel. Set only for a session built to run speech jobs: the sidecar
   /// refuses such a load for a runner that runs none.
@@ -83,6 +89,25 @@ struct SessionWithJobChannel {
 };
 
 [[nodiscard]] SessionWithJobChannel make_python_pytorch_session_with_channel(
+    ExecutionSessionRuntimeHooks hooks, PythonPytorchConfig config, SidecarLauncher launcher);
+
+/// A session, the job bridge bound to it (job_bridge.hpp) and the channel
+/// under both. What SessionWithJobChannel says of the session and of a
+/// holder of the channel holds for the bridge and its caller: nothing
+/// reaches prime, unload or the session's destructor from a sink callback or
+/// while holding a lock a callback takes. `channel` is for tests and
+/// diagnostics; the registered backend drops it.
+struct SessionWithJobBridge {
+  std::unique_ptr<ExecutionSession> session;
+  std::shared_ptr<BoundedJobBridge> bridge;
+  std::shared_ptr<JobChannel> channel;
+};
+
+/// As make_python_pytorch_session_with_channel() with `config.speech_jobs`
+/// set, whatever the caller gave: the channel of a session that loads
+/// without jobs never starts, and its bridge would refuse every job for
+/// good. The bridge's health() waits `config.health_timeout`.
+[[nodiscard]] SessionWithJobBridge make_python_pytorch_session_with_bridge(
     ExecutionSessionRuntimeHooks hooks, PythonPytorchConfig config, SidecarLauncher launcher);
 
 }  // namespace tensorplate::adapters::python_pytorch

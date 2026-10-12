@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The bridge conformance cases against the in-process fixture bridge, and the
+// The bridge conformance cases against the in-process fixture bridge and
+// against the Python/PyTorch adapter's bridge over a scripted sidecar, and the
 // fixture's own hold on its backend, which those cases do not reach.
 
 #include "bounded_job_bridge_conformance.hpp"
@@ -33,6 +34,15 @@
 #include "fixture_job_bridge.hpp"
 #include "recording_job_event_sink.hpp"
 #include "speech_job_golden.hpp"
+
+#if TP_ENABLE_PYTHON_PYTORCH_SIDECAR
+#include "tensorplate/core/execution_session.hpp"
+#include "tensorplate/core/model_spec.hpp"
+
+#include "adapters/python_pytorch/python_pytorch_session.hpp"
+#include "job_bridge_harness.hpp"
+#include "scripted_sidecar.hpp"
+#endif
 
 namespace tensorplate::testing {
 namespace {
@@ -101,6 +111,81 @@ BridgeCase fixture_case(std::string name, FixtureJobBridgeOptions options, bool 
 
 // The depth of the runner's job queue (GPU_LANE_QUEUE_DEPTH in jobs.py).
 static_assert(FixtureJobBridge::kWaitingJobs == 8);
+
+#if TP_ENABLE_PYTHON_PYTORCH_SIDECAR
+
+/// The Python/PyTorch adapter's bridge with its session, over a scripted
+/// sidecar whose backend is a thread with the fixture's results. Built
+/// loaded, as a session is before its prime: a release is then taken, and
+/// the backend can be lost.
+class ScriptedSidecarBridgeUnderTest final : public BridgeUnderTest {
+ public:
+  ScriptedSidecarBridgeUnderTest() {
+    ExecutionSessionRuntimeHooks hooks{};
+    hooks.buffer_manager = buffers_.get();
+    adapters::python_pytorch::PythonPytorchConfig config;
+    config.startup_timeout = ScriptedSidecar::kPatience;
+    config.health_timeout = ScriptedSidecar::kPatience;
+    built_ = adapters::python_pytorch::make_python_pytorch_session_with_bridge(
+        hooks, std::move(config), sidecar_.launcher());
+    const auto loaded = built_.session->load(
+        ModelSpec::create("speech", ModelClass::Speech, "/dev/null", "python_pytorch").value());
+    EXPECT_TRUE(loaded.has_value()) << loaded.error().message;
+  }
+  ~ScriptedSidecarBridgeUnderTest() override { unload(); }
+
+  // What the runner does, which the scripted sidecar keeps: one job runs,
+  // eight wait, a waiting job ends at its cancel and a running one that was
+  // cancelled ends `failed`; the job beyond them is failed, not refused.
+  Choices choices() const override {
+    return {.holds_started_jobs = true,
+            .refuses_vad_frames = true,
+            .runs_one_job_at_a_time = true,
+            .ends_a_waiting_job_at_its_cancel = true,
+            .fails_a_held_job_that_was_cancelled = true,
+            .open_jobs = 1 + FixtureJobBridge::kWaitingJobs};
+  }
+  BoundedJobBridge& bridge() override { return *built_.bridge; }
+  BufferManager& buffers() override { return *buffers_; }
+  void prime() override {
+    const auto primed = built_.session->prime();
+    EXPECT_TRUE(primed.has_value()) << primed.error().message;
+  }
+  // The session's unload waits behind the job the sidecar runs: a held one is
+  // let go only once the sidecar has the unload, so the jobs behind it are
+  // still waiting when it arrives. After a lost backend the unload fails, and
+  // releases all the same.
+  void unload() override {
+    backend_.end_a_held_job_at_the_unload();
+    (void)built_.session->unload();
+  }
+  void lose_backend() override {
+    backend_.lose();
+    sidecar_.die();
+  }
+  void hold_jobs() override { backend_.hold(); }
+  void release_jobs() override { backend_.release(); }
+  bool settled(std::chrono::milliseconds patience) override {
+    return settled_over(*built_.channel, sidecar_, backend_, patience);
+  }
+  TranscriptResult transcript(const JobRequest& request) const override {
+    return fixture_transcript(std::get<AudioFrames>(request.payload()));
+  }
+  std::vector<std::byte> speech(const JobRequest& request) const override {
+    const std::size_t text_bytes = std::get<TextSegment>(request.payload()).text.size();
+    return std::vector<std::byte>(kFixtureSpeechBytesPerTextByte * text_bytes, std::byte{0});
+  }
+
+ private:
+  // In this order: the session goes first, which reaps the sidecar, then the
+  // backend's thread, then the sidecar it reads.
+  std::unique_ptr<BufferManager> buffers_ = make_buffers();
+  ScriptedSidecar sidecar_;
+  ScriptedBackend backend_{sidecar_};
+  adapters::python_pytorch::SessionWithJobBridge built_;
+};
+
+#endif  // TP_ENABLE_PYTHON_PYTORCH_SIDECAR
 
 // -- The fixture's own rules, which the cases leave open. -------------------------
 
@@ -631,5 +716,13 @@ INSTANTIATE_TEST_SUITE_P(
                       fixture_case("fixture_with_late_cancels", {.cancels_arrive_late = true}),
                       fixture_case("fixture_without_a_hold", {}, /*holds=*/false)),
     [](const auto& bridge_case) { return bridge_case.param.name; });
+
+#if TP_ENABLE_PYTHON_PYTORCH_SIDECAR
+INSTANTIATE_TEST_SUITE_P(PythonPytorchAdapter, BoundedJobBridgeConformance,
+                         ::testing::Values(BridgeCase{
+                             "scripted_sidecar",
+                             [] { return std::make_unique<ScriptedSidecarBridgeUnderTest>(); }}),
+                         [](const auto& bridge_case) { return bridge_case.param.name; });
+#endif
 
 }  // namespace tensorplate::testing

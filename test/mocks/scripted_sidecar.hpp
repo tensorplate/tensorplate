@@ -54,8 +54,8 @@
 //     writes no more and drops what waits.
 //
 // The test is the backend: it takes the job at the head of the FIFO and says
-// how it ends. emit(), refuse(), stop_reading(), stop_reading_after(),
-// hold_health(), Options::declares_any_job_class and the overrides in Options
+// how it ends (job_bridge_harness.hpp has a thread that does). emit(), refuse(), stop_reading(),
+// stop_reading_after(), hold_health(), Options::declares_any_job_class and the overrides in Options
 // step outside the runner's behaviour for what the adapter has to survive.
 
 #pragma once
@@ -175,20 +175,40 @@ class ScriptedSidecar {
 
   // -- The backend. --------------------------------------------------------------
 
-  /// Waits for a job at the head of the FIFO with none running and starts it.
-  /// @return its job id; zero when none came.
-  [[nodiscard]] std::uint64_t take_job() {
+  /// A job the backend took, with the header and the payload size of its
+  /// submit; `job_id` is zero when none came.
+  struct TakenJob {
+    std::uint64_t job_id = 0;
+    Json submit = Json::object();
+    std::size_t payload_bytes = 0;
+  };
+
+  /// Waits up to `patience` for a job at the head of the FIFO with none
+  /// running and starts it.
+  [[nodiscard]] TakenJob take(std::chrono::milliseconds patience) {
     std::unique_lock<std::mutex> lock(table_mutex_);
-    const bool due = work_.wait_for(lock, kPatience, [this] {
-      return running_ == 0 && !lane_.empty() &&
-             std::holds_alternative<std::uint64_t>(lane_.front());
-    });
-    if (!due) {
-      return 0;
+    if (!work_.wait_for(lock, patience, [this] { return job_due_locked(); })) {
+      return {};
     }
     running_ = std::get<std::uint64_t>(lane_.front());
     lane_.pop_front();
-    return running_;
+    const Job& job = jobs_.at(running_);
+    return TakenJob{running_, job.submit, job.payload_bytes};
+  }
+
+  /// take() with this sidecar's patience.
+  /// @return the job's id; zero when none came.
+  [[nodiscard]] std::uint64_t take_job() { return take(kPatience).job_id; }
+
+  /// What the backend sees of the FIFO: the job it runs, zero for none, and
+  /// whether take() would return one now.
+  struct Lane {
+    std::uint64_t running = 0;
+    bool job_due = false;
+  };
+  [[nodiscard]] Lane lane() {
+    std::lock_guard<std::mutex> lock(table_mutex_);
+    return Lane{running_, job_due_locked()};
   }
 
   /// Ends the running job as the runner does when its backend call returns:
@@ -252,6 +272,12 @@ class ScriptedSidecar {
   [[nodiscard]] std::vector<Json> written() const {
     std::lock_guard<std::mutex> lock(log_mutex_);
     return written_;
+  }
+
+  /// How many frames this sidecar wrote.
+  [[nodiscard]] std::size_t written_count() const {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    return written_.size();
   }
 
   /// Waits until this sidecar holds its job lock to write a `kind` message.
@@ -391,6 +417,8 @@ class ScriptedSidecar {
     std::uint64_t session_key = 0;
     std::uint64_t generation = 0;
     bool cancelled = false;
+    Json submit = Json::object();
+    std::size_t payload_bytes = 0;
   };
 
   static constexpr std::size_t kLaneDepth = 8;
@@ -617,6 +645,10 @@ class ScriptedSidecar {
     return waiting;
   }
 
+  bool job_due_locked() const {
+    return running_ == 0 && !lane_.empty() && std::holds_alternative<std::uint64_t>(lane_.front());
+  }
+
   // Answers the unary requests at the head of the FIFO while no job runs.
   void pump_locked() {
     while (running_ == 0 && !lane_.empty() && std::holds_alternative<Json>(lane_.front())) {
@@ -753,7 +785,7 @@ class ScriptedSidecar {
       // Not job messages: they would land in the live job's stream.
       write_frame(refusal(header, "error_event", "config_invalid", "duplicate_job_id"), 0);
     } else {
-      jobs_.emplace(job_id, named);
+      jobs_.emplace(job_id, Job{named.session_key, named.generation, false, header, payload_bytes});
       const std::vector<std::string> declared = declared_classes();
       const bool runs = std::find(declared.begin(), declared.end(),
                                   header.value("job_class", "")) != declared.end();

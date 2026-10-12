@@ -37,6 +37,7 @@
 #include "tensorplate/ipc/sidecar_codec.hpp"
 #include "tensorplate/ipc/unix_socket.hpp"
 
+#include "job_bridge.hpp"
 #include "job_channel.hpp"
 #include "job_wire.hpp"
 #include "runner_profile.hpp"
@@ -673,29 +674,57 @@ std::unique_ptr<ExecutionSession> make_python_pytorch_session(ExecutionSessionRu
       .session;
 }
 
+SessionWithJobBridge make_python_pytorch_session_with_bridge(ExecutionSessionRuntimeHooks hooks,
+                                                             PythonPytorchConfig config,
+                                                             SidecarLauncher launcher) {
+  config.speech_jobs = true;
+  const std::chrono::milliseconds health_timeout = config.health_timeout;
+  auto built =
+      make_python_pytorch_session_with_channel(hooks, std::move(config), std::move(launcher));
+  auto bridge = std::make_shared<JobBridge>(built.channel, health_timeout);
+  return SessionWithJobBridge{std::move(built.session), std::move(bridge),
+                              std::move(built.channel)};
+}
+
+namespace {
+
+// The registered backend's configuration: the interpreter and the timeouts
+// the environment names.
+PythonPytorchConfig configured() {
+  PythonPytorchConfig config;
+  config.python_exe = configured_python_exe();
+  config.startup_timeout =
+      configured_duration_ms("TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS", config.startup_timeout);
+  config.infer_timeout =
+      configured_duration_ms("TP_PYTHON_PYTORCH_INFER_TIMEOUT_MS", config.infer_timeout);
+  config.health_timeout =
+      configured_duration_ms("TP_PYTHON_PYTORCH_HEALTH_TIMEOUT_MS", config.health_timeout);
+  return config;
+}
+
+}  // namespace
+
 }  // namespace tensorplate::adapters::python_pytorch
 
 namespace tensorplate {
 
 Result<void> register_python_pytorch_backend(BackendRegistry& registry) {
+  using adapters::python_pytorch::configured;
   using adapters::python_pytorch::default_fork_exec_launcher;
   using adapters::python_pytorch::kBackendName;
   using adapters::python_pytorch::make_python_pytorch_capability;
   using adapters::python_pytorch::make_python_pytorch_session;
-  using adapters::python_pytorch::PythonPytorchConfig;
+  using adapters::python_pytorch::make_python_pytorch_session_with_bridge;
   return registry.register_backend(BackendEntry{
       std::string(kBackendName),
       make_python_pytorch_capability(),
       [](ExecutionSessionRuntimeHooks hooks) -> Result<std::unique_ptr<ExecutionSession>> {
-        PythonPytorchConfig config;
-        config.python_exe = adapters::python_pytorch::configured_python_exe();
-        config.startup_timeout = adapters::python_pytorch::configured_duration_ms(
-            "TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS", config.startup_timeout);
-        config.infer_timeout = adapters::python_pytorch::configured_duration_ms(
-            "TP_PYTHON_PYTORCH_INFER_TIMEOUT_MS", config.infer_timeout);
-        config.health_timeout = adapters::python_pytorch::configured_duration_ms(
-            "TP_PYTHON_PYTORCH_HEALTH_TIMEOUT_MS", config.health_timeout);
-        return make_python_pytorch_session(hooks, std::move(config), default_fork_exec_launcher());
+        return make_python_pytorch_session(hooks, configured(), default_fork_exec_launcher());
+      },
+      [](ExecutionSessionRuntimeHooks hooks) -> Result<SessionWithBridge> {
+        auto built = make_python_pytorch_session_with_bridge(hooks, configured(),
+                                                             default_fork_exec_launcher());
+        return SessionWithBridge{std::move(built.session), std::move(built.bridge)};
       },
   });
 }
