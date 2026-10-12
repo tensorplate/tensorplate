@@ -3,9 +3,10 @@
 ``StreamServer`` serves speech-to-text and text-to-speech sessions as the
 stream schema and ``docs/architecture/serving-worker.md`` ("Stream
 listener", "Logical sessions", "Session dispatch") say a worker does, and
-refuses what they say it refuses: input before its Open, a second Open,
-input of the other mode, input above the credit, and input while a Finalize
-is unanswered; audio above the frame bound or after a short frame; a text
+refuses what they say it refuses: an Open whose trace or turn id is not at
+most 64 ASCII characters; input before its Open, a second Open, input of the
+other mode, input above the credit, and input while a Finalize is
+unanswered; audio above the frame bound or after a short frame; a text
 segment that is empty, above a text bound, or whose id is not above every
 earlier one. It keeps the envelope itself: sequences, credit, utterance ids,
 sample offsets, chunk indexes, the Finalize an answer names, the totals. It
@@ -21,7 +22,7 @@ recorded frames under ``test/contract/fixtures/stream/v1``.
 It does not enforce, so no client is tested against: the two output budgets
 and every timer; the bounds on the audio of a segment and of a synthesis;
 the schema's 4,096-byte ceiling on a segment's text; ids above 2^53 - 1;
-``trace_id``, capabilities, message size and compression.
+capabilities, message size and compression.
 
 ``Playback`` serves one call from a recording instead: the recorded server
 frames, byte for byte or with a test's `changes`, each run after the client
@@ -323,6 +324,10 @@ class StreamServer:
         if not named or target.deployment_id in (".", ".."):
             raise _Ends("invalid_event")
         if not re.fullmatch(_SHORT_TEXT % 1, opened.language):
+            raise _Ends("invalid_event")
+        if not all(
+            re.fullmatch(_SHORT_TEXT % 0, text) for text in (opened.trace_id, opened.turn_id)
+        ):
             raise _Ends("invalid_event")
         speaks = opened.mode == pb.SESSION_MODE_TTS_STREAMING
         # A text-to-speech Open names a voice and no input format.

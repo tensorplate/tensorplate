@@ -27,10 +27,18 @@ CHUNK_MS = 20
 CLOSE_MARGIN_S = 30.0
 
 
-class _Follow(enum.Enum):
-    """The default of a timeout that is taken from a limit the server declares."""
+class Follow(enum.Enum):
+    """What ``SpeechClient.synthesize()`` takes as its `close_timeout` in place of seconds.
+
+    ``FINALIZE_DEADLINE``, the default, follows a limit the server declares:
+    the ``limits.finalize_deadline_ms`` of the session's ``Ready`` and 30
+    seconds more. No other timeout takes it.
+    """
 
     FINALIZE_DEADLINE = "limits.finalize_deadline_ms and a margin"
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}.{self.name}"
 
 
 class TextToSpeechSession(Session[TextToSpeechEvent]):
@@ -64,13 +72,13 @@ class TextToSpeechSession(Session[TextToSpeechEvent]):
         trace_id: str,
         turn_id: str,
         open_timeout: float | None,
-        close_timeout: float | _Follow | None,
+        close_timeout: float | Follow | None,
         cancel_timeout: float,
     ) -> TextToSpeechSession:
         session = cls.__new__(cls)
-        follows = close_timeout is _Follow.FINALIZE_DEADLINE
+        follows = close_timeout is Follow.FINALIZE_DEADLINE
         # A close needs an open session, and Ready sets the bound that follows it.
-        given = None if close_timeout is _Follow.FINALIZE_DEADLINE else close_timeout
+        given = None if close_timeout is Follow.FINALIZE_DEADLINE else close_timeout
         session._setup(connect, target, open_timeout, given, cancel_timeout)
         session._configure(language, voice, trace_id, turn_id, follows)
         return session
@@ -152,7 +160,9 @@ class TextToSpeechSession(Session[TextToSpeechEvent]):
         sends nothing for text above ``limits.text_to_speech``'s bound on
         one segment or on the segments between two ``finalize()`` calls
         (both in bytes of UTF-8), and for a segment larger than the
-        session's whole input credit.
+        session's whole input credit. A caller cancelled on the turn this
+        call fails gets ``CancelledError``, and the call's error is not
+        raised.
         """
         if not isinstance(text, str):
             raise TypeError(f"text is a str, not {type(text).__name__}")
@@ -205,7 +215,9 @@ class TextToSpeechSession(Session[TextToSpeechEvent]):
         ``finalize()`` calls starts again with this one. `timeout`, in
         seconds, bounds the whole call, the wait for its turn included. A
         timeout ends the session: the call is cancelled and
-        ``SessionTimeoutError`` raised, here and from every later use.
+        ``SessionTimeoutError`` raised, here and from every later use. A
+        caller cancelled on the turn this call fails gets
+        ``CancelledError``, and the call's error is not raised.
         """
         return await self._bounded(self._final(), timeout, "answer to Finalize")
 

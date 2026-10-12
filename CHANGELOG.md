@@ -217,11 +217,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `cancel()` abandons the session. Events are read while the session sends:
   a session holds 16 KiB of unread events and then reads nothing more from
   the server, and one left that way for the server's output stall time ends
-  with `ResourceExhaustedError`; a `Ready` that declares no stall time is
-  refused at open. A frame that is empty or not a whole number of samples
-  is refused at once, before any wait. The open, the close and the cancel are
-  bounded (`open_timeout`, `close_timeout`, `cancel_timeout`); a timeout is
-  one deadline over the whole call and ends the session. A cancelled caller
+  with `ResourceExhaustedError`; a `Ready` that declares no stall time or
+  no heartbeat interval is refused at open. A frame that is empty or not a
+  whole number of samples is refused at once, before any wait. The open,
+  the close and the cancel are bounded (`open_timeout`, `close_timeout`,
+  `cancel_timeout`); a timeout is one deadline over the whole call and
+  ends the session. A cancelled caller
   gets its cancellation and the session stays open. Closing the client ends
   the sessions made from it. The session sends `Ping` at the interval
   the server gives. Every failure is a typed `SpeechError` whose class
@@ -252,11 +253,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   declared, out of order, or not what a completion or the closing totals
   count ends the session with `StreamProtocolError`. Text the server would
   refuse raises `ValueError` before it is sent, and text no session would
-  send (empty, only whitespace, not a `str`) at once, before any wait. A
-  `close_timeout` that is not given follows the server: the
-  `finalize_deadline_ms` its `Ready` declares plus 30 seconds, which is 150
-  seconds by default. Run against an in-process server only, like the rest
-  of the client. (V030-E04-F02-T03)
+  send (empty, only whitespace, not a `str`) at once, before any wait. The
+  default `close_timeout`, `Follow.FINALIZE_DEADLINE`, follows the server:
+  the `finalize_deadline_ms` its `Ready` declares plus 30 seconds, which is
+  150 seconds by default. Run against an in-process server only, like the
+  rest of the client. (V030-E04-F02-T03)
 
 - A gRPC stream listener in the serving worker that binds and refuses every
   `Open`: the worker does not serve stream sessions yet. In builds with

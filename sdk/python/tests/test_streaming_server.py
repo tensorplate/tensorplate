@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -27,7 +28,7 @@ except MissingDependencyError as missing:
 import grpc
 import grpc.aio
 
-from stream_server import STATUS, StreamServer, end_cause, frames, recorded
+from stream_server import REPOSITORY, STATUS, StreamServer, end_cause, frames, recorded
 from tensorplate.stream.v1 import session_pb2 as pb
 from tensorplate.stream.v1 import session_pb2_grpc as rpc
 
@@ -165,6 +166,14 @@ def _first(event: Any) -> Any:
     [
         ("invalid_event", _open(sequence=2), StreamServer()),
         ("invalid_event", _first(recorded("stt_audio_1")), StreamServer()),
+        ("invalid_event", _open(turn_id="t" * 65), StreamServer()),
+        ("invalid_event", _open(turn_id="tur\u00f1"), StreamServer()),
+        ("invalid_event", _open(turn_id="turn\n"), StreamServer()),
+        ("invalid_event", _open(turn_id="turn\t"), StreamServer()),
+        ("invalid_event", _open(turn_id="turn\x7f"), StreamServer()),
+        ("invalid_event", _open(trace_id="t" * 65), StreamServer()),
+        ("invalid_event", _open(trace_id="trac\u00e9"), StreamServer()),
+        ("invalid_event", _open(trace_id="trace\n"), StreamServer()),
         ("backend_unsupported_capability", _open(language="xx"), StreamServer()),
         ("target_unresolved", recorded("open_selector"), StreamServer()),
         ("target_mismatch", _open(deployment_id="another-deployment"), StreamServer()),
@@ -182,6 +191,23 @@ def test_an_open_is_refused_with_the_recorded_refusal_and_no_event(
     assert status is STATUS[reason]
     assert server.refusals == [recorded(f"refused_{reason}")]
     assert server.closed == []
+
+
+def test_an_opens_trace_and_turn_ids_are_held_to_the_length_the_schema_states() -> None:
+    schema = REPOSITORY / "protocol/proto/tensorplate/stream/v1/session.proto"
+    rule = re.search(
+        r"// Optional, at most (\d+) ASCII characters each\.\n +string trace_id = 7;\n"
+        r" +string turn_id = 8;\n",
+        schema.read_text(encoding="utf-8"),
+    )
+    assert rule, "the schema no longer states one bound for an Open's trace and turn ids"
+    bound = int(rule.group(1))
+
+    for name in ("trace_id", "turn_id"):
+        got, status = exchange(StreamServer(), [_open(**{name: "t" * bound})])
+        assert (_bodies(got), status) == (["ready", "session_closed"], grpc.StatusCode.OK), name
+        got, status = exchange(StreamServer(), [_open(**{name: "t" * (bound + 1)})])
+        assert (got, status) == ([], grpc.StatusCode.INVALID_ARGUMENT), name
 
 
 def _audio(sequence: int, offset: int, samples: int = 160, data: bytes | None = None) -> Any:
@@ -389,6 +415,7 @@ def _voiced(**changes: Any) -> Any:
     [
         ("invalid_event", _voiced(voice="")),
         ("invalid_event", _voiced(voice="v" * 65)),
+        ("invalid_event", _voiced(turn_id="t" * 33 + "\u00f1" * 33)),
         ("invalid_event", _voiced(input_format=recorded("stt_open").open.input_format)),
         ("backend_unsupported_capability", _voiced(voice="another_voice")),
         ("backend_unsupported_capability", _voiced(language="xx")),
