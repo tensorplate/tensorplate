@@ -428,12 +428,15 @@ impl StateStore {
     ///
     /// # Errors
     ///
-    /// Returns [`AgentError::Internal`] if no candidate is present.
+    /// Returns [`AgentError::Internal`] if no candidate is present, or if
+    /// it does not name the descriptor identity its deploy's transaction
+    /// names.
     pub fn promote_candidate(&self, monotonic_ns: u64) -> AgentResult<()> {
         self.update(|s| {
             let mut cand = s.candidate.take().ok_or_else(|| {
                 AgentError::Internal("promote_candidate called with no candidate".into())
             })?;
+            named_as_its_deploy(&cand, s.in_flight_transaction.as_ref())?;
             cand.promoted_monotonic_ns = Some(monotonic_ns);
             let prev_active = s.active.take();
             s.previous_active = prev_active;
@@ -530,6 +533,42 @@ impl StateStore {
             .map(|d| d.labels.clone())
             .unwrap_or_default())
     }
+}
+
+/// Require `candidate`, which a promotion makes active, to name the
+/// descriptor identity the deploy transaction of its deployment names, and
+/// none when no such transaction names one. A deploy names both in one
+/// update, so nothing reaches the refusal; it would leave the transaction in
+/// flight at `Promoted` while the worker serves the candidate.
+fn named_as_its_deploy(
+    candidate: &DeploymentRecord,
+    transaction: Option<&TransactionRecord>,
+) -> AgentResult<()> {
+    let id = &candidate.deployment_id;
+    let refused = |why: String| AgentError::Internal(format!("promotion of `{id}` refused: {why}"));
+    let deploy = transaction
+        .filter(|tx| tx.kind == TransactionKind::Deploy && tx.deployment_id == *id)
+        .map(TransactionRecord::descriptor_identity)
+        .transpose()
+        .map_err(|e| refused(format!("its transaction {e}")))?;
+    let recorded = candidate
+        .descriptor_identity()
+        .map_err(|e| refused(format!("its record {e}")))?;
+    if recorded == deploy.flatten() {
+        return Ok(());
+    }
+    let show = |named: Option<DescriptorIdentity<'_>>| match named {
+        Some(named) => format!(
+            "generation {} of descriptor `{}`",
+            named.generation, named.descriptor_digest
+        ),
+        None => "no deployment descriptor".to_owned(),
+    };
+    Err(refused(format!(
+        "its record names {} and its deploy transaction names {}",
+        show(recorded),
+        show(deploy.flatten())
+    )))
 }
 
 /// Give `previous`, which a rollback puts back as active, the descriptor

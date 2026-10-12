@@ -346,6 +346,18 @@ either leaves the in-flight transaction at the last successfully
 persisted phase (which the recovery planner can read) or at the
 phase-just-before that one if the failing phase did not commit.
 
+A deploy of a format 0.2 bundle derives the bundle's
+[deployment descriptor](#deployment-descriptor-documents) after
+`capacity_checked`, directly before it asks for a worker: it verifies the
+staged copy again, takes the generation, names the descriptor on the
+candidate record and on the transaction, and writes its document, in one
+state update. The promotion moves that identity to `active` with the
+candidate record, and refuses a candidate that does not name the identity
+its deploy's transaction names. A deploy of a format 0.1 bundle derives
+nothing and writes what it wrote before: its records carry no identity, no
+document exists, and its worker's generation is taken by the registry
+inside `prepare`.
+
 ## Serving-worker handoff (V01-E08-F05)
 
 The agent stages the verified bundle into
@@ -359,6 +371,8 @@ pub trait WorkerControl: Send + Sync {
     fn warm(&self, transaction_id, candidate, timeout) -> Result<WorkerReadiness>;
     fn promote(&self, transaction_id, candidate) -> Result;
     fn abandon(&self, candidate);
+    fn hold(&self);
+    fn release(&self);
     fn unload(&self, deployment_id);
     fn active_deployment_id(&self) -> Result<Option<String>>;
     fn supervise(&self) -> Vec<MemberEvent>;
@@ -373,7 +387,11 @@ pub trait WorkerControl: Send + Sync {
 promotion). `abandon` tells the worker control that the transaction
 which prepared a candidate returned without promoting it; the coordinator
 calls it on every such return, a failed state write included, and it does
-nothing by default. `supervise`, `member_failure` and `shutdown` do nothing by
+nothing by default. `hold` asks the worker control to start no generation
+by itself until `release`; a transaction that hands over a generation takes
+the hold before it takes that generation and releases it when `prepare` has
+returned (see [the member registry](#member-registry)). Both do nothing by
+default. `supervise`, `member_failure` and `shutdown` do nothing by
 default; the [member registry](#member-registry) implements them to
 restart a serving worker that stops, to report one it no longer restarts,
 and to stop every worker when the agent is told to stop. `serving_member`
@@ -437,11 +455,12 @@ previous-active record is left intact, and the operator can retry.
 
 A previous record that names a
 [deployment descriptor](#deployment-descriptor-documents) is started at a
-new generation: just before step 3 the rollback re-stamps the recorded
-descriptor and names the new one on its transaction, and the candidate
-reference carries that identity. The swap of step 4 gives it to the record
-it puts back as active, and refuses a described record whose rollback
-transaction does not name a later generation of the same configuration.
+new generation: just before step 3, under a hold on the worker control, the
+rollback re-stamps the recorded descriptor and names the new one on its
+transaction, and the candidate reference carries that identity. The swap
+of step 4 gives it to the record it puts back as active, and refuses a
+described record whose rollback transaction does not name a later
+generation of the same configuration.
 
 ## Restart recovery (V01-E08-F07)
 
@@ -496,12 +515,15 @@ previous generations, and the committed endpoint map; the singleton
 `active`, `previous_active` and `candidate` slots are absent beside it). It
 also lets a singleton record and the in-flight transaction name the
 deployment descriptor of their generation by `generation`,
-`descriptor_digest` and `configuration_digest`, all three or none; no
-deploy records them yet
+`descriptor_digest` and `configuration_digest`, all three or none; a deploy
+of a format 0.2 bundle records them
 ([`integrity.md`](../bundles/integrity.md#naming-a-descriptor),
 [descriptor documents](#deployment-descriptor-documents)). The
 agent stamps the oldest state version whose readers decode the file without
-loss: `0.2` from the first generation it allocates, `0.1` until then. An
+loss: `0.2` from the first generation it allocates, `0.1` until then. A
+deploy of a format 0.2 bundle takes a generation itself, so it writes a
+`0.2` file under either worker mode; with `worker.mode = "mock"` a format
+0.1 deploy takes none and the file stays `0.1`. An
 agent through 0.2.x refuses a `0.2` file with its typed unsupported-version
 error and exits instead of misreading it; nothing migrates a state file
 backwards, and a downgrade sets the state directory aside instead. The
@@ -526,11 +548,41 @@ before the first document is written.
   update has set the identity in the next state and before the store writes
   that state: a `.tmp` file, `fsync`, `rename(2)`, then a sync of the
   directory. A document that cannot be written fails the update, and the
-  failed write removes its `.tmp`: nothing is named. A deploy's update,
-  which takes the generation in that same update, then spends none; a
-  restart's generation was allocated by the registry in its earlier state
-  write, so a restart whose stamp cannot write the document has spent one.
-  A crash between the two writes leaves a document no record names.
+  failed write removes its `.tmp`: nothing is named. The update of a
+  deploy, a rollback or a restore, which takes the generation in that same
+  update, then spends none; a restart's generation was allocated by the
+  registry in its earlier state write, so a restart whose stamp cannot
+  write the document has spent one. A crash between the two writes leaves
+  a document no record names.
+- **Deploy.** `start_deploy` builds the candidate reference a deploy hands
+  the worker control. For a format 0.2 bundle it parses the staged copy
+  with every artifact digest verified, requires its manifest digest to be
+  the candidate record's (`load_failed` otherwise), and then, in one state
+  update taken under a hold on the worker control, requires the candidate
+  record and the deploy's transaction to stand as the deploy wrote them,
+  takes the next generation, derives the descriptor from the staged copy,
+  names it on both and writes its document. The descriptor states the
+  runtime version the bundle's `runtime_compatibility` was judged against,
+  the runner profile as the backend's probe report found it installed,
+  admission mode `production` and the default quota: no quota is assigned
+  to a member yet, the value is not a limit, and every configuration digest
+  changes when one is first assigned. A descriptor that cannot be derived
+  refuses the deploy at `capacity_checked`, with `unsupported` for a runner
+  profile that is not installed or does not list the manifest's compute
+  type and `config_invalid` otherwise. On a deployed agent the bundle
+  verifier has refused those two before staging, since every available
+  backend that has a descriptor has a probe report; a coordinator built
+  without a report for the bundle's backend refuses a named runner profile
+  here. A `staging_dir` that is absolute and not normalized (a `.` or `..`
+  segment) is `config_invalid`, naming `staged_path`. A refusal names
+  nothing and takes no generation. A kill after the document and before
+  the state write leaves a document no record names: the next start removes
+  it, resumes the deploy and hands out the same generation. A kill after
+  the state write and before `prepared` leaves the generation named on a
+  replayable transaction: the next start resumes the deploy under a new
+  generation, and the start after that removes the first document. A bundle
+  of another format gets the reference it got before; nothing is read,
+  held or written for it.
 - **Read.** By deployment id and the identity a record or candidate
   reference carries. The document must be a regular file of at most 1 MiB
   of UTF-8 (a directory, a FIFO or a symlink at its name is refused without
@@ -579,15 +631,12 @@ before the first document is written.
   named: the next start restores `active` from it, or decides the rollback
   as it decides any in-flight transaction, the previous record still naming
   its own document (resumed, the rollback takes another generation). The
-  descriptor is re-stamped as recorded, as by the restart stamp. Between a
-  rollback's update and its `prepare`, a restart of the serving member can
-  take a newer generation. Either the registry refuses the rollback's
-  reference, the rollback fails with nothing else changed, and it can be
-  asked for again; or that restart, still starting, yields to the rollback,
-  which is promoted, and the swap leaves `previous_active` at a higher
-  generation than `active`. That is harmless: a later rollback takes a
-  generation above both. A record that names no descriptor gets the
-  reference it got before, and nothing is written.
+  descriptor is re-stamped as recorded, as by the restart stamp. The update
+  runs under a hold on the worker control, which `prepare` ends, so no
+  restart of the serving member takes a newer generation in between (see
+  [the member registry](#member-registry)). A record that names no
+  descriptor gets the reference it got before, and nothing is held or
+  written.
 - **Restart stamp.** For a member whose recipe names a descriptor, the stamp
   a `process`-mode agent installs reads the stopped generation's document,
   [re-stamps](../bundles/integrity.md#re-stamping) it, writes the new
@@ -600,8 +649,11 @@ before the first document is written.
   upgrade it still states the deploy's runtime version and runner
   environment. A recipe that names no descriptor is returned unchanged.
 
-No deploy records a descriptor yet: no record names one, no document is
-written, and all of the above is inert in a deployed agent.
+A record names a descriptor exactly when its bundle is format 0.2 and was
+deployed by an agent that derives one. For every other record (a format 0.1
+bundle, or a state file an earlier agent wrote) no document is read or
+written, and deploy, rollback, restore and restart behave as they did
+before descriptors.
 
 ## Worker runtime control transport
 
@@ -626,14 +678,16 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   version `0.2` (see [durable state](#durable-state-store-v01-e08-f02)); startup
   recovery relaunches the recorded active deployment through the same path,
   so it happens on the first start that has a deployment to restore. A
-  deploy's candidate reference that names a
-  [descriptor](#deployment-descriptor-documents) hands over its generation
-  instead: the launch is that generation and takes none from the counter.
-  A handed generation must be above every generation the registry holds,
-  its members', those of workers it has asked to stop and not yet reaped,
-  and the one a restart is owed for, or the candidate is refused with
-  `load_failed`. A restart always takes a new one, whatever its recipe
-  names.
+  candidate reference that names a
+  [descriptor](#deployment-descriptor-documents), a deploy's, a rollback's
+  or a restore's, hands over its generation instead: the launch is that
+  generation and takes none from the counter. A handed generation must be
+  above every generation the registry holds, its members', those of workers
+  it has asked to stop and not yet reaped, and the one a restart is owed
+  for. One taken under a hold always is; a reference that is not, which
+  only a generation handed twice can be, is refused with `internal`,
+  recoverable: another attempt takes a new generation. A restart always
+  takes a new one, whatever its recipe names.
 - **Start.** The registry renders the serving config with
   `deployment.generation` and `deployment.endpoint` set to the deployment id,
   hands the worker its control socket on fd 0 in the same launch, and starts
@@ -702,14 +756,19 @@ A restart never starts while a deploy holds the member: from the moment
 gives up, or the transaction returns without promoting it for any other
 reason, such as a state write that failed. A promoted generation the
 registry allocated is therefore never older than the one it replaces. A
-generation handed with a descriptor is compared, at its launch, with the
-generations the registry holds then: while a restart is being stamped, a
-reference handing a lower generation can still be prepared and promoted.
-Nothing hands a generation yet; the change that makes deploys hand them
-closes that window, by holding restarts before the generation is allocated
-or by refusing at promote, and decides whether that refusal is
-recoverable. A promotion drops the restart that was owed and gives the
-member its three restarts back. A candidate whose `warm` gave up is left
+transaction that hands a generation over takes it before `prepare`, so it
+holds the member earlier: `WorkerControl::hold`, taken before the state
+update that takes the generation and released when `prepare` has returned,
+counts as a `prepare` that is running. A restart takes its generation
+first and checks for a hold after. One that finds the hold starts and
+stamps nothing, and stays owed. One that passed the check before the hold
+took its generation before the transaction did: it may still stamp
+`active` and start its worker, and it yields to the transaction when its
+launch returns. Either way every generation the registry holds when the
+handed one is launched is older, and after the promotion or the swap
+`previous_active` names an older generation than `active`. A promotion
+drops the restart that was owed and gives the member its three restarts
+back. A candidate whose `warm` gave up is left
 where it was, as before, but is not promoted afterwards.
 
 A member's name is its deployment id, and the serving worker accepts only 1
@@ -796,30 +855,28 @@ worker is promoted before the record that names it is written, and the
 worker it replaces is stopped in between, so for up to the stop deadline
 (ten seconds) the member serving is not the recorded one; `active` then
 carries the new worker's URL and no generation. A record that names no
-descriptor, which is every record a deploy writes today, cannot tell a
+descriptor, which is every record of a format 0.1 bundle, cannot tell a
 redeploy of its own bundle under its own id from the deployment it
 records: for the stop of the replaced worker `active` then carries the new
 worker's generation and URL beside the replaced deployment's promotion
-time. One gap is latent: startup recovery and a rollback start their member
-from a reference that carries no descriptor identity, so beside a record
-that names a descriptor `active.generation` would stay absent for as long
-as that member serves. No record names a descriptor yet; the change that
-makes rollback and recovery carry the identity closes it. Both are absent
+time. Both are absent
 while nothing serves: the worker stopped, a restart is waiting or loading,
 or the member is failed. `candidate.generation` is
 the generation a deploy has prepared and not promoted; a worker an earlier
 deploy abandoned is not named.
 
-Status reads no generation from a singleton record. A record can carry
-one: the [restart stamp](#deployment-descriptor-documents) writes the new
-generation and its digests into `active` when the record names a
-descriptor, and leaves a record that names none as it is. No deploy records
-a descriptor yet, so no record of a deployed agent carries a generation.
-Where `active` carries one, `active.generation` is still the registry's:
-the stamp writes the record before the new generation starts, so the field
-is absent while that generation loads and is the record's generation once
-it serves. `previous_active.generation` is absent in every case: nothing
-runs for a retained deployment.
+A singleton record that names a descriptor carries its generation: a
+deploy, a rollback, a restore and the
+[restart stamp](#deployment-descriptor-documents) each write the generation
+they start into the record. `active.generation` is still read from the
+registry, and only while the member serving is the one the record names. A
+restart, a restore and a rollback write the record before the new
+generation serves, and a deploy writes it after its worker was promoted, so
+the field is absent in between and is the record's generation once both
+are true.
+`previous_active.generation` is the retained record's own, the generation
+that deployment was last started as, since nothing runs for a retained
+deployment; it is absent for a record that names no descriptor.
 
 For a resident set, each member is matched to the registry by deployment id
 and generation. A committed generation the registry holds no running

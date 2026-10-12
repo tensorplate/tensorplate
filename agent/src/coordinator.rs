@@ -665,7 +665,15 @@ impl Coordinator {
                 summary.serving_url = Some(serving.serving_url);
             }
         }
-        let mut previous = state.previous_active.as_ref().map(deployment_summary);
+        // Nothing serves the retained record: its generation is the one it
+        // was last started as, where it names a descriptor.
+        let mut previous = state.previous_active.as_ref().map(|retained| {
+            let generation = retained.generation;
+            DeploymentSummary {
+                generation,
+                ..deployment_summary(retained)
+            }
+        });
         let live = self.worker.live_members();
         // Beside a durable resident set the singleton slots are empty; a
         // size-1 serving set projects into them for clients that read only

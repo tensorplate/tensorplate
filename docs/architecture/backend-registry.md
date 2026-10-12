@@ -773,8 +773,10 @@ declarations into the descriptor's `runner_profiles`: the descriptor's own
 entries first, then each `*.json` file in file name order. Consumers see only
 the merged list. It is the list `DeploymentDescriptor::derive` takes as the
 installed runner profiles, so a bundle's `runner_profile` resolves exactly
-when a package that declares it is installed. The agent's deploy path does
-not derive a deployment descriptor yet.
+when a package that declares it is installed. The agent's deploy path
+derives the descriptor of a format 0.2 bundle from the probe report's copy
+of that list
+([agent.md](agent.md#deployment-descriptor-documents)).
 
 The merge fails closed. One refused declaration refuses the descriptor, and
 the backend is then not runnable for any bundle:

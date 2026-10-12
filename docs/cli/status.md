@@ -23,7 +23,9 @@ tensorplate status [--observability-snapshot <path>] [--no-quarantine] [--output
   serving it, or beside a resident set of one the committed one), human
   output adds a `generation=` line under `active:`; in JSON, `active`,
   `previous_active` and `candidate` always carry a `generation` key, `null`
-  when the agent did not name one. Not done yet: `severity` does not judge
+  when the agent did not name one. `previous_active.generation` is the
+  generation a retained deployment was last started as, for a deployment
+  whose record names a deployment descriptor. Not done yet: `severity` does not judge
   `process` or `readiness`. It judges `contact`, and a member whose process
   is `stopped` or draining reports none, so a `serving` member whose process
   is `stopped` does not lower it.

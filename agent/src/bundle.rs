@@ -160,6 +160,17 @@ pub(crate) fn staged_manifest(staged_path: &Path) -> AgentResult<StagedManifest>
     })
 }
 
+/// Parse the bundle staged at `staged_path` and verify each artifact
+/// against its digest, as the bundle was verified before it was staged.
+///
+/// # Errors
+///
+/// As [`staged_manifest`], and [`AgentError::BundleIntegrity`] for an
+/// artifact that is missing or is not the one the manifest names.
+pub(crate) fn staged_bundle(staged_path: &Path) -> AgentResult<BundleDescriptor> {
+    parse_bundle(staged_path).map_err(parse_error_to_agent_error)
+}
+
 /// Verify the bundle at `bundle_path` against the agent config.
 ///
 /// bundle format migrates the implementation to the shared

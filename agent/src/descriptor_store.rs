@@ -16,8 +16,14 @@ use std::time::Duration;
 
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
 use tensorplate_protocol::agent_state::{AgentState, DeploymentRecord, TransactionKind};
+use tensorplate_protocol::backend_descriptor::RunnerProfile;
+use tensorplate_protocol::bundle_profile::PROFILE_FORMAT_VERSION;
+use tensorplate_protocol::deployment_descriptor::DeploymentDescriptorError;
 use tensorplate_protocol::worker_control::CandidateRef;
-use tensorplate_protocol::{ArtifactRole, DeploymentDescriptor, DescriptorIdentity, ErrorCode};
+use tensorplate_protocol::{
+    AdmissionMode, ArtifactRole, DeploymentDescriptor, DescriptorIdentity, DescriptorInputs,
+    ErrorCode, MemberQuota, ProtocolError,
+};
 
 use crate::backend_detection::BackendProbeReport;
 use crate::error::{AgentError, AgentResult};
@@ -552,11 +558,78 @@ pub(crate) fn start_deploy<'w>(
     deploy: &Deploy<'_>,
 ) -> AgentResult<InHand<'w>> {
     let record = deploy.record;
+    let id = &record.deployment_id;
     let reference = reference_of(record, deploy.artifact_relative_path.clone());
-    // Not built yet: every bundle is referenced as it was recorded.
-    let _ = (store, deploy.transaction_id, deploy.format_version);
-    let _ = (deploy.runtime_version, deploy.probes);
-    Ok(InHand::as_recorded(worker, reference))
+    if deploy.format_version != PROFILE_FORMAT_VERSION {
+        return Ok(InHand::as_recorded(worker, reference));
+    }
+    let (digest, staged_path) = (&*record.bundle_digest, &*record.staged_path);
+    let staged = crate::bundle::staged_bundle(Path::new(staged_path))?;
+    if !crate::bundle::bundle_digests_equal(&staged.manifest_digest, digest) {
+        return Err(AgentError::BundleIntegrity {
+            path: "manifest.json".into(),
+            reason: format!(
+                "`{id}` is not started: the bundle staged at `{staged_path}` is `{}`, not the `{digest}` that was verified",
+                staged.manifest_digest
+            ),
+        });
+    }
+    // No report for the backend: no profile is known to be installed.
+    let report = deploy.probes.get(&record.backend_hint);
+    let probed = report
+        .into_iter()
+        .flat_map(|report| &report.runner_profiles);
+    let installed: Vec<RunnerProfile> = probed.map(|probe| probe.profile.clone()).collect();
+    let descriptors = DescriptorStore::new(store.state_dir());
+    let underived = |reason: String| unusable(format!("of `{id}` is not derived: {reason}"));
+    let guard = Held::new(worker);
+    let derived = store.update(|state| {
+        if state.candidate.as_ref() != Some(record) {
+            return Err(underived("the candidate record is not its deploy's".into()));
+        }
+        let generation = state.allocate_generation(1);
+        let generation = generation.map_err(|e| underived(e.to_string()))?;
+        let inputs = DescriptorInputs {
+            deployment_id: id,
+            generation,
+            admission_mode: AdmissionMode::Production,
+            staged_path,
+            quota: MemberQuota::default(),
+            runtime_version: deploy.runtime_version,
+            runner_profiles: &installed,
+            acceptance_profile_digest: None,
+        };
+        let derived = DeploymentDescriptor::derive(&staged, &inputs);
+        let derived = derived.map_err(|e: DeploymentDescriptorError| {
+            let message = format!("of `{id}` is not derived: {e}");
+            let code = ProtocolError::from(e).code;
+            AgentError::DeploymentDescriptor { code, message }
+        })?;
+        let (generation, descriptor_digest, configuration_digest) = naming(&derived);
+        let in_flight = state.in_flight_transaction.as_mut().filter(|tx| {
+            tx.transaction_id == deploy.transaction_id
+                && tx.kind == TransactionKind::Deploy
+                && tx.deployment_id == *id
+        });
+        let transaction = in_flight.ok_or_else(|| {
+            let transaction_id = deploy.transaction_id;
+            underived(format!(
+                "deploy transaction `{transaction_id}` is not in flight"
+            ))
+        })?;
+        state.candidate = Some(DeploymentRecord {
+            generation,
+            descriptor_digest: descriptor_digest.clone(),
+            configuration_digest: configuration_digest.clone(),
+            ..record.clone()
+        });
+        transaction.generation = generation;
+        transaction.descriptor_digest = descriptor_digest;
+        transaction.configuration_digest = configuration_digest;
+        descriptors.write(&derived)?;
+        Ok(derived)
+    })?;
+    Ok(InHand::naming(worker, reference, &derived, guard))
 }
 
 /// The reference of `record` before any descriptor is named on it.

@@ -306,6 +306,44 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   stream/v1 frame through the modules and encode it back byte for byte.
   (V030-E04-F02-T04)
 
+- A deploy of a format 0.2 bundle derives the bundle's deployment
+  descriptor and records it, which puts the descriptor documents to work in
+  a deployed agent. After the capacity check and directly before it asks
+  for a worker, the deploy verifies its staged copy again, artifact digests
+  included (one more SHA-256 pass over the artifacts for each such deploy),
+  and in one state update takes the next generation, derives the descriptor
+  from the staged copy and the installed runner profile, names it on the
+  candidate record and on the deploy's transaction and writes its document.
+  The candidate reference hands the worker control that generation, and the
+  promotion carries the identity to the active record. A staged copy that
+  is not the bundle that was verified is `load_failed`; a descriptor that
+  cannot be derived refuses the deploy with `unsupported` (a runner profile
+  that is not installed, or that does not list the bundle's compute type)
+  or `config_invalid`, names nothing and takes no generation. The
+  descriptor records admission mode `production` and the default member
+  quota: no quota is assigned yet, the value is not a limit, and every
+  configuration digest changes when one is first assigned. It states the
+  runtime version and the runner environment installed at the deploy, and
+  a descriptor re-stamped after a package upgrade still states those. A
+  deploy of a bundle that names a runner profile needs the probe report of
+  its backend: the packaged agent always holds one, and a coordinator built
+  without one refuses the deploy. A format 0.2 deploy writes state version
+  `0.2` under either worker mode. A transaction that hands a generation
+  over (a deploy, a rollback, the restore at a start) takes it under a
+  hold on the worker control, `WorkerControl::hold` and `release`, which do
+  nothing by default: the member registry starts no restart from before the
+  generation is taken until `prepare` has returned. A restart could take a
+  newer generation in between, which either refused the transaction or
+  left the previous record at a higher generation than the active one. The
+  registry's refusal of a handed generation that is not above every
+  generation it holds is now `internal` and recoverable, where it was
+  `load_failed`; only a generation handed twice reaches it. Agent status
+  reports `previous_active.generation` for a retained record that names a
+  descriptor: the generation that deployment was last started as. A format
+  0.1 bundle deploys as before: nothing is derived, read again, held or
+  written for it, its records carry no identity, and with the mock worker
+  control its state file stays state version `0.1`. (V030-E02-F01-T04)
+
 - A rollback and the restore at an agent start begin a deployment that
   names a deployment descriptor at a new generation, and the agent removes
   the descriptor documents nothing names when it starts. For a record that
