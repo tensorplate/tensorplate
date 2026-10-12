@@ -1248,8 +1248,104 @@ The binding can run a hook inside the sink call of a chosen transition,
 which is how a case releases a held job inside the manager call that
 applies a Finalize: the synthetic dispatch then reports the completion
 before it has recorded the Finalize, and another dispatch may take
-either order. The dispatch that runs backend jobs is not built yet, and
-the serving worker constructs none.
+either order.
+
+### The speech dispatch
+
+`SpeechJobDispatch` (`runtime/src/serving/session/speech_dispatch.hpp`,
+internal) is the dispatch that runs backend jobs: it turns session input
+into typed jobs through one `BoundedJobBridge`
+([backend-registry.md](backend-registry.md), "Sessions with a job
+bridge") and their results into task output. The serving worker does not
+construct it yet, so a worker still refuses every stream session.
+
+It is **provisional**: the least that serves one transcription and one
+synthesis, standing in for the mode handlers that will own windows,
+partial transcripts and endpointing.
+
+- **Audio input** (16 kHz mono 16-bit PCM, frames of 20 to 320 ms). A
+  client Finalize, a half-close or the 30-second limit ends the
+  utterance, and its accumulated audio is one `stt_decode`: copied into
+  one buffer, the window the whole utterance, `start_sample` its first
+  sample on the session's timeline. The result's text becomes the one
+  segment of the final transcript, over the whole utterance. An utterance
+  without audio runs no job (a job request cannot carry an empty window)
+  and yields a final without segments, as does a result without text.
+- **Text input.** A segment is one `tts_synthesis` with the session's
+  language and voice at normal speed. Its single audio result stays in
+  the backend's buffer and is cut from there into chunks of 20 ms: a
+  chunk is cut only when the one before it was queued, so backpressure
+  holds one chunk and nothing grows. The buffer is released when the last
+  chunk was cut, and the segment's completion follows.
+- **One lane.** One job is in flight for the whole dispatch, and sessions
+  are served in the order their work became ready. A job keeps the lane
+  until the backend ends it, also when its session was cancelled
+  meanwhile: that is where a cancel waits behind the backend. With one
+  job in flight nothing else is queued behind it in the backend. The
+  dispatch records the longest wait between a session's release and the
+  backend's acknowledgement (`stats()`), for measuring that cost. The
+  scheduler's public contract is not involved: no speech job passes
+  through `InferScheduler`.
+
+**What it cannot refuse before admission.** `negotiate` refuses an input
+kind the dispatch was not built for, an audio format other than the one
+above, and a language or voice that a job request could not carry. The
+bridge has no query for what the loaded profile permits, so a job class,
+a language or a voice the backend refuses fails the session at its first
+job, after it was reported ready.
+
+**Threads.** One thread of the dispatch makes every report to the
+manager, every offer to an output queue and every bridge call. The
+binding's calls and the bridge's callbacks only queue for it under one
+mutex, which is held for nothing else: no call to the manager, a queue,
+the bridge or the buffer manager is made with it held. A callback
+therefore never waits on the manager or the backend, never calls
+`health()`, and never unloads or destroys the backend session or the
+bridge. The bridge keeps the object its callbacks run on, so a callback
+that arrives after `stop()` still settles its buffers.
+
+**Releases.** Every session opened here is released through the bridge
+exactly once, whether or not it ran a job: at its cleanup, or at
+`stop()` for a session still open then, because an unload cancels
+nothing and would otherwise wait behind a running job. The cleanup is
+acknowledged when the backend reports the session released. A release
+the bridge answers `backend_unavailable` is a released session and is
+acknowledged at once; any other refusal leaves the slot held. A session
+never opened here is acknowledged without a bridge call.
+
+**Buffers.** The buffer of an audio result is released exactly once:
+when its last chunk was cut, or when the result is dropped (its session
+is ending or gone, the job is not the one in flight, or the dispatch has
+stopped). A job's input buffer is released when the backend reports the
+job released, also after `stop()`; a job never reported released keeps
+it.
+
+**Backend outcomes.** A failed job, or a submit the bridge refuses,
+fails the session with a cause whose reason is the stream's:
+
+| Bridge outcome | Session failure |
+|---|---|
+| `failed`, `unavailable` / `backend_reset` | the `backend_reset` event, reason `backend_reset` |
+| `failed`, `unavailable` / `session_unloaded`; `submit` refused `backend_unavailable` | `backend_unavailable` |
+| `job_class_unsupported` or `job_not_permitted`, from `submit` or as `failed` | `backend_unsupported_capability` |
+| `job_capacity_exhausted`, from `submit` or as `failed` | the bridge's error unchanged (`resource_exhausted`; `internal` on a stream) |
+| any other failure | the bridge's error unchanged; its code decides the stream's reason |
+
+After a backend was lost with no job open, nothing is delivered: the
+session learns of it at its next job, from the refused submit. A
+capacity refusal is not a load condition here: one job is in flight and
+the dispatch is the bridge's only submitter, so it means that invariant
+was broken, and it fails the session the same way however it arrives.
+The dispatch never ends a session as `deployment_retired` or
+`worker_shutdown`; those are the causes the worker gives a drain.
+
+`test/unit/session_dispatch_test.cpp` runs the contract cases against it
+over the fixture job bridge, once for each outcome that backend can be
+told to choose (capacity refused by `submit`; a cancelled job that
+completes), with results that follow their input.
+`test/unit/speech_dispatch_test.cpp` holds what the cases leave to it:
+the job requests, the lane's order, each row of the table above, one
+release a session, and the buffer accounting of every path.
 
 ## Test surface
 

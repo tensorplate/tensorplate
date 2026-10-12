@@ -149,6 +149,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Speech dispatch over the job bridge (internal, provisional): the serving
+  runtime can run a stream session's input as backend jobs. An utterance
+  ended by a Finalize, a half-close or the 30-second limit is one decode
+  whose text becomes the final transcript; a text segment is one synthesis
+  whose audio is cut into 20 ms chunks under the output queue's
+  backpressure. One job is in flight at a time. The serving worker does not
+  construct it yet, so a worker still refuses every stream session.
+  (V030-E04-F03-T02)
+
 - A health probe in the Python/PyTorch adapter's job channel, for the job
   bridge that will sit on it; nothing calls it yet. It answers from the
   channel's state as a submit would (`backend_not_ready` before jobs are
