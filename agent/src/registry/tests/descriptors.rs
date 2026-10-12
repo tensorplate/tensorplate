@@ -5,7 +5,7 @@ use tensorplate_protocol::agent_state::{AgentState, DeploymentRecord};
 use tensorplate_protocol::{DeploymentDescriptor, ErrorCode};
 
 use crate::descriptor_store::tests::{deploy, derive, naming, reference};
-use crate::descriptor_store::{identity_of, resolve, restart_stamp};
+use crate::descriptor_store::{identity_of, resolve, restart_stamp, start_again, Start};
 
 /// A registry wired as the agent's is, over a state whose `active` record
 /// names the descriptor of generation 1 of `stt`.
@@ -322,6 +322,26 @@ fn the_serving_member_carries_the_digests_of_the_descriptor_it_was_started_from(
     let second = d.first.restamp(2).unwrap();
     assert!(d.records(&second));
     assert_eq!(started_from(), of(&second));
+}
+
+#[test]
+fn a_record_started_again_is_launched_as_the_generation_its_reference_names() {
+    let d = described();
+    let recorded = d.active();
+
+    let again = start_again(&d.store, &recorded, "entry.json".into(), Start::Restore).unwrap();
+    d.serve(&again);
+
+    let second = d.first.restamp(2).unwrap();
+    assert_eq!(d.launcher.handle(2).spec.member, MemberRef::new("stt", 2));
+    assert_eq!(d.last_config()["generation"], 2);
+    assert_eq!(d.last_config()["model"]["runner_profile"], "faster_whisper");
+    assert!(d.records(&second) && d.launcher.count() == 1);
+
+    // Its restart is stamped from the generation the record now names.
+    d.stop(2);
+    assert_eq!(d.step(1), restarted(3));
+    assert!(d.records(&second.restamp(3).unwrap()));
 }
 
 #[test]

@@ -533,18 +533,14 @@ impl Coordinator {
             DeployState::CapacityChecked,
         )?;
 
-        let candidate_ref = CandidateRef {
-            deployment_id: prev.deployment_id.clone(),
-            staged_path: prev.staged_path.clone(),
-            bundle_digest: prev.bundle_digest.clone(),
-            generation: None,
-            descriptor_digest: None,
-            configuration_digest: None,
-            backend_hint: prev.backend_hint.clone(),
-            model_class: prev.model_class.clone(),
-            bundle_name: Some(prev.bundle_name.clone()),
-            bundle_version: Some(prev.bundle_version.clone()),
-            artifact_relative_path: Some(artifact_relative_path),
+        // Just before `prepare`: a restart that takes a generation in between
+        // makes the registry refuse the one this reference names.
+        let start = crate::descriptor_store::Start::Rollback(&transaction_id);
+        let again =
+            crate::descriptor_store::start_again(&self.store, &prev, artifact_relative_path, start);
+        let candidate_ref = match again {
+            Ok(candidate) => candidate,
+            Err(err) => return self.fail_rollback(&transaction_id, &prev.deployment_id, err),
         };
 
         self.emit(&WorkerEvent::PrepareStart {

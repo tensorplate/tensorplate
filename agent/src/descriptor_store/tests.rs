@@ -14,6 +14,8 @@ use tensorplate_protocol::{parse_bundle, AdmissionMode, DescriptorInputs, Member
 
 use crate::state::StateStore;
 
+mod start_again;
+
 const STAGED: &str = "/var/lib/tensorplate/bundles/staging/stt";
 const ELSEWHERE: &str = "/var/lib/tensorplate/bundles/staging/other";
 
