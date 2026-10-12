@@ -1083,10 +1083,11 @@ def test_the_documented_example_reads_events_while_it_sends(
 
 
 def test_the_documented_example_raises_its_readers_error_when_reading_fails() -> None:
-    # Forty frames fit the input credit and draw 40 KiB of partial transcripts, with no stall
-    # timer to speak of: an example that left its sender waiting for the Finalize's answer
-    # behind the events nobody takes would not return.
-    example, fake = documented(partial_bytes=1000, output_stall_timeout_ms=NO_STALL_MS)
+    # Forty frames fit the input credit and draw 40 KiB of partial transcripts. An example
+    # that left its sender waiting for the Finalize's answer behind the events nobody takes
+    # would raise the stall timer's error; one that stops at the reader's failure holds a
+    # few events at most, and the timer never starts.
+    example, fake = documented(partial_bytes=1000, output_stall_timeout_ms=50)
     failure = RuntimeError("the display failed")
 
     def show(text: str) -> None:
@@ -1100,7 +1101,9 @@ def test_the_documented_example_raises_its_readers_error_when_reading_fails() ->
                 await example["transcribe"](endpoint, [FRAME] * 40)
             assert caught.value is failure
             await fake.until(lambda: fake.live == 0)
-            assert fake.closed[0].cause.reason == pb.FAILURE_REASON_CLIENT_CANCELLED
+            # The example left the session by its exit on the error, not by a timer.
+            reasons = [closed.cause.reason for closed in fake.closed]
+            assert reasons == [pb.FAILURE_REASON_CLIENT_CANCELLED]
 
     # `run` fails on a task whose exception nobody took.
     run(main)

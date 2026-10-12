@@ -28,11 +28,11 @@ CLOSE_MARGIN_S = 30.0
 
 
 class Follow(enum.Enum):
-    """What a timeout argument takes, in place of seconds, to follow a limit the server declares.
+    """What ``SpeechClient.synthesize()`` takes as its `close_timeout` in place of seconds.
 
-    ``FINALIZE_DEADLINE`` is the default `close_timeout` of
-    ``SpeechClient.synthesize()``: the ``limits.finalize_deadline_ms`` of the
-    session's ``Ready`` and 30 seconds more.
+    ``FINALIZE_DEADLINE``, the default, follows a limit the server declares:
+    the ``limits.finalize_deadline_ms`` of the session's ``Ready`` and 30
+    seconds more. No other timeout takes it.
     """
 
     FINALIZE_DEADLINE = "limits.finalize_deadline_ms and a margin"

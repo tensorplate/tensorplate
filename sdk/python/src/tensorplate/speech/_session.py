@@ -149,9 +149,11 @@ class Session(Generic[EventT]):
     A task cancelled inside a method gets its ``CancelledError`` and the
     session stays open; an event it was writing at that moment is still sent.
     A task cancelled on the turn of the event loop in which its call fails
-    gets ``CancelledError`` too, and that call's error is not raised: an
-    error that ended the session is raised by the session's next use, and a
-    ``ValueError`` for input that was not sent is not reported at all.
+    gets ``CancelledError`` too, and that call's error is not raised. An
+    error that ended the session is raised by the session's next use; after
+    an ``open()`` that failed, by iterating the session, while its other
+    calls raise ``SessionClosedError``. A ``ValueError`` for input that was
+    not sent is not reported at all.
     """
 
     # Whether the session's input is text segments, which the waiting-segment credit bounds.

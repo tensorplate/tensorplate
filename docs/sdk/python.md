@@ -396,9 +396,11 @@ async def show_partials(session: SpeechToTextSession) -> None:
   was writing at that moment is still sent, because gRPC cancels a call
   whose write is cancelled; one it was still waiting to send is not. A task
   cancelled on the turn of the event loop in which its call fails gets
-  `CancelledError` too, and that call's error is not raised: an error that
-  ended the session is raised by the session's next use, and a `ValueError`
-  for a frame or a text that was not sent is not reported at all.
+  `CancelledError` too, and that call's error is not raised. An error that
+  ended the session is raised by the session's next use; after an open that
+  failed, by iterating the session, while its other calls raise
+  `SessionClosedError`. A `ValueError` for a frame or a text that was not
+  sent is not reported at all.
 - **Input and credit.** `send_audio(data)` sends one frame in the session's
   input format and waits while the server's input credit does not admit it.
   `data` is `bytes` or a contiguous view of bytes (a `bytearray`, a
@@ -570,7 +572,8 @@ async def play_audio(
   `ResourceExhaustedError` in place of the error that caused it.
 - **Sessions.** `client.synthesize(target, *, language, voice, trace_id="",
   turn_id="", open_timeout=10.0, close_timeout=Follow.FINALIZE_DEADLINE,
-  cancel_timeout=5.0)`.
+  cancel_timeout=5.0)`; `trace_id` and `turn_id` are bounded as in
+  `transcribe()`.
   The deployment declares its voices, and the server chooses the audio
   format for the voice: `session.output_format` is an `AudioFormat`, and
   `session.limits.text_to_speech` holds the text bounds. `close()`, or
