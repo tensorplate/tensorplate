@@ -47,8 +47,25 @@ namespace {
 const Error kConnectionEnded =
     Error::make(Error::Code::Unavailable, "the sidecar connection ended");
 
+Error refusal(Error::Code code, std::string_view reason) {
+  return Error::make(code, "job channel: " + std::string(reason), std::string(reason));
+}
+
 Unexpected refuse(Error::Code code, std::string_view reason) {
-  return unexpected(Error::make(code, "job channel: " + std::string(reason), std::string(reason)));
+  return unexpected(refusal(code, reason));
+}
+
+// What a frame that carries the health probe's id says of the backend.
+Result<void> health_answer(const ipc::SidecarFrame& frame) {
+  const auto ready = reports_ready(frame.json_header);
+  if (!ready.has_value()) {
+    return unexpected(
+        Error::make(Error::Code::Unavailable, ready.error().message, "backend_unavailable"));
+  }
+  if (!ready.value()) {
+    return refuse(Error::Code::NotReady, "backend_not_ready");
+  }
+  return Result<void>{};
 }
 
 // Blocks until the descriptor has bytes, reached EOF, was shut down or failed.
@@ -132,6 +149,16 @@ bool JobChannel::live_locked() const noexcept {
   return phase_ != Phase::Idle && phase_ != Phase::Stopped && !ended_;
 }
 
+std::optional<Error> JobChannel::not_running_locked() const {
+  if (phase_ == Phase::Idle || phase_ == Phase::Started || manager_ == nullptr) {
+    return refusal(Error::Code::NotReady, "backend_not_ready");
+  }
+  if (phase_ != Phase::Admitting || ended_) {
+    return refusal(Error::Code::Unavailable, "backend_unavailable");
+  }
+  return std::nullopt;
+}
+
 // -- The session's side. -------------------------------------------------------
 
 Result<void> JobChannel::start(ipc::UnixSocket& socket, const std::vector<JobClass>& job_classes) {
@@ -185,6 +212,8 @@ void JobChannel::close_admission() noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   if (phase_ == Phase::Started || phase_ == Phase::Admitting) {
     phase_ = Phase::Closing;
+    // A health call waits for an answer the sidecar may never send.
+    probe_cv_.notify_all();
   }
 }
 
@@ -279,11 +308,8 @@ Result<void> JobChannel::submit(const JobRequest& request) {
   if (!sink_) {
     return refuse(Error::Code::NotReady, "event_sink_missing");
   }
-  if (phase_ == Phase::Idle || phase_ == Phase::Started || manager_ == nullptr) {
-    return refuse(Error::Code::NotReady, "backend_not_ready");
-  }
-  if (phase_ != Phase::Admitting || ended_) {
-    return refuse(Error::Code::Unavailable, "backend_unavailable");
+  if (auto refused = not_running_locked(); refused.has_value()) {
+    return unexpected(std::move(*refused));
   }
   if (std::find(job_classes_.begin(), job_classes_.end(), request.job_class()) ==
       job_classes_.end()) {
@@ -351,6 +377,13 @@ Result<void> JobChannel::release_session(std::uint64_t session_key, std::uint64_
     return refuse(Error::Code::NotReady, "event_sink_missing");
   }
   if (!live_locked()) {
+    // The caller takes the session as released and never submits its key
+    // again. A channel never started has had no session to release, and
+    // arguments a live channel refuses name none.
+    if (phase_ != Phase::Idle &&
+        encode_session_release(session_key, generation, "unsent").has_value()) {
+      released_sessions_.insert(session_key);
+    }
     return refuse(Error::Code::Unavailable, "backend_unavailable");
   }
   if (releasing_.contains(session_key) || released_sessions_.contains(session_key)) {
@@ -376,6 +409,50 @@ Result<void> JobChannel::release_session(std::uint64_t session_key, std::uint64_
   }
   queue_locked(QueuedFor::Release, session_key, std::move(frame).value());
   return Result<void>{};
+}
+
+Result<void> JobChannel::probe_health(TimePoint deadline) {
+  std::unique_lock<std::mutex> lock(mutex_);
+  if (auto refused = not_running_locked(); refused.has_value()) {
+    return unexpected(std::move(*refused));
+  }
+  if (!probe_) {
+    auto asked = std::make_shared<HealthProbe>();
+    asked->message_id = next_message_id();
+    auto header = encode_health_check(asked->message_id);
+    if (!header.has_value()) {
+      return unexpected(header.error());
+    }
+    auto frame = ipc::encode_frame(ipc::SidecarFrame{std::move(header).value(), {}});
+    if (!frame.has_value()) {
+      return unexpected(frame.error());
+    }
+    // Queued first: a push that throws must leave no probe standing.
+    queue_locked(QueuedFor::Probe, 0, std::move(frame).value());
+    probe_ = std::move(asked);
+  }
+  // The channel lets go of the probe when it ends; this caller reads it after.
+  const std::shared_ptr<HealthProbe> probe = probe_;
+  ++probe->waiting;
+  probe_cv_.wait_until(lock, deadline, [this, &probe] {
+    return probe->outcome.has_value() || not_running_locked().has_value();
+  });
+  --probe->waiting;
+  // The channel's state first, as for a call made now: an unload may have
+  // closed admission while the call waited, answered or not.
+  if (auto refused = not_running_locked(); refused.has_value()) {
+    return unexpected(std::move(*refused));
+  }
+  const std::optional<Result<void>> outcome = probe->outcome;
+  if (!outcome.has_value()) {
+    return refuse(Error::Code::Timeout, "health_timeout");
+  }
+  return *outcome;
+}
+
+std::size_t JobChannel::health_waiters() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return probe_ ? probe_->waiting : 0;
 }
 
 JobChannelCounters JobChannel::counters() const {
@@ -448,6 +525,9 @@ void JobChannel::end_connection(const Error& error) {
       std::exchange(unary_, nullptr)->outcome = unexpected(*failure_);
       unqueue_locked(QueuedFor::Exchange, 0);
     }
+    if (probe_) {
+      end_probe_locked(refuse(Error::Code::Unavailable, "backend_unavailable"));
+    }
     Error ended = kConnectionEnded;
     ended.context = stopping_ ? stop_reason_ : std::string(kBackendReset);
     for (auto& [job_id, job] : jobs_) {
@@ -459,6 +539,25 @@ void JobChannel::end_connection(const Error& error) {
   unary_cv_.notify_all();
   outbox_cv_.notify_all();
   deliver(out);
+}
+
+bool JobChannel::names_probe_locked(std::string_view message_id) const noexcept {
+  return probe_ && probe_->message_id == message_id;
+}
+
+void JobChannel::end_probe_locked(Result<void> outcome) {
+  probe_->outcome = std::move(outcome);
+  probe_.reset();
+  unqueue_locked(QueuedFor::Probe, 0);
+  probe_cv_.notify_all();
+}
+
+void JobChannel::answer_probe_locked(Result<void> outcome) {
+  if (probe_->waiting == 0) {
+    // Every caller gave up before it came.
+    ++counters_.dropped_other_messages;
+  }
+  end_probe_locked(std::move(outcome));
 }
 
 bool JobChannel::route(ipc::SidecarFrame frame) {
@@ -510,7 +609,7 @@ bool JobChannel::route(ipc::SidecarFrame frame) {
     } else if (auto* refused = std::get_if<MessageRefused>(&message)) {
       refuse_locked(*refused, std::move(frame), out);
     } else {
-      offer_unary_locked(std::move(frame), nullptr);
+      offer_other_locked(std::get<NotJobMessage>(message).message_id, std::move(frame));
     }
   }
   // No event the sink receives holds the chunk, so nobody else releases it.
@@ -642,6 +741,11 @@ void JobChannel::refuse_locked(const MessageRefused& refused, ipc::SidecarFrame&
                                std::vector<Delivery>& out) {
   const auto named = message_jobs_.find(refused.message_id);
   if (named == message_jobs_.end()) {
+    if (names_probe_locked(refused.message_id)) {
+      answer_probe_locked(unexpected(
+          Error::make(Error::Code::Unavailable, refused.error.message, "backend_unavailable")));
+      return;
+    }
     offer_unary_locked(std::move(frame), &refused.message_id);
     return;
   }
@@ -654,6 +758,15 @@ void JobChannel::refuse_locked(const MessageRefused& refused, ipc::SidecarFrame&
   // The sidecar never took the job, so it holds nothing to release.
   fail_locked(found->second, refused.error, out);
   release_locked(found, out);
+}
+
+void JobChannel::offer_other_locked(const std::string& message_id, ipc::SidecarFrame&& frame) {
+  if (names_probe_locked(message_id)) {
+    // Ahead of the exchange's slot: the probe's answer is never an exchange's.
+    answer_probe_locked(health_answer(frame));
+    return;
+  }
+  offer_unary_locked(std::move(frame), nullptr);
 }
 
 void JobChannel::offer_unary_locked(ipc::SidecarFrame&& frame, const std::string* message_id) {

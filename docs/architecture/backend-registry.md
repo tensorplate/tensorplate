@@ -414,9 +414,10 @@ declared neither class a lane runs (`unsupported`,
 - **Two threads own the socket.** A reader reads one frame at a time, routes
   it and calls the `JobEventSink`; while the connection lives nothing else
   calls the sink. A writer sends whole frames in the order they were queued
-  and is the only thread that writes. `submit`, `cancel`, `release_session`
-  and the unary `exchange` only queue, so a sink callback may call the first
-  three while the reader keeps reading. The sidecar needs that of its peer:
+  and is the only thread that writes. `submit`, `cancel`, `release_session`,
+  the unary `exchange` and the health probe only queue, so a sink callback
+  may call the first three while the reader keeps reading. The sidecar needs
+  that of its peer:
   it writes a job message under the lock its own reader takes to act on one,
   and ends a connection on which its write makes no progress for five
   seconds.
@@ -425,17 +426,19 @@ declared neither class a lane runs (`unsupported`,
   unacknowledged; one more is refused with `resource_exhausted`
   (`job_capacity_exhausted`, `session_release_capacity_exhausted`). Those two
   tables are the only bounds a caller meets. A frame in the queue the writer
-  drains belongs to a record: a job in the table, a pending release, or the
-  exchange that waits. A record has each of its frames queued at most once,
-  and a frame still queued when its record goes leaves with it: a job's
-  submit and cancel when the job is released, a release when it is
-  acknowledged, a unary request when its exchange is answered, gives up or
-  fails with the connection. So the queue never holds more than 2,081
-  frames (a submit and a cancel for each of 16 jobs, a release for each of
-  2,048 sessions, one unary request), nobody is refused or waits for room
-  in it, and `cancel` and `release_session` are never refused for capacity
-  by it. The writer takes a frame out of the queue before its first byte, so
-  a frame it has begun is written whole whatever becomes of its record.
+  drains belongs to a record: a job in the table, a pending release, the
+  exchange that waits, or the health probe that is unanswered. A record has
+  each of its frames queued at most once, and a frame still queued when its
+  record goes leaves with it: a job's submit and cancel when the job is
+  released, a release when it is acknowledged, a unary request when its
+  exchange is answered, gives up or fails with the connection, the probe's
+  request when a frame answers it or the connection ends. So the queue never
+  holds more than 2,082 frames (a submit and a cancel for each of 16 jobs, a
+  release for each of 2,048 sessions, one unary request, one health probe),
+  nobody is refused or waits for room in it, and `cancel` and
+  `release_session` are never refused for capacity by it. The writer takes a
+  frame out of the queue before its first byte, so a frame it has begun is
+  written whole whatever becomes of its record.
   The `message_id` of a job's submit and cancel is kept until the job is
   released, because the sidecar's `error_event` names only that id.
 - **Who can find the pending releases full.** 2,048 is the protocol's
@@ -455,13 +458,21 @@ declared neither class a lane runs (`unsupported`,
   that is not in the record, so the runs number at most the keys below the
   highest recorded one that are not in it, plus one. A session manager
   issues its keys in increasing order and reuses none, so those keys are
-  its sessions that still hold a slot, which it bounds, and the keys whose
-  release was never acknowledged here: a session its holder did not release
-  through this channel, or one it released while the channel had no live
-  connection. That release is refused with `backend_unavailable` and
-  recorded nowhere, and the bridge's header tells the caller to treat the
-  session as released. Each such key keeps the runs on its two sides apart
-  for good, so the record grows by at most one run for each.
+  its sessions that still hold a slot, which it bounds, and the keys never
+  recorded here. A release made while the channel has no live connection is
+  refused with `backend_unavailable`, and the bridge's header tells the
+  caller to treat the session as released and never to submit its key
+  again; a channel that was ever started records the key as released all
+  the same (unless the key or the generation is one a live channel refuses
+  as an argument), so a job for it is refused on the next connection as
+  well and a lost connection adds no run, however many sessions were open
+  when it
+  went. What still adds one for good is a key that never reaches the
+  record: a session its holder did not release through this channel, or one
+  released before the channel's first start, when there was no backend to
+  hold a session; that state comes once, so those keys number at most the
+  sessions that existed then. Each such key keeps the runs on its two sides
+  apart, so the record grows by at most one run for each.
 - **Each frame goes one way.** A job event is checked by its job's
   `JobEventSequence` and delivered; one the check refuses fails the job with
   the refusal in its place when the job has no terminal event yet, and a
@@ -473,7 +484,9 @@ declared neither class a lane runs (`unsupported`,
   that follows a job's terminal event, is dropped and counted, and a chunk
   no delivered event carries is released. A frame that is not a job message
   goes to the waiting exchange; so does an `error_event` naming that
-  exchange's request. The exchange does not match a response to its request,
+  exchange's request. A frame of either kind that carries the id of the
+  health probe goes to neither: it is the probe's answer (next point).
+  The exchange does not match a response to its request,
   so a caller whose exchange timed out stops the channel before the next
   one. An unreadable header ends the connection, and so does a frame that
   declares a payload larger than the longest synthesized segment a job
@@ -481,6 +494,36 @@ declared neither class a lane runs (`unsupported`,
   sidecar whose jobs an
   unload has closed refuses a `session_release`; the refusal is counted and
   the release stays pending until `stop` acknowledges it.
+- **Health is a probe of the channel's own.** `probe_health` answers what
+  `submit` would for the channel's state, in the same order: before the
+  channel admits jobs `backend_not_ready`, and once admission closed, the
+  connection ended or the channel stopped `backend_unavailable`, without
+  asking the sidecar. While the channel admits it sends a `health_check`
+  with an id of its own and reads the answer's `health.ready`: false is
+  `backend_not_ready`, and an answer that cannot be read as a health
+  report, or an `error_event` naming the probe, is `backend_unavailable`.
+  The channel's state is read again when the call's wait ends and comes
+  first: an unload that closes admission meanwhile wakes the caller, which
+  returns `backend_unavailable` before its deadline, whatever the sidecar
+  said and also when it said nothing. While the probe is unanswered it is
+  matched by its `message_id` ahead of the exchange slot, so it is answered
+  beside a `prime` or an `unload` that waits and its answer is not taken
+  for theirs. The id guards the slot no longer than that: a second frame
+  carrying the id of a probe already answered, which only a faulty sidecar
+  sends, is a stray frame like any other, handed to the exchange that waits
+  (the session then ends the connection over the id) and dropped and counted
+  when none does. At most one probe is unanswered. It belongs to the
+  channel, not
+  to a caller: while the channel admits, a call made beside a probe that
+  stands sends nothing and waits for its answer, each caller with its own
+  deadline, and a caller whose deadline
+  passes gets `health_timeout` and leaves the probe standing. An answer
+  that comes after every caller gave up is dropped by its id and counted,
+  and only then does the next call send a new probe. So against a sidecar
+  that never answers, every later call ends `health_timeout` until the
+  connection ends, which ends the probe as `backend_unavailable`, and the
+  queue holds at most one probe frame however many callers time out. The
+  session's own health check inside `prime` stays a unary exchange.
 - **A connection ends once.** End of file, a read error, an unreadable
   header, a write that fails or takes longer than the write bound, and
   `stop` all lead the reader out of its loop, where it fails every job that
@@ -515,7 +558,11 @@ adapter's as seen only once it has acted
 on it, a test that plays a message for a job it does not hold fails there,
 and `stop_reading` returns only once its reader has parked: a test that
 waits for "sent" knows the job is admitted, and one that stops the reading
-knows nothing more is read. Both ends' socket buffers are set smaller than
+knows nothing more is read. It can hold its health answers back, which no
+runner does, so that a test has a probe unanswered for as long as it needs:
+a deadline that has already passed then times a call out without a sleep,
+and a count of the callers that wait tells a test when a call on another
+thread has joined the probe. Both ends' socket buffers are set smaller than
 the largest frame, whatever the host's default. Six golden
 files are replayed whole: the channel writes the recorded adapter frames,
 the scripted sidecar writes the recorded answers, and the sink receives what
@@ -551,9 +598,10 @@ and releases, and never starts or stops.
   refuses a request without one the same way.
 - **One slot.** From the load on, the channel's reader owns the socket and
   the session's `prime`, health check and `unload` go through the channel's
-  one exchange slot. The slot hands over the next frame that is not a job
-  message, so the session compares the response's `message_id` with its
-  request's and treats another as a failed connection. On the socket, which
+  one exchange slot. The slot hands over the next frame that is neither a
+  job message nor the channel's own health answer, so the session compares
+  the response's `message_id` with its request's and treats another as a
+  failed connection. On the socket, which
   carries every exchange of a session without jobs and the load of one with
   them, ids are not compared, as before. `infer` is refused on
   such a session (`unsupported`, `tensor_inference_unsupported`) and nothing
@@ -604,9 +652,10 @@ assume:
   health check then times out, and the sidecar gives up a peer that has not
   read for five seconds.
 - A frame that is neither a job message nor an `error_event`, arriving
-  while an exchange waits, is taken as that exchange's answer; when it is
-  not the answer, the exchange fails and the backend is reset, as a
-  response of the wrong kind always has. With no exchange waiting it is
+  while an exchange waits, is taken as that exchange's answer unless it
+  carries the id of the unanswered health probe; when it is not the
+  answer, the exchange fails and the backend is reset, as a response of
+  the wrong kind always has. With no exchange waiting it is
   dropped and counted, as is an `error_event` that names neither a job's
   message nor the waiting request. Besides the unary responses, the
   schema's frames of that class are the `ready_event`, which the runner

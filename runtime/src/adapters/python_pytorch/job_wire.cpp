@@ -563,6 +563,14 @@ Result<std::string> encode_session_release(std::uint64_t session_key, std::uint6
   return dump(header);
 }
 
+Result<std::string> encode_health_check(std::string_view message_id) {
+  json header;
+  if (auto refused = write_envelope(header, "health_check", message_id, {}); refused.has_value()) {
+    return unexpected(std::move(*refused));
+  }
+  return dump(header);
+}
+
 namespace {
 
 // The strings of the array `name` in a header, none when it has no such
@@ -629,6 +637,31 @@ Result<std::vector<JobClass>> declared_job_classes(std::string_view load_model_r
   return classes;
 }
 
+Result<bool> reports_ready(std::string_view health_check_response_header) {
+  const json header =
+      json::parse(health_check_response_header, nullptr, /*allow_exceptions=*/false);
+  const auto unreadable = [](std::string_view field) {
+    return violation(kHealthResponseMalformed,
+                     about("health_check_response", unreadable_field(field)));
+  };
+  if (wire_text(header, "kind") != "health_check_response") {
+    return unreadable("kind");
+  }
+  if (wire_text(header, "schema_version") != kSchemaVersion) {
+    return unreadable("schema_version");
+  }
+  if (header.contains("status") && wire_text(header, "status") != "ok") {
+    return unreadable("status");
+  }
+  const json* health = member(header, "health", json::value_t::object);
+  const json* ready =
+      health == nullptr ? nullptr : member(*health, "ready", json::value_t::boolean);
+  if (ready == nullptr) {
+    return unreadable("health.ready");
+  }
+  return ready->get<bool>();
+}
+
 SidecarJobMessage decode_sidecar_message(const ipc::SidecarFrame& frame,
                                          const PcmPublisher& publish_pcm) {
   const json header = json::parse(frame.json_header, nullptr, /*allow_exceptions=*/false);
@@ -649,7 +682,7 @@ SidecarJobMessage decode_sidecar_message(const ipc::SidecarFrame& frame,
   if (kind->starts_with(kJobKindPrefix)) {
     return read_job_message(header, *kind, frame, publish_pcm);
   }
-  return NotJobMessage{};
+  return NotJobMessage{wire_text(header, "message_id").value_or(std::string{})};
 }
 
 }  // namespace tensorplate::adapters::python_pytorch

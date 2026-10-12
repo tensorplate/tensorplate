@@ -95,6 +95,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A health probe in the Python/PyTorch adapter's job channel, for the job
+  bridge that will sit on it; nothing calls it yet. It answers from the
+  channel's state as a submit would (`backend_not_ready` before jobs are
+  admitted, `backend_unavailable` once admission closed, the connection
+  ended or the channel stopped) and otherwise asks the sidecar with a
+  `health_check` of its own, matched by its `message_id` ahead of the unary
+  exchange: it is answered beside a `prime` or an `unload` that waits and
+  never taken for their answer. At most one probe is unanswered at a time;
+  a later call waits for the same one, a caller whose deadline passes gets
+  `health_timeout` and leaves it standing, and an answer that comes after
+  every caller gave up is dropped by its id. A call that waits when
+  admission closes returns `backend_unavailable` then, not at its deadline.
+  The send queue's bound grows by the probe's one frame, to 2,082.
+  (V030-E04-F03-T03)
+
 - Agent status names generations and reports how a member's worker process
   stands. Beside a singleton record, `active.generation` is the generation
   serving at `active.serving_url`, read together with it, and
@@ -659,6 +674,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   count has its own message. (V030-E06-F02-T01)
 
 ### Changed
+
+- The Python/PyTorch adapter's job channel records a session as released
+  also when its release is refused because the connection has ended or the
+  channel was stopped (`backend_unavailable`): a job for that session key is
+  then refused (`session_releasing`) on the next connection too, and a lost
+  connection no longer grows the record of released sessions. A release
+  refused by a channel that was never started is not recorded.
+  (V030-E04-F03-T03)
 
 - The Python/PyTorch adapter's job channel records every session whose
   release was acknowledged, where it remembered the last 1,024: a repeated

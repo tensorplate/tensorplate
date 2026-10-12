@@ -3,26 +3,28 @@
 // The adapter's side of the `speech_jobs_v1` messages on one sidecar
 // connection (protocol/schemas/python_pytorch_ipc.json): a reader thread that
 // owns the socket's read side, a writer thread that owns its write side, the
-// table of unreleased jobs and the slot a unary exchange waits in.
+// table of unreleased jobs, the slot a unary exchange waits in and the health
+// probe that is answered beside it.
 //
 // Threads. The reader reads one frame at a time, routes it and calls the
 // event sink; while the connection lives nothing else calls the sink. The
 // writer sends whole frames in the order they were queued, and is the only
 // thread that touches the socket's write side: not a caller's thread, and not
-// the reader. submit(), cancel(), release_session() and exchange() only
-// queue, so a sink callback may call the first three: the reader keeps
-// reading whatever the adapter has to send. The sidecar requires that of its
-// peer, because it writes a job message while holding the lock its own reader
-// needs, and gives up a peer that stops reading.
+// the reader. submit(), cancel(), release_session(), exchange() and
+// probe_health() only queue, so a sink callback may call the first three: the
+// reader keeps reading whatever the adapter has to send. The sidecar requires
+// that of its peer, because it writes a job message while holding the lock
+// its own reader needs, and gives up a peer that stops reading.
 //
 // The queue the writer drains is exact. A frame is queued for a record (a job
-// in the table, a pending session release, the exchange that waits), at most
-// once per kind of frame, and leaves the queue with its record. So the queue
-// never holds more than kMaxQueuedFrames frames and nobody is refused or
-// waits for room in it: only the job table and the pending releases refuse a
-// caller, with Error::Code::ResourceExhausted. The writer takes a frame out
-// before its first byte, so a frame it has begun is written whole. Frames
-// leave in the order they were queued: a cancel waits behind earlier submits.
+// in the table, a pending session release, the exchange that waits, the
+// health probe that is unanswered), at most once per kind of frame, and
+// leaves the queue with its record. So the queue never holds more than
+// kMaxQueuedFrames frames and nobody is refused or waits for room in it: only
+// the job table and the pending releases refuse a caller, with
+// Error::Code::ResourceExhausted. The writer takes a frame out before its
+// first byte, so a frame it has begun is written whole. Frames leave in the
+// order they were queued: a cancel waits behind earlier submits.
 //
 // A write that fails, or a frame the sidecar does not take within the write
 // bound, ends the connection: the writer records the error, shuts the socket
@@ -37,8 +39,8 @@
 // reader as it leaves. stop() joins the reader, then the writer. What was
 // still queued is dropped, never silently: the reader, on its way out, fails
 // every job without a terminal event, a queued `session_release` is
-// acknowledged once the process is reaped, and a waiting exchange gets the
-// error the connection ended with.
+// acknowledged once the process is reaped, a waiting exchange gets the error
+// the connection ended with, and a health probe ends as unavailable.
 //
 // One mutex guards all state. It is never held across socket I/O or a sink
 // callback. submit() copies the request's PCM window twice while holding it,
@@ -92,28 +94,31 @@ inline constexpr std::size_t kMaxPendingSessionReleases = 2'048;
 
 /// Most frames of each kind that wait for the writer: a `job_submit` and a
 /// `job_cancel` for each job in the table, a `session_release` for each
-/// pending release, the request of the one exchange that waits.
+/// pending release, the request of the one exchange that waits and that of
+/// the one health probe that is unanswered.
 inline constexpr std::size_t kMaxQueuedSubmits = kMaxOpenJobs;
 inline constexpr std::size_t kMaxQueuedCancels = kMaxOpenJobs;
 inline constexpr std::size_t kMaxQueuedReleases = kMaxPendingSessionReleases;
-inline constexpr std::size_t kMaxQueuedRequests = 1;
+inline constexpr std::size_t kMaxQueuedRequests = 2;
 
 /// Most frames that wait for the writer.
 inline constexpr std::size_t kMaxQueuedFrames =
     kMaxQueuedSubmits + kMaxQueuedCancels + kMaxQueuedReleases + kMaxQueuedRequests;
-static_assert(kMaxQueuedFrames == 2 * kMaxOpenJobs + kMaxPendingSessionReleases + 1,
-              "the queue has a place for every frame the job table, the pending releases and "
-              "the waiting exchange can own, and no other");
+static_assert(kMaxQueuedFrames == 2 * kMaxOpenJobs + kMaxPendingSessionReleases + 2,
+              "the queue has a place for every frame the job table, the pending releases, the "
+              "waiting exchange and the unanswered health probe can own, and no other");
 
-/// Every session key whose release was acknowledged, as runs of consecutive
-/// keys. The sidecar forgets a session it released, so this record is what
-/// keeps a repeated release from being sent and a job from being taken for a
-/// released session.
+/// Every session key that counts as released, as runs of consecutive keys: one
+/// whose release was acknowledged, and one whose release was refused because
+/// the connection had gone. The sidecar forgets a session it released, so
+/// this record is what keeps a repeated release from being sent and a job
+/// from being taken for a released session.
 ///
 /// Its size is its number of runs: at most the keys below the highest
 /// recorded one that are not in it, plus one. With keys issued in increasing
-/// order those are the sessions that still hold a slot and the keys whose
-/// release was never acknowledged here; the adapter's page says which.
+/// order those are the sessions that still hold a slot and the keys never
+/// released through a channel that had been started; the adapter's page says
+/// which.
 class ReleasedSessionKeys {
  public:
   void insert(std::uint64_t key);
@@ -144,7 +149,7 @@ struct JobChannelCounters {
   std::uint64_t dropped_job_messages = 0;
   /// About nothing the channel can name: a job message without a readable
   /// job, a refusal of a message it does not know, a frame no exchange waits
-  /// for.
+  /// for, the answer to a health probe after its last caller gave up.
   std::uint64_t dropped_other_messages = 0;
 
   friend bool operator==(const JobChannelCounters&, const JobChannelCounters&) noexcept = default;
@@ -185,17 +190,18 @@ class JobChannel {
   /// The backend can run jobs: submit() takes them from here on.
   void admit_jobs() noexcept;
 
-  /// The backend is about to unload: submit() refuses from here on. cancel()
-  /// and release_session() still reach the sidecar, which acts on them while
-  /// an unreleased job remains.
+  /// The backend is about to unload: submit() refuses from here on and a
+  /// probe_health() that waits returns. cancel() and release_session() still
+  /// reach the sidecar, which acts on them while an unreleased job remains.
   void close_admission() noexcept;
 
   /// Sends a unary request and waits for its response: the next frame that is
-  /// not a job message, or the `error_event` that names `message_id`. One
-  /// exchange at a time. A response is not matched to its request: after
-  /// Error::Code::Timeout a late one would answer the next exchange, so the
-  /// caller stops the channel before it exchanges again. A request the writer
-  /// had not begun when its exchange ended is not sent.
+  /// neither a job message nor the health probe's answer, or the `error_event`
+  /// that names `message_id`. One exchange at a time. A response is not
+  /// matched to its request: after Error::Code::Timeout a late one would
+  /// answer the next exchange, so the caller stops the channel before it
+  /// exchanges again. A request the writer had not begun when its exchange
+  /// ended is not sent.
   ///
   /// @return the response frame, or Error::Code::Timeout at `deadline`, the
   ///   error the connection ended with, Error::Code::NotReady when the
@@ -261,11 +267,37 @@ class JobChannel {
   ///
   /// @return success, or Error::Code::NotReady, "event_sink_missing";
   ///   Error::Code::Unavailable, "backend_unavailable" (not started, or the
-  ///   connection ended); Error::Code::ResourceExhausted,
+  ///   connection ended: the caller takes the session as released, and a
+  ///   channel that was ever started records it so, unless the key or the
+  ///   generation is one encode_session_release() refuses);
+  ///   Error::Code::ResourceExhausted,
   ///   "session_release_capacity_exhausted" (kMaxPendingSessionReleases are
   ///   unacknowledged); or encode_session_release()'s refusal of a zero key
   ///   or generation.
   [[nodiscard]] Result<void> release_session(std::uint64_t session_key, std::uint64_t generation);
+
+  // -- Health: any thread but one inside a sink callback. ----------------------
+
+  /// Reports whether the backend can run jobs now. While the channel admits
+  /// jobs it asks the sidecar with a `health_check` of its own, answered by
+  /// `message_id` beside whatever exchange waits. At most one such probe is
+  /// unanswered: a call made meanwhile waits for that one's answer, and a
+  /// caller that gives up at `deadline` leaves it standing. Its answer,
+  /// however late, is then dropped by its id and never taken for an
+  /// exchange's, and until it comes or the connection ends no other probe is
+  /// sent.
+  ///
+  /// @return success, or Error::Code::NotReady, "backend_not_ready" (as
+  ///   submit() answers it, or the sidecar reports that it is not ready);
+  ///   Error::Code::Unavailable, "backend_unavailable" (as submit() answers
+  ///   it, also when that became true while the call waited; or the answer
+  ///   cannot be read as one, or is an `error_event`);
+  ///   Error::Code::Timeout, "health_timeout" at `deadline`;
+  ///   ipc::encode_frame()'s refusal.
+  [[nodiscard]] Result<void> probe_health(TimePoint deadline);
+
+  /// Callers that wait in probe_health().
+  [[nodiscard]] std::size_t health_waiters() const;
 
   [[nodiscard]] JobChannelCounters counters() const;
 
@@ -292,8 +324,8 @@ class JobChannel {
   };
 
   // What a queued frame was queued for; `key` is the job's id, the session's
-  // key, or zero for the exchange.
-  enum class QueuedFor : std::uint8_t { Submit, Cancel, Release, Exchange };
+  // key, or zero for the exchange and for the probe.
+  enum class QueuedFor : std::uint8_t { Submit, Cancel, Release, Exchange, Probe };
   struct QueuedFrame {
     QueuedFor owner;
     std::uint64_t key;
@@ -310,6 +342,14 @@ class JobChannel {
     std::optional<Result<ipc::SidecarFrame>> outcome;
   };
 
+  // The `health_check` that is unanswered. Its callers share it, and it stands
+  // until a frame carries its id or the connection ends, whoever still waits.
+  struct HealthProbe {
+    std::string message_id;
+    std::size_t waiting = 0;
+    std::optional<Result<void>> outcome;
+  };
+
   void read_loop();
   void write_loop();
   // Routes one frame; false when it ends the connection.
@@ -318,6 +358,13 @@ class JobChannel {
   void deliver(const std::vector<Delivery>& deliveries);
 
   [[nodiscard]] bool live_locked() const noexcept;
+  // Why no job can run now, in the order submit() refuses; none when one can.
+  [[nodiscard]] std::optional<Error> not_running_locked() const;
+  [[nodiscard]] bool names_probe_locked(std::string_view message_id) const noexcept;
+  // Ends the probe that stands with `outcome` and wakes its callers.
+  void end_probe_locked(Result<void> outcome);
+  // As end_probe_locked(), for a frame that carried the probe's id.
+  void answer_probe_locked(Result<void> outcome);
   // The `*_locked` members below need mutex_ held and append what the sink is
   // owed to `out`.
   // True when `event` itself was appended.
@@ -331,6 +378,9 @@ class JobChannel {
                           std::vector<Delivery>& out);
   void refuse_locked(const MessageRefused& refused, ipc::SidecarFrame&& frame,
                      std::vector<Delivery>& out);
+  // A frame that is not a job message: the probe's answer when it carries the
+  // probe's id, else the waiting exchange's.
+  void offer_other_locked(const std::string& message_id, ipc::SidecarFrame&& frame);
   // Answers the waiting exchange with `frame`; `message_id` is the request an
   // `error_event` names, null for any other frame.
   void offer_unary_locked(ipc::SidecarFrame&& frame, const std::string* message_id);
@@ -346,6 +396,7 @@ class JobChannel {
   mutable std::mutex mutex_;
   std::condition_variable outbox_cv_;
   std::condition_variable unary_cv_;
+  std::condition_variable probe_cv_;
 
   Phase phase_ = Phase::Idle;
   /// The reader left its loop; set until stop() has finished.
@@ -372,6 +423,7 @@ class JobChannel {
 
   /// The exchange that waits for its answer; null once it has one.
   UnaryWaiter* unary_ = nullptr;
+  std::shared_ptr<HealthProbe> probe_;
 
   JobChannelCounters counters_;
 

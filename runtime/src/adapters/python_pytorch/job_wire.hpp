@@ -71,6 +71,11 @@ inline constexpr std::string_view kJobMessageMalformed = "job_message_malformed"
                                                          std::uint64_t generation,
                                                          std::string_view message_id);
 
+/// Header of a `health_check`; its frame has no payload.
+///
+/// @return the header, or Error::Code::ConfigInvalid, "message_id_empty".
+[[nodiscard]] Result<std::string> encode_health_check(std::string_view message_id);
+
 // -- Negotiation. ------------------------------------------------------------
 
 /// Most names a load response's `job_classes` may hold, whether this adapter
@@ -96,6 +101,17 @@ inline constexpr std::size_t kMaxDeclaredJobClasses = 16;
 [[nodiscard]] Result<std::vector<JobClass>> declared_job_classes(
     std::string_view load_model_response_header);
 
+/// Error::context of an answer to a `health_check` that cannot be read as one.
+inline constexpr std::string_view kHealthResponseMalformed = "health_response_malformed";
+
+/// Whether a `health_check_response` header says the sidecar's backend is
+/// ready.
+///
+/// @return Error::Code::InferenceFailed with kHealthResponseMalformed when the
+///   header is not a `health_check_response` of this protocol whose status,
+///   if it has one, is "ok" and whose `health.ready` is a boolean.
+[[nodiscard]] Result<bool> reports_ready(std::string_view health_check_response_header);
+
 // -- Sidecar to adapter. -----------------------------------------------------
 
 /// Publishes the PCM of one `audio_chunk` into a buffer the receiver of the
@@ -112,9 +128,11 @@ using PcmPublisher = std::function<Result<BufferRef>(std::span<const std::byte>)
 
 /// A frame the job channel does not own, with a header it can read: a unary
 /// response, a `ready_event`, a `metric_event`, or a `session_*` kind other
-/// than `session_released` and `session_release`. The unary exchange judges
-/// it.
+/// than `session_released` and `session_release`. The channel's health probe
+/// or the unary exchange judges it.
 struct NotJobMessage {
+  /// The frame's `message_id`; empty when it has none that is a string.
+  std::string message_id;
   friend bool operator==(const NotJobMessage&, const NotJobMessage&) noexcept = default;
 };
 
