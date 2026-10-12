@@ -35,6 +35,10 @@ inline constexpr std::string_view kBackendName = "python_pytorch";
 /// configuration says otherwise.
 inline constexpr std::chrono::milliseconds kDefaultHealthTimeout{std::chrono::seconds{2}};
 
+/// Error::context of the Error::Code::Internal a `prime` or an `unload` made
+/// from a job event callback is refused with.
+inline constexpr std::string_view kLifecycleCallInSinkCallback = "lifecycle_call_in_sink_callback";
+
 /// Adapter configuration tunables. Defaults are chosen for the v0.1.0
 /// SmolVLA validation flow on Jetson Orin Nano 8GB Super.
 struct PythonPytorchConfig {
@@ -75,6 +79,12 @@ struct PythonPytorchConfig {
 /// A stop waits for a running sink callback and delivers on the calling
 /// thread, and prime, unload and the destructor can all stop: none of them
 /// is called from a sink callback or while holding a lock a callback takes.
+/// A prime or an unload made from a sink callback is refused
+/// (Error::Code::Internal, kLifecycleCallInSinkCallback) before anything is
+/// sent, closed or joined; the session's state then reads Failed, as after
+/// any failed lifecycle call, and its sidecar, channel and jobs are as they
+/// were. The destructor has no answer to give: called from a sink callback
+/// it joins or waits for its own thread, so that stays a precondition.
 /// The buffer manager of `hooks` outlives `channel`.
 ///
 /// unload() cancels nothing. The sidecar answers an unload only once the job

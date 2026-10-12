@@ -33,6 +33,7 @@ TEST(JobBridge, FeatureFlagDisabled) {
 #include "tensorplate/backend/bounded_job_bridge.hpp"
 #include "tensorplate/backend/registry.hpp"
 #include "tensorplate/core/error.hpp"
+#include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/job_event.hpp"
 #include "tensorplate/core/job_request.hpp"
 #include "tensorplate/core/model_spec.hpp"
@@ -508,6 +509,59 @@ TEST(JobBridgeDeathTest, ABridgeDestroyedInsideASinkCallbackEndsTheProcessWithAM
   GTEST_FLAG_SET(death_test_style, "threadsafe");
   EXPECT_DEATH(destroy_the_bridge_inside_a_callback(),
                "a job bridge was destroyed inside one of its sink callbacks");
+}
+
+// -- Lifecycle calls from a sink callback. -------------------------------------------
+
+TEST_F(JobBridgeTest, AnUnloadFromASinkCallbackIsRefusedAndTheSessionsSidecarAndJobsLiveOn) {
+  std::atomic<bool> called{false};
+  Result<void> unloaded = unexpected(Error::Code::Internal, "not run");
+  h.on_event = [&](const JobEvent& event) {
+    if (event.kind() == Accepted && event.identity().job_id == 1) {
+      unloaded = h.session->unload();
+      called = true;
+    }
+  };
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_EQ(peer.take_job(), 1U);
+  ASSERT_TRUE(h.wait([&] { return called.load(); }));
+  expect_refused(unloaded, Error::Code::Internal, kLifecycleCallInSinkCallback);
+  // The lifecycle's rule for every failed unload: the session is not ready.
+  // Nothing else changed: the backend is healthy, admission is open and both
+  // jobs run to their end.
+  EXPECT_FALSE(h.session->is_ready());
+  EXPECT_TRUE(h.bridge->health().has_value());
+  ASSERT_TRUE(h.submit(h.stt(2, 1)).has_value());
+  peer.complete(1, transcript());
+  ASSERT_EQ(peer.take_job(), 2U);
+  peer.complete(2, transcript());
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted, Completed, Released}));
+  ASSERT_TRUE(h.wait_kinds(2, {Accepted, Completed, Released}));
+  EXPECT_TRUE(peer.sent("unload", 0).empty());
+  // From a thread that may make it, the unload goes through.
+  EXPECT_TRUE(h.session->unload().has_value());
+  EXPECT_EQ(peer.sent("unload", 1).size(), 1U);
+}
+
+// Loaded and not primed, the channel is started: a session release is
+// acknowledged on its reader, and a prime made there would wait for an
+// answer only that thread can route.
+TEST_F(JobBridgeTest, APrimeFromASinkCallbackIsRefusedAndNothingIsSent) {
+  std::atomic<bool> called{false};
+  Result<void> primed = unexpected(Error::Code::Internal, "not run");
+  h.on_session_release = [&](std::uint64_t, std::uint64_t) {
+    primed = h.session->prime();
+    called = true;
+  };
+  ASSERT_TRUE(h.session->load(speech_spec()).has_value());
+  ASSERT_TRUE(h.release(7).has_value());
+  ASSERT_TRUE(h.wait([&] { return called.load(); }));
+  expect_refused(primed, Error::Code::Internal, kLifecycleCallInSinkCallback);
+  // The connection is up and its exchange slot free.
+  EXPECT_TRUE(h.unary("health_check").has_value());
+  EXPECT_TRUE(peer.sent("prime", 0).empty());
+  EXPECT_TRUE(h.session->unload().has_value());
 }
 
 // -- Requests this backend cannot carry. ---------------------------------------------

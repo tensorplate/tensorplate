@@ -205,6 +205,15 @@ ipc::UnixSocket::TimePoint clamped_deadline(const InferRequest& req,
                     "python_pytorch adapter requires a BufferManager hook");
 }
 
+// A lifecycle call made from a sink callback: it would stop the channel from
+// the thread its stop joins or waits for.
+[[nodiscard]] Unexpected lifecycle_call_in_sink_callback(std::string_view call) {
+  return unexpected(Error::make(
+      Error::Code::Internal,
+      "python_pytorch session: " + std::string(call) + " called from a job event callback",
+      std::string(kLifecycleCallInSinkCallback)));
+}
+
 [[nodiscard]] json model_spec_to_json(const ModelSpec& spec) {
   json out;
   out["schema_version"] = std::string(kSchemaVersion);
@@ -340,6 +349,9 @@ class PythonPytorchSession final : public ExecutionSession {
   }
 
   Result<void> do_prime() override {
+    if (channel_->in_sink_callback()) {
+      return lifecycle_call_in_sink_callback("prime");
+    }
     if (!process_) {
       return unexpected(Error::Code::NotReady, "sidecar not started");
     }
@@ -371,6 +383,9 @@ class PythonPytorchSession final : public ExecutionSession {
   }
 
   Result<void> do_unload() override {
+    if (channel_->in_sink_callback()) {
+      return lifecycle_call_in_sink_callback("unload");
+    }
     if (!process_) {
       return Result<void>{};
     }
