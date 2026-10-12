@@ -284,8 +284,16 @@ void JobChannel::stop(std::string_view reason, const std::function<void()>& reap
     ended_ = false;
     stopping_ = false;
     phase_ = Phase::Stopped;
+    owe_locked(out);
   }
   deliver(out);
+}
+
+void JobChannel::retire() noexcept {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (phase_ == Phase::Idle) {
+    phase_ = Phase::Stopped;
+  }
 }
 
 // -- The job side. ---------------------------------------------------------------
@@ -378,7 +386,7 @@ Result<void> JobChannel::release_session(std::uint64_t session_key, std::uint64_
   }
   if (!live_locked()) {
     // The caller takes the session as released and never submits its key
-    // again. A channel never started has had no session to release, and
+    // again. A channel not started yet has had no session to release, and
     // arguments a live channel refuses name none.
     if (phase_ != Phase::Idle &&
         encode_session_release(session_key, generation, "unsent").has_value()) {
@@ -453,6 +461,11 @@ Result<void> JobChannel::probe_health(TimePoint deadline) {
 std::size_t JobChannel::health_waiters() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return probe_ ? probe_->waiting : 0;
+}
+
+JobChannelBacklog JobChannel::backlog() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return JobChannelBacklog{jobs_.size(), releasing_.size(), owed_callbacks_};
 }
 
 JobChannelCounters JobChannel::counters() const {
@@ -533,6 +546,7 @@ void JobChannel::end_connection(const Error& error) {
     for (auto& [job_id, job] : jobs_) {
       fail_locked(job, ended, out);
     }
+    owe_locked(out);
   }
   // The sidecar reads end of file and a writer inside a frame is woken.
   (void)::shutdown(socket_->fd(), SHUT_RDWR);
@@ -611,6 +625,7 @@ bool JobChannel::route(ipc::SidecarFrame frame) {
     } else {
       offer_other_locked(std::get<NotJobMessage>(message).message_id, std::move(frame));
     }
+    owe_locked(out);
   }
   // No event the sink receives holds the chunk, so nobody else releases it.
   if (published.has_value() && !chunk_delivered) {
@@ -656,11 +671,33 @@ void JobChannel::deliver(const std::vector<Delivery>& deliveries) {
         break;
     }
   }
+  std::lock_guard<std::mutex> lock(mutex_);
+  owed_callbacks_ -= deliveries.size();
 }
 
 // -- Under the mutex. ------------------------------------------------------------
 
-bool JobChannel::admit_locked(const JobEvent& event, std::vector<Delivery>& out) {
+std::optional<JobEvent> JobChannel::unloaded_locked(const JobEvent& event) const {
+  if (phase_ != Phase::Closing || event.kind() != JobEventKind::Failed) {
+    return std::nullopt;
+  }
+  std::optional<Error> error = event.error();
+  if (!error.has_value() || error->code != Error::Code::Unavailable ||
+      error->context != "backend_unavailable") {
+    return std::nullopt;
+  }
+  error->context = std::string(kSessionUnloaded);
+  auto unloaded = JobEvent::failed(event.identity(), std::move(*error));
+  return unloaded.has_value() ? std::optional<JobEvent>(std::move(unloaded).value()) : std::nullopt;
+}
+
+void JobChannel::owe_locked(const std::vector<Delivery>& out) noexcept {
+  owed_callbacks_ += out.size();
+}
+
+bool JobChannel::admit_locked(const JobEvent& received, std::vector<Delivery>& out) {
+  const std::optional<JobEvent> unloaded = unloaded_locked(received);
+  const JobEvent& event = unloaded.has_value() ? *unloaded : received;
   const auto found = jobs_.find(event.identity().job_id);
   if (found == jobs_.end()) {
     ++counters_.dropped_job_messages;

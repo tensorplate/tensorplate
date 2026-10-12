@@ -155,6 +155,20 @@ struct JobChannelCounters {
   friend bool operator==(const JobChannelCounters&, const JobChannelCounters&) noexcept = default;
 };
 
+/// What the channel still owes its sink, for tests and diagnostics: nothing
+/// in the adapter decides anything from it.
+struct JobChannelBacklog {
+  /// Jobs without `released`.
+  std::size_t open_jobs = 0;
+  /// Session releases without their acknowledgement.
+  std::size_t pending_releases = 0;
+  /// Sink calls decided whose batch has not returned: those of one frame, of
+  /// the connection's end, or of a stop.
+  std::size_t owed_callbacks = 0;
+
+  friend bool operator==(const JobChannelBacklog&, const JobChannelBacklog&) noexcept = default;
+};
+
 class JobChannel {
  public:
   using TimePoint = ipc::UnixSocket::TimePoint;
@@ -192,7 +206,10 @@ class JobChannel {
 
   /// The backend is about to unload: submit() refuses from here on and a
   /// probe_health() that waits returns. cancel() and release_session() still
-  /// reach the sidecar, which acts on them while an unreleased job remains.
+  /// reach the sidecar, which acts on them while an unreleased job remains. A
+  /// job the sidecar fails as unavailable ("backend_unavailable") from here
+  /// on, which is how it ends a job that waits when the unload arrives,
+  /// reaches the sink with kSessionUnloaded.
   void close_admission() noexcept;
 
   /// Sends a unary request and waits for its response: the next frame that is
@@ -222,6 +239,12 @@ class JobChannel {
   /// A started channel is stopped before it is destroyed: it holds two
   /// joinable threads.
   void stop(std::string_view reason, const std::function<void()>& reap);
+
+  /// The session is gone and nothing will start the channel again: one that
+  /// never started answers as a stopped one from here on, "backend_unavailable"
+  /// where it answered "backend_not_ready". Changes nothing else, and nothing
+  /// at all for a channel that was started, which stop() ends first.
+  void retire() noexcept;
 
   // -- The job side: any thread, a sink callback included. -------------------
 
@@ -268,8 +291,8 @@ class JobChannel {
   /// @return success, or Error::Code::NotReady, "event_sink_missing";
   ///   Error::Code::Unavailable, "backend_unavailable" (not started, or the
   ///   connection ended: the caller takes the session as released, and a
-  ///   channel that was ever started records it so, unless the key or the
-  ///   generation is one encode_session_release() refuses);
+  ///   channel that was ever started, or was retired, records it so, unless
+  ///   the key or the generation is one encode_session_release() refuses);
   ///   Error::Code::ResourceExhausted,
   ///   "session_release_capacity_exhausted" (kMaxPendingSessionReleases are
   ///   unacknowledged); or encode_session_release()'s refusal of a zero key
@@ -300,6 +323,9 @@ class JobChannel {
   [[nodiscard]] std::size_t health_waiters() const;
 
   [[nodiscard]] JobChannelCounters counters() const;
+
+  /// A reading under the channel's lock that changes nothing.
+  [[nodiscard]] JobChannelBacklog backlog() const;
 
   /// Runs of consecutive keys in the record of released sessions.
   [[nodiscard]] std::size_t released_session_runs() const;
@@ -365,10 +391,15 @@ class JobChannel {
   void end_probe_locked(Result<void> outcome);
   // As end_probe_locked(), for a frame that carried the probe's id.
   void answer_probe_locked(Result<void> outcome);
+  // The `failed` the sink gets in `event`'s place when the sidecar failed a job
+  // because an unload was closing its lane; none for any other event.
+  [[nodiscard]] std::optional<JobEvent> unloaded_locked(const JobEvent& event) const;
+  // Counts the batch a caller is about to hand to deliver().
+  void owe_locked(const std::vector<Delivery>& out) noexcept;
   // The `*_locked` members below need mutex_ held and append what the sink is
   // owed to `out`.
-  // True when `event` itself was appended.
-  bool admit_locked(const JobEvent& event, std::vector<Delivery>& out);
+  // True when `received`, or the failure that stands in for it, was appended.
+  bool admit_locked(const JobEvent& received, std::vector<Delivery>& out);
   static void fail_locked(Job& job, const Error& error, std::vector<Delivery>& out);
   void release_locked(std::map<std::uint64_t, Job>::iterator job, std::vector<Delivery>& out);
   // Drops a released job and what named it, and settles its session.
@@ -426,6 +457,7 @@ class JobChannel {
   std::shared_ptr<HealthProbe> probe_;
 
   JobChannelCounters counters_;
+  std::size_t owed_callbacks_ = 0;
 
   std::thread reader_;
   std::thread writer_;

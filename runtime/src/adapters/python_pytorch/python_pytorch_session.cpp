@@ -252,7 +252,10 @@ class PythonPytorchSession final : public ExecutionSession {
         manager_(hooks.buffer_manager),
         channel_(std::move(channel)) {}
 
-  ~PythonPytorchSession() override { stop_sidecar(kSessionUnloaded); }
+  ~PythonPytorchSession() override {
+    stop_sidecar(kSessionUnloaded);
+    channel_->retire();
+  }
 
   PythonPytorchSession(const PythonPytorchSession&) = delete;
   PythonPytorchSession& operator=(const PythonPytorchSession&) = delete;
