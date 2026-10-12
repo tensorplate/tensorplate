@@ -376,9 +376,12 @@ TEST_F(JobChannelTest, AClassNoLaneRunsIsRefusedAndNothingIsWritten) {
 }
 
 TEST(JobChannelClasses, OnlyTheClassesTheLoadDeclaredAreTaken) {
-  ScriptedSidecar peer(ScriptedSidecar::Options{.job_classes = {"stt_decode", "vad_frames"}});
+  ScriptedSidecar peer(ScriptedSidecar::Options{.job_classes = {"stt_decode", "vad_frames"},
+                                                .declares_any_job_class = true});
   JobChannelHarness h;
-  ASSERT_TRUE(h.connect(peer.launcher()).has_value());
+  const auto loaded = h.connect(peer.launcher());
+  ASSERT_TRUE(loaded.has_value());
+  ASSERT_EQ(loaded.value().at("job_classes"), Json::array({"stt_decode", "vad_frames"}));
   ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
   h.channel.admit_jobs();
   expect_refused(h.channel.submit(JobChannelHarness::tts(1, 1)), Error::Code::Unsupported,
@@ -392,13 +395,31 @@ TEST(JobChannelClasses, OnlyTheClassesTheLoadDeclaredAreTaken) {
 
 TEST(JobChannelClasses, ALoadThatDeclaresNoClassALaneRunsDoesNotStartTheChannel) {
   // The runner refuses such a load itself; a sidecar that did not is not served.
-  ScriptedSidecar peer(ScriptedSidecar::Options{.job_classes = {"vad_frames"}});
+  ScriptedSidecar peer(
+      ScriptedSidecar::Options{.job_classes = {"vad_frames"}, .declares_any_job_class = true});
   JobChannelHarness h;
   const auto loaded = h.connect(peer.launcher());
   ASSERT_FALSE(loaded.has_value());
   EXPECT_EQ(loaded.error().code, Error::Code::Unsupported);
   EXPECT_EQ(loaded.error().context.value_or(""), "job_class_unsupported");
   EXPECT_EQ(h.unary("health_check").error().code, Error::Code::NotReady);
+}
+
+// The scripted sidecar's own rule, which the two tests above switch off.
+TEST(JobChannelClasses, TheScriptedSidecarDeclaresOnlyLaneClassesAndRefusesALoadWithNone) {
+  ScriptedSidecar peer(ScriptedSidecar::Options{.job_classes = {"stt_decode", "vad_frames"}});
+  JobChannelHarness h;
+  const auto loaded = h.connect(peer.launcher());
+  ASSERT_TRUE(loaded.has_value());
+  EXPECT_EQ(loaded.value().at("job_classes"), Json::array({"stt_decode"}));
+
+  ScriptedSidecar without(ScriptedSidecar::Options{.job_classes = {"vad_frames"}});
+  JobChannelHarness other;
+  const auto refused = other.connect(without.launcher());
+  ASSERT_FALSE(refused.has_value());
+  // The sidecar's refusal of the load, not the channel's of its answer.
+  EXPECT_EQ(refused.error().code, Error::Code::LoadFailed);
+  EXPECT_EQ(Json::parse(refused.error().message).at("error").at("code"), "unsupported");
 }
 
 // -- Admission. ------------------------------------------------------------------

@@ -97,8 +97,10 @@ void expect_refused(const Result<void>& result, Error::Code code, std::string_vi
 
 TEST(JobSessionNegotiation, ALoadWithJobsWritesAndReadsTheRecordedNegotiation) {
   const std::vector<Json> recorded = golden("negotiation");
+  // The recorded answer declares a pair no runner writes.
   ScriptedSidecar peer(ScriptedSidecar::Options{
-      .job_classes = recorded.at(2).at("job_classes").get<std::vector<std::string>>()});
+      .job_classes = recorded.at(2).at("job_classes").get<std::vector<std::string>>(),
+      .declares_any_job_class = true});
   JobSessionHarness h(with_jobs(), peer.launcher());
   ASSERT_TRUE(h.session->load(recorded_spec()).has_value());
 
@@ -237,7 +239,8 @@ TEST(JobSessionNegotiation, ALoadAnswerWithoutReadableJobClassesFailsTheLoad) {
 
 TEST(JobSessionNegotiation, ALoadThatDeclaresNoClassALaneRunsFailsAndTheSidecarIsReaped) {
   // The runner refuses such a load itself; a sidecar that did not is not served.
-  ScriptedSidecar peer(ScriptedSidecar::Options{.job_classes = {"vad_frames"}});
+  ScriptedSidecar peer(
+      ScriptedSidecar::Options{.job_classes = {"vad_frames"}, .declares_any_job_class = true});
   JobSessionHarness h(with_jobs(), peer.launcher());
   expect_refused(h.session->load(recorded_spec()), Error::Code::Unsupported,
                  "job_class_unsupported");

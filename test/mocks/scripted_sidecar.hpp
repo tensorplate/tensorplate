@@ -13,7 +13,8 @@
 //     of this sidecar's own, both in arrival order behind what waits;
 //   - a frame whose header is not a JSON object ends the connection;
 //   - a load is refused as the runner refuses it (an empty `capabilities`
-//     list, a capability it did not list, a runner with no job class);
+//     list, a capability it did not list, a runner with no job class a lane
+//     runs), and one it takes declares the classes a lane runs and no other;
 //   - `health_check` is answered at once; any other unary request and every
 //     admitted job wait in one FIFO, and a load or an unload fails the jobs
 //     still waiting when it arrives;
@@ -33,12 +34,6 @@
 //     and keeps the payload for the test to read;
 //   - it has no bound on the unary requests that wait, and it writes a unary
 //     answer under the job lock, where the runner writes it outside;
-//   - it declares the job classes it is given, where the runner declares
-//     only those a lane runs and refuses a load that leaves none. Four tests
-//     rest on that: the session's replay of the recorded negotiation, whose
-//     answer declares a pair no runner writes (`stt_decode`, `vad_frames`),
-//     the channel's "only the classes the load declared", and the "no class
-//     a lane runs" test of the channel and of the session;
 //   - an id of its own for a frame without one is the next `s<n>`, where the
 //     runner draws a random one, and a `message_id` that is not a string
 //     counts as none, where the runner echoes it;
@@ -60,8 +55,8 @@
 //
 // The test is the backend: it takes the job at the head of the FIFO and says
 // how it ends. emit(), refuse(), stop_reading(), stop_reading_after(),
-// hold_health() and the overrides in Options step outside the runner's
-// behaviour for what the adapter has to survive.
+// hold_health(), Options::declares_any_job_class and the overrides in Options
+// step outside the runner's behaviour for what the adapter has to survive.
 
 #pragma once
 
@@ -110,8 +105,13 @@ class ScriptedSidecar {
     /// False plays a runner older than the list: its `ready_event` has no
     /// `capabilities` key, and it lists nothing a load could enable.
     bool lists_capabilities = true;
-    /// The job classes of the loaded "runner"; none refuses a load with jobs.
+    /// The job classes of the loaded "runner". A load with jobs declares those
+    /// of them a lane runs (`stt_decode`, `tts_synthesis`) and is refused when
+    /// that leaves none.
     std::vector<std::string> job_classes{"stt_decode", "tts_synthesis"};
+    /// True declares `job_classes` as given, whether a lane runs them or not,
+    /// which no runner does.
+    bool declares_any_job_class = false;
     std::chrono::milliseconds write_stall{std::chrono::seconds{5}};
     /// The texts of the error a load this sidecar refuses is answered with.
     std::string load_refusal_message = "m";
@@ -680,17 +680,29 @@ class ScriptedSidecar {
     }
     const bool with_jobs =
         std::find(enabled.begin(), enabled.end(), "speech_jobs_v1") != enabled.end();
-    if (with_jobs && options_.job_classes.empty()) {
+    const std::vector<std::string> declared = declared_classes();
+    if (with_jobs && declared.empty()) {
       return refused("unsupported");
     }
     loaded_ = true;
     Json response = answer(request, "load_model_response");
     if (with_jobs) {
       jobs_open_ = true;
-      response["job_classes"] = options_.job_classes;
+      response["job_classes"] = declared;
     }
     response.update(options_.load_response_overrides);
     return response;
+  }
+
+  // The classes a load with jobs declares.
+  std::vector<std::string> declared_classes() const {
+    std::vector<std::string> declared = options_.job_classes;
+    if (!options_.declares_any_job_class) {
+      std::erase_if(declared, [](const std::string& job_class) {
+        return job_class != "stt_decode" && job_class != "tts_synthesis";
+      });
+    }
+    return declared;
   }
 
   // True when a submit's input is of a known type and its `payload_length`
@@ -742,9 +754,9 @@ class ScriptedSidecar {
       write_frame(refusal(header, "error_event", "config_invalid", "duplicate_job_id"), 0);
     } else {
       jobs_.emplace(job_id, named);
-      const std::string job_class = header.value("job_class", "");
-      const bool runs = std::find(options_.job_classes.begin(), options_.job_classes.end(),
-                                  job_class) != options_.job_classes.end();
+      const std::vector<std::string> declared = declared_classes();
+      const bool runs = std::find(declared.begin(), declared.end(),
+                                  header.value("job_class", "")) != declared.end();
       if (!runs) {
         end_locked(job_id, "unsupported", "job_class_unsupported");
       } else if (std::exchange(refuse_next_, false)) {
