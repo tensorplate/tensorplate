@@ -717,6 +717,18 @@ INSTANTIATE_TEST_SUITE_P(
                       fixture_case("fixture_without_a_hold", {}, /*holds=*/false)),
     [](const auto& bridge_case) { return bridge_case.param.name; });
 
+// A binding that names why it cannot be built is never built: its cases are
+// skipped, here all of them.
+INSTANTIATE_TEST_SUITE_P(Unavailable, BoundedJobBridgeConformance,
+                         ::testing::Values(BridgeCase{
+                             "binding",
+                             []() -> std::unique_ptr<BridgeUnderTest> {
+                               ADD_FAILURE() << "built all the same";
+                               return nullptr;
+                             },
+                             [] { return std::string("not built here"); }}),
+                         [](const auto& bridge_case) { return bridge_case.param.name; });
+
 #if TP_ENABLE_PYTHON_PYTORCH_SIDECAR
 INSTANTIATE_TEST_SUITE_P(PythonPytorchAdapter, BoundedJobBridgeConformance,
                          ::testing::Values(BridgeCase{

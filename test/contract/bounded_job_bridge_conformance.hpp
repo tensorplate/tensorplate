@@ -145,6 +145,10 @@ class InsideABridgeCall {
 struct BridgeCase {
   std::string name;
   std::function<std::unique_ptr<BridgeUnderTest>()> make;
+  /// Why the binding cannot be built where the test runs, for one whose
+  /// backend the environment may lack: every case is then skipped. Unset, or
+  /// empty when called, builds it.
+  std::function<std::string()> unavailable = nullptr;
 };
 
 inline std::ostream& operator<<(std::ostream& out, const BridgeCase& bridge_case) {
@@ -176,6 +180,10 @@ class BoundedJobBridgeConformance : public ::testing::TestWithParam<BridgeCase> 
   static constexpr std::uint64_t kGeneration = 3;
 
   void SetUp() override {
+    if (const std::string reason = GetParam().unavailable ? GetParam().unavailable() : "";
+        !reason.empty()) {
+      GTEST_SKIP() << reason;
+    }
     under = GetParam().make();
     choices = under->choices();
     sink = std::make_shared<RecordingJobEventSink>();
@@ -199,6 +207,9 @@ class BoundedJobBridgeConformance : public ::testing::TestWithParam<BridgeCase> 
   // a thread while that thread is inside a method of the bridge." Held for
   // every case.
   void TearDown() override {
+    if (!under) {
+      return;  // skipped: the binding was not built
+    }
     // A hook reaches the bridge through `under`: no callback may be owed
     // when it goes, also after a case that failed half way.
     under->unload();
