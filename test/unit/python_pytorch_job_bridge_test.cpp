@@ -613,6 +613,28 @@ TEST_F(JobBridgeTest, AnUnloadFromASinkCallbackIsRefusedAndTheSessionsSidecarAnd
   EXPECT_EQ(peer.sent("unload", 1).size(), 1U);
 }
 
+// The other thread that delivers: the caller of a stop. The sidecar has died
+// with job 1 open, so the unload's own stop delivers the job's `released` on
+// this thread, and the callback unloads again.
+TEST_F(JobBridgeTest, AnUnloadFromACallbackThatAnUnloadIsDeliveringIsRefused) {
+  Result<void> inner = unexpected(Error::Code::Internal, "not run");
+  std::thread::id released_on;
+  h.on_event = [&](const JobEvent& event) {
+    if (event.kind() == Released) {
+      released_on = std::this_thread::get_id();
+      inner = h.session->unload();
+    }
+  };
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(run_job_1());
+  peer.die();
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted, Failed}));
+  (void)h.session->unload();
+  ASSERT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  EXPECT_EQ(released_on, std::this_thread::get_id());
+  expect_refused(inner, Error::Code::Internal, kLifecycleCallInSinkCallback);
+}
+
 // Loaded and not primed, the channel is started: a session release is
 // acknowledged on its reader, and a prime made there would wait for an
 // answer only that thread can route.

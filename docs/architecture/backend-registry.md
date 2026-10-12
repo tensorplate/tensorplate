@@ -890,7 +890,9 @@ destructor ends afterwards reaches no sink; a destructor called while a
 callback is parked is seen waiting and returns only once the callback has; and
 a bridge destroyed inside a callback ends the process with its message (a
 death test). For lifecycle calls from a callback: an `unload` and a `prime`
-made there are refused, nothing is sent, and the sidecar and the jobs live on.
+made on the channel's reader are refused, nothing is sent, and the sidecar and
+the jobs live on; and an `unload` made from a callback that another unload's
+stop is delivering is refused on that thread.
 `test/unit/job_channel_test.cpp` holds the detached channel's job side.
 
 `test/integration/python_pytorch_job_bridge_runner_test.cpp` runs the same
