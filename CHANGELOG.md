@@ -172,9 +172,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   backend session the bridge belongs to and never destroys the bridge. This
   bridge's destructor detaches the sink: when it returns no sink callback is
   running and none follows, and the events of jobs still open are dropped.
-  The adapter refuses a `prime` or an `unload` made from a sink callback
-  (`internal`, `lifecycle_call_in_sink_callback`) before anything is sent or
-  stopped. (V030-E04-F03-T03)
+  `registry.hpp` says what follows for the pair the registry returns:
+  destroyed as declared, the bridge goes first and the sink receives nothing
+  of what the session then ends. The adapter refuses a `prime` or an `unload`
+  made from a sink callback (`internal`, `lifecycle_call_in_sink_callback`)
+  before anything is sent or stopped. (V030-E04-F03-T03)
 
 - The serving worker's stream listener serves the remaining client events of
   the draft stream envelope, still behind a dispatch the worker does not

@@ -63,8 +63,11 @@ using ExecutionSessionFactory =
 /// release was confirmed has received `released`, and every session release
 /// whose jobs were all released has been acknowledged; afterwards no
 /// callback runs and `submit`, `release_session` and `health` report
-/// `Unavailable`. A job whose release could not be confirmed keeps its
-/// reservations held.
+/// `Unavailable`. The sink receives those events only while the bridge
+/// lives: a pair destroyed as declared (the bridge first, then the session)
+/// delivers nothing further, so a holder that wants them unloads the session
+/// first. A job whose release could not be confirmed keeps its reservations
+/// held.
 struct SessionWithBridge {
   std::unique_ptr<ExecutionSession> session;
   std::shared_ptr<BoundedJobBridge> bridge;
