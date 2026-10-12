@@ -390,8 +390,10 @@ calls it on every such return, a failed state write included, and it does
 nothing by default. `hold` asks the worker control to start no generation
 by itself until `release`; a transaction that hands over a generation takes
 the hold before it takes that generation and releases it when `prepare` has
-returned (see [the member registry](#member-registry)). Both do nothing by
-default. `supervise`, `member_failure` and `shutdown` do nothing by
+returned (see [the member registry](#member-registry)). Every
+implementation supplies both, so one that forwards `prepare` cannot leave
+them out; the mock worker control's do nothing, since it starts no worker by
+itself. `supervise`, `member_failure` and `shutdown` do nothing by
 default; the [member registry](#member-registry) implements them to
 restart a serving worker that stops, to report one it no longer restarts,
 and to stop every worker when the agent is told to stop. `serving_member`
@@ -491,7 +493,11 @@ worker-reported active deployment matches the transaction target.
 [deployment descriptor](#deployment-descriptor-documents) at a new
 generation, named on the record before a worker is asked for; a recorded
 document that is missing or is not the one named fails the restore, and
-with it the start, as a missing staged manifest does.
+with it the start, as a missing staged manifest does. Two records are not
+restored and do not fail the start: one whose id cannot name a member, and
+one that names a descriptor while another bundle is staged under its id
+(see the [staged bundle check](#member-registry)). The agent comes up with
+the reason in `last_error` and that deployment not serving.
 
 Recovery is **state-diff based**; the planner never replays commands
 just because they appeared in the original request order.
@@ -632,20 +638,22 @@ before the first document is written.
   names the new identity (on the in-flight rollback transaction, or on
   `active`) and writes the new document. The reference carries that
   identity, so the registry starts the member as that generation. A refusal
-  names nothing and spends no generation: the restore's is a failed start,
-  the rollback's a failed rollback that leaves the previous record as it
-  was. A kill after the document and before the state write leaves a
-  document no record names; the next start removes it and hands out the
-  same generation again. A kill after the state write leaves the generation
-  named: the next start restores `active` from it, or decides the rollback
-  as it decides any in-flight transaction, the previous record still naming
-  its own document (resumed, the rollback takes another generation). The
-  descriptor is re-stamped as recorded, as by the restart stamp. The update
-  runs under a hold on the worker control, which `prepare` ends, so no
-  restart of the serving member takes a newer generation in between (see
-  [the member registry](#member-registry)). A record that names no
-  descriptor gets the reference it got before, and nothing is held or
-  written.
+  names nothing and spends no generation: the rollback's is a failed
+  rollback that leaves the previous record as it was, and the restore's a
+  failed start, except for a staged bundle that is not the record's, which
+  leaves the agent up and the deployment not serving (see the
+  [staged bundle check](#member-registry)). A kill after the document and
+  before the state write leaves a document no record names; the next start
+  removes it and hands out the same generation again. A kill after the
+  state write leaves the generation named: the next start restores `active`
+  from it, or decides the rollback as it decides any in-flight transaction,
+  the previous record still naming its own document (resumed, the rollback
+  takes another generation). The descriptor is re-stamped as recorded, as by
+  the restart stamp. The update runs under a hold on the worker control,
+  which `prepare` ends, so no restart of the serving member takes a newer
+  generation in between (see [the member registry](#member-registry)). A
+  record that names no descriptor gets the reference it got before, and
+  nothing is held or written.
 - **Restart stamp.** For a member whose recipe names a descriptor, the stamp
   a `process`-mode agent installs reads the stopped generation's document,
   [re-stamps](../bundles/integrity.md#re-stamping) it, writes the new
@@ -750,15 +758,26 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   a record that names no descriptor from the same root without this check,
   whatever is staged there. For a record that names a
   [descriptor](#deployment-descriptor-documents), which is every format 0.2
-  deployment this agent deploys, they compare the two digests as well: the
-  rollback is refused, and the restore is refused and with it the agent's
-  start, both with `load_failed`. Staging is not yet kept apart for each
-  generation, so for a format 0.2 deployment a deploy of another bundle under
-  its id has two consequences. After one that succeeded, a rollback to the
-  earlier record is refused. After one that failed past staging, the serving
-  deployment is neither restarted nor, at the next start of the agent,
-  restored, and that start fails; deploying the id again while the agent is
-  still up gives the start a record it can restore.
+  deployment this agent deploys, they compare the two digests as well, and
+  a staged bundle that is not the record's is `load_failed` for both. The
+  rollback is refused. The restore starts nothing, and the agent still comes
+  up with its socket open: status reports `agent_state: degraded`, the
+  refusal as `last_error` (it names both digests and says that the
+  deployment is not serving until it is deployed again), and `active` as the
+  record with no `generation` and no `serving_url`. To recover, deploy the
+  id again through that agent, as either bundle: the deploy serves it and
+  clears the error, and the next start restores it. Staging is not yet kept
+  apart for each generation, so for a format 0.2 deployment a deploy of
+  another bundle under its id has two consequences. After one that
+  succeeded, a rollback to the earlier record is refused, and stays refused
+  until staging is kept for each generation. After one that did not
+  complete, the serving deployment is not restarted when its worker stops,
+  and no later start of the agent restores it until the id is deployed
+  again. A deploy refused or failed after staging leaves that, and no
+  failed deploy is needed: one that a kill or a stop of the agent ended
+  after `prepared` leaves it too, its candidate quarantined by the next
+  start, and so does one that a start resumed and then refused, which fails
+  that start as a resumed transaction that fails always has.
 - **Failure.** A member that stops with three restarts inside the last five
   minutes is failed: nothing is started for it until a deployment is
   promoted, by a deploy or a rollback. Status then reports

@@ -332,26 +332,34 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   refuses the deploy. A format 0.2 deploy writes state version `0.2` under
   either worker mode. A transaction that hands a generation over (a deploy, a
   rollback, the restore at a start) takes it under a hold on the worker
-  control, `WorkerControl::hold` and `release`, which do nothing by default:
-  the member registry starts no restart from before the generation is taken
-  until `prepare` has returned. A restart could take a newer generation in
+  control, `WorkerControl::hold` and `release`, which every implementation
+  supplies (the mock worker control's do nothing): the member registry
+  starts no restart from before the generation is taken until `prepare` has
+  returned. A restart could take a newer generation in
   between, which either refused the transaction or left the previous record
   at a higher generation than the active one. The registry's refusal of a
   handed generation that is not above every generation it holds is now
   `internal` and recoverable, where it was `load_failed`; only a generation
   handed twice reaches it. Agent status reports `previous_active.generation`
   for a retained record that names a descriptor: the generation that
-  deployment was last started as. Known and not changed: staging is keyed by
-  the deployment id alone, so a deploy of another bundle under the id of a
-  format 0.2 deployment replaces the staged bundle that deployment's record
-  names. A rollback to that record and its restore at a start of the agent
-  compare the staged bundle with the record since they re-stamp descriptors,
-  and both refusals are reachable now that deploys record one. After such a
+  deployment was last started as. Known: staging is keyed by the deployment
+  id alone, so a deploy of another bundle under the id of a format 0.2
+  deployment replaces the staged bundle that deployment's record names. A
+  rollback to that record and its restore at a start of the agent compare
+  the staged bundle with the record since they re-stamp descriptors, and
+  both refusals are reachable now that deploys record one. After such a
   deploy has succeeded, a rollback to the earlier record is refused with
-  `load_failed`. After one has failed past staging, the serving deployment's
-  worker is not restarted, as before, and its restore at the next start of
-  the agent is refused with `load_failed`, so that start fails; deploying the
-  id again while the agent is up lets the next start restore. For a format
+  `load_failed`, and stays refused until staging is kept for each
+  generation. After one that did not complete, the serving deployment's
+  worker is not restarted, as before, and no later start of the agent
+  restores it; no failed deploy is needed, since a deploy killed or stopped
+  after `prepared` leaves the same state as one refused or failed after
+  staging. Such a start no longer fails: it starts nothing for that
+  deployment, records the `load_failed` refusal as `last_error` and comes up
+  with its socket open, so status reports `agent_state: degraded`, the
+  error, and `active` without a `generation` or a `serving_url`. Deploying
+  the id again through the agent serves it, and the next start restores it.
+  Every other refusal of a restore fails the start as before. For a format
   0.1 deployment, and for format 0.2 before this change, the rollback and the
   restore started whatever was staged under the id. A format 0.1 bundle
   deploys as before: nothing is derived, read again, held or written for it,
@@ -370,7 +378,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   first. A recorded document that is missing or is not the one named, or a
   staged bundle that is not the record's, is `load_failed`, not
   recoverable: the rollback fails and leaves the previous record as it was,
-  and a restore fails the start, as a missing staged manifest does. At its
+  and a restore fails the start, as a missing staged manifest does, except
+  for a staged bundle that is not the record's, which leaves the agent up
+  and the deployment not serving (the entry above). At its
   start the agent removes every descriptor document that neither file of
   its state pair names, before recovery writes any; a prune that fails is
   logged and the start goes on. A record that names no descriptor is rolled
