@@ -868,9 +868,9 @@ fn main() -> ExitCode {
     }
     let coordinator = Arc::new(coordinator);
 
-    // Startup recovery runs before the control socket opens so replayable
-    // transactions are resumed and unsafe candidates are quarantined
-    // before new mutating requests can arrive.
+    // Startup recovery runs before the control socket opens, so the
+    // transaction an earlier run left is settled and the active record
+    // started again before new mutating requests can arrive.
     match recovery::apply_startup(coordinator.as_ref()) {
         Ok(plan) => {
             eprintln!(
