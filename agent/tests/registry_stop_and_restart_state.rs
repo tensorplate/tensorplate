@@ -214,7 +214,7 @@ fn stop_during<T: Send>(
 }
 
 #[test]
-fn a_deploy_held_in_prepare_when_the_agent_stops_stays_in_flight_and_the_next_start_resumes_it() {
+fn a_deploy_held_in_prepare_when_the_agent_stops_stays_in_flight_and_the_next_start_ends_it() {
     let h = Harness::new();
     let bundle = common::vision_bundle(h.td.path(), "stt");
     let agent = start_agent(&h);
@@ -250,14 +250,14 @@ fn a_deploy_held_in_prepare_when_the_agent_stops_stays_in_flight_and_the_next_st
     let next = start_agent(&h);
     let summary = recovery::apply_startup(&next.coord).expect("recovery");
 
-    assert_eq!(summary.action, RecoveryAction::ResumePrepare);
+    // Nothing of the deploy is run again, and no record was serving.
+    assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
     let state = next.store.snapshot().expect("state");
     assert_eq!(state.in_flight_transaction, None);
-    assert_eq!(
-        state.active.map(|active| active.deployment_id).as_deref(),
-        Some("stt")
-    );
-    assert_eq!(next.launcher.running(), 1);
+    assert_eq!((state.active, state.candidate), (None, None));
+    let ended: Vec<_> = state.quarantined.iter().map(|q| q.phase).collect();
+    assert_eq!(ended, [DeployState::CapacityChecked]);
+    assert_eq!(next.launcher.count(), 0);
 }
 
 #[test]
@@ -283,25 +283,26 @@ fn a_rollback_held_in_prepare_when_the_agent_stops_stays_in_flight() {
     );
     drop(agent);
 
-    // The next start completes the rollback, as it does after a kill; the
-    // caller was answered `unavailable` and may not expect it.
+    // The next start ends the rollback, as it does after a kill: the caller
+    // was answered `unavailable`, and what was serving serves again.
     let next = start_agent(&h);
     let summary = recovery::apply_startup(&next.coord).expect("recovery");
 
-    assert_eq!(summary.action, RecoveryAction::ResumePrepare);
+    assert_eq!(summary.action, RecoveryAction::RestoreActive);
     let state = next.store.snapshot().expect("state");
     assert_eq!(state.in_flight_transaction, None);
-    assert_eq!(
-        state.active.map(|active| active.deployment_id).as_deref(),
-        Some("stt")
-    );
+    let ended: Vec<_> = state.quarantined.iter().map(|q| q.phase).collect();
+    assert_eq!(ended, [DeployState::CapacityChecked]);
+    assert_eq!(state.last_error, None);
+    let recorded = [state.active, state.previous_active].map(|r| r.map(|r| r.deployment_id));
+    assert_eq!(recorded, [Some("tts".into()), Some("stt".into())]);
+    assert_eq!(next.launcher.running(), 1);
 }
 
-/// Startup recovery quarantines a candidate interrupted in a worker-side
-/// phase and starts nothing in that pass, after a stop as after a kill: the
-/// deployment that was serving comes back at the start after that.
+/// One start ends a deploy interrupted while its candidate warmed and starts
+/// the deployment that was serving again, after a stop as after a kill.
 #[test]
-fn a_deploy_stopped_while_it_warms_is_quarantined_by_the_next_start_which_serves_nothing() {
+fn a_deploy_stopped_while_it_warms_is_ended_by_the_next_start_which_serves_what_was_serving() {
     let h = Harness::new();
     let agent = start_agent(&h);
     deploy_as(&agent, "stt", &common::vision_bundle(h.td.path(), "stt")).expect("deploy");
@@ -342,22 +343,17 @@ fn a_deploy_stopped_while_it_warms_is_quarantined_by_the_next_start_which_serves
     let next = start_agent(&h);
     let summary = recovery::apply_startup(&next.coord).expect("recovery");
 
-    assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
-    assert_eq!(next.launcher.count(), 0);
+    assert_eq!(summary.action, RecoveryAction::RestoreActive);
+    assert_eq!(next.launcher.running(), 1);
     let state = next.store.snapshot().expect("state");
     assert_eq!(state.in_flight_transaction, None);
-    assert_eq!(state.quarantined.len(), 1);
+    assert_eq!((state.candidate, state.last_error), (None, None));
+    let ended: Vec<_> = state.quarantined.iter().map(|q| q.phase).collect();
+    assert_eq!(ended, [DeployState::Prepared]);
     assert_eq!(
         state.active.map(|active| active.deployment_id).as_deref(),
         Some("stt")
     );
-    drop(next);
-
-    let after = start_agent(&h);
-    let summary = recovery::apply_startup(&after.coord).expect("recovery");
-
-    assert_eq!(summary.action, RecoveryAction::RestoreActive);
-    assert_eq!(after.launcher.running(), 1);
 }
 
 /// Stop the serving worker and step the registry until its successor serves.

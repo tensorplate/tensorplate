@@ -240,7 +240,7 @@ impl Coordinator {
 
         if let Some(admission) = &self.platform_admission {
             if let Err(err) = admission.ensure_supported() {
-                return self.fail(&transaction_id, deployment_id, DeployState::Received, err);
+                return self.fail(&transaction_id, deployment_id, err);
             }
         }
 
@@ -256,9 +256,7 @@ impl Coordinator {
         });
         let verified = match verification {
             Ok(v) => v,
-            Err(err) => {
-                return self.fail(&transaction_id, deployment_id, DeployState::Received, err)
-            }
+            Err(err) => return self.fail(&transaction_id, deployment_id, err),
         };
         if let (Some(admission), Some(registry)) =
             (&self.platform_admission, self.platform_registry.as_ref())
@@ -266,7 +264,7 @@ impl Coordinator {
             if let Err(err) =
                 admission.admit_backend(registry, verified.manifest.backend_hint.as_str())
             {
-                return self.fail(&transaction_id, deployment_id, DeployState::Received, err);
+                return self.fail(&transaction_id, deployment_id, err);
             }
         }
         if let Some(expected) = expected_bundle_digest {
@@ -278,7 +276,7 @@ impl Coordinator {
                         verified.manifest_digest
                     ),
                 };
-                return self.fail(&transaction_id, deployment_id, DeployState::Received, err);
+                return self.fail(&transaction_id, deployment_id, err);
             }
         }
         self.advance(
@@ -297,7 +295,7 @@ impl Coordinator {
         let staged_path = match self.stage_bundle(deployment_id, &verified) {
             Ok(p) => p,
             Err(err) => {
-                return self.fail(&transaction_id, deployment_id, DeployState::Verified, err);
+                return self.fail(&transaction_id, deployment_id, err);
             }
         };
         let candidate_record = DeploymentRecord {
@@ -319,7 +317,7 @@ impl Coordinator {
 
         // Phase: capacity_checked.
         if let Err(err) = capacity_check(&verified, &self.config) {
-            return self.fail(&transaction_id, deployment_id, DeployState::Staged, err);
+            return self.fail(&transaction_id, deployment_id, err);
         }
         self.advance(
             &transaction_id,
@@ -340,8 +338,7 @@ impl Coordinator {
         let in_hand = match crate::descriptor_store::start_deploy(&self.store, worker, &first) {
             Ok(in_hand) => in_hand,
             Err(err) => {
-                let reached = DeployState::CapacityChecked;
-                return self.fail(&transaction_id, deployment_id, reached, err);
+                return self.fail(&transaction_id, deployment_id, err);
             }
         };
 
@@ -358,12 +355,7 @@ impl Coordinator {
                 deployment_id: deployment_id.to_string(),
                 reason: err.to_string(),
             });
-            return self.fail(
-                &transaction_id,
-                deployment_id,
-                DeployState::CapacityChecked,
-                err,
-            );
+            return self.fail(&transaction_id, deployment_id, err);
         }
         let mut prepared = Prepared::new(self.worker.as_ref(), &candidate_ref);
         self.advance(
@@ -393,7 +385,7 @@ impl Coordinator {
                     deployment_id: deployment_id.to_string(),
                     reason: err.to_string(),
                 });
-                return self.fail(&transaction_id, deployment_id, DeployState::Prepared, err);
+                return self.fail(&transaction_id, deployment_id, err);
             }
         };
         if !warmed.ready {
@@ -403,7 +395,7 @@ impl Coordinator {
                 deployment_id: deployment_id.to_string(),
                 reason: err.to_string(),
             });
-            return self.fail(&transaction_id, deployment_id, DeployState::Prepared, err);
+            return self.fail(&transaction_id, deployment_id, err);
         }
         self.advance(&transaction_id, DeployState::Prepared, DeployState::Warmed)?;
         self.emit(&WorkerEvent::WarmEnd {
@@ -418,13 +410,12 @@ impl Coordinator {
                 deployment_id: deployment_id.to_string(),
                 reason: err.to_string(),
             });
-            return self.fail(&transaction_id, deployment_id, DeployState::Warmed, err);
+            return self.fail(&transaction_id, deployment_id, err);
         }
         prepared.promoted = true;
-        self.advance(&transaction_id, DeployState::Warmed, DeployState::Promoted)?;
-        let monotonic_ns = now_monotonic_ns();
-        self.store.promote_candidate(monotonic_ns)?;
-        self.advance(&transaction_id, DeployState::Promoted, DeployState::Active)?;
+        // The commit: the records move and the phase becomes `promoted` in
+        // one write. No later phase is written to a transaction in flight.
+        self.store.promote_candidate(now_monotonic_ns())?;
         self.emit(&WorkerEvent::Promote {
             transaction_id: transaction_id.clone(),
             deployment_id: deployment_id.to_string(),
@@ -448,9 +439,7 @@ impl Coordinator {
             });
         }
 
-        // Clear the in-flight transaction now that it has reached Active.
-        self.store.clear_transaction()?;
-        self.store.set_last_error(None)?;
+        self.store.end_transaction()?;
 
         // V01-E09-F06-T02: hand the new active over to the supervisor.
         // A successful deploy is also the documented recovery trigger
@@ -599,21 +588,13 @@ impl Coordinator {
             return self.fail_rollback(&transaction_id, &prev.deployment_id, err);
         }
         prepared.promoted = true;
-        self.advance(&transaction_id, DeployState::Warmed, DeployState::Promoted)?;
-        let monotonic_ns = now_monotonic_ns();
-        self.store.swap_active_with_previous(monotonic_ns)?;
-        // Rollback's terminal state is RolledBack rather than Active.
-        self.advance(
-            &transaction_id,
-            DeployState::Promoted,
-            DeployState::RolledBack,
-        )?;
+        // The commit, as a deploy's: the swap and `promoted` in one write.
+        self.store.swap_active_with_previous(now_monotonic_ns())?;
         self.emit(&WorkerEvent::Promote {
             transaction_id: transaction_id.clone(),
             deployment_id: prev.deployment_id.clone(),
         });
-        self.store.clear_transaction()?;
-        self.store.set_last_error(None)?;
+        self.store.end_transaction()?;
 
         // V01-E09-F06-T02: hand the rolled-back active over to the
         // supervisor and reset crash-loop state.
@@ -819,33 +800,22 @@ impl Coordinator {
         self.store.record_phase(tx, to, now_monotonic_ns())
     }
 
+    /// End a deploy that failed, in one write: its quarantine record
+    /// carries the phase the transaction had recorded and the failure.
     fn fail(
         &self,
         transaction_id: &str,
         deployment_id: &str,
-        last_successful: DeployState,
         err: AgentError,
     ) -> AgentResult<DeployOutcome> {
         self.refuse_while_stopping()?;
-        let record = err.to_record();
-        // Stamp the in-flight transaction with the last-successful phase
-        // so the quarantine record reflects how far the candidate got
-        // before failing. This is what recovery / status surfaces read.
-        let _ = self.store.update(|s| {
-            if let Some(tx) = s.in_flight_transaction.as_mut() {
-                tx.phase = last_successful;
-                tx.failure = Some(record.clone());
-                tx.last_transition_monotonic_ns = Some(now_monotonic_ns());
-            }
-            Ok(())
-        });
         self.emit(&WorkerEvent::Failure {
             transaction_id: transaction_id.to_string(),
             deployment_id: deployment_id.to_string(),
             reason: err.to_string(),
         });
         self.store
-            .quarantine_in_flight(record, now_monotonic_ns())?;
+            .quarantine_in_flight(err.to_record(), now_monotonic_ns())?;
         Err(err)
     }
 
@@ -856,15 +826,6 @@ impl Coordinator {
         err: AgentError,
     ) -> AgentResult<DeployOutcome> {
         self.refuse_while_stopping()?;
-        let record = err.to_record();
-        let _ = self.store.update(|s| {
-            if let Some(tx) = s.in_flight_transaction.as_mut() {
-                tx.phase = DeployState::Failed;
-                tx.failure = Some(record.clone());
-                tx.last_transition_monotonic_ns = Some(now_monotonic_ns());
-            }
-            Ok(())
-        });
         self.emit(&WorkerEvent::Failure {
             transaction_id: transaction_id.to_string(),
             deployment_id: deployment_id.to_string(),
@@ -872,9 +833,8 @@ impl Coordinator {
         });
         // Rollback failures do not quarantine the previous-active record:
         // it is still a valid deployment, just temporarily unreachable.
-        // Clear the in-flight transaction and surface last_error.
-        self.store.set_last_error(Some(record))?;
-        self.store.clear_transaction()?;
+        // One write clears the transaction and records why.
+        self.store.fail_transaction(err.to_record())?;
         Err(err)
     }
 
@@ -978,7 +938,7 @@ struct Deployments {
 /// started from the same bundle and, when the record names a descriptor,
 /// from that descriptor. A record that names none cannot tell a redeploy
 /// of its own bundle under its own id from the deployment it records.
-fn serves(serving: &ServingMember, recorded: &DeploymentRecord) -> bool {
+pub(crate) fn serves(serving: &ServingMember, recorded: &DeploymentRecord) -> bool {
     let started_from = |recorded: &Option<String>, started_from: &Option<String>| {
         recorded.is_none() || recorded == started_from
     };

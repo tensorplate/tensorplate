@@ -318,7 +318,7 @@ fn a_variant_resolves_only_against_a_bundle_deployed_on_a_row_the_machine_holds(
 }
 
 #[test]
-fn a_replayed_deploy_the_rules_refuse_is_quarantined_and_the_active_record_kept() {
+fn an_interrupted_deploy_the_rules_would_refuse_is_ended_at_a_start_and_not_replayed() {
     let h = Harness::new();
     let coord = agent(&h, PREVIEW_ROW, true);
     deploy(&coord, "base", &fixtures().join(BASE)).unwrap();
@@ -347,13 +347,8 @@ fn a_replayed_deploy_the_rules_refuse_is_quarantined_and_the_active_record_kept(
     let calls = h.worker.calls().unwrap().len();
 
     let restarted = agent(&h, PREVIEW_ROW, true);
-    let plan = recovery::plan_with_worker(&h.store, h.worker.as_ref()).unwrap();
-    assert_eq!(plan.action, RecoveryAction::ResumeVerify);
-    let error = recovery::apply_startup(&restarted).expect_err("the replay is refused");
-    assert_eq!(
-        error.to_record().context.as_deref(),
-        Some("bundle_r9_hardware_row")
-    );
+    let plan = recovery::apply_startup(&restarted).expect("the start");
+    assert_eq!(plan.action, RecoveryAction::QuarantineCandidate);
 
     let snapshot = h.store.snapshot().unwrap();
     assert_eq!(snapshot.active.as_ref(), Some(&active));
@@ -362,15 +357,12 @@ fn a_replayed_deploy_the_rules_refuse_is_quarantined_and_the_active_record_kept(
     let quarantined = snapshot.quarantined.last().expect("quarantined");
     assert_eq!(quarantined.deployment_id, "interrupted");
     assert_eq!(quarantined.phase, DeployState::Received);
-    assert_eq!(quarantined.error.code, ErrorCode::ConfigInvalid);
-    assert_eq!(
-        quarantined.error.context.as_deref(),
-        Some("bundle_r9_hardware_row")
-    );
+    // The bundle was not read again, so no rule judged it.
+    let context = quarantined.error.context.as_deref();
+    assert_eq!(context, Some("startup_recovery"));
     assert!(!h.config.staging_dir.join("interrupted").exists());
     assert_eq!(h.worker.calls().unwrap().len(), calls);
 
-    // Nothing is left to replay, so the next start goes through.
     let plan = recovery::apply_startup(&restarted).expect("the next start");
     assert_eq!(plan.action, RecoveryAction::NoOp);
     assert_eq!(h.store.snapshot().unwrap().active, Some(active));

@@ -9,42 +9,13 @@
 //             -> warmed -> promoted -> active
 //
 // Failure transitions are typed; every candidate phase can transition to
-// `failed`. `received`/`verified` are replayable: a restart that finds
-// the agent paused there can re-run the work safely. Phases that touched
-// the worker (`prepared`, `warmed`) are not replayable — the worker may
-// already have side effects — and a candidate that crashed there is
-// quarantined.
+// `failed`. `promoted` is recorded by the commit write, so a start reads
+// it, with the records, as committed. No phase is run again at a start:
+// a transaction found before its commit is ended as failed. The agent
+// records no phase after `promoted`: the write that ends a transaction
+// clears it.
 
 use tensorplate_protocol::deploy_transaction::DeployState;
-
-/// Classification of a phase from the recovery planner's point of view.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PhaseClass {
-    /// Safe to re-run from scratch on restart.
-    Replayable,
-    /// Touched the worker; must be revalidated, possibly quarantined.
-    WorkerSideEffect,
-    /// Active deployment. No further work needed.
-    Active,
-    /// Terminal failure / rollback state.
-    Terminal,
-}
-
-/// Lookup the [`PhaseClass`] for `state`.
-#[must_use]
-pub fn classify(state: DeployState) -> PhaseClass {
-    match state {
-        DeployState::Received | DeployState::Verified | DeployState::Staged => {
-            PhaseClass::Replayable
-        }
-        DeployState::CapacityChecked => PhaseClass::Replayable,
-        DeployState::Prepared | DeployState::Warmed | DeployState::Promoted => {
-            PhaseClass::WorkerSideEffect
-        }
-        DeployState::Active => PhaseClass::Active,
-        DeployState::Failed | DeployState::RolledBack => PhaseClass::Terminal,
-    }
-}
 
 /// True if `next` is a permitted successor of `current` along the
 /// success path. Terminal transitions (any phase to `failed` /
@@ -107,7 +78,7 @@ mod tests {
         clippy::unwrap_used,
         clippy::default_trait_access
     )]
-    use super::{classify, is_permitted, is_promotion, is_success_transition, PhaseClass};
+    use super::{is_permitted, is_promotion, is_success_transition};
     use tensorplate_protocol::deploy_transaction::DeployState;
 
     #[test]
@@ -173,26 +144,5 @@ mod tests {
         ] {
             assert!(!is_promotion(s));
         }
-    }
-
-    #[test]
-    fn phase_classification_matches_planner_expectations() {
-        assert!(matches!(
-            classify(DeployState::Received),
-            PhaseClass::Replayable
-        ));
-        assert!(matches!(
-            classify(DeployState::Prepared),
-            PhaseClass::WorkerSideEffect
-        ));
-        assert!(matches!(
-            classify(DeployState::Warmed),
-            PhaseClass::WorkerSideEffect
-        ));
-        assert!(matches!(classify(DeployState::Active), PhaseClass::Active));
-        assert!(matches!(
-            classify(DeployState::Failed),
-            PhaseClass::Terminal
-        ));
     }
 }
