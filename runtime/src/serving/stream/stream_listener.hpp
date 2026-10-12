@@ -31,8 +31,9 @@ struct StreamListenerOptions {
 /// driving the SessionManager it owns and the dispatch behind it.
 ///
 /// Uses the callback API: no thread per call; gRPC's own threads run the
-/// reactions, which never wait on a job. Without a dispatch every Open is
-/// refused with `backend_unsupported_capability`.
+/// reactions, which never wait on a job. One thread of its own cancels a call
+/// that outruns the no-progress limit after its session has ended. Without a
+/// dispatch every Open is refused with `backend_unsupported_capability`.
 class StreamListener {
  public:
   /// Binds and starts serving. `dispatch`, when given, is attached here, is
@@ -60,6 +61,10 @@ class StreamListener {
   /// Sessions holding a slot; after stop(), those that still held one when it
   /// released the manager.
   [[nodiscard]] std::size_t live_sessions() const noexcept;
+
+  /// Calls not yet over on this side: a session's call outlives its slot
+  /// until its last event is written or the call is cancelled.
+  [[nodiscard]] std::size_t open_calls() const noexcept;
 
   struct Impl;
 

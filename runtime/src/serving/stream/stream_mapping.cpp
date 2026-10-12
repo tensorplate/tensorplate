@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <string>
 #include <utility>
+#include <variant>
 
 namespace tensorplate::serving::stream {
 namespace {
@@ -32,6 +34,10 @@ bool names_a_deployment(std::string_view id) noexcept {
 
 Error invalid_event(std::string message) {
   return Error::make(Error::Code::ConfigInvalid, std::move(message), "invalid_event");
+}
+
+Error empty_input(std::string message) {
+  return Error::make(Error::Code::ConfigInvalid, std::move(message), "empty_input");
 }
 
 Error unsupported(std::string message) {
@@ -66,6 +72,98 @@ wire::FailureReason reason_for_code(Error::Code code) noexcept {
   }
   return wire::FAILURE_REASON_INTERNAL;
 }
+
+bool ascii_space(char c) noexcept {
+  return c == ' ' || (c >= '\t' && c <= '\r');
+}
+
+wire::Usage usage(const LogicalSessionUsage& from) {
+  wire::Usage out;
+  out.set_used(from.used());
+  out.set_limit(from.limit());
+  return out;
+}
+
+/// Samples of `format` in `duration`.
+std::uint64_t samples_in(std::chrono::milliseconds duration,
+                         const StreamAudioFormat& format) noexcept {
+  return std::uint64_t{format.sample_rate_hz} * static_cast<std::uint64_t>(duration.count()) /
+         1000U;
+}
+
+wire::EndpointReason wire_reason(EndpointReason reason) noexcept {
+  switch (reason) {
+    case EndpointReason::Silence:
+      return wire::ENDPOINT_REASON_SILENCE;
+    case EndpointReason::ClientFinalize:
+      return wire::ENDPOINT_REASON_CLIENT_FINALIZE;
+    case EndpointReason::DurationLimit:
+      return wire::ENDPOINT_REASON_DURATION_LIMIT;
+    case EndpointReason::HalfClose:
+      return wire::ENDPOINT_REASON_HALF_CLOSE;
+  }
+  return wire::ENDPOINT_REASON_UNSPECIFIED;
+}
+
+/// Encodes each kind of task output; an alternative added later has no
+/// overload and yields no event.
+struct TaskEvent {
+  const StreamAudioFormat& format;
+
+  std::optional<wire::ServerEvent> operator()(const EndpointDetectedOutput& from) const {
+    wire::ServerEvent event;
+    auto& out = *event.mutable_endpoint_detected();
+    out.set_utterance_id(from.utterance_id);
+    out.set_end_sample_offset(from.end_sample_offset);
+    out.set_reason(wire_reason(from.reason));
+    return event;
+  }
+  std::optional<wire::ServerEvent> operator()(const FinalTranscriptOutput& from) const {
+    wire::ServerEvent event;
+    auto& out = *event.mutable_final_transcript();
+    out.set_utterance_id(from.utterance_id);
+    for (const auto& segment : from.segments) {
+      auto& to = *out.add_segments();
+      to.set_start_us(segment.start_us);
+      to.set_end_us(segment.end_us);
+      to.set_text(segment.text);
+    }
+    out.set_end_sample_offset(from.end_sample_offset);
+    out.set_finalize_sequence(from.finalize_sequence);
+    return event;
+  }
+  std::optional<wire::ServerEvent> operator()(const AudioChunkOutput& from) const {
+    wire::ServerEvent event;
+    auto& out = *event.mutable_audio_chunk();
+    out.set_segment_id(from.segment_id);
+    out.set_chunk_index(from.chunk_index);
+    out.set_segment_sample_offset(from.segment_sample_offset);
+    *out.mutable_format() = wire_format(format);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): bytes as protobuf takes them.
+    out.set_data(reinterpret_cast<const char*>(from.pcm.data()), from.pcm.size());
+    return event;
+  }
+  std::optional<wire::ServerEvent> operator()(const SegmentCompletedOutput& from) const {
+    wire::ServerEvent event;
+    auto& out = *event.mutable_segment_completed();
+    out.set_segment_id(from.segment_id);
+    out.set_total_samples(from.total_samples);
+    out.set_chunk_count(from.chunk_count);
+    return event;
+  }
+  std::optional<wire::ServerEvent> operator()(const SynthesisCompletedOutput& from) const {
+    wire::ServerEvent event;
+    auto& out = *event.mutable_synthesis_completed();
+    out.set_segment_count(from.segment_count);
+    out.set_total_samples(from.total_samples);
+    out.set_finalize_sequence(from.finalize_sequence);
+    return event;
+  }
+  template <typename Other>
+  std::optional<wire::ServerEvent> operator()(const Other& /*from*/) const {
+    return std::nullopt;
+  }
+};
 
 }  // namespace
 
@@ -272,6 +370,88 @@ wire::AudioFormat wire_format(const StreamAudioFormat& format) {
   out.set_sample_rate_hz(format.sample_rate_hz);
   out.set_channels(format.channels);
   return out;
+}
+
+wire::InputCredit wire_credit(const LogicalSessionStatus& status,
+                              const LogicalSessionUsage& waiting_segments) {
+  wire::InputCredit out;
+  *out.mutable_bytes() = usage(status.input_credit_bytes);
+  *out.mutable_waiting_segments() = usage(waiting_segments);
+  return out;
+}
+
+wire::SessionStatus wire_status(const LogicalSessionStatus& status,
+                                const LogicalSessionUsage& waiting_segments) {
+  wire::SessionStatus out;
+  out.set_state(wire_state(status.state));
+  out.set_input_queue_depth(status.input_queue_depth);
+  *out.mutable_input_credit() = wire_credit(status, waiting_segments);
+  *out.mutable_output_pcm_bytes() = usage(status.output_pcm_bytes);
+  *out.mutable_output_metadata_bytes() = usage(status.output_metadata_bytes);
+  return out;
+}
+
+bool is_short_frame(std::uint32_t sample_count, const SessionTerms& terms) noexcept {
+  return sample_count < samples_in(terms.min_frame, terms.audio_format);
+}
+
+Result<void> check_audio(const wire::Audio& audio, const SessionTerms& terms,
+                         const InputHistory& history) {
+  if (terms.input_kind != SessionInputKind::Audio) {
+    return unexpected(invalid_event("wrong_input_kind"));
+  }
+  if (audio.data().empty()) {
+    return unexpected(empty_input("audio body without data"));
+  }
+  const auto& format = terms.audio_format;
+  const std::uint64_t frame_bytes =
+      std::uint64_t{audio.sample_count()} * format.bytes_per_sample() * format.channels;
+  if (audio.data().size() != frame_bytes) {
+    return unexpected(invalid_event("frame_size_mismatch"));
+  }
+  if (audio.sample_count() > samples_in(terms.max_frame, format)) {
+    return unexpected(invalid_event("frame_too_long"));
+  }
+  if (audio.sample_offset() != history.samples) {
+    return unexpected(invalid_event("sample_offset_mismatch"));
+  }
+  // Only the client's Finalize or half-close may follow a short frame.
+  if (history.short_frame) {
+    return unexpected(invalid_event("audio_after_short_frame"));
+  }
+  return {};
+}
+
+Result<void> check_text_segment(const wire::TextSegment& segment, const SessionTerms& terms,
+                                const InputHistory& history) {
+  if (terms.input_kind != SessionInputKind::Text) {
+    return unexpected(invalid_event("wrong_input_kind"));
+  }
+  const auto& text = segment.text();
+  if (std::all_of(text.begin(), text.end(), ascii_space)) {
+    return unexpected(empty_input("text segment without text"));
+  }
+  if (segment.segment_id() > kMaxWireInteger) {
+    return unexpected(invalid_event("segment_id_out_of_range"));
+  }
+  if (history.last_segment_id && segment.segment_id() <= *history.last_segment_id) {
+    return unexpected(invalid_event("segment_id_not_increasing"));
+  }
+  if (text.size() > terms.max_segment_text_bytes) {
+    return unexpected(invalid_event("segment_too_long"));
+  }
+  if (history.synthesis_text_bytes + text.size() > terms.max_synthesis_text_bytes) {
+    return unexpected(invalid_event("synthesis_text_limit_exceeded"));
+  }
+  if (!short_text(segment.turn_id(), false)) {
+    return unexpected(invalid_event("turn_id_malformed"));
+  }
+  return {};
+}
+
+std::optional<wire::ServerEvent> task_event(const TaskOutput& output,
+                                            const StreamAudioFormat& format) {
+  return std::visit(TaskEvent{format}, output);
 }
 
 Result<SessionRequest> session_request(const wire::Open& open) {

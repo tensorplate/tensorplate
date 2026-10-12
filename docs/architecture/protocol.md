@@ -20,7 +20,7 @@ See also:
 | Cross-component control payloads (desired_state, worker_status, health_event, deploy_transaction) | JSON Schema Draft 7 | Crosses Rust/C++ language boundaries; JSON keeps the schema human-readable; the volume is low (status / event ticks, not request hot-path). |
 | HTTP `/infer` payload | JSON Schema Draft 7 (header) + raw bytes | The header documented in `infer_request.json` / `infer_result.json` rides as JSON; tensor payloads ride as raw bytes per `BufferRef` / `TensorView` metadata. v0.1.0 does not negotiate an alternative encoding; V01-E07 lands the HTTP server. |
 | Python/PyTorch sidecar IPC | JSON header + raw payload bytes | Schema captured in `python_pytorch_ipc.json`. Wire format: a 16-byte big-endian prefix (magic, wire version, header length, payload length), the JSON header, then the payload bytes: tensors, or a job's PCM or text input or its synthesized audio. JSON-encoding tensors was an explicit non-goal. |
-| External stream session envelope (draft) | Protocol Buffers (proto3), for gRPC | `protocol/proto/tensorplate/stream/v1/session.proto`: typed events on one ordered bidirectional stream per session, with audio as bytes. A draft that no listener serves yet; see [`protocol/README.md`](../../protocol/README.md#streaming-session-envelope). |
+| External stream session envelope (draft) | Protocol Buffers (proto3), for gRPC | `protocol/proto/tensorplate/stream/v1/session.proto`: typed events on one ordered bidirectional stream per session, with audio as bytes. A draft: the serving worker's stream listener implements it and serves no session yet; see [`protocol/README.md`](../../protocol/README.md#streaming-session-envelope). |
 | Agent-to-worker runtime control | Newline-delimited compact JSON | `worker_control.json` defines six runtime operations. The Rust and C++ codecs use the same byte-exact golden frames under `protocol/rust/tests/fixtures/worker_control_*.jsonl`. Each request and response names the member, transaction and correlation id. Frames are limited to 65,536 bytes including the newline. The serving worker answers them on its control thread when it is started as a member of a deployment generation. |
 
 We deliberately did **not** introduce protobuf in v0.1.0, and the JSON
@@ -33,8 +33,9 @@ v0.1.0 critical path and would split the operator-facing config and
 the IPC headers across two encodings.
 
 The external stream session envelope is the one protobuf contract. It is
-a draft, it changes none of the JSON contracts, and no listener, server
-or client uses it yet.
+a draft and changes none of the JSON contracts. The serving worker's
+stream listener implements it, and no worker serves a session with it
+yet.
 
 ## Versioning
 
@@ -272,7 +273,7 @@ generated sets.
 | C++ control-plane value objects (desired_state, worker_status, health_event, deploy_transaction) | `protocol/cpp/` | **Deferred to V01-E07/V01-E10** alongside the components that emit/consume them. The Rust mirror plus the committed JSON fixtures under `protocol/rust/tests/fixtures/` are the v0.1.0 cross-language contract. |
 | C++ Python sidecar IPC binding | `runtime/src/adapters/python_pytorch/python_pytorch_session.cpp`, `job_wire.cpp` | Reads the header fields it uses by name and ignores the rest. `job_wire.cpp` builds and reads the job and session messages and the two negotiation fields, held to the golden frames and the job seam's vectors by `test/unit/job_wire_test.cpp`. `job_channel.cpp` carries them on a connection (a reader, a writer, the table of unreleased jobs); the session starts it on a load that enabled `speech_jobs_v1` and stops it (see `docs/architecture/backend-registry.md`, "The session and its job channel"). |
 | Python sidecar IPC binding | `backends/python_pytorch/src/tensorplate_pytorch_backend/protocol.py` | Kind, status, error-code, capability and job literals, and the job seam's limits. `job_objects.py` validates a `job_submit` and renders job results and messages as the seam's objects do. `codec.py` frames headers without interpreting them. |
-| C++ stream session envelope binding (draft) | build tree only, target `tp::stream_proto` | Generated from `protocol/proto/tensorplate/stream/v1/session.proto` by the pinned `protoc` and gRPC plugin when `TP_ENABLE_STREAMING_GRPC` is ON; never committed. Only `test/contract/stream_envelope_conformance_test.cpp` links it. |
+| C++ stream session envelope binding (draft) | build tree only, target `tp::stream_proto` | Generated from `protocol/proto/tensorplate/stream/v1/session.proto` by the pinned `protoc` and gRPC plugin when `TP_ENABLE_STREAMING_GRPC` is ON; never committed. The serving worker's stream listener links it, as do the listener's tests and `test/contract/stream_envelope_conformance_test.cpp`. |
 | Python stream session envelope modules (draft) | inside the `tensorplate-python` wheel, `tensorplate.stream.v1` | Generated from the same file by the pinned `grpcio-tools` when the SDK is built (`sdk/python/setup.py`); never committed. Nothing in the SDK calls them yet; `sdk/python/tests/test_stream_modules.py` reads the golden frames through them. |
 
 We chose hand-written bindings over code generation because:

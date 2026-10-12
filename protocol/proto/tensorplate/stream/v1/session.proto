@@ -136,7 +136,7 @@ enum EndpointReason {
   ENDPOINT_REASON_UNSPECIFIED = 0;
   ENDPOINT_REASON_SILENCE = 1;
   ENDPOINT_REASON_CLIENT_FINALIZE = 2;
-  // The utterance reached its maximum length and was split.
+  // The utterance reached its maximum length and was ended there.
   ENDPOINT_REASON_DURATION_LIMIT = 3;
   // The client closed its sending half with the utterance open.
   ENDPOINT_REASON_HALF_CLOSE = 4;
@@ -192,8 +192,9 @@ message SpeechToTextLimits {
   // Bounds on the audio one Audio body carries, in whole milliseconds.
   uint32 min_frame_ms = 1;
   uint32 max_frame_ms = 2;
-  // Longest utterance; a longer one is split, with
-  // ENDPOINT_REASON_DURATION_LIMIT.
+  // Longest utterance. One that reaches this length is ended at once, with
+  // ENDPOINT_REASON_DURATION_LIMIT, without waiting for more audio; audio
+  // that follows begins the next.
   uint32 max_utterance_ms = 3;
 }
 
@@ -371,9 +372,13 @@ message TextSegment {
 
 // Completes the current utterance or the submitted synthesis and is answered
 // by a FinalTranscript or by SynthesisCompleted that names this event's
-// sequence; input sent before that answer is refused. A Finalize repeated
-// before the answer, or received while the session drains, starts nothing and
-// has no answer of its own.
+// sequence. A client sends no input until it has read that answer. While the
+// session is finalizing for a Finalize, input is refused and a repeated
+// Finalize starts nothing and has no answer of its own. The session may be
+// active again shortly before the answer is written: input the server reads
+// then is accepted for the next utterance or synthesis, and a Finalize it
+// reads then is a new one with an answer of its own. A Finalize received
+// while the session drains starts nothing and has no answer.
 //
 // In a speech-to-text session it ends the utterance that is open when the
 // server reads it, even one that holds no audio yet, and that utterance's
