@@ -12,6 +12,7 @@ use crate::supervision::FakeClock;
 use crate::worker::MemberEvent;
 
 mod descriptors;
+mod handoff;
 mod ports;
 mod restart;
 mod view;

@@ -12,8 +12,11 @@ use tensorplate_protocol::agent_state::{decode_agent_state, DeploymentRecord};
 use tensorplate_protocol::backend_descriptor::BackendDescriptor;
 use tensorplate_protocol::{parse_bundle, AdmissionMode, DescriptorInputs, MemberQuota};
 
+use crate::backend_detection::{BackendProbeState, RunnerProfileProbe};
+use crate::config::AgentConfig;
 use crate::state::StateStore;
 
+mod deploy;
 mod start_again;
 
 const STAGED: &str = "/var/lib/tensorplate/bundles/staging/stt";
@@ -42,6 +45,52 @@ pub(crate) fn derive(id: &str, generation: u64, staged_path: &str) -> Deployment
         acceptance_profile_digest: None,
     };
     DeploymentDescriptor::derive(&bundle, &inputs).unwrap()
+}
+
+/// The probe report of an agent on which the committed runner profiles are
+/// installed and runnable: what [`derive`] derives against.
+pub(crate) fn probes() -> BTreeMap<String, BackendProbeReport> {
+    let path = repo("protocol/rust/tests/fixtures/backend_descriptor_runner_profiles.json");
+    let text = fs::read_to_string(&path).unwrap();
+    let installed = BackendDescriptor::parse_with_path(&text, &path).unwrap();
+    let runnable = |profile| RunnerProfileProbe {
+        profile,
+        state: BackendProbeState::Runnable,
+        observed: None,
+    };
+    let report = BackendProbeReport {
+        backend_name: "python_pytorch".into(),
+        descriptor_path: path,
+        state: BackendProbeState::Runnable,
+        install_hint: None,
+        runner_profiles: installed
+            .runner_profiles
+            .into_iter()
+            .map(runnable)
+            .collect(),
+    };
+    BTreeMap::from([("python_pytorch".to_owned(), report)])
+}
+
+/// The configuration of an agent that keeps its state and its staged bundles
+/// under `root` and can serve the fixture bundles.
+pub(crate) fn agent_config(root: &Path) -> AgentConfig {
+    let served = serde_json::json!({
+        "supported_precision": ["fp32", "fp16"],
+        "supported_artifact_kinds": ["python_pytorch_entry"],
+    });
+    let config = serde_json::json!({
+        "socket_path": root.join("agent.sock"),
+        "state_dir": root.join("state"),
+        "staging_dir": root.join("staging"),
+        "available_backends": ["mock", "python_pytorch"],
+        "backend_capabilities": {"python_pytorch": served},
+        "device_memory_bytes": 8_u64 << 30,
+        "device_family": "x86_64",
+        "runtime_version": "0.3.1",
+    });
+    let config: AgentConfig = serde_json::from_value(config).unwrap();
+    config.validate().unwrap()
 }
 
 /// The reference a deploy hands the registry for `descriptor`.

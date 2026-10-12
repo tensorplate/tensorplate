@@ -1862,4 +1862,120 @@ mod tests {
             assert_eq!(read.snapshot().expect("snap"), before, "{case}");
         }
     }
+
+    /// A deploy of `candidate` at `Promoted` that names what `named` names.
+    fn deploy_of(candidate: &DeploymentRecord, named: &DeploymentRecord) -> TransactionRecord {
+        TransactionRecord {
+            kind: TransactionKind::Deploy,
+            ..rollback_of(candidate, named)
+        }
+    }
+
+    /// A store about to promote `candidate`, with `transaction` in flight.
+    fn before_the_promotion(
+        dir: &Path,
+        candidate: DeploymentRecord,
+        transaction: Option<TransactionRecord>,
+    ) -> StateStore {
+        let store = StateStore::open(dir).expect("open");
+        let seed = |s: &mut AgentState| {
+            s.next_generation = Some(9);
+            s.active = Some(described("serving", 4, 'a'));
+            s.candidate = Some(candidate);
+            s.in_flight_transaction = transaction;
+            Ok(())
+        };
+        store.update(seed).expect("seed");
+        store
+    }
+
+    #[test]
+    fn the_promotion_moves_the_identity_the_candidate_and_its_deploy_both_name() {
+        let named = described("stt", 5, 'c');
+        let plain = sample_record("stt");
+        let another = deploy_of(&described("tts", 5, 'c'), &named);
+        let rollback = rollback_of(&named, &named);
+        let cases = [
+            (&named, Some(deploy_of(&named, &named))),
+            (&plain, Some(deploy_of(&plain, &plain))),
+            // No deploy of this deployment in flight names an identity.
+            (&plain, None),
+            (&plain, Some(another)),
+            (&plain, Some(rollback)),
+        ];
+        for (candidate, transaction) in cases {
+            let td = TempDir::new().expect("td");
+            let store = before_the_promotion(td.path(), candidate.clone(), transaction);
+
+            store.promote_candidate(300).expect("promoted");
+
+            let s = StateStore::open(td.path()).expect("reopen").snapshot();
+            let s = s.expect("snap");
+            let active = s.active.expect("active");
+            assert_eq!(
+                active.descriptor_identity(),
+                candidate.descriptor_identity()
+            );
+            assert_eq!(active.promoted_monotonic_ns, Some(300));
+            assert_eq!(s.previous_active, Some(described("serving", 4, 'a')));
+            assert_eq!(s.candidate, None);
+        }
+    }
+
+    #[test]
+    fn the_promotion_refuses_a_candidate_that_does_not_name_what_its_deploy_names() {
+        let named = described("stt", 5, 'c');
+        let plain = sample_record("stt");
+        let restamped = DeploymentRecord {
+            descriptor_digest: Some(digest('e')),
+            ..described("stt", 5, 'c')
+        };
+        let elsewhere = deploy_of(&described("tts", 5, 'c'), &named);
+        let cases = [
+            ("no transaction", &named, None),
+            (
+                "a deploy that names none",
+                &named,
+                Some(deploy_of(&named, &plain)),
+            ),
+            ("another deployment's", &named, Some(elsewhere)),
+            (
+                "a rollback",
+                &named,
+                Some(rollback_of(&named, &described("stt", 6, 'c'))),
+            ),
+            (
+                "another generation",
+                &named,
+                Some(deploy_of(&named, &described("stt", 6, 'c'))),
+            ),
+            (
+                "another descriptor",
+                &named,
+                Some(deploy_of(&named, &restamped)),
+            ),
+            (
+                "another configuration",
+                &named,
+                Some(deploy_of(&named, &described("stt", 5, 'f'))),
+            ),
+            (
+                "a record that names none",
+                &plain,
+                Some(deploy_of(&plain, &named)),
+            ),
+        ];
+        for (case, candidate, transaction) in cases {
+            let td = TempDir::new().expect("td");
+            let store = before_the_promotion(td.path(), candidate.clone(), transaction);
+            let before = store.snapshot().expect("snap");
+
+            let err = store.promote_candidate(300).expect_err(case);
+
+            assert!(matches!(err, AgentError::Internal(_)), "{case}: {err:?}");
+            assert_eq!(store.snapshot().expect("snap"), before, "{case}");
+            let read = StateStore::open(td.path()).expect("reopen");
+            assert_eq!(read.snapshot().expect("snap"), before, "{case}");
+        }
+    }
 }

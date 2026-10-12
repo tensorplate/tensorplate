@@ -229,7 +229,9 @@ fn speech_runtime_floor_precedes_staging_and_preserves_active_deployment() {
             config
                 .backend_capabilities
                 .insert("python_pytorch".into(), capability);
-            let coord = Coordinator::new(config.clone(), Arc::clone(&h.store), h.worker.clone());
+            // A deploy of a bundle that names a runner profile needs its probe.
+            let coord = Coordinator::new(config.clone(), Arc::clone(&h.store), h.worker.clone())
+                .with_backend_probes(common::speech_probes());
             let healthy = vision_bundle(h.td.path(), "healthy");
             coord
                 .deploy("healthy", &healthy, Default::default(), None, None)

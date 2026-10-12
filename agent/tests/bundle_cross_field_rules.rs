@@ -17,10 +17,7 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use common::Harness;
-use tensorplate_agent::backend_detection::{
-    BackendProbeReport, BackendProbeState, RunnerProfileProbe,
-};
+use common::{speech_probes, Harness};
 use tensorplate_agent::config::AgentConfig;
 use tensorplate_agent::coordinator::Coordinator;
 use tensorplate_agent::error::AgentError;
@@ -29,7 +26,6 @@ use tensorplate_agent::recovery;
 use tensorplate_platform::{AdmissionPosture, PlatformRegistry, SupportLevel};
 use tensorplate_protocol::agent_control::RecoveryAction;
 use tensorplate_protocol::agent_state::{TransactionKind, TransactionRecord};
-use tensorplate_protocol::backend_descriptor::{ComputeType, RunnerProfile};
 use tensorplate_protocol::bundle::parse_bundle;
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::{ErrorCode, ErrorRecord};
@@ -79,40 +75,6 @@ fn admitted_on(registry: &PlatformRegistry, row_id: &str, validated: bool) -> Pl
     }
 }
 
-fn installed_runner(id: &str, compute_types: &[ComputeType]) -> RunnerProfileProbe {
-    RunnerProfileProbe {
-        profile: RunnerProfile {
-            id: id.into(),
-            interpreter: "/opt/env/bin/python".into(),
-            environment_root: "/opt/env".into(),
-            library_search_paths: Vec::new(),
-            packages: vec!["speech-runtime".into()],
-            compute_types: compute_types.to_vec(),
-        },
-        state: BackendProbeState::Runnable,
-        observed: None,
-    }
-}
-
-fn probes() -> BTreeMap<String, BackendProbeReport> {
-    BTreeMap::from([(
-        "python_pytorch".to_string(),
-        BackendProbeReport {
-            backend_name: "python_pytorch".into(),
-            descriptor_path: PathBuf::from("backend.json"),
-            state: BackendProbeState::Runnable,
-            install_hint: None,
-            runner_profiles: vec![
-                installed_runner(
-                    "faster_whisper",
-                    &[ComputeType::Float16, ComputeType::Float32],
-                ),
-                installed_runner("kokoro", &[ComputeType::Float32]),
-            ],
-        },
-    )])
-}
-
 fn config(h: &Harness) -> AgentConfig {
     let mut config = h.config.clone();
     config.runtime_version = Some("0.3.1".into());
@@ -134,7 +96,7 @@ fn agent(h: &Harness, row: &str, validated: bool) -> Coordinator {
     let registry = registry();
     let admission = admitted_on(&registry, row, validated);
     Coordinator::new(config(h), h.store.clone(), h.worker.clone())
-        .with_backend_probes(probes())
+        .with_backend_probes(speech_probes())
         .with_platform_registry(registry)
         .with_platform_admission(admission)
 }
@@ -346,9 +308,10 @@ fn a_variant_resolves_only_against_a_bundle_deployed_on_a_row_the_machine_holds(
         "{not_deployed}"
     );
 
-    // No platform facts at all.
+    // No platform rows at all.
     let h = Harness::new();
-    let coord = Coordinator::new(config(&h), h.store.clone(), h.worker.clone());
+    let coord = Coordinator::new(config(&h), h.store.clone(), h.worker.clone())
+        .with_backend_probes(speech_probes());
     deploy(&coord, "base", &fixtures().join(BASE)).unwrap();
     assert_eq!(refusal(&coord, variant).message, no_level.message);
 }
@@ -512,7 +475,8 @@ fn format_0_1_bundles_are_not_judged_by_these_rules() {
 #[test]
 fn hardware_rows_are_judged_only_where_a_registry_is_loaded() {
     let h = Harness::new();
-    let coord = Coordinator::new(config(&h), h.store.clone(), h.worker.clone());
+    let coord = Coordinator::new(config(&h), h.store.clone(), h.worker.clone())
+        .with_backend_probes(speech_probes());
     for fixture in ["invalid_r9_unknown_row", "invalid_r9_production_claim"] {
         deploy(&coord, "unjudged", &fixtures().join(fixture)).expect(fixture);
     }

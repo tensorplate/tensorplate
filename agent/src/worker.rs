@@ -150,6 +150,15 @@ pub trait WorkerControl: Send + Sync {
     /// restarted.
     fn abandon(&self, _candidate: &CandidateRef) {}
 
+    /// Start no generation by itself until [`Self::release`], as while
+    /// `prepare` runs. A transaction takes the hold before it takes the
+    /// generation it hands to `prepare`, so that a restart cannot take a
+    /// newer one in between.
+    fn hold(&self) {}
+
+    /// End one [`Self::hold`].
+    fn release(&self) {}
+
     /// Unload `deployment_id` (the previous active) from the worker.
     /// Best-effort: a failure here is logged but never replaces the
     /// current active deployment.
