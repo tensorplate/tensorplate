@@ -45,8 +45,9 @@ Architecture and on-the-wire details live in
 ## Rules
 
 - Deploy and rollback use desired-state reconciliation, not command replay.
-- Persistent state is durable across restarts; transactions resume from the
-  last persisted phase.
+- Persistent state is durable across restarts; a start settles the
+  transaction it finds from the last persisted phase and runs none of it
+  again.
 - The agent never mutates the serving worker's data plane directly; it
   stages a verified bundle and asks the worker to prepare/warm/promote
   through the typed `WorkerControl` trait. `worker.mode=mock` uses the

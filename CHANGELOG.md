@@ -28,7 +28,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   record's) no longer ends the start with exit code 5: the agent comes up
   with the refusal as `last_error` and the deployment not serving. It still
   exits when its own state write fails or the restored worker does not come
-  up. `recovery.action` in status reports `restore_active`,
+  up. When the write that ends a committed transaction fails, the
+  transaction stays in flight at `promoted` and later transactions are
+  refused as busy until the agent is restarted, whose start clears it;
+  before, the next transaction replaced it. A transaction in flight no
+  longer carries a `failure`. `recovery.action` in status reports `restore_active`,
   `quarantine_candidate`, `no_op` or `operator_required`; the `resume_*`
   values and `finalize_promotion` stay in the schema and are never
   reported. (V030-E03-F01-T04)

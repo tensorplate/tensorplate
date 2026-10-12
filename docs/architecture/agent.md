@@ -365,9 +365,21 @@ The old member is still retired before the commit write. When that write
 fails (a full disk), the agent goes on serving the candidate while the
 state names the old record and the transaction stays in flight; later
 transactions are refused as busy, and the next start ends the transaction
-and starts the old record. The same holds for the write that ends a
-committed transaction: until the agent restarts, later transactions are
-refused as busy, and that start clears it.
+and starts the old record.
+
+When the write that ends a committed transaction fails, the deployment is
+committed and serving and the transaction stays in flight at `promoted`.
+The operator sees the `deploy` or `rollback` answered with an `internal`
+error, status showing the new deployment as `active` beside
+`in_flight: phase=promoted`, and every later `deploy` and `rollback`
+refused as busy, naming that transaction. Nothing clears it while the
+agent runs: restart the agent. That start clears the transaction, makes no
+quarantine entry and starts the committed deployment again.
+
+A transaction in flight never carries a `failure`: the write that records
+why a transaction failed is the one that clears it, so this agent never
+sets `in_flight_transaction.failure` in status. The failure is read from
+the quarantine entry or from `last_error`.
 
 A deploy of a format 0.2 bundle derives the bundle's
 [deployment descriptor](#deployment-descriptor-documents) after
@@ -472,8 +484,8 @@ Rollback is a transaction, not a file-pointer swap:
 2. Verify its staged files (`staged_path/` exists and contains
    `manifest.json`).
 3. Walk the same prepare / warm / promote sequence as deploy.
-4. On success, swap active <-> previous_active in durable state and
-   mark the transaction `rolled_back`.
+4. On success, swap active <-> previous_active in durable state, in the
+   write that records `promoted`, then clear the transaction.
 
 A failed rollback preserves the current active deployment — the
 previous-active record is left intact, and the operator can retry.
@@ -571,7 +583,13 @@ agent process started is ended by the packaged service, not by the pass:
 the systemd unit keeps the default control-group kill, and the Homebrew
 launchd job does not set `AbandonProcessGroup`, so no worker outlives the
 agent under either. Where an agent is run by hand and killed, the pass
-does not end a worker it left behind: nothing records one.
+does not end a worker it left behind: nothing records one. That worker
+still listens on its port, and the agent does not check that a port it
+leases is free (see [Ports](#member-registry)): the worker the restore
+starts exits when it cannot bind, and the start ends with exit code `5`.
+The error does not name the port: a worker writes no startup record for a
+listener it could not start, so `last_error` is `load_failed` with the
+worker's exit status and no reason.
 
 ## Versioning policy
 
@@ -659,11 +677,11 @@ before the first document is written.
   segment) is `config_invalid`, naming `staged_path`; a format 0.1 deploy
   is not held to that. A refusal names nothing and takes no generation. A
   kill after the document and before the state write leaves a document no
-  record names: the next start removes it, resumes the deploy and hands
-  out the same generation. A kill after
-  the state write and before `prepared` leaves the generation named on a
-  replayable transaction: the next start resumes the deploy under a new
-  generation, and the start after that removes the first document. A bundle
+  record names and the counter where it stood: the next start removes the
+  document and ends the deploy as failed. A kill after the state write
+  leaves the generation named on the transaction: the next start ends the
+  deploy as failed, the generation is not handed out again, and the start
+  after that removes its document. A bundle
   of another format gets the reference it got before; nothing is read,
   held or written for it.
 - **Read.** By deployment id and the identity a record or candidate
@@ -710,16 +728,16 @@ before the first document is written.
   `active`) and writes the new document. The reference carries that
   identity, so the registry starts the member as that generation. A refusal
   names nothing and spends no generation: the rollback's is a failed
-  rollback that leaves the previous record as it was, and the restore's a
-  failed start, except for a staged bundle that is not the record's, which
-  leaves the agent up and the deployment not serving (see the
-  [staged bundle check](#member-registry)). A kill after the document and
+  rollback that leaves the previous record as it was, and the restore's
+  leaves the agent up and the deployment not serving (see
+  [Restart recovery](#restart-recovery-v01-e08-f07)). A kill after the document and
   before the state write leaves a document no record names; the next start
   removes it and hands out the same generation again. A kill after the
   state write leaves the generation named: the next start restores `active`
-  from it, or decides the rollback as it decides any in-flight transaction,
-  the previous record still naming its own document (resumed, the rollback
-  takes another generation). The descriptor is re-stamped as recorded, as by
+  from it, or ends the rollback as it ends any transaction interrupted
+  before its commit, the previous record still naming its own document
+  (the generation the rollback named is not handed out again, and its
+  document goes at the start after). The descriptor is re-stamped as recorded, as by
   the restart stamp. The update runs under a hold on the worker control,
   which `prepare` ends, so no restart of the serving member takes a newer
   generation in between (see [the member registry](#member-registry)). A
@@ -848,9 +866,8 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   and no later start of the agent restores it until the id is deployed
   again. A deploy refused or failed after staging leaves that, and no
   failed deploy is needed: one that a kill or a stop of the agent ended
-  after `prepared` leaves it too, its candidate quarantined by the next
-  start, and so does one that a start resumed and then refused, which fails
-  that start as a resumed transaction that fails always has.
+  after its bundle was staged leaves it too. The next start ends it with a
+  quarantine entry and comes up with the deployment not serving.
 - **Failure.** A member that stops with three restarts inside the last five
   minutes is failed: nothing is started for it until a deployment is
   promoted, by a deploy or a rollback. Status then reports
