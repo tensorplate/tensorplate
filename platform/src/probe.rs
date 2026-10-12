@@ -2488,6 +2488,39 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_that_comes_after_the_budget_is_not_waited_for() {
+        // The peer answers a second after the request, so the budget alone
+        // decides between its answer and the unreachable case.
+        let late_peer = || {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let addr = listener.local_addr().expect("addr").to_string();
+            std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().expect("accept");
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 256];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    match socket.read(&mut chunk) {
+                        Ok(n) if n > 0 => request.extend_from_slice(&chunk[..n]),
+                        _ => break,
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(1));
+                let _ = socket.write_all(MACHINE_TYPE_200.as_bytes());
+            });
+            addr
+        };
+        assert_eq!(
+            query_metadata(&late_peer(), METADATA_PATH, ANSWERED).expect("waited for"),
+            "projects/REDACTED/machineTypes/g2-standard-8"
+        );
+        let result = query_metadata(&late_peer(), METADATA_PATH, Duration::from_millis(200));
+        assert!(
+            matches!(result, Err(MetadataFailure::Timeout)),
+            "the answer came after the budget: {result:?}"
+        );
+    }
+
+    #[test]
     fn a_peer_that_sent_anything_but_a_complete_answer_answered() {
         // Each of these is a service that was reached. None of them may be
         // mistaken for an unreachable one, because only that lets the record
@@ -2741,11 +2774,11 @@ mod tests {
         // hold a service start open indefinitely.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
-        // The peer trickles for 80 s and says whether the query closed on
-        // it before it had sent everything.
-        let cut_off = std::thread::spawn(move || {
+        // The peer trickles a byte every 20 ms for 80 s and says how many
+        // it had sent when the query closed on it: 50 take a second.
+        let sent_before_the_close = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().expect("accept");
-            (0..4096).any(|_| {
+            (0..4096).position(|_| {
                 let closed = socket.write_all(b"x").is_err();
                 std::thread::sleep(Duration::from_millis(20));
                 closed
@@ -2756,9 +2789,10 @@ mod tests {
             matches!(result, Err(MetadataFailure::Answered(_))),
             "a peer that sent bytes was reached, however slowly: {result:?}"
         );
+        let sent = sent_before_the_close.join().expect("peer");
         assert!(
-            cut_off.join().expect("peer"),
-            "the budget is an overall deadline: the peer trickled to its end"
+            sent.is_some_and(|bytes| bytes < 50),
+            "the budget is an overall deadline: the peer sent {sent:?} bytes before the close"
         );
     }
 
