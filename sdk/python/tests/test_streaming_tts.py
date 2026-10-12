@@ -675,7 +675,10 @@ def test_the_stall_timer_for_audio_lasts_what_ready_gives_and_restarts_with_a_ch
         await turns()
         assert session._events.audio_used == HELD - 800
         with stopped_clock() as advance:
-            # The take restarts the timer, here on the stopped clock.
+            # A second passes before the take, which restarts the timer: one deadline kept
+            # from the first wait would end the session 7.0 s after the take, not 8.0 s.
+            await advance(1.0)
+            assert not session._ended
             short = await anext(session)
             assert isinstance(short, speech.AudioChunk)
             assert len(short.data) == 80
