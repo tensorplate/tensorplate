@@ -525,13 +525,29 @@ TEST_F(JobBridgeTest, WhatTheSessionEndsOnceItsBridgeIsDestroyedReachesNoSink) {
 
 // The callback of job 1's `accepted` is parked. The destructor is seen
 // waiting before the callback is let go, and reads on its return whether the
-// callback had returned.
+// callback had returned. Let go, the callback finds the job side closed: the
+// detach has begun, though the channel holds the sink until its wait ends.
 TEST_F(JobBridgeTest, ADestructorCalledWhileACallbackRunsReturnsOnlyOnceItHasReturned) {
   ParkedCallback parked;
   std::atomic<bool> callback_returned{false};
+  // The callback's way to the bridge: the destroying thread resets the harness's.
+  BoundedJobBridge& bridge = *h.bridge;
+  const JobRequest second = h.stt(2, 1);
+  bool waited_for = false;
+  Result<void> submitted = unexpected(Error::Code::Internal, "not run");
+  Result<void> released = unexpected(Error::Code::Internal, "not run");
+  Result<void> cancelled = unexpected(Error::Code::Internal, "not run");
+  JobChannelBacklog table;
+  std::size_t queued = 1;
   h.on_event = [&](const JobEvent& event) {
     if (event.kind() == Accepted) {
       parked.park();
+      waited_for = h.channel->detach_waiters() == 1;
+      submitted = bridge.submit(second);
+      released = bridge.release_session(1, 1);
+      cancelled = bridge.cancel(1);
+      table = h.channel->backlog();
+      queued = h.channel->queued_frames();
       callback_returned = true;
     }
   };
@@ -554,6 +570,19 @@ TEST_F(JobBridgeTest, ADestructorCalledWhileACallbackRunsReturnsOnlyOnceItHasRet
   EXPECT_TRUE(waiting);
   EXPECT_TRUE(returned_after_the_callback);
   EXPECT_EQ(h.sink.use_count(), 1) << "the bridge kept the sink";
+
+  EXPECT_TRUE(waited_for) << "the destructor had returned when the callback called";
+  expect_refused(submitted, Error::Code::NotReady, "event_sink_missing");
+  expect_refused(released, Error::Code::NotReady, "event_sink_missing");
+  expect_refused(cancelled, Error::Code::NotReady, "unknown_job");
+  // Job 1 and the callback that was running, as before the three calls.
+  EXPECT_EQ(table, (JobChannelBacklog{1, 0, 1}));
+  EXPECT_EQ(queued, 0U);
+  // Answered behind whatever the calls had queued.
+  ASSERT_TRUE(h.unary("health_check").has_value());
+  EXPECT_EQ(peer.sent("job_submit", 1).size(), 1U);
+  EXPECT_TRUE(peer.sent("job_cancel", 0).empty());
+  EXPECT_TRUE(peer.sent("session_release", 0).empty());
 }
 
 // Everything the statement needs is built inside it: the process that runs it

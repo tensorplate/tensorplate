@@ -340,7 +340,8 @@ std::size_t JobChannel::detach_waiters() const {
 Result<void> JobChannel::submit(const JobRequest& request) {
   const JobIdentity& identity = request.identity();
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!sink_) {
+  // From the moment the detach begins, though the sink is held until its wait ends.
+  if (!sink_ || sink_detached_) {
     return refuse(Error::Code::NotReady, "event_sink_missing");
   }
   if (auto refused = not_running_locked(); refused.has_value()) {
@@ -409,7 +410,8 @@ Result<void> JobChannel::cancel(std::uint64_t job_id) {
 
 Result<void> JobChannel::release_session(std::uint64_t session_key, std::uint64_t generation) {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (!sink_) {
+  // From the moment the detach begins, though the sink is held until its wait ends.
+  if (!sink_ || sink_detached_) {
     return refuse(Error::Code::NotReady, "event_sink_missing");
   }
   if (retired_) {

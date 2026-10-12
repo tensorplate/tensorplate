@@ -276,9 +276,10 @@ class JobChannel {
   /// The channel still takes every frame as before: the job table, the
   /// releases, the send queue and the record of released sessions change as
   /// they did. Only the sink calls are dropped, and a result chunk published
-  /// for an event that is dropped is released. From here on submit() and
-  /// release_session() answer "event_sink_missing", cancel() "unknown_job",
-  /// and none of them queues a frame.
+  /// for an event that is dropped is released. From the moment it is called,
+  /// so also for a callback it waits for, submit() and release_session()
+  /// answer "event_sink_missing", cancel() "unknown_job", and none of them
+  /// queues a frame.
   void detach_event_sink();
 
   /// True on a thread that is inside a sink callback of this channel: the
@@ -489,6 +490,7 @@ class JobChannel {
   std::vector<JobClass> job_classes_;
   /// Null before set_event_sink() and once detach_event_sink() has returned.
   std::shared_ptr<JobEventSink> sink_;
+  /// Set when detach_event_sink() begins: the job side is closed from then on.
   bool sink_detached_ = false;
   /// The thread whose batch of sink calls has not returned; no thread when
   /// none is in flight.

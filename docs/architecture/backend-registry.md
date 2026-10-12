@@ -812,7 +812,10 @@ rely on beyond the public header, and what it must not assume:
   receives. Nothing can call `submit`, `cancel` or `release_session` any more:
   they are the bridge's methods, and the bridge is the only caller of the
   channel's job side, which from the detach on refuses a call and queues
-  nothing; the session calls the channel's lifecycle side only.
+  nothing; the session calls the channel's lifecycle side only. The job side
+  closes when the detach begins, not when its wait ends: a callback the
+  destructor waits for is refused as well (`event_sink_missing` from `submit`
+  and `release_session`, `unknown_job` from `cancel`).
 - **How the detach waits.** Sink calls are serialized by which thread makes
   them (the channel's reader, or the caller of a stop once it has joined the
   reader), not by a lock. A batch of calls is decided under the channel's one
@@ -887,12 +890,13 @@ not take, the factory enabling jobs, and the registered entry with and without
 a buffer manager. For the destructor: a result held while the bridge is
 destroyed reaches no sink and its chunk is released; what the session's
 destructor ends afterwards reaches no sink; a destructor called while a
-callback is parked is seen waiting and returns only once the callback has; and
-a bridge destroyed inside a callback ends the process with its message (a
-death test). For lifecycle calls from a callback: an `unload` and a `prime`
-made on the channel's reader are refused, nothing is sent, and the sidecar and
-the jobs live on; and an `unload` made from a callback that another unload's
-stop is delivering is refused on that thread.
+callback is parked is seen waiting and returns only once the callback has,
+and what that callback submits, releases and cancels meanwhile is refused and
+queues nothing; and a bridge destroyed inside a callback ends the process with
+its message (a death test). For lifecycle calls from a callback: an `unload`
+and a `prime` made on the channel's reader are refused, nothing is sent, and
+the sidecar and the jobs live on; and an `unload` made from a callback that
+another unload's stop is delivering is refused on that thread.
 `test/unit/job_channel_test.cpp` holds the detached channel's job side.
 
 `test/integration/python_pytorch_job_bridge_runner_test.cpp` runs the same
