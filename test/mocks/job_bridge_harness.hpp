@@ -62,39 +62,32 @@ class ScriptedBackend {
   ScriptedBackend(ScriptedBackend&&) = delete;
   ScriptedBackend& operator=(ScriptedBackend&&) = delete;
 
-  /// From now on a job it has taken is not ended.
-  void hold() { set(holding_, true); }
+  /// From now on a job it has taken is ended only once an `unload` waits
+  /// behind it in the sidecar's FIFO: by then the sidecar has failed the jobs
+  /// that waited, so none of them starts when this one ends.
+  void hold() { set_holding(true); }
 
   /// Ends the job it holds, and holds none after it.
-  void release() { set(holding_, false); }
+  void release() { set_holding(false); }
 
-  /// The session is about to unload. A held job ends once the sidecar has
-  /// acted on the `unload` and not before: ended earlier, the jobs behind it
-  /// could start, and the unload would find none waiting.
-  void end_a_held_job_at_the_unload() { set(unloading_, true); }
-
-  /// The sidecar is gone: nothing is ended from here on.
-  void lose() { set(lost_, true); }
-
-  /// True when it has nothing to do: it holds the job the sidecar runs, no
-  /// job is due, or the sidecar is gone.
+  /// True when it has nothing to do, for a hold set before the job's submit
+  /// and while no lifecycle call of the session runs. That a job it runs
+  /// unheld keeps it busy has no test: no gate stops the thread mid-job.
   [[nodiscard]] bool idle() {
     const ScriptedSidecar::Lane lane = sidecar_.lane();
     const std::lock_guard<std::mutex> lock(mutex_);
-    if (lost_) {
-      return true;
-    }
-    return lane.running == 0 ? !lane.job_due : parked_ && holding_ && !unloading_;
+    return lane.running == 0 ? !lane.job_due : holding_;
   }
 
  private:
-  // How often the thread looks up from a sidecar that admits no job.
+  // How often the thread looks at the sidecar: for a job to take, and for an
+  // unload behind the one it holds.
   static constexpr std::chrono::milliseconds kStep{20};
 
-  void set(bool& flag, bool value) {
+  void set_holding(bool holding) {
     {
       const std::lock_guard<std::mutex> lock(mutex_);
-      flag = value;
+      holding_ = holding;
     }
     changed_.notify_all();
   }
@@ -103,27 +96,16 @@ class ScriptedBackend {
     for (;;) {
       const ScriptedSidecar::TakenJob job = sidecar_.take(kStep);
       std::unique_lock<std::mutex> lock(mutex_);
+      while (job.job_id != 0 && holding_ && !stopping_ && !sidecar_.lane().unload_waits) {
+        changed_.wait_for(lock, kStep);
+      }
       if (stopping_) {
         return;
       }
-      if (job.job_id == 0) {
-        continue;
-      }
-      parked_ = true;
-      changed_.wait(lock, [this] { return !holding_ || unloading_ || lost_ || stopping_; });
-      parked_ = false;
-      if (stopping_) {
-        return;
-      }
-      if (lost_) {
-        continue;
-      }
-      const bool at_the_unload = holding_ && unloading_;
       lock.unlock();
-      if (at_the_unload) {
-        (void)sidecar_.sent("unload", 1);
+      if (job.job_id != 0) {
+        end(job);
       }
-      end(job);
     }
   }
 
@@ -156,11 +138,7 @@ class ScriptedBackend {
   std::mutex mutex_;
   std::condition_variable changed_;
   bool holding_ = false;
-  bool unloading_ = false;
-  bool lost_ = false;
   bool stopping_ = false;
-  /// The thread has a job in hand and waits to end it.
-  bool parked_ = false;
   std::thread thread_;
 };
 
@@ -194,28 +172,31 @@ using SettleClock = std::chrono::steady_clock;
   return Result<void>{};
 }
 
-/// What is left to wait for when a round trip failed: nothing after a
-/// timeout; else the connection is gone or was never there, and the last
-/// batch its end or its stop decided has to return.
+/// What is left to wait for when a round trip failed: nothing that can be told
+/// after a timeout or while another exchange has the slot (`Internal`); else
+/// the connection is gone or was never there, and the last batch its end or
+/// its stop decided has to return.
 [[nodiscard]] inline bool settled_without_a_connection(
     const adapters::python_pytorch::JobChannel& channel, const Error& failure,
     SettleClock::time_point deadline) {
-  return failure.code != Error::Code::Timeout &&
-         wait_until(deadline, [&] { return channel.backlog().owed_callbacks == 0; });
+  if (failure.code == Error::Code::Timeout || failure.code == Error::Code::Internal) {
+    return false;
+  }
+  return wait_until(deadline, [&] { return channel.backlog().owed_callbacks == 0; });
 }
 
 /// True once nothing is on its way between `channel`, a scripted sidecar and
 /// its backend, as far as held jobs allow: two round trips in a row, each
-/// begun with the backend idle, found that the sidecar wrote nothing but
+/// begun once `idle` answered true, found that the sidecar wrote nothing but
 /// their answers. One is not enough: a callback that was running when the
 /// first was queued may have queued a frame behind it.
 [[nodiscard]] inline bool settled_over(adapters::python_pytorch::JobChannel& channel,
-                                       ScriptedSidecar& sidecar, ScriptedBackend& backend,
+                                       ScriptedSidecar& sidecar, const std::function<bool()>& idle,
                                        std::chrono::milliseconds patience) {
   const auto deadline = SettleClock::now() + patience;
   std::size_t written = sidecar.written_count();
   for (int quiet = 0; quiet < 2;) {
-    if (!wait_until(deadline, [&] { return backend.idle(); })) {
+    if (!wait_until(deadline, idle)) {
       return false;
     }
     const auto answered = round_trip(channel, deadline);

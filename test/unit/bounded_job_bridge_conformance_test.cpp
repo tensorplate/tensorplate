@@ -152,22 +152,14 @@ class ScriptedSidecarBridgeUnderTest final : public BridgeUnderTest {
     const auto primed = built_.session->prime();
     EXPECT_TRUE(primed.has_value()) << primed.error().message;
   }
-  // The session's unload waits behind the job the sidecar runs: a held one is
-  // let go only once the sidecar has the unload, so the jobs behind it are
-  // still waiting when it arrives. After a lost backend the unload fails, and
-  // releases all the same.
-  void unload() override {
-    backend_.end_a_held_job_at_the_unload();
-    (void)built_.session->unload();
-  }
-  void lose_backend() override {
-    backend_.lose();
-    sidecar_.die();
-  }
+  // After a lost backend the unload fails, and releases all the same.
+  void unload() override { (void)built_.session->unload(); }
+  void lose_backend() override { sidecar_.die(); }
   void hold_jobs() override { backend_.hold(); }
   void release_jobs() override { backend_.release(); }
   bool settled(std::chrono::milliseconds patience) override {
-    return settled_over(*built_.channel, sidecar_, backend_, patience);
+    return settled_over(
+        *built_.channel, sidecar_, [this] { return backend_.idle(); }, patience);
   }
   TranscriptResult transcript(const JobRequest& request) const override {
     return fixture_transcript(std::get<AudioFrames>(request.payload()));

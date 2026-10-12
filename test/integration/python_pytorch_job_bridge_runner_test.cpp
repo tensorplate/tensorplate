@@ -102,11 +102,15 @@ class RunnerBridgeUnderTest final : public BridgeUnderTest {
     const auto primed = built_.session->prime();
     EXPECT_TRUE(primed.has_value()) << primed.error().message;
   }
-  void unload() override { (void)built_.session->unload(); }
+  // The process is reaped when it returns: its pid is the runner's no more.
+  void unload() override {
+    (void)built_.session->unload();
+    runner_ = 0;
+  }
   // The process is killed and its session is not told.
   void lose_backend() override {
-    if (runner_ > 0) {
-      (void)::kill(runner_, SIGKILL);
+    if (const int runner = runner_.exchange(0); runner > 0) {
+      (void)::kill(runner, SIGKILL);
     }
   }
   void hold_jobs() override {}

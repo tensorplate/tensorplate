@@ -36,6 +36,7 @@ add_executable(tp_test_unit
   job_channel_test.cpp
   python_pytorch_job_session_test.cpp
   python_pytorch_job_bridge_test.cpp
+  job_bridge_harness_test.cpp
   scheduler_interface_test.cpp
   scheduler_fifo_test.cpp
   scheduler_deadline_test.cpp

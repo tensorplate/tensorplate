@@ -200,15 +200,21 @@ class ScriptedSidecar {
   /// @return the job's id; zero when none came.
   [[nodiscard]] std::uint64_t take_job() { return take(kPatience).job_id; }
 
-  /// What the backend sees of the FIFO: the job it runs, zero for none, and
-  /// whether take() would return one now.
+  /// What the backend sees of the FIFO: the job it runs, zero for none,
+  /// whether take() would return one now, and whether an `unload` waits in
+  /// it, which it does only behind the running job.
   struct Lane {
     std::uint64_t running = 0;
     bool job_due = false;
+    bool unload_waits = false;
   };
   [[nodiscard]] Lane lane() {
     std::lock_guard<std::mutex> lock(table_mutex_);
-    return Lane{running_, job_due_locked()};
+    const bool unload_waits = std::any_of(lane_.begin(), lane_.end(), [](const Work& work) {
+      const Json* request = std::get_if<Json>(&work);
+      return request != nullptr && text_of(*request, "kind") == "unload";
+    });
+    return Lane{running_, job_due_locked(), unload_waits};
   }
 
   /// Ends the running job as the runner does when its backend call returns:
@@ -726,13 +732,18 @@ class ScriptedSidecar {
     return response;
   }
 
-  // The classes a load with jobs declares.
+  // The classes a load with jobs declares: as the runner does, those of its
+  // classes that have a lane, in lane order and once each.
   std::vector<std::string> declared_classes() const {
-    std::vector<std::string> declared = options_.job_classes;
-    if (!options_.declares_any_job_class) {
-      std::erase_if(declared, [](const std::string& job_class) {
-        return job_class != "stt_decode" && job_class != "tts_synthesis";
-      });
+    if (options_.declares_any_job_class) {
+      return options_.job_classes;
+    }
+    std::vector<std::string> declared;
+    for (const char* with_a_lane : {"stt_decode", "tts_synthesis"}) {
+      if (std::find(options_.job_classes.begin(), options_.job_classes.end(), with_a_lane) !=
+          options_.job_classes.end()) {
+        declared.emplace_back(with_a_lane);
+      }
     }
     return declared;
   }

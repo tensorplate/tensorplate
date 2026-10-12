@@ -19,6 +19,7 @@ TEST(JobBridge, FeatureFlagDisabled) {
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <latch>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -241,9 +242,12 @@ TEST_F(JobBridgeTest, CallsFromSeveralThreadsAtOnceLeaveEveryJobEndedOnceAndRele
   ASSERT_NO_FATAL_FAILURE(up());
   ScriptedBackend backend(peer);
   std::atomic<int> refused{0};
+  // No caller makes its first call before every caller is running.
+  std::latch all_running{kCallers};
   std::vector<std::thread> callers;
   for (std::uint64_t caller = 0; caller < kCallers; ++caller) {
     callers.emplace_back([&, caller] {
+      all_running.arrive_and_wait();
       const std::uint64_t session_key = 10 + caller;
       for (std::uint64_t nth = 0; nth < kJobsEach; ++nth) {
         const std::uint64_t job_id = 1 + caller * kJobsEach + nth;
