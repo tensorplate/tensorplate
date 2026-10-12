@@ -237,7 +237,7 @@ impl Agent {
     }
     /// The state writes of a rollback to the previous record, `stt`, up to
     /// the one that records `phase`, and none after.
-    fn rollback_up_to(&self, phase: DeployState) {
+    pub(super) fn rollback_up_to(&self, phase: DeployState) {
         let [_, previous] = self.records();
         self.in_flight(TransactionKind::Rollback, "tx", "stt");
         self.again(&previous, Start::Rollback("tx")).unwrap();
@@ -312,7 +312,7 @@ impl Host {
         (agent, pruned)
     }
     /// A started agent whose `active` is `stt` at generation 1, described.
-    fn restoring(&self, worker: Worker) -> (Agent, DeploymentDescriptor) {
+    pub(super) fn restoring(&self, worker: Worker) -> (Agent, DeploymentDescriptor) {
         let (agent, _) = self.start(worker);
         let staged = self.staged("stt").display().to_string();
         let first = deploy(&agent.store, &self.descriptors, "stt", &staged).unwrap();
@@ -320,7 +320,7 @@ impl Host {
     }
     /// A started agent whose `previous_active` is `stt` at generation 1 and
     /// whose `active` is `tts` at generation 2, both described.
-    fn rolling_back(&self, worker: Worker) -> (Agent, DeploymentDescriptor) {
+    pub(super) fn rolling_back(&self, worker: Worker) -> (Agent, DeploymentDescriptor) {
         let (agent, first) = self.restoring(worker);
         let retire = |state: &mut AgentState| {
             state.previous_active = state.active.take();

@@ -423,7 +423,7 @@ fn about_to_prepare(host: &Host) -> (Agent, Handed) {
 }
 
 /// The state of a deploy of `stt` killed after it recorded `phase`.
-fn killed_after(host: &Host, phase: DeployState) {
+pub(super) fn killed_after(host: &Host, phase: DeployState) {
     let (agent, handed) = about_to_prepare(host);
     drop(handed.start(&agent).unwrap());
     agent.store.record_phase("tx", phase, 1).unwrap();
