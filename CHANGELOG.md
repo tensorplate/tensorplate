@@ -133,8 +133,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   as before, and a client built before them passes over them. No
   production path writes a resident set yet, so the member fields appear
   only on a state that already holds one. A generation handed to the
-  member registry with a descriptor is now also refused, `load_failed`,
-  while a worker that carries it is still draining. (V030-E03-F01-T03)
+  member registry with a descriptor is now also refused while a worker
+  that carries it is still draining. (V030-E03-F01-T03)
 
 - The serving worker's stream listener serves the remaining client events of
   the draft stream envelope, still behind a dispatch the worker does not

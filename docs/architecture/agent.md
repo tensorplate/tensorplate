@@ -739,26 +739,26 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   launched counts as one. From the stop until the new generation is ready,
   by the candidate's rule, status carries no `active.serving_url`.
 - **Staged bundle check.** The staged root is `staging_dir/<deployment_id>`,
-  and a deploy of the same id that fails after staging leaves its own
-  bundle there. Before a restart the registry therefore reads the staged
-  manifest and compares its digest with the bundle digest the member was
-  started under. When they differ, nothing is started and the member is
-  failed at once, without using a restart, with a `load_failed` error that
-  names both digests. A staged manifest that cannot be read counts as a
-  restart that could not be launched. The manifest's digest covers each
-  artifact's digest; artifact bytes are not hashed again. Startup recovery
-  and a rollback start a record that names no descriptor from the same
-  root without this check, whatever is staged there. For a record that
-  names a [descriptor](#deployment-descriptor-documents), which is every
-  format 0.2 deployment, they compare the two digests as well: the
+  and a deploy of the same id that fails after staging leaves its own bundle
+  there. Before a restart the registry therefore reads the staged manifest
+  and compares its digest with the bundle digest the member was started
+  under. When they differ, nothing is started and the member is failed at
+  once, without using a restart, with a `load_failed` error that names both
+  digests. A staged manifest that cannot be read counts as a restart that
+  could not be launched. The manifest's digest covers each artifact's digest;
+  artifact bytes are not hashed again. Startup recovery and a rollback start
+  a record that names no descriptor from the same root without this check,
+  whatever is staged there. For a record that names a
+  [descriptor](#deployment-descriptor-documents), which is every format 0.2
+  deployment this agent deploys, they compare the two digests as well: the
   rollback is refused, and the restore is refused and with it the agent's
   start, both with `load_failed`. Staging is not yet kept apart for each
-  generation, so for a format 0.2 deployment a deploy of another bundle
-  under its id has two consequences. After one that succeeded, a rollback
-  to the earlier record is refused. After one that failed past staging,
-  the serving deployment is neither restarted nor, at the next start of
-  the agent, restored, and that start fails; deploying the id again while
-  the agent is still up gives the start a record it can restore.
+  generation, so for a format 0.2 deployment a deploy of another bundle under
+  its id has two consequences. After one that succeeded, a rollback to the
+  earlier record is refused. After one that failed past staging, the serving
+  deployment is neither restarted nor, at the next start of the agent,
+  restored, and that start fails; deploying the id again while the agent is
+  still up gives the start a record it can restore.
 - **Failure.** A member that stops with three restarts inside the last five
   minutes is failed: nothing is started for it until a deployment is
   promoted, by a deploy or a rollback. Status then reports
