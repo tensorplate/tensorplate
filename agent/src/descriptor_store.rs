@@ -529,8 +529,6 @@ pub(crate) struct Deploy<'a> {
     pub(crate) artifact_relative_path: Option<String>,
     /// The verified manifest's; only a format 0.2 bundle gets a descriptor.
     pub(crate) format_version: &'a str,
-    /// The version the bundle's runtime range was judged against.
-    pub(crate) runtime_version: &'a str,
     pub(crate) probes: &'a BTreeMap<String, BackendProbeReport>,
 }
 
@@ -542,6 +540,8 @@ pub(crate) struct Deploy<'a> {
 /// bundle of another format is referenced as it was before descriptors.
 ///
 /// The quota is the default: none is assigned yet, and it is not a limit.
+/// The runtime version is the one this agent runs, whatever its
+/// configuration gives the compatibility check to judge against.
 ///
 /// # Errors
 ///
@@ -595,7 +595,7 @@ pub(crate) fn start_deploy<'w>(
             admission_mode: AdmissionMode::Production,
             staged_path,
             quota: MemberQuota::default(),
-            runtime_version: deploy.runtime_version,
+            runtime_version: tensorplate_protocol::version(),
             runner_profiles: &installed,
             acceptance_profile_digest: None,
         };

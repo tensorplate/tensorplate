@@ -452,6 +452,9 @@ Rollback is a transaction, not a file-pointer swap:
 
 A failed rollback preserves the current active deployment — the
 previous-active record is left intact, and the operator can retry.
+A rollback to a format 0.2 deployment whose staged bundle a later deploy
+under the same id replaced is refused (see the
+[staged bundle check](#member-registry)).
 
 A previous record that names a
 [deployment descriptor](#deployment-descriptor-documents) is started at a
@@ -562,8 +565,10 @@ before the first document is written.
   record and the deploy's transaction to stand as the deploy wrote them,
   takes the next generation, derives the descriptor from the staged copy,
   names it on both and writes its document. The descriptor states the
-  runtime version the bundle's `runtime_compatibility` was judged against,
-  the runner profile as the backend's probe report found it installed,
+  runtime version the agent runs (its build's; the configuration's
+  `runtime_version`, an override the compatibility check reads, is not
+  stated), the runner profile as the backend's probe report found it
+  installed,
   admission mode `production` and the default quota: no quota is assigned
   to a member yet, the value is not a limit, and every configuration digest
   changes when one is first assigned. A descriptor that cannot be derived
@@ -574,13 +579,11 @@ before the first document is written.
   backend that has a descriptor has a probe report; a coordinator built
   without a report for the bundle's backend refuses a named runner profile
   here. A `staging_dir` that is absolute and not normalized (a `.` or `..`
-  segment) is `config_invalid`, naming `staged_path`, and so is a
-  configured `runtime_version` the descriptor cannot state (it takes 1 to
-  64 ASCII letters, digits and `.+~-`, starting with a letter or digit),
-  naming `configuration.runtime_version`; a format 0.1 deploy is held to
-  neither. A refusal names nothing and takes no generation. A kill after the document and before
-  the state write leaves a document no record names: the next start removes
-  it, resumes the deploy and hands out the same generation. A kill after
+  segment) is `config_invalid`, naming `staged_path`; a format 0.1 deploy
+  is not held to that. A refusal names nothing and takes no generation. A
+  kill after the document and before the state write leaves a document no
+  record names: the next start removes it, resumes the deploy and hands
+  out the same generation. A kill after
   the state write and before `prepared` leaves the generation named on a
   replayable transaction: the next start resumes the deploy under a new
   generation, and the start after that removes the first document. A bundle
@@ -614,9 +617,10 @@ before the first document is written.
   nothing names is never read and a later write of its generation replaces
   it. Between starts these stay: the document a re-stamp replaced, the
   finished document of an update whose state write then failed, the
-  document of a candidate whose deploy failed, and the document of a
-  record a later promotion or swap pushed out of `previous_active`. That
-  is at most one for each generation started.
+  document of a candidate whose deploy failed, that of a rollback whose
+  worker did not come up, and the document of a record a later promotion
+  pushed out of `previous_active`. That is at most one for each generation
+  started.
 - **Rollback and restore.** `start_again` builds the candidate reference a
   rollback, or recovery's restore, hands the worker control from a
   deployment record. For a record that names a descriptor it compares the
@@ -744,14 +748,17 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   restart that could not be launched. The manifest's digest covers each
   artifact's digest; artifact bytes are not hashed again. Startup recovery
   and a rollback start a record that names no descriptor from the same
-  root without this check. For a record that names a
-  [descriptor](#deployment-descriptor-documents) they compare the two
-  digests as well: the rollback is refused, and the restore is refused and
-  with it the agent's start, both with `load_failed`. So once a deploy
-  under the id of a serving format 0.2 deployment has failed after staging,
-  that deployment is neither restarted nor restored at the next start of
-  the agent, which fails, until the id has been deployed again while the
-  agent is still up. Staging is not yet kept apart for each generation.
+  root without this check, whatever is staged there. For a record that
+  names a [descriptor](#deployment-descriptor-documents), which is every
+  format 0.2 deployment, they compare the two digests as well: the
+  rollback is refused, and the restore is refused and with it the agent's
+  start, both with `load_failed`. Staging is not yet kept apart for each
+  generation, so for a format 0.2 deployment a deploy of another bundle
+  under its id has two consequences. After one that succeeded, a rollback
+  to the earlier record is refused. After one that failed past staging,
+  the serving deployment is neither restarted nor, at the next start of
+  the agent, restored, and that start fails; deploying the id again while
+  the agent is still up gives the start a record it can restore.
 - **Failure.** A member that stops with three restarts inside the last five
   minutes is failed: nothing is started for it until a deployment is
   promoted, by a deploy or a rollback. Status then reports

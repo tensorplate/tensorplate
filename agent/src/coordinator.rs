@@ -334,7 +334,6 @@ impl Coordinator {
             record: &candidate_record,
             artifact_relative_path: verified.manifest.model_artifact().map(|a| a.path.clone()),
             format_version: &verified.manifest.format_version,
-            runtime_version: self.config.runtime_version.as_deref().unwrap_or_default(),
             probes: &self.backend_probes,
         };
         let worker = self.worker.as_ref();

@@ -67,7 +67,8 @@ fn a_deploy_a_start_of_the_agent_and_a_rollback_each_start_from_one_descriptor_o
     assert_eq!(asked.held_since, Some(unnamed));
     assert_eq!(asked.view, ["-", "-", "stt@1", "2"]);
     assert_eq!(asked.candidate, "stt@1");
-    assert_ne!(RUNTIME, tensorplate_protocol::version());
+    // The agent is configured with another runtime version than it runs.
+    assert_ne!(CONFIGURED_RUNTIME, configuration.runtime_version);
     assert_eq!(asked.reference, reference(&first));
     assert_eq!(asked.resolved.as_ref(), Some(&first));
     assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
@@ -198,11 +199,29 @@ fn a_deploy_under_a_serving_id_that_fails_after_staging_leaves_its_record_unrest
     assert!(next.never_asked() && host.last_error() == Some(error));
 }
 
+#[test]
+fn a_rollback_after_a_deploy_of_another_bundle_under_the_same_id_is_refused() {
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    agent.deploy("stt", STT).unwrap();
+    drop(agent.asked());
+    agent.deploy("stt", TTS).unwrap();
+    assert_eq!(agent.asked().view, ["stt@1", "-", "stt@2", "3"]);
+
+    // The earlier record's bundle is no longer staged under the id.
+    let error = agent.coordinator.rollback(None).unwrap_err().to_record();
+
+    let load_failed = error.code == ErrorCode::LoadFailed && !error.recoverable;
+    let says = "`stt` is not started again: the bundle staged at";
+    assert!(load_failed && error.message.contains(says), "{error:?}");
+    assert_eq!(host.view(), ["stt@2", "stt@1", "-", "3"]);
+    assert!(agent.never_asked() && host.last_error() == Some(error));
+}
+
 /// What a deploy of `stt` hands [`start_deploy`].
 struct Handed {
     record: DeploymentRecord,
     transaction_id: &'static str,
-    runtime_version: &'static str,
     probes: BTreeMap<String, BackendProbeReport>,
 }
 
@@ -213,7 +232,6 @@ impl Handed {
             record: &self.record,
             artifact_relative_path: Some("entry.json".into()),
             format_version: "0.2",
-            runtime_version: self.runtime_version,
             probes: &self.probes,
         };
         start_deploy(&agent.store, agent.worker.as_ref(), &deploy)
@@ -230,7 +248,6 @@ fn a_bundle_of_another_format_is_referenced_without_its_staged_copy_being_read()
         record: &handed.record,
         artifact_relative_path: None,
         format_version: "0.1",
-        runtime_version: RUNTIME,
         probes: &handed.probes,
     };
     let before = (host.view(), host.candidate());
@@ -269,7 +286,6 @@ fn about_to_prepare(host: &Host) -> (Agent, Handed) {
     let handed = Handed {
         record: candidate,
         transaction_id: "tx",
-        runtime_version: RUNTIME,
         probes: probes(),
     };
     (agent, handed)
@@ -291,7 +307,7 @@ fn a_deploy_is_refused_unless_its_staged_copy_its_records_and_the_installation_a
     let load_failed = (ErrorCode::LoadFailed, false);
     let config_invalid = (ErrorCode::ConfigInvalid, false);
     let not_in_flight = "of `stt` is not derived: deploy transaction `tx` is not in flight";
-    let cases: [(Broken, (ErrorCode, bool), &str); 10] = [
+    let cases: [(Broken, (ErrorCode, bool), &str); 9] = [
         (
             |host, _, _| drop(host.restage()),
             load_failed,
@@ -321,11 +337,6 @@ fn a_deploy_is_refused_unless_its_staged_copy_its_records_and_the_installation_a
             |_, agent, _| agent.in_flight(TransactionKind::Deploy, "tx", "tts"),
             load_failed,
             not_in_flight,
-        ),
-        (
-            |_, _, handed| handed.runtime_version = "",
-            config_invalid,
-            "of `stt` is not derived: deployment descriptor `configuration.runtime_version`",
         ),
         (
             |_, _, handed| {

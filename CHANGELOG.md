@@ -306,54 +306,57 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   stream/v1 frame through the modules and encode it back byte for byte.
   (V030-E04-F02-T04)
 
-- A deploy of a format 0.2 bundle derives the bundle's deployment
-  descriptor and records it, which puts the descriptor documents to work in
-  a deployed agent. After the capacity check and directly before it asks
-  for a worker, the deploy verifies its staged copy again, artifact digests
-  included (one more SHA-256 pass over the artifacts for each such deploy),
-  and in one state update takes the next generation, derives the descriptor
-  from the staged copy and the installed runner profile, names it on the
-  candidate record and on the deploy's transaction and writes its document.
-  The candidate reference hands the worker control that generation, and the
-  promotion carries the identity to the active record. A staged copy that
-  is not the bundle that was verified is `load_failed`; a descriptor that
-  cannot be derived refuses the deploy with `unsupported` (a runner profile
-  that is not installed, or that does not list the bundle's compute type)
-  or `config_invalid`, names nothing and takes no generation. Two
-  configurations a format 0.1 deploy accepts are `config_invalid` for a
-  format 0.2 deploy, after staging: a `staging_dir` with a `.` or `..`
-  segment, and a configured `runtime_version` outside the descriptor's
-  form (1 to 64 ASCII letters, digits and `.+~-`). The
-  descriptor records admission mode `production` and the default member
-  quota: no quota is assigned yet, the value is not a limit, and every
-  configuration digest changes when one is first assigned. It states the
-  runtime version and the runner environment installed at the deploy, and
-  a descriptor re-stamped after a package upgrade still states those. A
-  deploy of a bundle that names a runner profile needs the probe report of
-  its backend: the packaged agent always holds one, and a coordinator built
-  without one refuses the deploy. A format 0.2 deploy writes state version
-  `0.2` under either worker mode. A transaction that hands a generation
-  over (a deploy, a rollback, the restore at a start) takes it under a
-  hold on the worker control, `WorkerControl::hold` and `release`, which do
-  nothing by default: the member registry starts no restart from before the
-  generation is taken until `prepare` has returned. A restart could take a
-  newer generation in between, which either refused the transaction or
-  left the previous record at a higher generation than the active one. The
-  registry's refusal of a handed generation that is not above every
-  generation it holds is now `internal` and recoverable, where it was
-  `load_failed`; only a generation handed twice reaches it. Agent status
-  reports `previous_active.generation` for a retained record that names a
-  descriptor: the generation that deployment was last started as. Known
-  and not changed: staging is keyed by the deployment id alone, so a deploy
-  under the id of a serving format 0.2 deployment that fails after staging
-  leaves that deployment's record naming a bundle that is no longer
-  staged. Its worker is not restarted, as before, and now its restore at
-  the next start of the agent is refused with `load_failed` and the start
-  fails, where an agent that recorded no descriptor started the other
-  bundle; deploying the id again while the agent is up repairs it. A format
-  0.1 bundle deploys as before: nothing is derived, read again, held or
-  written for it, its records carry no identity, and with the mock worker
-  control its state file stays state version `0.1`. (V030-E02-F01-T04)
+- A deploy of a format 0.2 bundle derives the bundle's deployment descriptor
+  and records it, which puts the descriptor documents to work in a deployed
+  agent. After the capacity check and directly before it asks for a worker,
+  the deploy verifies its staged copy again, artifact digests included (one
+  more SHA-256 pass over the artifacts for each such deploy), and in one
+  state update takes the next generation, derives the descriptor from the
+  staged copy and the installed runner profile, names it on the candidate
+  record and on the deploy's transaction and writes its document. The
+  candidate reference hands the worker control that generation, and the
+  promotion carries the identity to the active record. A staged copy that is
+  not the bundle that was verified is `load_failed`; a descriptor that cannot
+  be derived refuses the deploy with `unsupported` (a runner profile that is
+  not installed, or that does not list the bundle's compute type) or
+  `config_invalid`, names nothing and takes no generation. One configuration
+  a format 0.1 deploy accepts is `config_invalid` for a format 0.2 deploy,
+  after staging: a `staging_dir` with a `.` or `..` segment. The descriptor
+  records admission mode `production` and the default member quota: no quota
+  is assigned yet, the value is not a limit, and every configuration digest
+  changes when one is first assigned. It states the runtime version the agent
+  runs and the runner environment installed at the deploy, and a descriptor
+  re-stamped after a package upgrade still states those. A deploy of a bundle
+  that names a runner profile needs the probe report of its backend: the
+  packaged agent always holds one, and a coordinator built without one
+  refuses the deploy. A format 0.2 deploy writes state version `0.2` under
+  either worker mode. A transaction that hands a generation over (a deploy, a
+  rollback, the restore at a start) takes it under a hold on the worker
+  control, `WorkerControl::hold` and `release`, which do nothing by default:
+  the member registry starts no restart from before the generation is taken
+  until `prepare` has returned. A restart could take a newer generation in
+  between, which either refused the transaction or left the previous record
+  at a higher generation than the active one. The registry's refusal of a
+  handed generation that is not above every generation it holds is now
+  `internal` and recoverable, where it was `load_failed`; only a generation
+  handed twice reaches it. Agent status reports `previous_active.generation`
+  for a retained record that names a descriptor: the generation that
+  deployment was last started as. Known and not changed: staging is keyed by
+  the deployment id alone, so a deploy of another bundle under the id of a
+  format 0.2 deployment replaces the staged bundle that deployment's record
+  names. A rollback to that record and its restore at a start of the agent
+  compare the staged bundle with the record since they re-stamp descriptors,
+  and both refusals are reachable now that deploys record one. After such a
+  deploy has succeeded, a rollback to the earlier record is refused with
+  `load_failed`. After one has failed past staging, the serving deployment's
+  worker is not restarted, as before, and its restore at the next start of
+  the agent is refused with `load_failed`, so that start fails; deploying the
+  id again while the agent is up lets the next start restore. For a format
+  0.1 deployment, and for format 0.2 before this change, the rollback and the
+  restore started whatever was staged under the id. A format 0.1 bundle
+  deploys as before: nothing is derived, read again, held or written for it,
+  its records carry no identity, and with the mock worker control its state
+  file stays state version `0.1`. (V030-E02-F01-T04)
 
 - A rollback and the restore at an agent start begin a deployment that
   names a deployment descriptor at a new generation, and the agent removes
@@ -371,9 +374,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   start the agent removes every descriptor document that neither file of
   its state pair names, before recovery writes any; a prune that fails is
   logged and the start goes on. A record that names no descriptor is rolled
-  back to and restored as before, and no deploy records a descriptor yet, so
-  a deployed agent has no such document and serves, rolls back and recovers
-  as before. (V030-E02-F01-T04)
+  back to and restored as before. (V030-E02-F01-T04)
 
 - The agent keeps deployment descriptor documents beside its state, and the
   member registry reads and re-stamps them. A descriptor is one file in the
@@ -389,8 +390,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   its new generation and names it on the active record in the same state
   update. A missing or different document, or one that cannot be read or
   is not a regular file of at most 1 MiB of UTF-8, is `load_failed`, not
-  recoverable. No deploy records a descriptor yet, so a deployed agent
-  behaves as before. (V030-E02-F01-T04)
+  recoverable. (V030-E02-F01-T04)
 
 - A deployment record, the in-flight transaction and a candidate reference
   can name the deployment descriptor of their generation. Three optional
@@ -412,9 +412,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `DeploymentDescriptor::restamp` returns a verified descriptor at a newer
   generation with a new `descriptor_digest` and nothing else changed, for a
   restart, recovery or rollback that must not derive the descriptor again;
-  it refuses a descriptor that was altered after it was read. Nothing in
-  the agent records an identity or calls the re-stamp yet. Additive inside
-  protocol 0.1; the version constants are unchanged. (V030-E02-F01-T04)
+  it refuses a descriptor that was altered after it was read. Additive
+  inside protocol 0.1; the version constants are unchanged.
+  (V030-E02-F01-T04)
 
 - The agent leases its serving workers' ports. A worker generation holds
   its ports from its start until its process has been reaped, so a worker
