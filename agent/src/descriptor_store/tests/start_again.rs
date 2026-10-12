@@ -94,6 +94,9 @@ pub(super) struct Worker {
     killed_at_hold: bool,
     /// The same, in this call (`prepare` or `warm`) for this generation.
     killed_in: Option<(&'static str, u64)>,
+    /// This call fails and the agent lives on: `prepare`, `warm`, `promote`,
+    /// or `ready` for a worker that warms and is not ready.
+    fails_in: Option<&'static str>,
     stopping: AtomicBool,
     active: Option<String>,
     /// The view at each hold that has not been released.
@@ -120,6 +123,18 @@ impl Worker {
             killed_in: Some((call, generation)),
             ..Self::default()
         }
+    }
+    pub(super) fn failing_in(call: &'static str) -> Self {
+        Self {
+            fails_in: Some(call),
+            ..Self::default()
+        }
+    }
+    fn fails(&self, call: &str) -> AgentResult<()> {
+        if self.fails_in == Some(call) {
+            return Err(AgentError::WorkerControl(format!("no worker: {call}")));
+        }
+        Ok(())
     }
     /// End the agent as a kill would: no later state write lands.
     fn kill(&self) -> AgentError {
@@ -166,22 +181,23 @@ impl WorkerControl for Worker {
         if self.killed_at_prepare || self.killed_in == Some(("prepare", generation)) {
             return Err(self.kill());
         }
-        Ok(())
+        self.fails("prepare")
     }
     fn warm(&self, _: &str, candidate: &CandidateRef, _: Duration) -> AgentResult<WorkerReadiness> {
         let generation = candidate.generation.unwrap_or(0);
         if self.killed_in == Some(("warm", generation)) {
             return Err(self.kill());
         }
+        self.fails("warm")?;
         let deployment_id = candidate.deployment_id.clone();
-        let ready = true;
+        let ready = self.fails_in != Some("ready");
         Ok(WorkerReadiness {
             deployment_id,
             ready,
         })
     }
     fn promote(&self, _: &str, _: &CandidateRef) -> AgentResult<()> {
-        Ok(())
+        self.fails("promote")
     }
     fn unload(&self, _: &str) {}
     fn active_deployment_id(&self) -> AgentResult<Option<String>> {
@@ -530,6 +546,60 @@ fn a_restore_refused_by_what_is_on_disk_leaves_the_agent_up_with_the_refusal_rec
         // No generation is taken and nothing is written or asked for.
         assert_eq!((host.view(), host.documents()), before, "case {case}");
         assert!(agent.never_asked() && before.0[3] == "2", "case {case}");
+    }
+}
+
+#[test]
+fn a_refusal_whose_record_did_not_land_ends_the_start_and_is_recorded_by_the_next() {
+    let host = host();
+    let (agent, _) = host.restoring(Worker::default());
+    fs::remove_file(host.document()).unwrap();
+    agent.store.kill_after_writes(0);
+
+    let error = apply_startup(&agent.coordinator).unwrap_err();
+
+    assert!(matches!(error, AgentError::Io(_)), "{error}");
+    assert_eq!(host.last_error(), None);
+    let (next, _) = host.start(Worker::default());
+    apply_startup(&next.coordinator).unwrap();
+    let refusal = host.last_error().expect("the refusal is recorded");
+    let remedy = "; `stt` is not serving until it is deployed again";
+    assert!(refusal.message.ends_with(remedy), "{refusal:?}");
+    assert!(next.never_asked());
+    assert_eq!(host.view(), ["stt@1?", "-", "-", "2"]);
+}
+
+#[test]
+fn a_restore_whose_worker_does_not_come_up_ends_the_start_and_the_next_start_restores() {
+    // `recorded`: whether the write that records why lands.
+    let calls = ["prepare", "warm", "ready", "promote"];
+    for (call, recorded) in calls
+        .map(|call| (call, true))
+        .into_iter()
+        .chain([("warm", false)])
+    {
+        let host = host();
+        let (agent, first) = host.restoring(Worker::failing_in(call));
+        // The write that names the generation, then the one that records why.
+        agent.store.kill_after_writes(if recorded { 2 } else { 1 });
+
+        let error = apply_startup(&agent.coordinator).unwrap_err();
+
+        let why = recorded.then(|| error.to_record());
+        assert_eq!(
+            matches!(error, AgentError::Io(_)),
+            !recorded,
+            "{call}: {error}"
+        );
+        assert_eq!(host.last_error(), why, "{call}");
+        assert_eq!(host.view(), ["stt@2", "-", "-", "3"], "{call}");
+
+        let (next, _) = host.start(Worker::default());
+        apply_startup(&next.coordinator).unwrap();
+        let restored = Some(first.restamp(3).unwrap());
+        assert_eq!(next.asked().resolved, restored, "{call}");
+        assert_eq!(host.view(), ["stt@3", "-", "-", "4"], "{call}");
+        assert_eq!(host.last_error(), None, "{call}");
     }
 }
 

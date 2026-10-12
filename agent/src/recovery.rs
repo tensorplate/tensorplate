@@ -496,6 +496,49 @@ mod tests {
     }
 
     #[test]
+    fn a_deploy_is_read_as_committed_from_its_phase_and_its_records_together() {
+        use DeployState::{
+            Active, CapacityChecked, Prepared, Promoted, Received, Staged, Verified, Warmed,
+        };
+        // No candidate is recorded before `staged`: a deploy killed at
+        // `received` has none, as one that committed has none.
+        let before = [
+            Received,
+            Verified,
+            Staged,
+            CapacityChecked,
+            Prepared,
+            Warmed,
+        ];
+        let found = before.map(|phase| (phase, false));
+        for (phase, committed) in found.into_iter().chain([(Promoted, true), (Active, true)]) {
+            let td = TempDir::new().expect("td");
+            let cfg = config(td.path());
+            let store = Arc::new(StateStore::open(&cfg.state_dir).expect("open"));
+            store
+                .update(|s| {
+                    s.active = Some(record("d"));
+                    s.in_flight_transaction = Some(tx("tx", phase));
+                    Ok(())
+                })
+                .expect("update");
+            let coordinator = Coordinator::new(cfg, store.clone(), Arc::new(mock(Some("d"))));
+
+            let summary = apply_startup(&coordinator).expect("apply");
+
+            let snap = store.snapshot().expect("snap");
+            let ended: Vec<_> = snap.quarantined.iter().map(|q| q.phase).collect();
+            let (action, quarantined) = if committed {
+                (RecoveryAction::NoOp, vec![])
+            } else {
+                (RecoveryAction::QuarantineCandidate, vec![phase])
+            };
+            assert_eq!((summary.action, ended), (action, quarantined), "{phase:?}");
+            assert!(snap.in_flight_transaction.is_none(), "{phase:?}");
+        }
+    }
+
+    #[test]
     fn a_start_reads_no_commit_from_the_deployment_the_worker_control_serves() {
         let td = TempDir::new().expect("td");
         let cfg = config(td.path());

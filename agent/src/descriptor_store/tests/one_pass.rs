@@ -218,6 +218,87 @@ fn a_start_killed_after_any_write_of_its_pass_is_finished_by_the_next_start() {
 }
 
 #[test]
+fn a_start_whose_settling_write_did_not_land_leaves_what_it_found_for_the_next_start() {
+    // A committed deploy to clear.
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    let writes = phases_before_the_commit(true, true).len() + 2;
+    agent.store.kill_after_writes(writes - 1);
+    agent.deploy("stt", STT).unwrap_err();
+    let found = host.view();
+    let (killed, _) = host.start(Worker::default());
+    killed.store.kill_after_writes(0);
+
+    let error = apply_startup(&killed.coordinator).unwrap_err();
+
+    assert!(matches!(error, AgentError::Io(_)), "{error}");
+    assert!(killed.never_asked() && host.view() == found && !host.settled());
+    host.settles_in_one_start(Some("stt"), None, None, "a committed deploy");
+
+    // A rollback recorded failed and not cleared, to clear.
+    let host = self::host();
+    let (agent, _) = host.rolling_back(Worker::default());
+    agent.rollback_up_to(DeployState::Failed);
+    let found = host.view();
+    let (killed, _) = host.start(Worker::default());
+    killed.store.kill_after_writes(0);
+
+    let error = apply_startup(&killed.coordinator).unwrap_err();
+
+    assert!(matches!(error, AgentError::Io(_)), "{error}");
+    assert!(killed.never_asked() && host.view() == found && !host.settled());
+    let (action, next) = host.one_start(Worker::default());
+    assert_eq!(action, RecoveryAction::RestoreActive);
+    assert_eq!(next.asked().reference.deployment_id, "tts");
+    assert!(host.settled() && host.quarantined().0.is_empty());
+    assert_eq!(host.last_error(), None);
+}
+
+#[test]
+fn a_committed_transaction_whose_end_write_failed_is_busy_until_a_start_clears_it() {
+    for rollback in [false, true] {
+        let case = if rollback { "rollback" } else { "deploy" };
+        let host = host();
+        let (agent, _) = host.start(Worker::default());
+        agent.deploy("tts", TTS).unwrap();
+        if rollback {
+            agent.deploy("stt", STT).unwrap();
+        }
+        // Every write lands but the one that ends the transaction.
+        let writes = phases_before_the_commit(!rollback, true).len() + 2;
+        agent.store.kill_after_writes(writes - 1);
+
+        let ended = if rollback {
+            agent.coordinator.rollback(None).map(|_| ())
+        } else {
+            agent.deploy("stt", STT)
+        };
+
+        assert!(matches!(ended, Err(AgentError::Io(_))), "{case}");
+        // The store writes again; the transaction stays, committed.
+        agent.store.kill_after_writes(usize::MAX);
+        let state = agent.store.snapshot().unwrap();
+        let in_flight = state.in_flight_transaction.expect("still in flight");
+        assert_eq!(in_flight.phase, DeployState::Promoted, "{case}");
+        let (serving, retained) = if rollback {
+            ("tts", "stt")
+        } else {
+            ("stt", "tts")
+        };
+        assert_eq!(host.ids(), [serving, retained], "{case}");
+        let busy = |refused: AgentResult<()>| match refused {
+            Err(AgentError::Busy(id)) => id == in_flight.transaction_id,
+            _ => false,
+        };
+        assert!(busy(agent.deploy("smoke", FORMAT_0_1)), "{case}");
+        assert!(busy(agent.coordinator.rollback(None).map(|_| ())), "{case}");
+        assert_eq!(host.ids(), [serving, retained], "{case}");
+
+        host.settles_in_one_start(Some(serving), Some(retained), None, case);
+    }
+}
+
+#[test]
 fn a_failed_transaction_whose_one_ending_write_did_not_land_is_ended_by_the_next_start() {
     // A deploy refused when its descriptor is derived: six writes, then the
     // one that ends it. Killed before that one, the start ends it instead.
