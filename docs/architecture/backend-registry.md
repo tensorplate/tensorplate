@@ -803,15 +803,18 @@ rely on beyond the public header, and what it must not assume:
 conformance cases against this bridge over the scripted sidecar, with every
 choice stated: one job runs and eight wait, so nine are open at once and the
 tenth is ended by `failed`. A thread plays the sidecar's backend with the
-fixture's results and holds a started job when a case says so. The binding's
-unload lets a held job go only once the sidecar has the unload, so that the
-jobs behind it are still waiting when it arrives. The binding is settled when
-two health round trips through the channel's exchange slot in a row, each
-begun with that thread idle, find that the sidecar wrote nothing but their
-answers; one is not enough, because a callback that was running when it was
-queued may have queued a frame behind it. Once the connection has ended it
-waits for the channel's last batch of sink calls to return. No case was
-loosened for this bridge.
+fixture's results and holds a started job when a case says so. It lets a held
+job go when it sees an `unload` waiting behind that job in the sidecar's
+queue: by then the sidecar has failed the jobs that waited, so none of them
+starts when the held one ends. The binding is settled when two health round
+trips through the channel's exchange slot in a row, each begun with that
+thread idle, find that the sidecar wrote nothing but their answers; one is not
+enough, because a callback that was running when it was queued may have queued
+a frame behind it. Once the connection has ended it waits for the channel's
+last batch of sink calls to return, and a round trip that timed out or found
+another exchange in the slot is not settled.
+`test/unit/job_bridge_harness_test.cpp` holds these rules of the harness. No
+case was loosened for this bridge.
 
 `test/unit/python_pytorch_job_bridge_test.cpp` holds what the cases leave to a
 binding: `job_not_permitted`; `health_timeout`, with a timeout of zero against
