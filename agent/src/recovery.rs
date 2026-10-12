@@ -31,7 +31,7 @@ use tensorplate_protocol::ErrorCode;
 
 use crate::bundle::model_artifact_relative_path;
 use crate::coordinator::{now_monotonic_ns, Coordinator};
-use crate::descriptor_store::{start_again, InHand, Start};
+use crate::descriptor_store::{another_bundle_staged, start_again, InHand, Start};
 use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
 use crate::transaction::{classify, PhaseClass};
@@ -257,6 +257,10 @@ fn finalize_promoted(coordinator: &Coordinator) -> AgentResult<()> {
     store.set_last_error(None)
 }
 
+/// Start the active record's deployment again. Two records are left not
+/// serving, with the reason as `last_error` and no error returned: one whose
+/// id cannot name a member, and one that names a descriptor while another
+/// bundle is staged under its id. Every other failure is returned.
 fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
     let active = coordinator
         .state()
@@ -271,6 +275,17 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
             active.deployment_id
         ));
         return coordinator.state().set_last_error(Some(err.to_record()));
+    }
+    // Another bundle is staged under the id than the record names, as a
+    // same-id update that did not complete leaves it. Nothing is started
+    // from it, and the agent stays up, so the operator can deploy the id again.
+    if let Ok(Some(refusal)) = another_bundle_staged(&active) {
+        let mut record = refusal.to_record();
+        record.message = format!(
+            "{}; `{}` is not serving until it is deployed again",
+            record.message, active.deployment_id
+        );
+        return coordinator.state().set_last_error(Some(record));
     }
     let worker = coordinator.worker_client().as_ref();
     let in_hand = match candidate_from_record(coordinator.state(), worker, &active) {

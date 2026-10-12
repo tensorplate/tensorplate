@@ -174,29 +174,145 @@ fn a_deploy_takes_no_generation_when_its_document_cannot_be_written() {
     assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
 }
 
-#[test]
-fn a_deploy_under_a_serving_id_that_fails_after_staging_leaves_its_record_unrestorable() {
-    let host = host();
+/// An agent started over what a same-id update that did not complete left:
+/// `stt` recorded active as the speech-to-text bundle, and the other bundle
+/// staged under the id. The update was refused after staging.
+fn started_after_an_update_that_did_not_complete(host: &Host) -> Agent {
     let (agent, _) = host.start(Worker::default());
     agent.deploy("stt", STT).unwrap();
     drop(agent.asked());
-    // The second deploy stages another bundle under the id, then fails.
     let unfinished = host.state_dir().join("descriptor-stt-2.json.tmp");
     fs::create_dir(&unfinished).unwrap();
     agent.deploy("stt", TTS).unwrap_err();
     fs::remove_dir(unfinished).unwrap();
     assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
 
-    // Staging is keyed by the id alone: the record's bundle is gone from it.
     let (next, pruned) = host.start(Worker::default());
     assert_eq!(pruned, 0);
-    let error = apply_startup(&next.coordinator).unwrap_err().to_record();
+    let summary = apply_startup(&next.coordinator).unwrap();
+    assert_eq!(summary.action, RecoveryAction::RestoreActive);
+    next
+}
 
+/// Whether the last error is that of a start that did not restore `stt`
+/// because another bundle is staged under its id.
+fn says_another_bundle_is_staged(host: &Host) -> bool {
+    let Some(error) = host.last_error() else {
+        return false;
+    };
     let load_failed = error.code == ErrorCode::LoadFailed && !error.recoverable;
     let says = "`stt` is not started again: the bundle staged at";
-    assert!(load_failed && error.message.contains(says), "{error:?}");
+    let remedy = "names; `stt` is not serving until it is deployed again";
+    load_failed && error.message.contains(says) && error.message.ends_with(remedy)
+}
+
+#[test]
+fn a_start_after_a_same_id_update_that_did_not_complete_leaves_the_agent_up_and_the_deployment_not_serving(
+) {
+    let host = host();
+
+    // Staging is keyed by the id alone: the record's bundle is gone from it.
+    let next = started_after_an_update_that_did_not_complete(&host);
+
+    // No worker is asked for, no generation is taken and nothing is written.
+    assert!(next.never_asked() && says_another_bundle_is_staged(&host));
     assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
-    assert!(next.never_asked() && host.last_error() == Some(error));
+    assert_eq!(host.documents(), "stt-1");
+}
+
+#[test]
+fn a_deploy_of_the_id_through_an_agent_that_did_not_restore_it_succeeds_and_the_next_start_restores_it(
+) {
+    // As the bundle the update staged, and as the one the record names.
+    for bundle in [TTS, STT] {
+        let host = host();
+        let next = started_after_an_update_that_did_not_complete(&host);
+
+        next.deploy("stt", bundle).unwrap();
+
+        assert_eq!(next.asked().view, ["stt@1", "-", "stt@2", "3"]);
+        assert_eq!(host.view(), ["stt@2", "stt@1", "-", "3"]);
+        assert_eq!(host.last_error(), None);
+
+        let (after, pruned) = host.start(Worker::default());
+        assert_eq!(pruned, 0);
+        let summary = apply_startup(&after.coordinator).unwrap();
+        assert_eq!(summary.action, RecoveryAction::RestoreActive);
+        let restored = after.asked().resolved.unwrap();
+        let deployed = parse_bundle(&repo(bundle)).unwrap().manifest_digest;
+        assert_eq!(restored.configuration.bundle.bundle_digest, deployed);
+        assert_eq!(host.view(), ["stt@3", "stt@1", "-", "4"], "{bundle}");
+        assert_eq!(host.last_error(), None);
+    }
+}
+
+#[test]
+fn a_same_id_update_killed_after_prepared_is_quarantined_by_the_first_start_and_later_starts_come_up_with_the_error_recorded(
+) {
+    let host = host();
+    let (agent, _) = host.start(Worker::killed_in("warm", 2));
+    agent.deploy("stt", STT).unwrap();
+    drop(agent.asked());
+
+    let error = agent.deploy("stt", TTS).unwrap_err();
+
+    assert!(matches!(error, AgentError::Stopping), "{error}");
+    refuse_state_writes(&host.state_dir(), false);
+    drop(agent.asked());
+    assert_eq!(host.view(), ["stt@1", "-", "stt@2", "3"]);
+
+    // The first start quarantines the candidate and restores nothing.
+    let (first, pruned) = host.start(Worker::default());
+    assert_eq!(pruned, 0);
+    let summary = apply_startup(&first.coordinator).unwrap();
+    assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
+    let (quarantined, is_last_error) = host.quarantined();
+    assert!(quarantined.ends_with("@Prepared") && is_last_error);
+    assert!(first.never_asked() && host.view() == ["stt@1", "-", "-", "3"]);
+
+    // Each later start finds the candidate's bundle staged under the id.
+    for removed in [1, 0] {
+        let (later, pruned) = host.start(Worker::default());
+        assert_eq!(pruned, removed);
+        let summary = apply_startup(&later.coordinator).unwrap();
+        assert_eq!(summary.action, RecoveryAction::RestoreActive);
+        assert!(later.never_asked() && says_another_bundle_is_staged(&host));
+        assert_eq!(host.view(), ["stt@1", "-", "-", "3"]);
+        assert_eq!(host.documents(), "stt-1");
+    }
+}
+
+#[test]
+fn a_same_id_update_that_a_start_resumes_and_then_refuses_fails_that_start_and_the_next_comes_up() {
+    let host = host();
+    let (agent, _) = host.start(Worker::killed_in("prepare", 2));
+    agent.deploy("stt", STT).unwrap();
+    drop(agent.asked());
+    // The update is deployed from a copy that is gone by the next start.
+    let source = host.td.path().join("update");
+    fs::create_dir_all(source.join("warmup")).unwrap();
+    for file in ["manifest.json", "entry.json", "warmup/segment.txt"] {
+        fs::copy(repo(TTS).join(file), source.join(file)).unwrap();
+    }
+    let labels = BTreeMap::new();
+    let update = agent.coordinator.deploy("stt", &source, labels, None, None);
+    assert!(matches!(update, Err(AgentError::Stopping)), "{update:?}");
+    refuse_state_writes(&host.state_dir(), false);
+    drop(agent.asked());
+    assert_eq!(host.view(), ["stt@1", "-", "stt@2", "3"]);
+    fs::remove_dir_all(&source).unwrap();
+
+    // The resumed deploy is refused, which fails that start as before.
+    let (resuming, _) = host.start(Worker::default());
+    let error = apply_startup(&resuming.coordinator).unwrap_err();
+    assert!(matches!(error, AgentError::BundleMissing(_)), "{error}");
+    assert!(resuming.never_asked() && host.view() == ["stt@1", "-", "-", "3"]);
+
+    let (next, _) = host.start(Worker::default());
+    let summary = apply_startup(&next.coordinator).unwrap();
+    assert_eq!(summary.action, RecoveryAction::RestoreActive);
+    assert!(next.never_asked() && says_another_bundle_is_staged(&host));
+    assert_eq!(host.view(), ["stt@1", "-", "-", "3"]);
 }
 
 #[test]

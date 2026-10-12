@@ -433,6 +433,33 @@ pub(crate) enum Start<'a> {
     Rollback(&'a str),
 }
 
+/// The refusal to start `record` again when the bundle staged at its path is
+/// not the one it names: staging is keyed by the deployment id, so a later
+/// deploy under the id replaced it. None when the staged bundle is the
+/// record's, and for a record that does not name a descriptor, which is
+/// started from whatever is staged.
+///
+/// # Errors
+///
+/// The staged manifest's own error when it cannot be read.
+pub(crate) fn another_bundle_staged(record: &DeploymentRecord) -> AgentResult<Option<AgentError>> {
+    if !matches!(record.descriptor_identity(), Ok(Some(_))) {
+        return Ok(None);
+    }
+    let (id, digest) = (&record.deployment_id, &*record.bundle_digest);
+    let staged_path = &*record.staged_path;
+    let staged = crate::bundle::staged_manifest(Path::new(staged_path))?.bundle_digest;
+    if crate::bundle::bundle_digests_equal(&staged, digest) {
+        return Ok(None);
+    }
+    Ok(Some(AgentError::BundleIntegrity {
+        path: "manifest.json".into(),
+        reason: format!(
+            "`{id}` is not started again: the bundle staged at `{staged_path}` is `{staged}`, not the `{digest}` its record names"
+        ),
+    }))
+}
+
 /// The reference `record` is started again from. For a record that names a
 /// descriptor, one state update takes the next generation, re-stamps the
 /// descriptor for it, names it where `start` says and writes its document;
@@ -462,16 +489,10 @@ pub(crate) fn start_again<'w>(
         return Ok(InHand::as_recorded(worker, reference));
     };
     // `prepare` reads no staged manifest for a reference that names a descriptor.
-    let (digest, staged_path) = (&*record.bundle_digest, &*record.staged_path);
-    let staged = crate::bundle::staged_manifest(Path::new(staged_path))?.bundle_digest;
-    if !crate::bundle::bundle_digests_equal(&staged, digest) {
-        return Err(AgentError::BundleIntegrity {
-            path: "manifest.json".into(),
-            reason: format!(
-                "`{id}` is not started again: the bundle staged at `{staged_path}` is `{staged}`, not the `{digest}` its record names"
-            ),
-        });
+    if let Some(refusal) = another_bundle_staged(record)? {
+        return Err(refusal);
     }
+    let (digest, staged_path) = (&*record.bundle_digest, &*record.staged_path);
     let descriptors = DescriptorStore::new(store.state_dir());
     let path = descriptors.path(id, identity.generation)?;
     let unstamped = |reason: String| refused(&path, format!("is not re-stamped: {reason}"));

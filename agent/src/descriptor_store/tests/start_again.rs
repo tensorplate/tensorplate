@@ -92,6 +92,8 @@ pub(super) struct Worker {
     killed_at_prepare: bool,
     /// The same, at the first hold.
     killed_at_hold: bool,
+    /// The same, in this call (`prepare` or `warm`) for this generation.
+    killed_in: Option<(&'static str, u64)>,
     stopping: AtomicBool,
     active: Option<String>,
     /// The view at each hold that has not been released.
@@ -112,6 +114,18 @@ impl Worker {
             killed_at_hold: true,
             ..Self::default()
         }
+    }
+    pub(super) fn killed_in(call: &'static str, generation: u64) -> Self {
+        Self {
+            killed_in: Some((call, generation)),
+            ..Self::default()
+        }
+    }
+    /// End the agent as a kill would: no later state write lands.
+    fn kill(&self) -> AgentError {
+        refuse_state_writes(&self.state_dir, true);
+        self.stopping.store(true, Ordering::SeqCst);
+        AgentError::WorkerExited("killed".into())
     }
     pub(super) fn serving(deployment_id: &str) -> Self {
         Self {
@@ -149,14 +163,16 @@ impl WorkerControl for Worker {
             candidate: shown(&self.state_dir, &read.snapshot().unwrap().candidate),
             held_since: self.holds.lock().unwrap().last().cloned(),
         });
-        if self.killed_at_prepare {
-            refuse_state_writes(&self.state_dir, true);
-            self.stopping.store(true, Ordering::SeqCst);
-            return Err(AgentError::WorkerExited("killed".into()));
+        if self.killed_at_prepare || self.killed_in == Some(("prepare", generation)) {
+            return Err(self.kill());
         }
         Ok(())
     }
     fn warm(&self, _: &str, candidate: &CandidateRef, _: Duration) -> AgentResult<WorkerReadiness> {
+        let generation = candidate.generation.unwrap_or(0);
+        if self.killed_in == Some(("warm", generation)) {
+            return Err(self.kill());
+        }
         let deployment_id = candidate.deployment_id.clone();
         let ready = true;
         Ok(WorkerReadiness {
@@ -398,11 +414,29 @@ fn a_restore_of_a_record_that_names_no_descriptor_writes_and_names_nothing() {
 }
 
 #[test]
-fn a_restore_is_refused_unless_the_document_and_the_staged_bundle_are_the_records() {
-    type Broken = (fn(&Host, &Agent), &'static str);
+fn a_restore_of_a_record_that_names_no_descriptor_starts_whatever_is_staged_under_its_id() {
+    let host = host();
+    let (agent, first) = host.restoring(Worker::default());
+    undescribe(&agent, |state| state.active.as_mut());
+    let staged = host.restage();
+
+    apply_startup(&agent.coordinator).unwrap();
+
+    // As before descriptors: the staged bundle is not compared with the record's.
+    let asked = agent.asked();
+    assert_ne!(asked.reference.bundle_digest, staged);
+    assert_eq!(asked.reference, naming(&reference(&first), [false; 3]));
+    assert_eq!(host.last_error(), None);
+}
+
+#[test]
+fn a_restore_fails_the_start_unless_the_staged_copy_reads_and_the_document_is_the_records() {
+    type Broken = (fn(&Host, &Agent), &'static str, ErrorCode);
+    let load_failed = ErrorCode::LoadFailed;
     let missing: Broken = (
         |host, _| fs::remove_file(host.document()).unwrap(),
         "descriptor-stt-1.json` is missing",
+        load_failed,
     );
     let another: Broken = (
         |host, _| {
@@ -411,10 +445,13 @@ fn a_restore_is_refused_unless_the_document_and_the_staged_bundle_are_the_record
             host.descriptors.write(&other).unwrap();
         },
         "descriptor-stt-1.json` is generation 1 of `stt` (",
+        load_failed,
     );
-    let restaged: Broken = (
-        |host, _| drop(host.restage()),
-        "`stt` is not started again: the bundle staged at",
+    // Whether the staged bundle is the record's cannot be told.
+    let unreadable: Broken = (
+        |host, _| fs::remove_file(host.staged("stt").join("manifest.json")).unwrap(),
+        "bundle manifest is invalid",
+        ErrorCode::ConfigInvalid,
     );
     // The record and the staged bundle agree; the document describes another.
     let renamed: Broken = (
@@ -427,8 +464,9 @@ fn a_restore_is_refused_unless_the_document_and_the_staged_bundle_are_the_record
             agent.store.update(rename).unwrap();
         },
         "descriptor-stt-1.json` is not re-stamped: it describes bundle `sha256:",
+        load_failed,
     );
-    for (broken, says) in [missing, another, restaged, renamed] {
+    for (broken, says, code) in [missing, another, unreadable, renamed] {
         let host = host();
         let (agent, _) = host.restoring(Worker::default());
         broken(&host, &agent);
@@ -436,8 +474,8 @@ fn a_restore_is_refused_unless_the_document_and_the_staged_bundle_are_the_record
 
         let error = apply_startup(&agent.coordinator).unwrap_err().to_record();
 
-        let load_failed = error.code == ErrorCode::LoadFailed && !error.recoverable;
-        assert!(load_failed && error.message.contains(says), "{error:?}");
+        let refused = error.code == code && !error.recoverable;
+        assert!(refused && error.message.contains(says), "{error:?}");
         assert_eq!(host.last_error(), Some(error));
         assert_eq!((host.view(), host.documents()), before, "{says}");
         assert!(agent.never_asked() && before.0[3] == "2", "{says}");

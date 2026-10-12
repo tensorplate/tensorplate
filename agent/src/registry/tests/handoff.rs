@@ -5,11 +5,14 @@
 //! member.
 
 use super::*;
+use tensorplate_protocol::agent_control::AgentRunState;
 use tensorplate_protocol::agent_state::DeploymentRecord;
+use tensorplate_protocol::ErrorCode;
 
 use crate::coordinator::Coordinator;
 use crate::descriptor_store::restart_stamp;
 use crate::descriptor_store::tests::{agent_config, probes};
+use crate::recovery::apply_startup;
 
 const STT: &str = "v0_2/speech_stt_streaming";
 const TTS: &str = "v0_2/speech_tts_streaming";
@@ -73,6 +76,9 @@ impl WorkerControl for Stepped {
     fn active_deployment_id(&self) -> AgentResult<Option<String>> {
         self.f.registry.active_deployment_id()
     }
+    fn serving_member(&self) -> AgentResult<Option<ServingMember>> {
+        self.f.registry.serving_member()
+    }
     fn stopping(&self) -> bool {
         self.f.registry.stopping()
     }
@@ -83,7 +89,7 @@ impl WorkerControl for Stepped {
 struct Wired {
     f: Arc<Fixture>,
     /// Holds the state and the staged bundles.
-    _root: TempDir,
+    root: Arc<TempDir>,
     store: Arc<StateStore>,
     worker: Arc<Stepped>,
     coordinator: Coordinator,
@@ -94,7 +100,12 @@ fn wired() -> Wired {
 }
 
 fn wired_with(step: Step, configure: impl FnOnce(&mut AgentConfig)) -> Wired {
-    let root = TempDir::new().unwrap();
+    wired_at(Arc::new(TempDir::new().unwrap()), step, configure)
+}
+
+/// One start of the agent over the state and the staged bundles in `root`:
+/// its registry holds no worker.
+fn wired_at(root: Arc<TempDir>, step: Step, configure: impl FnOnce(&mut AgentConfig)) -> Wired {
     let mut config = agent_config(root.path());
     configure(&mut config);
     let store = Arc::new(StateStore::open(&config.state_dir).unwrap());
@@ -118,7 +129,7 @@ fn wired_with(step: Step, configure: impl FnOnce(&mut AgentConfig)) -> Wired {
     let coordinator = Coordinator::new(config, store.clone(), worker.clone());
     Wired {
         f,
-        _root: root,
+        root,
         store,
         worker,
         coordinator: coordinator.with_backend_probes(probes()),
@@ -126,6 +137,10 @@ fn wired_with(step: Step, configure: impl FnOnce(&mut AgentConfig)) -> Wired {
 }
 
 impl Wired {
+    /// The next start of the agent over the same state and staged bundles.
+    fn started_again(&self) -> Wired {
+        wired_at(self.root.clone(), Step::BeforePrepare, |_| {})
+    }
     fn deploy(&self, id: &str, bundle: &str) -> AgentResult<()> {
         let bundle = std::path::PathBuf::from(bundle_fixture(bundle));
         let labels = BTreeMap::new();
@@ -306,4 +321,43 @@ fn a_deploy_after_one_whose_candidate_never_became_ready_takes_a_new_generation(
     w.deploy("tts", TTS).unwrap();
     assert_eq!(w.launched(), [1, 2, 3]);
     assert_eq!(w.named(), ["tts@3", "stt@1", "4"]);
+}
+
+#[test]
+fn status_after_a_start_that_did_not_restore_shows_the_error_and_no_serving_generation_until_the_id_is_deployed_again(
+) {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let serving = w.coordinator.status().unwrap().active.unwrap();
+    assert_eq!(serving.generation, Some(1));
+    assert!(serving.serving_url.is_some());
+    // A same-id update stages another bundle; its worker cannot be started.
+    w.f.launcher.refuse.store(true, Ordering::SeqCst);
+    w.deploy("stt", TTS).unwrap_err();
+    assert_eq!(w.named(), ["stt@1", "-", "3"]);
+
+    let next = w.started_again();
+    apply_startup(&next.coordinator).unwrap();
+
+    let status = next.coordinator.status().unwrap();
+    let recorded = status.active.unwrap();
+    assert_eq!(recorded.deployment_id, "stt");
+    assert_eq!((recorded.generation, recorded.serving_url), (None, None));
+    assert_eq!(status.agent_state, AgentRunState::Degraded);
+    let error = status.last_error.unwrap();
+    let says = "`stt` is not serving until it is deployed again";
+    assert_eq!(error.code, ErrorCode::LoadFailed);
+    assert!(error.message.ends_with(says), "{error:?}");
+    assert!(next.launched().is_empty() && next.f.registry.serving_member().unwrap().is_none());
+    assert_eq!(next.named(), ["stt@1", "-", "3"]);
+
+    next.deploy("stt", TTS).unwrap();
+
+    let status = next.coordinator.status().unwrap();
+    assert_eq!(status.active.unwrap().generation, Some(3));
+    assert_eq!(
+        (status.agent_state, status.last_error),
+        (AgentRunState::Ready, None)
+    );
+    assert_eq!(next.named(), ["stt@3", "stt@1", "4"]);
 }
