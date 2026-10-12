@@ -221,6 +221,21 @@ fn a_start_after_a_same_id_update_that_did_not_complete_leaves_the_agent_up_and_
 }
 
 #[test]
+fn a_staged_copy_of_another_bundle_leaves_the_agent_up_whatever_the_state_of_its_artifacts() {
+    let host = host();
+    drop(started_after_an_update_that_did_not_complete(&host));
+    // The staged manifest is the update's, and one of its artifacts is gone.
+    fs::remove_file(host.staged_at("stt") + "/entry.json").unwrap();
+
+    let (next, _) = host.start(Worker::default());
+    let summary = apply_startup(&next.coordinator).unwrap();
+
+    assert_eq!(summary.action, RecoveryAction::RestoreActive);
+    assert!(next.never_asked() && says_another_bundle_is_staged(&host));
+    assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
+}
+
+#[test]
 fn a_deploy_of_the_id_through_an_agent_that_did_not_restore_it_succeeds_and_the_next_start_restores_it(
 ) {
     // As the bundle the update staged, and as the one the record names.

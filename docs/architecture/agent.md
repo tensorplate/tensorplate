@@ -760,6 +760,8 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   [descriptor](#deployment-descriptor-documents), which is every format 0.2
   deployment this agent deploys, they compare the two digests as well, and
   a staged bundle that is not the record's is `load_failed` for both. The
+  restore compares them before it reads anything else of the staged copy,
+  so the state of the staged artifacts does not change its answer. The
   rollback is refused. The restore starts nothing, and the agent still comes
   up with its socket open: status reports `agent_state: degraded`, the
   refusal as `last_error` (it names both digests and says that the
