@@ -669,9 +669,15 @@ assume:
   closed or joined, on the channel's reader and on the thread of a stop
   that is delivering. The sidecar, the channel and the open jobs are as
   they were; the session's state reads `failed`, as after any failed
-  lifecycle call, until an `unload` from another thread. The destructor has
-  no answer to give: called from a sink callback it joins or waits for its
-  own thread, so for it the rule stays a precondition.
+  lifecycle call, until an `unload` from another thread. The refusal of a
+  `prime` is the adapter's for a session that is `loaded`: one that is
+  already `ready` is refused by the core before the adapter is asked
+  (`not_ready`), and its state stays as it was. Whichever refuses, the core
+  records it (the last error, and after the adapter's refusal the state) and
+  emits its session events on the thread that made the call: the delivering
+  thread. The destructor has no answer to give: called from a sink callback
+  it joins or waits for its own thread, so for it the rule stays a
+  precondition.
 - A job's `released` after a stop means the session's reap call has
   returned. Today that call blocks until the sidecar process has been
   waited for; it reports no result, and the channel releases whatever the
