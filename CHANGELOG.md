@@ -8,6 +8,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Three more tests no longer fail now and then for reasons that are not the
+  code under test. Doctor's two `dpkg-query` tests wrote a stand-in
+  executable and ran it, which can fail with "Text file busy" when another
+  test thread forks in between; they, and the staged interpreters of the
+  runner-profile findings test, now use the linked script that is never
+  written, and the second prints the state it was given when it fails. The
+  package inventory's test of a query that does not answer read the query's
+  process id from a file the stand-in wrote, and failed when the stand-in
+  had not run a line by the limit; it now reads the kill from a process the
+  test started. The two tests that asserted an elapsed time no longer do.
+  (V030-E01-F03)
+
 - The agent's deploy load-failure tests no longer bound a failing deploy by
   a time a loaded machine reaches. One required the answer within 750 ms
   when the worker exits without a startup record, and failed wherever the

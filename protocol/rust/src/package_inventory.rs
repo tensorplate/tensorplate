@@ -213,6 +213,7 @@ mod tests {
 
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
     use std::path::Path;
 
     macro_rules! recorded {
@@ -599,30 +600,24 @@ mod tests {
     #[test]
     fn a_query_that_does_not_answer_is_killed() {
         let dir = tempfile::tempdir().unwrap();
-        let pid_file = dir.path().join("pid");
-        let program = stub(
-            dir.path(),
-            &format!("echo $$ >{}\nexec sleep 60", pid_file.display()),
-        );
-        let started = Instant::now();
+        let program = stub(dir.path(), "exec sleep 60");
         let err = ask_within(&program, &["tprec-leaf"], Duration::from_secs(1)).unwrap_err();
-        assert!(err.contains("no exit within"), "{err}");
-        assert!(
-            started.elapsed() < Duration::from_secs(30),
-            "the call was not bounded"
-        );
-        let pid = std::fs::read_to_string(&pid_file).unwrap();
-        let alive = Command::new("kill")
-            .args(["-0", pid.trim()])
+        assert!(err.contains("gave no answer: no exit within 1s"), "{err}");
+
+        // The kill is read from a process this test started, not from a pid
+        // the stub reports: a stub may not have run a line by the limit.
+        let mut query = Command::new("sleep").arg("60").spawn().unwrap();
+        let err = wait_bounded(&mut query, Duration::from_millis(300)).unwrap_err();
+        assert_eq!(err, "no exit within 300ms");
+        let reaped = !Command::new("kill")
+            .args(["-0", &query.id().to_string()])
             .stderr(Stdio::null())
             .status()
             .unwrap()
             .success();
-        assert!(
-            !alive,
-            "the query process {} outlived the timeout",
-            pid.trim()
-        );
+        assert!(reaped, "the query process outlived the limit");
+        let status = query.wait().unwrap();
+        assert_eq!(status.signal(), Some(9), "ended by {status}, not the kill");
     }
 
     #[test]

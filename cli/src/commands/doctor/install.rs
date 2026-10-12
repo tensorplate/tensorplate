@@ -2206,45 +2206,40 @@ tensorplate-observability none
 other-service             error   root       ~/Library/LaunchAgents/other.plist
 ";
 
-    fn dpkg_stub(dir: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("dpkg-query");
-        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        path
+    /// The state of package `p` according to a `dpkg-query` that is this
+    /// shell script.
+    fn dpkg_answer(body: &str, limit: Duration) -> DpkgPackageState {
+        let td = TempDir::new().unwrap();
+        let program = td.path().join("dpkg-query");
+        super::super::test_script::stage(&program, body);
+        query_dpkg_with(&program, "p", limit)
     }
 
     #[test]
     fn a_package_database_that_does_not_answer_does_not_hold_doctor() {
-        let td = TempDir::new().unwrap();
-        let hung = dpkg_stub(td.path(), "exec sleep 30");
-        let started = std::time::Instant::now();
-        let state = query_dpkg_with(&hung, "tensorplate-cli", Duration::from_millis(300));
-        assert!(started.elapsed() < Duration::from_secs(10));
+        let state = dpkg_answer("exec sleep 30", Duration::from_millis(300));
         let DpkgPackageState::Unavailable(why) = state else {
             panic!("a query that never answers is not an answer");
         };
+        // The reason names what ended the wait: the limit, not the exit.
         assert_eq!(why, "did not finish: no exit within 300ms");
     }
 
     #[test]
     fn a_package_counts_as_installed_only_in_the_installed_state() {
-        let td = TempDir::new().unwrap();
-        let limit = Duration::from_secs(30);
-        let answer = |body: &str| query_dpkg_with(&dpkg_stub(td.path(), body), "p", limit);
-        assert!(matches!(
-            answer("printf 'ii \\t1.2.3-1'"),
-            DpkgPackageState::Installed(version) if version == "1.2.3-1"
-        ));
-        assert!(matches!(
-            answer("printf 'iU \\t1.2.3-1'"),
-            DpkgPackageState::Missing
-        ));
-        assert!(matches!(answer("exit 1"), DpkgPackageState::Missing));
-        assert!(matches!(
+        // Rendered, so that a failure prints the state the query gave.
+        let answer = |body: &str| match dpkg_answer(body, Duration::from_secs(30)) {
+            DpkgPackageState::Installed(version) => format!("installed {version}"),
+            DpkgPackageState::Missing => "missing".to_string(),
+            DpkgPackageState::Unavailable(why) => format!("unavailable: {why}"),
+        };
+        assert_eq!(answer("printf 'ii \\t1.2.3-1'"), "installed 1.2.3-1");
+        assert_eq!(answer("printf 'iU \\t1.2.3-1'"), "missing");
+        assert_eq!(answer("exit 1"), "missing");
+        assert_eq!(
             answer("printf 'no tab'"),
-            DpkgPackageState::Unavailable(_)
-        ));
+            "unavailable: unexpected dpkg-query output"
+        );
     }
 
     #[test]
