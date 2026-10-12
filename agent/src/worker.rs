@@ -153,11 +153,12 @@ pub trait WorkerControl: Send + Sync {
     /// Start no generation by itself until [`Self::release`], as while
     /// `prepare` runs. A transaction takes the hold before it takes the
     /// generation it hands to `prepare`, so that a restart cannot take a
-    /// newer one in between.
-    fn hold(&self) {}
+    /// newer one in between. Required, as `release` is: an implementation
+    /// that forwards `prepare` forwards both.
+    fn hold(&self);
 
     /// End one [`Self::hold`].
-    fn release(&self) {}
+    fn release(&self);
 
     /// Unload `deployment_id` (the previous active) from the worker.
     /// Best-effort: a failure here is logged but never replaces the
@@ -730,6 +731,11 @@ impl WorkerControl for MockWorkerControl {
         s.active = Some(candidate.deployment_id.clone());
         Ok(())
     }
+
+    // Nothing to hold or to release: the mock starts no worker by itself.
+    fn hold(&self) {}
+
+    fn release(&self) {}
 
     fn unload(&self, deployment_id: &str) {
         if let Ok(mut s) = self.inner.lock() {

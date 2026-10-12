@@ -43,6 +43,14 @@ impl WorkerControl for FailedMember {
         self.inner.promote(tx, candidate)
     }
 
+    fn hold(&self) {
+        self.inner.hold();
+    }
+
+    fn release(&self) {
+        self.inner.release();
+    }
+
     fn unload(&self, deployment_id: &str) {
         self.inner.unload(deployment_id);
     }

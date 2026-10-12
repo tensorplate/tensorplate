@@ -293,6 +293,12 @@ impl WorkerControl for Abandons {
         let mut abandoned = self.abandoned.lock().expect("abandoned");
         abandoned.push(candidate.deployment_id.clone());
     }
+    fn hold(&self) {
+        self.inner.hold();
+    }
+    fn release(&self) {
+        self.inner.release();
+    }
     fn unload(&self, deployment_id: &str) {
         self.inner.unload(deployment_id);
     }
