@@ -19,7 +19,6 @@ TEST(JobChannel, FeatureFlagDisabled) {
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <future>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -48,6 +47,7 @@ namespace {
 
 using testing::failure_of;
 using testing::JobChannelHarness;
+using testing::ParkedCallback;
 using testing::ScriptedSidecar;
 using testing::speech_golden::golden;
 using testing::speech_golden::golden_files;
@@ -1839,35 +1839,35 @@ TEST_F(JobChannelTest, RetiringAChannelEndsAHealthCallThatWaits) {
   expect_refused(health.outcome(), Error::Code::Unavailable, "backend_unavailable");
 }
 
+// -- A channel whose sink was detached. ------------------------------------------
+
+// The job side is its bridge's, and the bridge is gone: each call is refused
+// and none reaches the sidecar, also for the job that is still open.
+TEST_F(JobChannelTest, OnceItsSinkIsDetachedTheJobSideIsRefusedAndSendsNothing) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_EQ(peer.take_job(), 1U);
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
+  for (int times = 0; times < 2; ++times) {
+    h.channel.detach_event_sink();
+    EXPECT_EQ(h.sink.use_count(), 1) << "the channel holds the sink no more";
+    expect_refused(h.channel.submit(h.stt(2, 1)), Error::Code::NotReady, "event_sink_missing");
+    expect_refused(h.channel.cancel(1), Error::Code::NotReady, "unknown_job");
+    expect_refused(h.channel.release_session(1, 1), Error::Code::NotReady, "event_sink_missing");
+    expect_refused(h.channel.set_event_sink(h.sink), Error::Code::ConfigInvalid,
+                   "event_sink_already_set");
+  }
+  EXPECT_FALSE(h.channel.in_sink_callback());
+  EXPECT_EQ(h.channel.backlog(), (JobChannelBacklog{1, 0, 0}));
+  // Health does not go through the sink, and is answered behind whatever the
+  // calls above had queued.
+  settle();
+  EXPECT_TRUE(peer.sent("job_cancel", 0).empty());
+  EXPECT_TRUE(peer.sent("session_release", 0).empty());
+  EXPECT_EQ(peer.sent("job_submit", 1).size(), 1U);
+}
+
 // -- The backlog. ----------------------------------------------------------------
-
-// A sink callback that waits for the test, which reads the backlog meanwhile.
-class ParkedCallback {
- public:
-  // Parks the calling callback until let_go(); it gives up after kPatience.
-  void park() {
-    entered_ = true;
-    (void)released_.get_future().wait_for(JobChannelHarness::kPatience);
-  }
-  [[nodiscard]] bool entered() const { return entered_; }
-  void let_go() {
-    if (!std::exchange(let_go_, true)) {
-      released_.set_value();
-    }
-  }
-  ~ParkedCallback() { let_go(); }
-
-  ParkedCallback() = default;
-  ParkedCallback(const ParkedCallback&) = delete;
-  ParkedCallback& operator=(const ParkedCallback&) = delete;
-  ParkedCallback(ParkedCallback&&) = delete;
-  ParkedCallback& operator=(ParkedCallback&&) = delete;
-
- private:
-  std::atomic<bool> entered_{false};
-  bool let_go_ = false;
-  std::promise<void> released_;
-};
 
 class JobChannelBacklogTest : public JobChannelTest {
  protected:

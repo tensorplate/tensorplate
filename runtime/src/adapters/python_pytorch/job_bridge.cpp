@@ -2,6 +2,8 @@
 
 #include "job_bridge.hpp"
 
+#include <cstdio>
+#include <exception>
 #include <utility>
 
 #include "tensorplate/core/error.hpp"
@@ -10,6 +12,16 @@ namespace tensorplate::adapters::python_pytorch {
 
 JobBridge::JobBridge(std::shared_ptr<JobChannel> channel, std::chrono::milliseconds health_timeout)
     : channel_(std::move(channel)), health_timeout_(health_timeout) {}
+
+JobBridge::~JobBridge() {
+  if (channel_->in_sink_callback()) {
+    // The detach would wait for this thread's own callback to return.
+    (void)std::fputs("tensorplate: a job bridge was destroyed inside one of its sink callbacks\n",
+                     stderr);
+    std::terminate();
+  }
+  channel_->detach_event_sink();
+}
 
 Result<void> JobBridge::set_event_sink(std::shared_ptr<JobEventSink> sink) {
   return channel_->set_event_sink(std::move(sink));

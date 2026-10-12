@@ -309,11 +309,32 @@ Result<void> JobChannel::set_event_sink(std::shared_ptr<JobEventSink> sink) {
     return refuse(Error::Code::ConfigInvalid, "event_sink_null");
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  if (sink_) {
+  if (sink_ || sink_detached_) {
     return refuse(Error::Code::ConfigInvalid, "event_sink_already_set");
   }
   sink_ = std::move(sink);
   return Result<void>{};
+}
+
+void JobChannel::detach_event_sink() {
+  // Declared first: the sink is let go once the mutex is.
+  std::shared_ptr<JobEventSink> detached;
+  std::unique_lock<std::mutex> lock(mutex_);
+  sink_detached_ = true;
+  ++detach_waiters_;
+  delivered_cv_.wait(lock, [this] { return delivering_ == std::thread::id{}; });
+  --detach_waiters_;
+  detached = std::move(sink_);
+}
+
+bool JobChannel::in_sink_callback() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return delivering_ == std::this_thread::get_id();
+}
+
+std::size_t JobChannel::detach_waiters() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return detach_waiters_;
 }
 
 Result<void> JobChannel::submit(const JobRequest& request) {
@@ -362,7 +383,8 @@ Result<void> JobChannel::submit(const JobRequest& request) {
 Result<void> JobChannel::cancel(std::uint64_t job_id) {
   std::lock_guard<std::mutex> lock(mutex_);
   const auto found = jobs_.find(job_id);
-  if (found == jobs_.end()) {
+  // A job still open when the sink was detached has nobody to cancel it for.
+  if (found == jobs_.end() || sink_detached_) {
     return refuse(Error::Code::NotReady, "unknown_job");
   }
   Job& job = found->second;
@@ -649,10 +671,12 @@ void JobChannel::deliver(const std::vector<Delivery>& deliveries) {
   if (deliveries.empty()) {
     return;
   }
-  std::shared_ptr<JobEventSink> sink;
+  // The batch is marked in flight, so detach_event_sink() leaves the sink in
+  // place until it has returned: the channel's reference is the only one.
+  JobEventSink* sink = nullptr;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    sink = sink_;
+    sink = sink_.get();
   }
   for (const Delivery& delivery : deliveries) {
     if (const auto* session = std::get_if<SessionReleased>(&delivery)) {
@@ -681,8 +705,12 @@ void JobChannel::deliver(const std::vector<Delivery>& deliveries) {
         break;
     }
   }
-  std::lock_guard<std::mutex> lock(mutex_);
-  owed_callbacks_ -= deliveries.size();
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    owed_callbacks_ -= deliveries.size();
+    delivering_ = std::thread::id{};
+  }
+  delivered_cv_.notify_all();
 }
 
 // -- Under the mutex. ------------------------------------------------------------
@@ -701,8 +729,15 @@ std::optional<JobEvent> JobChannel::unloaded_locked(const JobEvent& event) const
   return unloaded.has_value() ? std::optional<JobEvent>(std::move(unloaded).value()) : std::nullopt;
 }
 
-void JobChannel::owe_locked(const std::vector<Delivery>& out) noexcept {
-  owed_callbacks_ += out.size();
+void JobChannel::owe_locked(std::vector<Delivery>& out) noexcept {
+  if (sink_detached_) {
+    out.clear();
+    return;
+  }
+  if (!out.empty()) {
+    owed_callbacks_ += out.size();
+    delivering_ = std::this_thread::get_id();
+  }
 }
 
 bool JobChannel::admit_locked(const JobEvent& received, std::vector<Delivery>& out) {
@@ -732,7 +767,8 @@ bool JobChannel::admit_locked(const JobEvent& received, std::vector<Delivery>& o
   if (event.kind() == JobEventKind::Released) {
     forget_locked(found, out);
   }
-  return true;
+  // A detached sink receives nothing: owe_locked() empties the batch.
+  return !sink_detached_;
 }
 
 void JobChannel::fail_locked(Job& job, const Error& error, std::vector<Delivery>& out) {

@@ -5,6 +5,10 @@
 // the channel, not the session, may outlive the session, and takes no part in
 // the session's lifecycle: an unload cancels no job.
 //
+// The job side is the bridge's alone: the session shares the channel and
+// calls only its lifecycle side. One bridge per channel: its destructor
+// detaches the channel's sink.
+//
 // Internal: nothing outside the adapter includes this header.
 
 #pragma once
@@ -25,6 +29,21 @@ class JobBridge final : public BoundedJobBridge {
  public:
   /// @param health_timeout  longest health() waits for the sidecar's answer.
   JobBridge(std::shared_ptr<JobChannel> channel, std::chrono::milliseconds health_timeout);
+
+  /// JobChannel::detach_event_sink(): when it returns no sink callback is
+  /// running and none follows, whatever the session and the channel do
+  /// afterwards, and the sink is held no more. Jobs still open are not
+  /// cancelled; the channel takes their events and drops them. It waits for
+  /// a callback that is running, so it is never called while holding a lock
+  /// a callback takes. Called from a sink callback, which the public header
+  /// forbids, it would wait for its caller: it writes one line to stderr and
+  /// calls std::terminate() instead.
+  ~JobBridge() override;
+
+  JobBridge(const JobBridge&) = delete;
+  JobBridge& operator=(const JobBridge&) = delete;
+  JobBridge(JobBridge&&) = delete;
+  JobBridge& operator=(JobBridge&&) = delete;
 
   [[nodiscard]] Result<void> set_event_sink(std::shared_ptr<JobEventSink> sink) override;
 

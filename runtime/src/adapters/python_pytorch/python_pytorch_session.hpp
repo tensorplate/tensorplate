@@ -95,8 +95,10 @@ struct SessionWithJobChannel {
 /// under both. What SessionWithJobChannel says of the session and of a
 /// holder of the channel holds for the bridge and its caller: nothing
 /// reaches prime, unload or the session's destructor from a sink callback or
-/// while holding a lock a callback takes. `channel` is for tests and
-/// diagnostics; the registered backend drops it.
+/// while holding a lock a callback takes. Destroying `bridge` detaches the
+/// sink (job_bridge.hpp): destroyed before a loaded session, it receives
+/// nothing of what that session's unload or destructor ends. `channel` is
+/// for tests and diagnostics; the registered backend drops it.
 struct SessionWithJobBridge {
   std::unique_ptr<ExecutionSession> session;
   std::shared_ptr<BoundedJobBridge> bridge;

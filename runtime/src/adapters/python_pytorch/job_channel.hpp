@@ -7,7 +7,9 @@
 // probe that is answered beside it.
 //
 // Threads. The reader reads one frame at a time, routes it and calls the
-// event sink; while the connection lives nothing else calls the sink. The
+// event sink; while the connection lives nothing else calls the sink, and
+// stop() calls it only once it has joined the reader. So one thread delivers
+// at a time, and no lock is held for it. The
 // writer sends whole frames in the order they were queued, and is the only
 // thread that touches the socket's write side: not a caller's thread, and not
 // the reader. submit(), cancel(), release_session(), exchange() and
@@ -46,6 +48,13 @@
 // callback. submit() copies the request's PCM window twice while holding it,
 // out of the buffer manager and then into the encoded frame: the channel's
 // mutex, then the buffer manager's, which never calls back.
+//
+// A batch of sink calls is decided under the mutex and made after it is let
+// go. The decision marks the batch in flight on the deciding thread, and the
+// mark is cleared when its last callback has returned. detach_event_sink()
+// sets its flag under the same mutex and waits for that mark on a condition
+// variable, holding nothing: a batch decided before the flag is waited for,
+// and one decided after it is dropped where it is decided.
 //
 // Internal: nothing outside the adapter includes this header.
 
@@ -249,11 +258,35 @@ class JobChannel {
   /// runs still delivers its jobs' events until stop().
   void retire() noexcept;
 
-  // -- The job side: any thread, a sink callback included. -------------------
+  // -- The job side: any thread, a sink callback included. Its one caller is
+  // the session's job bridge; the session calls none of it.
 
   /// @return success, or Error::Code::ConfigInvalid with reason
-  ///   "event_sink_null" or "event_sink_already_set".
+  ///   "event_sink_null" or "event_sink_already_set" (also after
+  ///   detach_event_sink(): a channel takes one sink for as long as it lives).
   [[nodiscard]] Result<void> set_event_sink(std::shared_ptr<JobEventSink> sink);
+
+  /// Lets go of the sink, for good. When it returns no sink callback is
+  /// running and none follows, whatever the channel does afterwards, and the
+  /// channel holds the sink no more. It waits for the batch of callbacks that
+  /// is in flight, without a time bound and holding no lock, so it is not
+  /// called from a sink callback (in_sink_callback(); the wait would be for
+  /// the caller's own return) nor while holding a lock a callback takes.
+  ///
+  /// The channel still takes every frame as before: the job table, the
+  /// releases, the send queue and the record of released sessions change as
+  /// they did. Only the sink calls are dropped, and a result chunk published
+  /// for an event that is dropped is released. From here on submit() and
+  /// release_session() answer "event_sink_missing", cancel() "unknown_job",
+  /// and none of them queues a frame.
+  void detach_event_sink();
+
+  /// True on a thread that is inside a sink callback of this channel: the
+  /// reader, or the caller of a stop() that is delivering.
+  [[nodiscard]] bool in_sink_callback() const;
+
+  /// Callers that wait in detach_event_sink().
+  [[nodiscard]] std::size_t detach_waiters() const;
 
   /// Queues a `job_submit`. The job's events follow through the sink.
   ///
@@ -399,11 +432,14 @@ class JobChannel {
   // The `failed` the sink gets in `event`'s place when the sidecar failed a job
   // because an unload was closing its lane; none for any other event.
   [[nodiscard]] std::optional<JobEvent> unloaded_locked(const JobEvent& event) const;
-  // Counts the batch a caller is about to hand to deliver().
-  void owe_locked(const std::vector<Delivery>& out) noexcept;
+  // Counts the batch a caller is about to hand to deliver() and marks it in
+  // flight on the calling thread. Once the sink is detached it empties the
+  // batch instead: nothing is owed and nothing delivered.
+  void owe_locked(std::vector<Delivery>& out) noexcept;
   // The `*_locked` members below need mutex_ held and append what the sink is
   // owed to `out`.
-  // True when `received`, or the failure that stands in for it, was appended.
+  // True when the sink receives `received` itself: it was appended, not a
+  // failure in its place, and the sink is not detached.
   bool admit_locked(const JobEvent& received, std::vector<Delivery>& out);
   static void fail_locked(Job& job, const Error& error, std::vector<Delivery>& out);
   void release_locked(std::map<std::uint64_t, Job>::iterator job, std::vector<Delivery>& out);
@@ -433,6 +469,7 @@ class JobChannel {
   std::condition_variable outbox_cv_;
   std::condition_variable unary_cv_;
   std::condition_variable probe_cv_;
+  std::condition_variable delivered_cv_;
 
   Phase phase_ = Phase::Idle;
   bool retired_ = false;
@@ -448,7 +485,13 @@ class JobChannel {
 
   ipc::UnixSocket* socket_ = nullptr;
   std::vector<JobClass> job_classes_;
+  /// Null before set_event_sink() and once detach_event_sink() has returned.
   std::shared_ptr<JobEventSink> sink_;
+  bool sink_detached_ = false;
+  /// The thread whose batch of sink calls has not returned; no thread when
+  /// none is in flight.
+  std::thread::id delivering_;
+  std::size_t detach_waiters_ = 0;
 
   std::map<std::uint64_t, Job> jobs_;
   /// The adapter's `message_id` of each unreleased job's submit and cancel.

@@ -19,6 +19,7 @@ TEST(JobBridge, FeatureFlagDisabled) {
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <latch>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -51,6 +52,7 @@ namespace {
 
 using testing::failure_of;
 using testing::JobBridgeHarness;
+using testing::ParkedCallback;
 using testing::ScriptedBackend;
 using testing::ScriptedSidecar;
 using Json = nlohmann::json;
@@ -414,6 +416,98 @@ TEST_F(JobBridgeTest, ABackendLostBeforeThePrimeIsNotReadyAsBeforeItWasLost) {
   expect_refused(h.bridge->submit(h.stt(1, 1)), Error::Code::NotReady, "backend_not_ready");
   expect_refused(h.bridge->health(), Error::Code::NotReady, "backend_not_ready");
   EXPECT_TRUE(h.sink->events().empty());
+}
+
+// -- The bridge's destructor. --------------------------------------------------------
+
+// Job 1 is open and the test, as the sidecar's backend, holds its result.
+TEST_F(JobBridgeTest, OnceTheBridgeIsDestroyedAHeldResultReachesNoSinkAndItsChunkIsReleased) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_TRUE(h.submit(JobBridgeHarness::tts(1, 1)).has_value());
+  ASSERT_EQ(peer.take_job(), 1U);
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
+  const std::size_t in_use = h.bytes_in_use();
+
+  h.bridge.reset();
+  EXPECT_EQ(h.sink.use_count(), 1) << "the bridge kept the sink";
+  peer.complete(1, audio(1'920), 1'920);
+  // Answered behind the job's last frame: the reader has routed them all.
+  ASSERT_TRUE(h.unary("health_check").has_value());
+
+  EXPECT_EQ(h.sink->kinds_for(1), Kinds{Accepted});
+  EXPECT_EQ(h.bytes_in_use(), in_use) << "the chunk published for the dropped result";
+  // Taken as before: the job left the table, and no frame counted as stray.
+  EXPECT_EQ(h.channel->backlog(), JobChannelBacklog{});
+  EXPECT_EQ(h.channel->counters(), JobChannelCounters{});
+}
+
+// The failure and the release the session's destructor ends job 1 with, on
+// the channel's reader and on this thread.
+TEST_F(JobBridgeTest, WhatTheSessionEndsOnceItsBridgeIsDestroyedReachesNoSink) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_NO_FATAL_FAILURE(run_job_1());
+  h.bridge.reset();
+  h.session.reset();
+  EXPECT_EQ(h.sink->kinds_for(1), Kinds{Accepted});
+  EXPECT_TRUE(h.sink->session_releases().empty());
+  EXPECT_EQ(h.channel->backlog(), JobChannelBacklog{});
+}
+
+// The callback of job 1's `accepted` is parked. The destructor is seen
+// waiting before the callback is let go, and reads on its return whether the
+// callback had returned.
+TEST_F(JobBridgeTest, ADestructorCalledWhileACallbackRunsReturnsOnlyOnceItHasReturned) {
+  ParkedCallback parked;
+  std::atomic<bool> callback_returned{false};
+  h.on_event = [&](const JobEvent& event) {
+    if (event.kind() == Accepted) {
+      parked.park();
+      callback_returned = true;
+    }
+  };
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_TRUE(h.wait([&] { return parked.entered(); }));
+
+  std::atomic<bool> destroyed{false};
+  bool returned_after_the_callback = false;
+  std::thread destroying([&] {
+    h.bridge.reset();
+    returned_after_the_callback = callback_returned.load();
+    destroyed = true;
+  });
+  const bool waiting =
+      h.wait([&] { return h.channel->detach_waiters() == 1 || destroyed.load(); }) && !destroyed;
+  parked.let_go();
+  destroying.join();
+
+  EXPECT_TRUE(waiting);
+  EXPECT_TRUE(returned_after_the_callback);
+  EXPECT_EQ(h.sink.use_count(), 1) << "the bridge kept the sink";
+}
+
+// Everything the statement needs is built inside it: the process that runs it
+// starts with one thread.
+void destroy_the_bridge_inside_a_callback() {
+  ScriptedSidecar peer;
+  JobBridgeHarness h(patient(), peer.launcher());
+  std::atomic<bool> returned{false};
+  h.on_event = [&](const JobEvent&) {
+    h.bridge.reset();
+    returned = true;
+  };
+  const bool up = h.session->load(speech_spec()).has_value() && h.session->prime().has_value() &&
+                  h.submit(h.stt(1, 1)).has_value();
+  (void)h.wait([&] { return !up || returned.load(); });
+  // The destructor returned, or never will: the harness cannot be taken down
+  // around a reader that waits for itself.
+  std::_Exit(EXIT_SUCCESS);
+}
+
+TEST(JobBridgeDeathTest, ABridgeDestroyedInsideASinkCallbackEndsTheProcessWithAMessage) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(destroy_the_bridge_inside_a_callback(),
+               "a job bridge was destroyed inside one of its sink callbacks");
 }
 
 // -- Requests this backend cannot carry. ---------------------------------------------
