@@ -28,6 +28,7 @@ fn active_deployment_response() -> ControlResponse {
         agent_state: AgentRunState::Ready,
         active: Some(DeploymentSummary {
             deployment_id: "d-1".into(),
+            generation: None,
             bundle_digest: "sha256:abc".into(),
             bundle_name: None,
             bundle_version: None,

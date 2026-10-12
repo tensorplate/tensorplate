@@ -423,7 +423,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["deployment_id", "generation", "bundle_digest", "state", "admission_mode", "quota"],
-      "description": "One resident-set member at its committed generation. Fields whose source does not exist yet are absent: `stream_api_version` until the stream endpoint lands, `effective_quota` and `contact` until the agent polls the member's worker over the runtime control channel, and `staged_bytes` until staging is keyed by generation.",
+      "description": "One resident-set member at its committed generation. `process`, `readiness`, `draining` and `contact` say how the worker process of that generation stands now; all four are absent when the agent's worker control does not report its processes. Fields whose source does not exist yet are absent: `stream_api_version` until the stream endpoint lands, `effective_quota` until the agent reports what the member's worker has in force, and `staged_bytes` until staging is keyed by generation.",
       "properties": {
         "deployment_id": {"$ref": "#/definitions/DeploymentId"},
         "generation": {"$ref": "#/definitions/StateCounter"},
@@ -461,7 +461,21 @@
         "contact": {
           "type": "string",
           "enum": ["in_contact", "out_of_contact"],
-          "description": "Whether the agent's polls of the member's worker are being answered."
+          "description": "Whether the agent's polls of the member's worker are being answered: `out_of_contact` once three polls in a row went unanswered. Absent for a generation with no process and for one that is draining."
+        },
+        "process": {
+          "type": "string",
+          "enum": ["running", "stopped"],
+          "description": "Whether the worker process of this generation is running under the agent. `stopped` when the agent holds no running process for it: it exited, it was stopped, or it has not been started."
+        },
+        "readiness": {
+          "type": "string",
+          "enum": ["ready", "not_ready"],
+          "description": "Whether the agent has judged this generation ready: its worker reported the member's model ready while answering on its control channel. It is the agent's last judgement, made when the generation was warmed or restarted, not a reading taken for this status. `not_ready` whenever `process` is `stopped`."
+        },
+        "draining": {
+          "type": "boolean",
+          "description": "The agent has asked this generation's worker to stop and its process has not been reaped. A draining worker finishes what it accepted inside its drain deadline; a reader opens nothing new on it, whatever `readiness` says."
         }
       }
     },
@@ -573,6 +587,10 @@
       "required": ["deployment_id", "bundle_digest"],
       "properties": {
         "deployment_id": {"type": "string", "minLength": 1},
+        "generation": {
+          "$ref": "#/definitions/StateCounter",
+          "description": "The deployment's generation, when the agent knows it: for `active`, the generation of the worker serving at `serving_url`, read together with that URL; for `candidate`, the generation being prepared; for a slot projected from a resident set, the member's committed generation. Absent otherwise."
+        },
         "bundle_digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"},
         "bundle_name": {"type": "string"},
         "bundle_version": {"type": "string"},

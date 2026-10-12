@@ -1252,17 +1252,35 @@ fn active_deployment_finding(
 
 /// How the members of a resident set stand, by the rule `status` degrades
 /// on. A member's `serving` state is committed, so the message says what
-/// the agent reports of contact rather than calling the member live.
+/// the agent reports of contact rather than calling the member live, and
+/// names a worker reported stopped or draining, which the rule does not
+/// judge.
 fn resident_set_members_finding(
     set: &ResidentSetStatus,
     health: &ResidentSetHealth<'_>,
 ) -> Finding {
     let total = set.members.len();
     if !health.degraded() {
-        let contact = match health.in_contact {
-            0 => "; contact not reported".to_string(),
-            n if n == total => " and in contact".to_string(),
-            n => format!("; {n} in contact, contact not reported for the rest"),
+        let (in_contact, without_worker) = (health.in_contact, health.stopped_or_draining);
+        let unreported = total.saturating_sub(in_contact + without_worker);
+        let contact = if in_contact == total {
+            " and in contact".to_string()
+        } else if unreported == total {
+            "; contact not reported".to_string()
+        } else {
+            let mut says = Vec::new();
+            if in_contact > 0 {
+                says.push(format!("{in_contact} in contact"));
+            }
+            if without_worker > 0 {
+                says.push(format!(
+                    "{without_worker} with a worker that is stopped or draining"
+                ));
+            }
+            if unreported > 0 {
+                says.push("contact not reported for the rest".to_string());
+            }
+            format!("; {}", says.join(", "))
         };
         return Finding::ok(
             FindingId::ResidentSetMembers,
@@ -1437,6 +1455,7 @@ mod tests {
         if active {
             status.active = Some(DeploymentSummary {
                 deployment_id: "d-1".into(),
+                generation: None,
                 bundle_digest: "sha256:abc".into(),
                 bundle_name: Some("yolov8".into()),
                 bundle_version: Some("0.0.1".into()),
@@ -1634,6 +1653,9 @@ mod tests {
             effective_quota: None,
             staged_bytes: None,
             contact: None,
+            process: None,
+            readiness: None,
+            draining: None,
         };
         if let Some(status) = response.agent_status.as_mut() {
             status.resident_set = Some(tensorplate_protocol::ResidentSetStatus {
@@ -1699,6 +1721,9 @@ mod tests {
             effective_quota: None,
             staged_bytes: None,
             contact,
+            process: None,
+            readiness: None,
+            draining: None,
         }
     }
 
@@ -1833,31 +1858,53 @@ mod tests {
     fn a_healthy_set_says_what_it_knows_of_contact() {
         use tensorplate_protocol::ContactState::InContact;
         use tensorplate_protocol::MemberState::Serving;
+        use tensorplate_protocol::ProcessState::{Running, Stopped};
+        // How an agent that reports worker processes describes a member:
+        // the process, whether it drains, and contact only for one in service.
+        let worker = |process, draining: bool| tensorplate_protocol::MemberStatus {
+            process: Some(process),
+            draining: Some(draining),
+            ..set_member(
+                "speech",
+                Serving,
+                (process == Running && !draining).then_some(InContact),
+            )
+        };
+        let unreported = |contact| set_member("speech", Serving, contact);
         let cases = [
             (
-                None,
-                None,
+                unreported(None),
+                unreported(None),
                 "2 members in `serving` state; contact not reported",
             ),
             (
-                Some(InContact),
-                Some(InContact),
+                unreported(Some(InContact)),
+                unreported(Some(InContact)),
                 "2 members in `serving` state and in contact",
             ),
             (
-                Some(InContact),
-                None,
+                unreported(Some(InContact)),
+                unreported(None),
                 "2 members in `serving` state; 1 in contact, contact not reported for the rest",
+            ),
+            (
+                worker(Running, false),
+                worker(Stopped, false),
+                "2 members in `serving` state; 1 in contact, 1 with a worker that is stopped or draining",
+            ),
+            (
+                worker(Stopped, false),
+                worker(Running, true),
+                "2 members in `serving` state; 2 with a worker that is stopped or draining",
+            ),
+            (
+                worker(Stopped, false),
+                unreported(None),
+                "2 members in `serving` state; 1 with a worker that is stopped or draining, contact not reported for the rest",
             ),
         ];
         for (first, second, says) in cases {
-            let findings = set_findings(
-                false,
-                vec![
-                    set_member("speech-stt", Serving, first),
-                    set_member("speech-tts", Serving, second),
-                ],
-            );
+            let findings = set_findings(false, vec![first, second]);
             let active = finding(&findings, FindingId::ActiveDeployment);
             assert_eq!(active.status, FindingStatus::Pass, "{active:?}");
             assert!(

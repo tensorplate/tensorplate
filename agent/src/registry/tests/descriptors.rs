@@ -40,6 +40,13 @@ fn described() -> Described {
 }
 
 fn described_with(stamp_of: impl FnOnce(RestartStamp) -> RestartStamp) -> Described {
+    described_on(|settings| settings, stamp_of)
+}
+
+fn described_on(
+    settings_of: impl FnOnce(RegistrySettings) -> RegistrySettings,
+    stamp_of: impl FnOnce(RestartStamp) -> RestartStamp,
+) -> Described {
     let state = TempDir::new().unwrap();
     let staged = staged_copy(&state, "staged", "v0_2/speech_stt_streaming");
     let store = Arc::new(StateStore::open(state.path().join("state")).unwrap());
@@ -51,7 +58,7 @@ fn described_with(stamp_of: impl FnOnce(RestartStamp) -> RestartStamp) -> Descri
         let stamped = registry.with_restart_stamp(stamp);
         stamped.with_descriptor_store(descriptors.clone())
     };
-    let f = fixture_with(|settings| settings, wired);
+    let f = fixture_with(settings_of, wired);
     let recipe = reference(&first);
     Described {
         f,
@@ -199,6 +206,122 @@ fn a_handed_generation_is_refused_unless_it_is_above_every_generation_the_regist
         let member = MemberRef::new("stt", 3);
         assert_eq!(d.launcher.handle(3).spec.member, member, "owed {owed}");
     }
+}
+
+/// The refusal of a generation handed while the registry holds `held`.
+fn refused_as_held(d: &Described, handed: &CandidateRef, held: u64) {
+    let error = d.registry.prepare("tx", handed, WARM).unwrap_err();
+    let record = error.to_record();
+    assert!(
+        matches!(error, AgentError::DeploymentDescriptor { .. }),
+        "{error}"
+    );
+    assert!(record.code == ErrorCode::LoadFailed && !record.recoverable);
+    let says = format!("is not started: the registry holds generation {held}");
+    assert!(record.message.contains(&says), "{record:?}");
+}
+
+/// The reference of `d`'s descriptor re-stamped for `generation`, its
+/// document written.
+fn restamped(d: &Described, generation: u64) -> CandidateRef {
+    let next = d.first.restamp(generation).unwrap();
+    d.descriptors.write(&next).unwrap();
+    reference(&next)
+}
+
+#[test]
+fn a_handed_generation_at_or_below_one_that_is_draining_is_refused() {
+    let d = described();
+    let second = restamped(&d, 2);
+    d.serve(&second);
+    let (is_stopping, release) = hold_stop(&d.launcher.handle(2));
+
+    std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets what is held end.
+        let release = release;
+        let unloading = scope.spawn(|| d.registry.unload("stt"));
+        is_stopping
+            .recv_timeout(GRACE)
+            .expect("the member is asked to stop");
+
+        // Generation 2 has left the table and has not been reaped.
+        for handed in [&d.recipe, &second] {
+            refused_as_held(&d, handed, 2);
+        }
+        assert_eq!(d.launcher.count(), 1);
+
+        release.send(()).unwrap();
+        unloading.join().unwrap();
+    });
+}
+
+#[test]
+fn with_two_generations_draining_a_handed_one_must_be_above_the_newer() {
+    // A third port: a launch finds one while two workers hold theirs.
+    let d = described_on(
+        |mut settings| {
+            let http = CANDIDATE_PORT + 1;
+            settings.ports.push(MemberPorts { http, stream: None });
+            settings
+        },
+        |stamp| stamp,
+    );
+    let [second, third, fourth] = [2, 3, 4].map(|generation| restamped(&d, generation));
+    d.serve(&second);
+    d.registry.prepare("tx", &third, WARM).unwrap();
+    let (is_stopping, release) = hold_stop(&d.launcher.handle(2));
+
+    std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets what is held end.
+        let release = release;
+        let unloading = scope.spawn(|| d.registry.unload("stt"));
+        is_stopping
+            .recv_timeout(GRACE)
+            .expect("the serving member is asked to stop");
+
+        // Generations 2 and 3 left the table together; neither is reaped.
+        for handed in [&d.recipe, &second, &third] {
+            refused_as_held(&d, handed, 3);
+        }
+        assert_eq!(d.launcher.count(), 2);
+
+        d.registry.prepare("tx", &fourth, WARM).unwrap();
+        let member = MemberRef::new("stt", 4);
+        assert_eq!(d.launcher.handle(4).spec.member, member);
+
+        release.send(()).unwrap();
+        unloading.join().unwrap();
+    });
+}
+
+#[test]
+fn the_serving_member_carries_the_digests_of_the_descriptor_it_was_started_from() {
+    let d = described();
+    let started_from = || {
+        let serving = d.registry.serving_member().unwrap().unwrap();
+        (
+            serving.member.generation,
+            serving.descriptor_digest,
+            serving.configuration_digest,
+        )
+    };
+    let of = |descriptor: &DeploymentDescriptor| {
+        (
+            descriptor.generation,
+            Some(descriptor.descriptor_digest.clone()),
+            Some(descriptor.configuration_digest.clone()),
+        )
+    };
+    d.serve(&d.recipe);
+    assert_eq!(started_from(), of(&d.first));
+
+    // A restarted generation serves from what the stamp wrote on `active`.
+    d.stop(1);
+    assert_eq!(d.step(1), restarted(2));
+    d.step(0);
+    let second = d.first.restamp(2).unwrap();
+    assert!(d.records(&second));
+    assert_eq!(started_from(), of(&second));
 }
 
 #[test]

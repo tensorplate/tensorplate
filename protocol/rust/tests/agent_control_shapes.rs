@@ -25,11 +25,13 @@ use tensorplate_protocol::agent_control::{
 use tensorplate_protocol::agent_state::decode_agent_state;
 use tensorplate_protocol::resident_set::{MemberState, ResidentSet};
 use tensorplate_protocol::{
-    decode_with_version_check, AdmissionMode, ContactState, DecodeError, FEATURE_MEMBER_ROLLBACK,
-    FEATURE_SET_OPERATION_ADD, MAX_MEMBER_SESSIONS,
+    decode_with_version_check, AdmissionMode, ContactState, DecodeError, ProcessState, Readiness,
+    FEATURE_MEMBER_ROLLBACK, FEATURE_SET_OPERATION_ADD, MAX_MEMBER_SESSIONS,
 };
 
 const GOLDEN: &str = "agent_control_singleton_lifecycle.jsonl";
+/// Status exchanges recorded from an agent that runs the member registry.
+const MEMBER_STATUS: &str = "agent_control_member_status.jsonl";
 
 fn fixture(name: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -118,24 +120,46 @@ fn committed_set(fixture_name: &str) -> ResidentSet {
 // ---- The recorded singleton exchange ----------------------------------------
 
 #[test]
-fn the_recorded_exchange_still_decodes_and_reencodes_byte_for_byte() {
-    for (index, line) in fixture(GOLDEN).lines().enumerate() {
-        let value: Value = serde_json::from_str(line).expect("json");
-        let errors = schema_error_paths(&value);
-        assert!(
-            errors.is_empty(),
-            "line {}: schema errors at {errors:?}",
-            index + 1
-        );
-        let reencoded = if is_response(&value) {
-            let response: ControlResponse =
-                decode_with_version_check(line).expect("response decodes");
-            serde_json::to_string(&response).expect("encode")
-        } else {
-            let request: ControlRequest = decode_with_version_check(line).expect("request decodes");
-            serde_json::to_string(&request).expect("encode")
-        };
-        assert_eq!(reencoded, line, "line {} changes on re-encode", index + 1);
+fn the_recorded_exchanges_still_decode_and_reencode_byte_for_byte() {
+    for name in [GOLDEN, MEMBER_STATUS] {
+        for (index, line) in fixture(name).lines().enumerate() {
+            let value: Value = serde_json::from_str(line).expect("json");
+            let errors = schema_error_paths(&value);
+            assert!(
+                errors.is_empty(),
+                "{name} line {}: schema errors at {errors:?}",
+                index + 1
+            );
+            let reencoded = if is_response(&value) {
+                let response: ControlResponse =
+                    decode_with_version_check(line).expect("response decodes");
+                serde_json::to_string(&response).expect("encode")
+            } else {
+                let request: ControlRequest =
+                    decode_with_version_check(line).expect("request decodes");
+                serde_json::to_string(&request).expect("encode")
+            };
+            assert_eq!(
+                reencoded,
+                line,
+                "{name} line {} changes on re-encode",
+                index + 1
+            );
+        }
+    }
+}
+
+#[test]
+fn the_singleton_recording_carries_none_of_the_fields_the_member_registry_adds() {
+    // It was recorded before they existed, and the test above still reads
+    // it: a status without them is one this reader accepts.
+    let recorded = fixture(GOLDEN);
+    for key in ["generation", "process", "readiness", "draining", "contact"] {
+        assert!(!recorded.contains(&format!("\"{key}\"")), "{key}");
+    }
+    let with = fixture(MEMBER_STATUS);
+    for key in ["generation", "process", "readiness", "draining", "contact"] {
+        assert!(with.contains(&format!("\"{key}\"")), "{key}");
     }
 }
 
@@ -256,6 +280,26 @@ fn schema_enums_match_the_mirror() {
     assert_eq!(
         defs["MemberStatus"]["properties"]["contact"]["enum"],
         Value::Array(contact.into_iter().map(spelling).collect())
+    );
+    let process = [ProcessState::Running, ProcessState::Stopped];
+    for state in process {
+        match state {
+            ProcessState::Running | ProcessState::Stopped => {}
+        }
+    }
+    assert_eq!(
+        defs["MemberStatus"]["properties"]["process"]["enum"],
+        Value::Array(process.into_iter().map(spelling).collect())
+    );
+    let readiness = [Readiness::Ready, Readiness::NotReady];
+    for state in readiness {
+        match state {
+            Readiness::Ready | Readiness::NotReady => {}
+        }
+    }
+    assert_eq!(
+        defs["MemberStatus"]["properties"]["readiness"]["enum"],
+        Value::Array(readiness.into_iter().map(spelling).collect())
     );
 }
 
@@ -900,7 +944,11 @@ fn a_two_member_set_projects_every_member_and_no_singleton() {
         assert_eq!(member.stream_api_version, None);
         assert_eq!(member.effective_quota, None);
         assert_eq!(member.staged_bytes, None);
+        // The committed record says nothing of a process.
         assert_eq!(member.contact, None);
+        assert_eq!(member.process, None);
+        assert_eq!(member.readiness, None);
+        assert_eq!(member.draining, None);
     }
     assert_eq!(singleton_slots(&set), (None, None));
     let response = json!({
@@ -932,6 +980,9 @@ fn a_size_one_set_projects_into_the_singleton_slots() {
     let previous = previous.expect("the retained generation is previous_active");
     assert_eq!(previous.deployment_id, retained.deployment_id);
     assert_eq!(previous.serving_url, None);
+    assert_ne!(member.generation, retained.generation);
+    assert_eq!(active.generation, Some(member.generation));
+    assert_eq!(previous.generation, Some(retained.generation));
     let response = json!({
         "schema_version": "0.1", "status": "ok",
         "agent_status": {
@@ -1007,4 +1058,113 @@ fn a_quarantined_only_member_projects_no_singleton() {
     let status = ResidentSetStatus::from_committed(&set);
     assert_eq!(status.members[0].state, MemberState::Quarantined);
     assert_eq!(status.members[0].unary_endpoint, None);
+}
+
+// ---- The fields a member's worker process and a generation add ---------------
+
+/// The recorded status of a set of one whose member and `active` carry
+/// every field added for the worker process and the generation.
+fn status_with_the_process_fields() -> Value {
+    let recorded = fixture(MEMBER_STATUS);
+    let line = recorded.lines().nth(3).expect("the second response");
+    serde_json::from_str(line).expect("json")
+}
+
+#[test]
+fn the_process_fields_and_the_generation_are_spelled_as_the_schema_allows() {
+    let response = status_with_the_process_fields();
+    let member = &response["agent_status"]["resident_set"]["members"][0];
+    assert_eq!(member["process"], "running");
+    assert_eq!(member["readiness"], "ready");
+    assert_eq!(member["draining"], false);
+    assert_eq!(member["contact"], "in_contact");
+    assert_eq!(response["agent_status"]["active"]["generation"], 2);
+    assert_eq!(response["agent_status"]["previous_active"]["generation"], 1);
+
+    let decoded: ControlResponse =
+        decode_with_version_check(&response.to_string()).expect("decodes");
+    let member = &decoded
+        .agent_status
+        .as_ref()
+        .and_then(|status| status.resident_set.as_ref())
+        .expect("set")
+        .members[0];
+    assert_eq!(member.process, Some(ProcessState::Running));
+    assert_eq!(member.readiness, Some(Readiness::Ready));
+    assert_eq!(member.draining, Some(false));
+    assert_eq!(member.contact, Some(ContactState::InContact));
+
+    // The other spelling of each.
+    let mut other = response.clone();
+    let stopped = &mut other["agent_status"]["resident_set"]["members"][0];
+    stopped["process"] = json!("stopped");
+    stopped["readiness"] = json!("not_ready");
+    stopped["draining"] = json!(true);
+    stopped["contact"] = json!("out_of_contact");
+    let errors = schema_error_paths(&other);
+    assert!(errors.is_empty(), "schema errors at {errors:?}");
+    let decoded: ControlResponse = decode_with_version_check(&other.to_string()).expect("decodes");
+    assert_eq!(serde_json::to_value(decoded).expect("encode"), other);
+}
+
+#[test]
+fn the_schema_refuses_a_process_field_of_the_wrong_kind() {
+    for (field, wrong) in [
+        ("process", json!("exited")),
+        ("readiness", json!(true)),
+        ("draining", json!("true")),
+    ] {
+        let mut response = status_with_the_process_fields();
+        response["agent_status"]["resident_set"]["members"][0][field] = wrong;
+        assert_eq!(
+            schema_error_paths(&response),
+            BTreeSet::from([format!("/agent_status/resident_set/members/0/{field}")]),
+            "{field}"
+        );
+    }
+    let mut response = status_with_the_process_fields();
+    response["agent_status"]["active"]["generation"] = json!(0);
+    assert_eq!(
+        schema_error_paths(&response),
+        BTreeSet::from(["/agent_status/active/generation".to_string()]),
+        "a generation is allocated from 1"
+    );
+}
+
+#[test]
+fn a_status_without_the_process_fields_still_decodes_and_writes_none_of_them() {
+    let mut response = status_with_the_process_fields();
+    let status = &mut response["agent_status"];
+    remove(&mut status["active"], "generation");
+    for field in ["process", "readiness", "draining", "contact"] {
+        remove(&mut status["resident_set"]["members"][0], field);
+    }
+    let decoded: ControlResponse =
+        decode_with_version_check(&response.to_string()).expect("decodes");
+    let agent = decoded.agent_status.as_ref().expect("status");
+    assert_eq!(agent.active.as_ref().expect("active").generation, None);
+    let member = &agent.resident_set.as_ref().expect("set").members[0];
+    assert_eq!(
+        (member.process, member.readiness, member.draining),
+        (None, None, None)
+    );
+    assert_eq!(serde_json::to_value(&decoded).expect("encode"), response);
+}
+
+#[test]
+fn a_status_reader_passes_over_a_key_it_does_not_know() {
+    // What lets a client built before a status field read a status that
+    // carries it: no status object refuses a key it has no field for.
+    let mut response = status_with_the_process_fields();
+    let known = decode_with_version_check::<ControlResponse>(&response.to_string())
+        .expect("decodes")
+        .agent_status;
+    let status = &mut response["agent_status"];
+    status["later"] = json!({"a": 1});
+    status["active"]["later"] = json!(1);
+    status["resident_set"]["later"] = json!("x");
+    status["resident_set"]["members"][0]["later"] = json!([1]);
+    let decoded: ControlResponse =
+        decode_with_version_check(&response.to_string()).expect("unknown keys are passed over");
+    assert_eq!(decoded.agent_status, known);
 }

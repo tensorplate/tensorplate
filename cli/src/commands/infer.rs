@@ -618,6 +618,7 @@ mod tests {
                 agent_state: AgentRunState::Ready,
                 active: Some(DeploymentSummary {
                     deployment_id: "d-1".into(),
+                    generation: None,
                     bundle_digest: "sha256:abc".into(),
                     bundle_name: None,
                     bundle_version: None,
@@ -656,6 +657,7 @@ mod tests {
                 agent_state: AgentRunState::Ready,
                 active: Some(DeploymentSummary {
                     deployment_id: "d-1".into(),
+                    generation: None,
                     bundle_digest: "sha256:abc".into(),
                     bundle_name: None,
                     bundle_version: None,
@@ -686,6 +688,7 @@ mod tests {
     fn summary(deployment_id: &str, serving_url: Option<&str>) -> DeploymentSummary {
         DeploymentSummary {
             deployment_id: deployment_id.into(),
+            generation: None,
             bundle_digest: "sha256:abc".into(),
             bundle_name: None,
             bundle_version: None,
@@ -716,6 +719,9 @@ mod tests {
             effective_quota: None,
             staged_bytes: None,
             contact: None,
+            process: None,
+            readiness: None,
+            draining: None,
         }
     }
 

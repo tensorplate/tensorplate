@@ -14,6 +14,7 @@ use crate::worker::MemberEvent;
 mod descriptors;
 mod ports;
 mod restart;
+mod view;
 
 const ACTIVE_PORT: u16 = 41_080;
 const CANDIDATE_PORT: u16 = 41_081;
@@ -30,6 +31,8 @@ struct Handle {
     config: serde_json::Value,
     calls: Mutex<Vec<&'static str>>,
     exited: AtomicBool,
+    /// Reading whether the process exited fails.
+    uninspectable: AtomicBool,
     obeys_terminate: AtomicBool,
     contact: Mutex<ControlContact>,
     /// `startup_failure` says it has begun, then waits to be let finish.
@@ -47,10 +50,22 @@ impl Handle {
     }
 }
 
+/// Holds `handle`'s stop; returns what tells that it began and what lets
+/// it finish.
+fn hold_stop(handle: &Handle) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let (started, has_started) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    *handle.hold_terminate.lock().unwrap() = Some((started, released));
+    (has_started, release)
+}
+
 struct FakeProcess(Arc<Handle>);
 
 impl MemberProcess for FakeProcess {
     fn exited(&mut self) -> AgentResult<bool> {
+        if self.0.uninspectable.load(Ordering::SeqCst) {
+            return Err(AgentError::WorkerControl("wait failed".into()));
+        }
         Ok(self.0.exited.load(Ordering::SeqCst))
     }
     fn startup_failure(&mut self) -> AgentError {
@@ -122,6 +137,7 @@ impl ProcessLauncher for FakeLauncher {
             config,
             calls: Mutex::new(Vec::new()),
             exited: AtomicBool::new(false),
+            uninspectable: AtomicBool::new(false),
             obeys_terminate: AtomicBool::new(!self.stubborn.load(Ordering::SeqCst)),
             contact: Mutex::new(ControlContact::Reporting),
             hold_failure: Mutex::new(None),
@@ -209,6 +225,11 @@ fn fixture_with(
         clock,
         registry,
     }
+}
+
+fn serving_url(f: &Fixture) -> Option<String> {
+    let serving = f.registry.serving_member().unwrap();
+    serving.map(|serving| serving.serving_url)
 }
 
 fn bundle_fixture(bundle: &str) -> String {
@@ -416,7 +437,7 @@ fn promotion_retires_the_old_generation_by_asking_it_to_stop() {
         Some("tts")
     );
     assert_eq!(
-        f.registry.active_serving_url().unwrap().as_deref(),
+        serving_url(&f).as_deref(),
         Some(format!("http://127.0.0.1:{CANDIDATE_PORT}/infer").as_str())
     );
     assert_eq!(f.configs(), 1);
@@ -473,7 +494,7 @@ fn a_serving_member_that_exited_is_no_longer_active() {
     serving.exited.store(true, Ordering::SeqCst);
 
     assert_eq!(f.registry.active_deployment_id().unwrap(), None);
-    assert_eq!(f.registry.active_serving_url().unwrap(), None);
+    assert_eq!(serving_url(&f), None);
     f.registry.supervise();
     assert_eq!(f.configs(), 0);
 }

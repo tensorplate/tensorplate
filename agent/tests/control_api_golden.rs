@@ -12,6 +12,9 @@
 // already reads. Values that differ per run (transaction ids, monotonic
 // timestamps, the temporary directory) are normalized in both the
 // recording and the replay. Run with `UPDATE_GOLDEN=1` to re-record.
+//
+// `agent_control_member_status.jsonl` beside it holds two status exchanges
+// recorded the same way from an agent that runs the member registry.
 
 #![cfg(unix)]
 #![allow(
@@ -22,8 +25,11 @@
 )]
 
 mod common;
+#[path = "support/registry_agent.rs"]
+mod registry_agent;
 
 use common::{vision_bundle, Harness};
+use registry_agent::RegistryAgent;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -33,9 +39,41 @@ use tensorplate_protocol::agent_control::{
     ControlRequest, DeployRequest, RollbackRequest, StatusRequest,
 };
 
-fn golden_path() -> PathBuf {
+fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../protocol/rust/tests/fixtures/agent_control_singleton_lifecycle.jsonl")
+        .join("../protocol/rust/tests/fixtures")
+        .join(name)
+}
+
+fn golden_path() -> PathBuf {
+    fixture_path("agent_control_singleton_lifecycle.jsonl")
+}
+
+/// The harness's temporary directory as it appears in a response. The
+/// canonical form first: on macOS a temporary directory under `/var`
+/// canonicalizes to `/private/var`.
+fn tempdirs(h: &Harness) -> [String; 2] {
+    [
+        h.td.path()
+            .canonicalize()
+            .expect("canonical tempdir")
+            .display()
+            .to_string(),
+        h.td.path().display().to_string(),
+    ]
+}
+
+/// Require `lines` to be the recording at `path`, or write them there.
+fn assert_recorded(path: &Path, lines: &[String]) {
+    let replay = lines.join("\n") + "\n";
+    if std::env::var_os("UPDATE_GOLDEN").is_some() {
+        std::fs::write(path, &replay).expect("write golden");
+    }
+    let golden = std::fs::read_to_string(path).expect("read golden");
+    for (index, (want, got)) in golden.lines().zip(replay.lines()).enumerate() {
+        assert_eq!(got, want, "line {} differs from the golden", index + 1);
+    }
+    assert_eq!(replay.lines().count(), golden.lines().count());
 }
 
 /// Send one request line and return the raw request and response lines.
@@ -123,16 +161,7 @@ fn a_singleton_lifecycle_crosses_the_socket_byte_for_byte() {
     let h = Harness::new();
     let socket = h.config.socket_path.clone().expect("socket");
     let mut server = Server::start(&h.config, h.coord.clone()).expect("start");
-    // The canonical form first: on macOS a temporary directory under
-    // `/var` canonicalizes to `/private/var`.
-    let tempdirs = [
-        h.td.path()
-            .canonicalize()
-            .expect("canonical tempdir")
-            .display()
-            .to_string(),
-        h.td.path().display().to_string(),
-    ];
+    let tempdirs = tempdirs(&h);
 
     let b1 = vision_bundle(h.td.path(), "d1");
     let b2 = vision_bundle(h.td.path(), "d2");
@@ -157,13 +186,30 @@ fn a_singleton_lifecycle_crosses_the_socket_byte_for_byte() {
     }
     server.shutdown();
 
-    let replay = lines.join("\n") + "\n";
-    if std::env::var_os("UPDATE_GOLDEN").is_some() {
-        std::fs::write(golden_path(), &replay).expect("write golden");
-    }
-    let golden = std::fs::read_to_string(golden_path()).expect("read golden");
-    for (index, (want, got)) in golden.lines().zip(replay.lines()).enumerate() {
-        assert_eq!(got, want, "line {} differs from the golden", index + 1);
-    }
-    assert_eq!(replay.lines().count(), golden.lines().count());
+    assert_recorded(&golden_path(), &lines);
+}
+
+#[test]
+fn the_status_of_an_agent_that_runs_the_member_registry_crosses_the_socket_as_recorded() {
+    let h = Harness::new();
+    let agent = RegistryAgent::start(&h);
+    let socket = h.config.socket_path.clone().expect("socket");
+    let mut server = Server::start(&h.config, agent.coord.clone()).expect("start");
+    let tempdirs = tempdirs(&h);
+    let mut tx_ids = Vec::new();
+    let mut lines = Vec::new();
+    let mut record_status = |correlation: &str| {
+        let request = ControlRequest::status(Some(correlation.into()), StatusRequest::default());
+        let (sent, received) = exchange(&socket, &request);
+        lines.push(normalize(&sent, &tempdirs, &mut tx_ids));
+        lines.push(normalize(&received, &tempdirs, &mut tx_ids));
+    };
+
+    agent.deploy_member(&h);
+    record_status("ctl-000001");
+    agent.commit_member_as_a_set(&h);
+    record_status("ctl-000002");
+    server.shutdown();
+
+    assert_recorded(&fixture_path("agent_control_member_status.jsonl"), &lines);
 }

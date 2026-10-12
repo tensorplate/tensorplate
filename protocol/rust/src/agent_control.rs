@@ -544,6 +544,11 @@ pub struct DeployStatus {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentSummary {
     pub deployment_id: String,
+    /// The deployment's generation, when the agent knows it: the one
+    /// serving at `serving_url`, the one being prepared, or a resident-set
+    /// member's committed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
     pub bundle_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_name: Option<String>,
@@ -568,6 +573,7 @@ impl DeploymentSummary {
     pub fn from_member(member: &ResidentMember, serving_url: Option<String>) -> Self {
         Self {
             deployment_id: member.deployment_id.clone(),
+            generation: Some(member.generation),
             bundle_digest: member.bundle_digest.clone(),
             bundle_name: Some(member.bundle_name.clone()),
             bundle_version: Some(member.bundle_version.clone()),
@@ -584,6 +590,7 @@ impl DeploymentSummary {
     pub fn from_retained(retained: &RetainedGeneration) -> Self {
         Self {
             deployment_id: retained.deployment_id.clone(),
+            generation: Some(retained.generation),
             bundle_digest: retained.bundle_digest.clone(),
             bundle_name: Some(retained.bundle_name.clone()),
             bundle_version: Some(retained.bundle_version.clone()),
@@ -940,12 +947,31 @@ pub enum ContactState {
     OutOfContact,
 }
 
+/// Whether the worker process of a member generation is running under the
+/// agent.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessState {
+    Running,
+    Stopped,
+}
+
+/// The agent's last judgement of a member generation: whether its worker
+/// reported the model ready while answering on its control channel.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Readiness {
+    Ready,
+    NotReady,
+}
+
 /// One resident-set member at its committed generation, as status reports
-/// it. Fields whose source does not exist yet stay absent:
-/// `stream_api_version` until the stream endpoint lands, `effective_quota`
-/// and `contact` until the agent polls the member's worker over the
-/// runtime control channel, and `staged_bytes` until staging is keyed by
-/// generation.
+/// it. `process`, `readiness`, `draining` and `contact` are absent when the
+/// agent's worker control does not report its processes. Fields whose
+/// source does not exist yet stay absent: `stream_api_version` until the
+/// stream endpoint lands, `effective_quota` until the agent reports what
+/// the member's worker has in force, and `staged_bytes` until staging is
+/// keyed by generation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MemberStatus {
     pub deployment_id: String,
@@ -969,6 +995,12 @@ pub struct MemberStatus {
     pub staged_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact: Option<ContactState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ProcessState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<Readiness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draining: Option<bool>,
 }
 
 /// The committed resident set as status reports it, members in committed
@@ -1006,6 +1038,9 @@ impl ResidentSetStatus {
                     effective_quota: None,
                     staged_bytes: None,
                     contact: None,
+                    process: None,
+                    readiness: None,
+                    draining: None,
                 }
             })
             .collect();

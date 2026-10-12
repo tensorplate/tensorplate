@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 use tensorplate_protocol::agent_control::{
     AgentRunState, AgentStatus, ContactState, ControlRequest, ControlResponse, DeploymentSummary,
-    QuarantineSummary, ResidentSetStatus, SupervisionStatusSummary,
+    ProcessState, QuarantineSummary, Readiness, ResidentSetStatus, SupervisionStatusSummary,
 };
 use tensorplate_protocol::supervision_event::{SupervisionAgentState, SupervisionServingState};
 use tensorplate_protocol::{AdmissionMode, MemberState};
@@ -217,6 +217,21 @@ fn resident_set_lines(set: &ResidentSetStatus) -> String {
                 ContactState::OutOfContact => " contact=out_of_contact",
             });
         }
+        if let Some(process) = member.process {
+            out.push_str(match process {
+                ProcessState::Running => " process=running",
+                ProcessState::Stopped => " process=stopped",
+            });
+        }
+        if let Some(readiness) = member.readiness {
+            out.push_str(match readiness {
+                Readiness::Ready => " readiness=ready",
+                Readiness::NotReady => " readiness=not_ready",
+            });
+        }
+        if let Some(draining) = member.draining {
+            out.push_str(&format!(" draining={draining}"));
+        }
         out.push('\n');
     }
     out
@@ -225,6 +240,7 @@ fn resident_set_lines(set: &ResidentSetStatus) -> String {
 fn summary_block(d: &DeploymentSummary) -> Value {
     json!({
         "deployment_id": d.deployment_id,
+        "generation": d.generation,
         "bundle_digest": d.bundle_digest,
         "bundle_name": d.bundle_name,
         "bundle_version": d.bundle_version,
@@ -314,13 +330,17 @@ impl Severity {
 /// How a committed resident set's members stand: the one rule `status`
 /// severity and `doctor` judge a set by. A member is degraded when it is
 /// quarantined, or in `serving` state while the agent reports its worker
-/// out of contact. An absent `contact` is unreported, not a fault.
+/// out of contact. An absent `contact` is not a fault: the agent does not
+/// report contact, or the member's process is stopped or draining.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct ResidentSetHealth<'a> {
     /// Members in `serving` state, whether or not their worker answers.
     pub(crate) serving: usize,
     /// Members in `serving` state the agent reports in contact.
     pub(crate) in_contact: usize,
+    /// Members in `serving` state with no contact reported because their
+    /// worker is stopped or draining.
+    pub(crate) stopped_or_draining: usize,
     /// Quarantined members, in committed order.
     pub(crate) quarantined: Vec<&'a str>,
     /// Members in `serving` state the agent reports out of contact, in
@@ -340,7 +360,12 @@ impl<'a> ResidentSetHealth<'a> {
                     match contact {
                         Some(ContactState::InContact) => health.in_contact += 1,
                         Some(ContactState::OutOfContact) => health.out_of_contact.push(id),
-                        None => {}
+                        None => {
+                            let stopped = member.process == Some(ProcessState::Stopped);
+                            if stopped || member.draining == Some(true) {
+                                health.stopped_or_draining += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -463,6 +488,9 @@ fn render_human(
                     .map(|n| format!("{n}@{}", active.bundle_version.as_deref().unwrap_or("?")))
                     .unwrap_or_else(|| active.bundle_digest.clone()),
             ));
+            if let Some(generation) = active.generation {
+                out.push_str(&format!("  generation={generation}\n"));
+            }
             if let Some(url) = active.serving_url.as_deref() {
                 out.push_str(&format!("  serving_url={url}\n"));
             }
@@ -746,6 +774,7 @@ mod tests {
             agent_state: AgentRunState::Ready,
             active: Some(DeploymentSummary {
                 deployment_id: "d-1".into(),
+                generation: None,
                 bundle_digest: "sha256:abc".into(),
                 bundle_name: Some("yolov8".into()),
                 bundle_version: Some("0.0.1".into()),
@@ -1135,6 +1164,9 @@ mod tests {
             effective_quota: None,
             staged_bytes: None,
             contact,
+            process: None,
+            readiness: None,
+            draining: None,
         }
     }
 
@@ -1154,15 +1186,30 @@ mod tests {
                     MemberState::Quarantined,
                     Some(ContactState::OutOfContact),
                 ),
+                tensorplate_protocol::MemberStatus {
+                    process: Some(ProcessState::Stopped),
+                    draining: Some(false),
+                    ..health_member("g", MemberState::Serving, None)
+                },
+                tensorplate_protocol::MemberStatus {
+                    process: Some(ProcessState::Running),
+                    draining: Some(true),
+                    ..health_member("h", MemberState::Serving, None)
+                },
+                tensorplate_protocol::MemberStatus {
+                    process: Some(ProcessState::Stopped),
+                    ..health_member("i", MemberState::Quarantined, None)
+                },
             ],
         };
         let health = ResidentSetHealth::of(&set);
         assert_eq!(
             health,
             ResidentSetHealth {
-                serving: 3,
+                serving: 5,
                 in_contact: 1,
-                quarantined: vec!["d", "e", "f"],
+                stopped_or_draining: 2,
+                quarantined: vec!["d", "e", "f", "i"],
                 out_of_contact: vec!["c"],
             }
         );

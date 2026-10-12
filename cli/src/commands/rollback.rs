@@ -149,6 +149,7 @@ mod tests {
     fn restored_response() -> ControlResponse {
         let restored = DeploymentSummary {
             deployment_id: "d-prev".into(),
+            generation: None,
             bundle_digest: "sha256:prev".into(),
             bundle_name: None,
             bundle_version: None,

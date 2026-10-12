@@ -97,8 +97,9 @@ The agent and CLI currently share one exact-match version decoder with every
 other protocol payload; bumping that global constant for a local status field
 would reject mixed-version agent/CLI installs and every unrelated `0.1`
 payload rather than provide minor-version compatibility. `supervision`,
-`serving_url`, `platform_telemetry`, `resident_set` and `control_features`
-follow this rule. The schema, Rust binding, and round-trip tests still
+`serving_url`, `platform_telemetry`, `resident_set`, `control_features`, a
+deployment summary's `generation` and a resident-set member's `process`,
+`readiness` and `draining` follow this rule. The schema, Rust binding, and round-trip tests still
 change together, and the exception does not apply to changed meanings.
 Schema validators pinned to the previous file remain strict because
 `additionalProperties` is false; compatibility here is the deployed

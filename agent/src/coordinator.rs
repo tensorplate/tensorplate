@@ -29,11 +29,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tensorplate_platform::PlatformRegistry;
 use tensorplate_protocol::agent_control::{
-    is_valid_deployment_id, singleton_slots, AgentRunState, AgentStatus, DeployFailureSummary,
-    DeployStatus, DeploymentSummary, QuarantineSummary, ResidentSetStatus, ResponseError,
-    SupervisionStatusSummary,
+    is_valid_deployment_id, singleton_slots, AgentRunState, AgentStatus, ContactState,
+    DeployFailureSummary, DeployStatus, DeploymentSummary, MemberStatus, ProcessState,
+    QuarantineSummary, Readiness, ResidentSetStatus, ResponseError, SupervisionStatusSummary,
 };
-use tensorplate_protocol::agent_state::{DeploymentRecord, TransactionKind, TransactionRecord};
+use tensorplate_protocol::agent_state::{
+    AgentState, DeploymentRecord, TransactionKind, TransactionRecord,
+};
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::supervision_event::SupervisionAgentState;
 use tensorplate_protocol::worker_control::CandidateRef;
@@ -52,7 +54,7 @@ use crate::platform_admission::PlatformAdmission;
 use crate::state::StateStore;
 use crate::supervision::supervisor::{DesiredWorker, WorkerSupervisor};
 use crate::transaction::is_permitted;
-use crate::worker::{WorkerControl, WorkerEvent};
+use crate::worker::{LiveMember, MemberRole, ServingMember, WorkerControl, WorkerEvent};
 
 /// Caller-supplied event sink. The coordinator emits one event per
 /// significant state transition; production sinks ship them to structured
@@ -643,6 +645,53 @@ impl Coordinator {
         Ok(status)
     }
 
+    /// The deployment slots and the resident set of `state`, with what the
+    /// worker control reports of the processes behind them.
+    fn deployments(&self, state: &AgentState) -> AgentResult<Deployments> {
+        let mut active = state.active.as_ref().map(deployment_summary);
+        // Without an active record nothing is read from the serving member,
+        // so a registry that cannot answer for it does not fail the status.
+        if let (Some(recorded), Some(summary)) = (state.active.as_ref(), active.as_mut()) {
+            if let Some(serving) = self.worker.serving_member()? {
+                // A worker is promoted before the record that names it is
+                // written, and the worker it replaces is stopped in between:
+                // the member serving may be another deployment's, or another
+                // bundle deployed under the same id.
+                if serves(&serving, recorded) {
+                    summary.generation = Some(serving.member.generation);
+                }
+                summary.serving_url = Some(serving.serving_url);
+            }
+        }
+        let mut previous = state.previous_active.as_ref().map(deployment_summary);
+        let live = self.worker.live_members();
+        // Beside a durable resident set the singleton slots are empty; a
+        // size-1 serving set projects into them for clients that read only
+        // `active` (with a `serving_url` only for a loopback unary endpoint).
+        let resident_set = state.resident_set.as_ref().map(|set| {
+            if active.is_none() && previous.is_none() {
+                (active, previous) = singleton_slots(set);
+            }
+            let mut status = ResidentSetStatus::from_committed(set);
+            if let Some(live) = live.as_deref() {
+                for member in &mut status.members {
+                    report_process(member, live);
+                }
+            }
+            status
+        });
+        let mut candidate = state.candidate.as_ref().map(deployment_summary);
+        if let (Some(summary), Some(live)) = (candidate.as_mut(), live.as_deref()) {
+            summary.generation = prepared_generation(live, &summary.deployment_id);
+        }
+        Ok(Deployments {
+            active,
+            previous,
+            candidate,
+            resident_set,
+        })
+    }
+
     /// The status the durable state and the supervisor describe, before
     /// [`Self::status`] accounts for a store that refuses writes.
     fn durable_status(&self) -> AgentResult<AgentStatus> {
@@ -665,21 +714,12 @@ impl Coordinator {
         {
             agent_state = AgentRunState::Degraded;
         }
-        let mut active = s.active.as_ref().map(deployment_summary);
-        if let Some(summary) = active.as_mut() {
-            summary.serving_url = self.worker.active_serving_url()?;
-        }
-        let mut previous = s.previous_active.as_ref().map(deployment_summary);
-        // Beside a durable resident set the singleton slots are empty; a
-        // size-1 serving set projects into them for clients that read only
-        // `active` (with a `serving_url` only for a loopback unary endpoint).
-        let resident_set = s.resident_set.as_ref().map(|set| {
-            if active.is_none() && previous.is_none() {
-                (active, previous) = singleton_slots(set);
-            }
-            ResidentSetStatus::from_committed(set)
-        });
-        let candidate = s.candidate.as_ref().map(deployment_summary);
+        let Deployments {
+            active,
+            previous,
+            candidate,
+            resident_set,
+        } = self.deployments(&s)?;
         let in_flight = s.in_flight_transaction.as_ref().map(|t| DeployStatus {
             phase: t.phase,
             transaction_id: Some(t.transaction_id.clone()),
@@ -917,11 +957,80 @@ fn merge_agent_state(base: AgentRunState, supervision: SupervisionAgentState) ->
     }
 }
 
+/// What status reports of the recorded deployments.
+struct Deployments {
+    active: Option<DeploymentSummary>,
+    previous: Option<DeploymentSummary>,
+    candidate: Option<DeploymentSummary>,
+    resident_set: Option<ResidentSetStatus>,
+}
+
+/// Whether `serving` is the deployment `recorded` describes: the same id,
+/// started from the same bundle and, when the record names a descriptor,
+/// from that descriptor. A record that names none cannot tell a redeploy
+/// of its own bundle under its own id from the deployment it records.
+fn serves(serving: &ServingMember, recorded: &DeploymentRecord) -> bool {
+    let started_from = |recorded: &Option<String>, started_from: &Option<String>| {
+        recorded.is_none() || recorded == started_from
+    };
+    serving.member.deployment_id == recorded.deployment_id
+        && crate::bundle::bundle_digests_equal(&serving.bundle_digest, &recorded.bundle_digest)
+        && started_from(&recorded.descriptor_digest, &serving.descriptor_digest)
+        && started_from(
+            &recorded.configuration_digest,
+            &serving.configuration_digest,
+        )
+}
+
+/// The generation a deploy of `deployment_id` has prepared and not promoted.
+/// A candidate an earlier deploy abandoned is not this deploy's, whatever
+/// its id.
+fn prepared_generation(live: &[LiveMember], deployment_id: &str) -> Option<u64> {
+    live.iter()
+        .find(|held| {
+            held.role == MemberRole::Candidate && held.member.deployment_id == deployment_id
+        })
+        .map(|held| held.member.generation)
+}
+
+/// Report how the worker process of `member`'s committed generation stands,
+/// from what the worker control holds. A generation it holds no process for
+/// is stopped.
+fn report_process(member: &mut MemberStatus, live: &[LiveMember]) {
+    let held = live.iter().find(|held| {
+        held.member.deployment_id == member.deployment_id
+            && held.member.generation == member.generation
+    });
+    let running = held.is_some_and(|held| held.running);
+    member.process = Some(if running {
+        ProcessState::Running
+    } else {
+        ProcessState::Stopped
+    });
+    member.readiness = Some(if running && held.is_some_and(|held| held.ready) {
+        Readiness::Ready
+    } else {
+        Readiness::NotReady
+    });
+    member.draining = Some(held.is_some_and(|held| held.role == MemberRole::Draining));
+    member.contact = held
+        .filter(|held| held.running)
+        .and_then(|held| held.in_contact)
+        .map(|in_contact| {
+            if in_contact {
+                ContactState::InContact
+            } else {
+                ContactState::OutOfContact
+            }
+        });
+}
+
 /// The status summary of a singleton deployment record, without a serving
 /// URL.
 fn deployment_summary(d: &DeploymentRecord) -> DeploymentSummary {
     DeploymentSummary {
         deployment_id: d.deployment_id.clone(),
+        generation: None,
         bundle_digest: d.bundle_digest.clone(),
         bundle_name: Some(d.bundle_name.clone()),
         bundle_version: Some(d.bundle_version.clone()),
@@ -950,4 +1059,124 @@ pub fn now_monotonic_ns() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::{prepared_generation, report_process, serves};
+    use crate::worker::{LiveMember, MemberRole, ServingMember};
+    use tensorplate_protocol::agent_control::{
+        MemberStatus, ProcessState, Readiness, ResidentSetStatus,
+    };
+    use tensorplate_protocol::agent_state::decode_agent_state;
+    use tensorplate_protocol::worker_control::MemberRef;
+
+    fn held(id: &str, generation: u64, role: MemberRole) -> LiveMember {
+        LiveMember {
+            member: MemberRef::new(id, generation),
+            role,
+            running: true,
+            ready: true,
+            in_contact: Some(true),
+            http_port: 18_080,
+            stream_port: None,
+        }
+    }
+
+    /// The member a state fixture commits: `vision-v2`, generation 2.
+    fn committed() -> MemberStatus {
+        let state = decode_agent_state(include_str!(
+            "../../protocol/rust/tests/fixtures/agent_state_0_2_restore_step.json"
+        ))
+        .expect("fixture decodes");
+        let set = state.resident_set.expect("the fixture records a set");
+        ResidentSetStatus::from_committed(&set).members.remove(0)
+    }
+
+    #[test]
+    fn a_process_is_the_members_only_under_its_deployment_id_and_its_generation() {
+        for (id, generation, expected) in [
+            ("vision-v2", 2, ProcessState::Running),
+            ("vision-v2", 3, ProcessState::Stopped),
+            ("vision-v3", 2, ProcessState::Stopped),
+        ] {
+            let mut member = committed();
+            report_process(&mut member, &[held(id, generation, MemberRole::Serving)]);
+            assert_eq!(
+                member.process,
+                Some(expected),
+                "{id} generation {generation}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_running_process_is_ready_only_once_the_agent_judged_it_so() {
+        let mut loading = held("vision-v2", 2, MemberRole::Serving);
+        loading.ready = false;
+        let mut member = committed();
+        report_process(&mut member, &[loading]);
+        assert_eq!(
+            (member.process, member.readiness),
+            (Some(ProcessState::Running), Some(Readiness::NotReady))
+        );
+    }
+
+    #[test]
+    fn a_record_that_names_a_descriptor_is_served_only_by_a_member_started_from_it() {
+        let state = decode_agent_state(include_str!(
+            "../../protocol/rust/tests/fixtures/agent_state_0_2_descriptor_identity.json"
+        ))
+        .expect("fixture decodes");
+        let recorded = state.active.expect("the fixture records one");
+        let (described, configured) = (
+            recorded.descriptor_digest.clone().expect("it names one"),
+            recorded.configuration_digest.clone().expect("it names one"),
+        );
+        let serving = |descriptor: Option<&str>, configuration: Option<&str>| ServingMember {
+            member: MemberRef::new(recorded.deployment_id.clone(), 3),
+            bundle_digest: recorded.bundle_digest.clone(),
+            descriptor_digest: descriptor.map(Into::into),
+            configuration_digest: configuration.map(Into::into),
+            serving_url: String::new(),
+        };
+        let other = "sha256:0000";
+
+        assert!(serves(
+            &serving(Some(&described), Some(&configured)),
+            &recorded
+        ));
+        for (descriptor, configuration) in [
+            (Some(other), Some(configured.as_str())),
+            (Some(described.as_str()), Some(other)),
+            (None, Some(configured.as_str())),
+            (Some(described.as_str()), None),
+        ] {
+            assert!(
+                !serves(&serving(descriptor, configuration), &recorded),
+                "{descriptor:?} {configuration:?}"
+            );
+        }
+
+        // A record that names none cannot tell: the id and the bundle decide.
+        let mut unnamed = recorded.clone();
+        (unnamed.generation, unnamed.descriptor_digest) = (None, None);
+        unnamed.configuration_digest = None;
+        assert!(serves(&serving(Some(other), Some(other)), &unnamed));
+        assert!(serves(&serving(None, None), &unnamed));
+    }
+
+    #[test]
+    fn the_prepared_generation_is_the_candidate_of_that_deployment_and_nothing_else() {
+        let live = [
+            held("stt", 4, MemberRole::Serving),
+            held("stt", 5, MemberRole::Draining),
+            held("tts", 6, MemberRole::Candidate),
+        ];
+        assert_eq!(prepared_generation(&live, "tts"), Some(6));
+        assert_eq!(prepared_generation(&live, "stt"), None);
+        assert_eq!(prepared_generation(&[], "tts"), None);
+    }
 }
