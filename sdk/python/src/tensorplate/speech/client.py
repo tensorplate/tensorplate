@@ -13,6 +13,7 @@ from tensorplate.speech._session import Session
 from tensorplate.speech.errors import SessionClosedError
 from tensorplate.speech.events import AudioFormat, Target
 from tensorplate.speech.stt import SpeechToTextSession
+from tensorplate.speech.tts import TextToSpeechSession, _Follow
 from tensorplate.stream.v1 import session_pb2_grpc
 
 MAX_MESSAGE_BYTES = 64 * 1024
@@ -85,6 +86,47 @@ class SpeechClient:
             target,
             language=language,
             input_format=input_format,
+            trace_id=trace_id,
+            turn_id=turn_id,
+            open_timeout=open_timeout,
+            close_timeout=close_timeout,
+            cancel_timeout=cancel_timeout,
+        )
+        self._sessions.add(session)
+        return session
+
+    def synthesize(
+        self,
+        target: Target,
+        *,
+        language: str,
+        voice: str,
+        trace_id: str = "",
+        turn_id: str = "",
+        open_timeout: float | None = 10.0,
+        close_timeout: float | _Follow | None = _Follow.FINALIZE_DEADLINE,
+        cancel_timeout: float = 5.0,
+    ) -> TextToSpeechSession:
+        """A text-to-speech session on `target`, not yet open: enter it with ``async with``.
+
+        `language` and `voice` must be ones the deployment declares. The
+        three timeouts are those of ``transcribe()``, and a `close_timeout`
+        that is given, ``None`` included, means what it means there. Left
+        out, it follows the server: a close ends once the server has sent
+        the audio of every accepted segment, which it does no faster than
+        the caller takes that audio, and the server allows itself
+        ``limits.finalize_deadline_ms`` for it, as the session's ``Ready``
+        declares. The bound is that deadline and 30 seconds more: 150
+        seconds for a deadline of two minutes. Raises
+        ``SessionClosedError`` on a closed client.
+        """
+        if self._closed:
+            raise SessionClosedError("the client is closed")
+        session = TextToSpeechSession._create(
+            self._stub.Session,
+            target,
+            language=language,
+            voice=voice,
             trace_id=trace_id,
             turn_id=turn_id,
             open_timeout=open_timeout,

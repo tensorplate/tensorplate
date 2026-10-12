@@ -25,19 +25,25 @@ from tensorplate.speech.errors import (  # noqa: E402
     StreamProtocolError,
 )
 from tensorplate.speech.events import (  # noqa: E402
+    AudioChunk,
     AudioFormat,
     EndpointDetected,
     FinalTranscript,
     PartialTranscript,
+    SegmentCompleted,
     SessionLimits,
     SessionTotals,
     SpeechToTextLimits,
+    SynthesisCompleted,
     Target,
+    TextToSpeechLimits,
     TranscriptSegment,
 )
 from tensorplate.speech.stt import SpeechToTextEvent, SpeechToTextSession  # noqa: E402
+from tensorplate.speech.tts import TextToSpeechEvent, TextToSpeechSession  # noqa: E402
 
 __all__ = [
+    "AudioChunk",
     "AudioFormat",
     "EndpointDetected",
     "FinalTranscript",
@@ -45,6 +51,7 @@ __all__ = [
     "PartialTranscript",
     "PreconditionFailedError",
     "ResourceExhaustedError",
+    "SegmentCompleted",
     "ServerInternalError",
     "ServiceUnavailableError",
     "SessionCancelledError",
@@ -58,6 +65,10 @@ __all__ = [
     "SpeechToTextLimits",
     "SpeechToTextSession",
     "StreamProtocolError",
+    "SynthesisCompleted",
     "Target",
+    "TextToSpeechEvent",
+    "TextToSpeechLimits",
+    "TextToSpeechSession",
     "TranscriptSegment",
 ]

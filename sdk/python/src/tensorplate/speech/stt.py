@@ -112,15 +112,23 @@ class SpeechToTextSession(Session[SpeechToTextEvent]):
         copied once. Anything else raises ``TypeError`` and sends nothing:
         an integer, a list, a view that is not contiguous, and a view of
         items other than bytes, which ``memoryview.cast("B")`` turns into
-        one of bytes. Waits until the session's input credit admits the
-        frame, and until a ``finalize()`` still unanswered has its answer.
-        Both come from the server, so events must be read meanwhile; when
-        the session ends first, this raises its error. A frame outside the
-        session's frame bounds raises ``ValueError`` and sends nothing; a
-        frame shorter than the least one is allowed only as the last before
+        one of bytes. A frame that is empty or not a whole number of
+        samples raises ``ValueError``. Both are raised at once, before any
+        wait and whatever the state of the session.
+
+        Waits until the session's input credit admits the frame, and until
+        a ``finalize()`` still unanswered has its answer. Both come from
+        the server, so events must be read meanwhile; when the session ends
+        first, this raises its error. After those waits, a frame longer
+        than the session's frame bound, or larger than its whole input
+        credit, raises ``ValueError`` and sends nothing; a frame shorter
+        than the least one is allowed only as the last before
         ``finalize()`` or ``close()``.
         """
-        await self._within(self._send_frame(_frame(data)), None)
+        frame = _frame(data)
+        if not frame or len(frame) % self._sample_width:
+            raise ValueError("audio is a whole, non-zero number of samples")
+        await self._within(self._send_frame(frame), None)
 
     async def _send_frame(self, data: bytes) -> None:
         async with self._input_gate:
@@ -129,9 +137,7 @@ class SpeechToTextSession(Session[SpeechToTextEvent]):
             await self._until(lambda: self._finalizing is None)
             limits = self._opened().limits.speech_to_text
             rate = self._format.sample_rate_hz
-            samples, rest = divmod(len(data), self._sample_width)
-            if not samples or rest:
-                raise ValueError("audio is a whole, non-zero number of samples")
+            samples = len(data) // self._sample_width
             if samples * 1000 > limits.max_frame_ms * rate:
                 raise ValueError(f"a frame holds at most {limits.max_frame_ms} ms of audio")
             if self._short_frame:

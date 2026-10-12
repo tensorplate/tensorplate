@@ -115,6 +115,16 @@ async def turns() -> None:
         await asyncio.sleep(0)
 
 
+async def at_once(call: Coroutine[Any, Any, Any]) -> BaseException | None:
+    """What `call` raises without waiting for anything; a call that waits fails the test."""
+    attempt = asyncio.ensure_future(call)
+    await turns()
+    done = attempt.done()
+    attempt.cancel()
+    assert done, "the call waits"
+    return attempt.exception()
+
+
 async def barrier(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
     """Return once the server has taken everything the session wrote before this call.
 
@@ -172,9 +182,11 @@ async def fill(fake: StreamServer, session: speech.SpeechToTextSession) -> list[
     waits: list[float | None] = []
     put = session._events.put
 
-    async def spy(item: Any, size: int, patience: float | None = None) -> None:
+    async def spy(
+        item: Any, size: int, patience: float | None = None, *, audio: bool = False
+    ) -> None:
         waits.append(patience)
-        await put(item, size, patience)
+        await put(item, size, patience, audio=audio)
 
     session._events.put = spy  # type: ignore[method-assign]
     for size in (*[1000] * 16, 3000):
@@ -259,6 +271,26 @@ def test_a_frame_outside_the_bounds_is_refused_before_it_is_sent() -> None:
         assert fake.bodies() == ["open", "audio", "finalize", "audio"]
 
     play(scenario)
+
+
+def test_a_frame_no_session_would_send_is_refused_at_once_behind_an_unanswered_finalize() -> None:
+    async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
+        async with session:
+            await session.send_audio(FRAME)
+            finalizing = asyncio.create_task(session.finalize())
+            # The answer is held back, and the Finalize holds the input gate until it comes.
+            await fake.until(lambda: "finalize" in fake.bodies())
+            assert session._input_gate.locked()
+            for data in (b"", bytes(641), bytearray()):
+                refusal = await at_once(session.send_audio(data))
+                assert isinstance(refusal, ValueError)
+                assert "whole, non-zero number of samples" in str(refusal)
+            assert isinstance(await at_once(session.send_audio(7)), TypeError)  # type: ignore[arg-type]
+            fake.final()
+            await finalizing
+        assert fake.bodies() == ["open", "audio", "finalize"]
+
+    play(scenario, StreamServer(hold_finals=True))
 
 
 def test_closing_ends_the_open_utterance_and_iteration_ends_with_the_session() -> None:
@@ -699,6 +731,28 @@ def test_the_event_buffer_lets_a_held_put_through_once_unbound() -> None:
     run(main)
 
 
+@pytest.mark.parametrize("turns_before_the_take", [0, 1, 2, 3])
+def test_a_take_admits_the_put_that_waits_whichever_turn_its_wait_began_on(
+    turns_before_the_take: int,
+) -> None:
+    # Before Python 3.12 ``asyncio.wait_for`` starts what it is given one turn of the loop
+    # late, so a take on the turn the put found the buffer full comes before that start.
+    async def main() -> None:
+        buffer: EventBuffer[str] = EventBuffer(10)
+        await buffer.put("held", 10)
+        parked = asyncio.create_task(buffer.put("parked", 1, 30))
+        for _ in range(turns_before_the_take):
+            await asyncio.sleep(0)
+        assert await buffer.get() == "held"
+        await turns()
+        admitted = parked.done()
+        parked.cancel()
+        assert admitted
+        assert buffer.used == 1
+
+    run(main)
+
+
 def test_the_recorded_session_is_what_the_client_sends_and_what_it_reads() -> None:
     session_frames = frames("stt_session")
     sent = [(name, encoded) for name, kind, encoded in session_frames if kind == "ClientEvent"]
@@ -830,6 +884,9 @@ def test_a_finalize_waits_for_the_audio_that_is_ahead_of_it() -> None:
         async with session:
             sender = asyncio.create_task(send(session, 51, FRAME))
             await fake.until(lambda: fake.bodies().count("audio") == 50)
+            # The server can take frame 50 before the sender is back with frame 51.
+            while not (session._input_gate.locked() and session._samples_sent == 50 * 320):
+                await asyncio.sleep(0)
             finalizing = asyncio.create_task(session.finalize())
             await turns()
             await barrier(fake, session)
@@ -1093,20 +1150,14 @@ def test_the_stall_timer_runs_only_while_the_reader_is_held_by_unread_events() -
     play(scenario, StreamServer(output_stall_timeout_ms=8000, heartbeat_interval_ms=0))
 
 
-def test_a_ready_without_a_stall_time_means_no_stall_timer() -> None:
+def test_a_ready_without_a_stall_time_is_refused_at_open() -> None:
     async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
-        await session.open()
-        assert session.limits.output_stall_timeout_ms == 0
-        assert await fill(fake, session) == [None] * 17
-        with stopped_clock() as advance:
-            await advance(20.0)
-            assert not session._ended
-            await anext(session)
-            await advance(10.0)
-            assert not session._ended
-        await session.cancel()
+        with pytest.raises(speech.StreamProtocolError, match="no output stall time") as caught:
+            await session.open()
+        assert caught.value.admitted is None
+        await fake.until(lambda: fake.live == 0)
 
-    play(scenario, StreamServer(output_stall_timeout_ms=0, heartbeat_interval_ms=0))
+    play(scenario, StreamServer(output_stall_timeout_ms=0))
 
 
 def test_a_sender_waiting_for_credit_raises_the_cause_the_server_ends_the_session_with() -> None:
@@ -1203,6 +1254,27 @@ def test_a_sender_cancelled_while_the_session_is_cancelled_reads_as_cancelled() 
             await session.send_audio(LARGE)
 
     play(scenario, deaf(), input_format=STEREO)
+
+
+@pytest.mark.parametrize("turns_before_the_cancel", [1, 2, 3, 4])
+def test_a_caller_cancelled_as_its_call_fails_leaves_asyncio_nothing_to_report(
+    turns_before_the_cancel: int,
+) -> None:
+    async def fail() -> None:
+        raise KeyError("the work's own failure")
+
+    async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
+        async with session:
+            caller = asyncio.create_task(session._within(fail(), None))
+            # On one of these turns the work has failed and its caller has not yet run again.
+            for _ in range(turns_before_the_cancel):
+                await asyncio.sleep(0)
+            caller.cancel()
+            await asyncio.wait({caller})
+            assert caller.cancelled() or isinstance(caller.exception(), KeyError)
+
+    # `run` fails on a task whose exception nobody took.
+    play(scenario)
 
 
 def test_a_sender_cancelled_in_a_write_leaves_the_session_open_and_its_frame_sent() -> None:
@@ -1458,6 +1530,7 @@ def _surface(exported: type) -> Iterator[tuple[str, Any]]:
 
 def test_the_public_names_are_the_sdks_own_types() -> None:
     assert not _foreign(speech.SpeechToTextEvent)
+    assert not _foreign(speech.TextToSpeechEvent)
     assert _foreign(pb.Open | None)
     assert _foreign(type(grpc.StatusCode.OK))
     for name in speech.__all__:

@@ -1,21 +1,31 @@
 """In-process stream servers for the streaming client's tests.
 
-``StreamServer`` serves speech-to-text sessions as the stream schema and
-``docs/architecture/serving-worker.md`` ("Stream listener", "Logical
-sessions", "Session dispatch") say a worker does, and refuses what they say
-it refuses: audio before its Open, a second Open, audio above the credit or
-the frame bound, audio after a short frame, and audio while a Finalize is
-unanswered. It keeps the envelope itself: sequences, credit, utterance ids,
-sample offsets, the Finalize a final transcript answers, the totals. It has
-no recognizer and runs no timer, so a test supplies what those would: the
-text of a transcript, where an automatic endpoint falls (``endpoint()``),
-when audio is consumed (``consume()``), and a timer or the worker ending the
+``StreamServer`` serves speech-to-text and text-to-speech sessions as the
+stream schema and ``docs/architecture/serving-worker.md`` ("Stream
+listener", "Logical sessions", "Session dispatch") say a worker does, and
+refuses what they say it refuses: input before its Open, a second Open,
+input of the other mode, input above the credit, and input while a Finalize
+is unanswered; audio above the frame bound or after a short frame; a text
+segment that is empty, above a text bound, or whose id is not above every
+earlier one. It keeps the envelope itself: sequences, credit, utterance ids,
+sample offsets, chunk indexes, the Finalize an answer names, the totals. It
+has no recognizer, no synthesizer and no timer, so a test supplies what
+those would: the text of a transcript, where an automatic endpoint falls
+(``endpoint()``), when audio is consumed (``consume()``), when a segment
+starts and how much audio it becomes (``start()``, ``speak()``,
+``complete()``, or `segment_samples`), and a timer or the worker ending the
 session (``end()``). A `fault` makes it break one rule, for the tests of
 what the client does then. ``test_streaming_server.py`` holds it to the
 recorded frames under ``test/contract/fixtures/stream/v1``.
 
+It does not enforce, so no client is tested against: the two output budgets
+and every timer; the bounds on the audio of a segment and of a synthesis;
+the schema's 4,096-byte ceiling on a segment's text; ids above 2^53 - 1;
+``trace_id``, capabilities, message size and compression.
+
 ``Playback`` serves one call from a recording instead: the recorded server
-frames, byte for byte, each run after the client frames that precede it.
+frames, byte for byte or with a test's `changes`, each run after the client
+frames that precede it.
 """
 
 from __future__ import annotations
@@ -69,6 +79,9 @@ FAILS = (
     "illegal_transition",
 )
 _SAMPLE_BYTES = {pb.AUDIO_ENCODING_PCM_S16LE: 2, pb.AUDIO_ENCODING_MULAW: 1}
+_SHORT_TEXT = r"[ -~]{%d,64}"
+# The audio of every synthetic segment: the recording's two samples, repeated.
+_TONE = b"\x00\x10\x00\xf0"
 
 
 def frames(file: str = "*") -> list[tuple[str, str, bytes]]:
@@ -125,9 +138,15 @@ async def serve(session: Callable[[Any, Any], Awaitable[None]]) -> AsyncIterator
 
 @dataclass
 class Playback:
-    """One call served from the recording `file`, and the client frames it was sent."""
+    """One call served from the recording `file`, and the client frames it was sent.
+
+    `changes` names recorded server frames and what a test does to each
+    before it is sent: a function that alters the decoded event, or ``None``
+    for a frame the server leaves out, which the later sequences close over.
+    """
 
     file: str
+    changes: dict[str, Callable[[Any], None] | None] = field(default_factory=dict)
     received: list[Any] = field(default_factory=list)
 
     def serving(self) -> contextlib.AbstractAsyncContextManager[str]:
@@ -136,11 +155,21 @@ class Playback:
     async def Session(self, unused_requests: Any, context: Any) -> None:
         # Each run of server frames, with the number of client frames recorded before it.
         runs: list[tuple[int, list[bytes]]] = []
-        sent = 0
-        for _, kind, encoded in frames(self.file):
+        sent = left_out = 0
+        for name, kind, encoded in frames(self.file):
             if kind == "ClientEvent":
                 sent += 1
-            elif runs and runs[-1][0] == sent:
+                continue
+            if name in self.changes or left_out:
+                event = pb.ServerEvent.FromString(encoded)
+                change = self.changes.get(name, lambda _: None)
+                if change is None:
+                    left_out += 1
+                    continue
+                event.sequence -= left_out
+                change(event)
+                encoded = event.SerializeToString()
+            if runs and runs[-1][0] == sent:
                 runs[-1][1].append(encoded)
             else:
                 runs.append((sent, [encoded]))
@@ -172,8 +201,19 @@ class StreamServer:
     )
     min_frame_ms: int = 20
     max_frame_ms: int = 40
+    voices: tuple[str, ...] = ("synthetic_voice",)
+    output_format: tuple[Any, int, int] = (pb.AUDIO_ENCODING_PCM_S16LE, 24000, 1)
+    max_segment_text_bytes: int = 512
+    max_synthesis_text_bytes: int = 4096
+    text_credit: int = 8192
+    # Samples a segment becomes when the server synthesizes by itself.
+    segment_samples: int = 960
+    # A segment starts, sounds and completes only at `start()`, `speak()` and `complete()`.
+    hold_synthesis: bool = False
     heartbeat_interval_ms: int = 10000
     output_stall_timeout_ms: int = 5000
+    # The finalize deadline of a text-to-speech session.
+    synthesis_deadline_ms: int = 120000
     max_sessions: int = 1
     admission_open: bool = True
     # Accepted audio stays charged until `consume()`.
@@ -189,6 +229,8 @@ class StreamServer:
     fault: str = ""
     calls: int = 0
     live: int = 0
+    # Client events read after the Open, which a session whose write is held back has not taken.
+    arrived: int = 0
     half_closed: bool = False
     received: list[Any] = field(default_factory=list)
     refusals: list[Any] = field(default_factory=list)
@@ -244,6 +286,18 @@ class StreamServer:
         """
         self._tell("final", segments)
 
+    def start(self) -> None:
+        """Start the segment that waited longest, which returns its input credit."""
+        self._tell("start")
+
+    def speak(self, samples: int) -> None:
+        """Send `samples` more of the started segment's audio, in chunks of 20 ms."""
+        self._tell("speak", samples)
+
+    def complete(self) -> None:
+        """Complete the started segment."""
+        self._tell("complete")
+
     def end(self, reason: str) -> None:
         """End the live session from the server's side."""
         self._tell("end", reason)
@@ -268,7 +322,13 @@ class StreamServer:
         named = re.fullmatch(r"[A-Za-z0-9._-]{1,128}", target.deployment_id)
         if not named or target.deployment_id in (".", ".."):
             raise _Ends("invalid_event")
-        if not re.fullmatch(r"[ -~]{1,64}", opened.language):
+        if not re.fullmatch(_SHORT_TEXT % 1, opened.language):
+            raise _Ends("invalid_event")
+        speaks = opened.mode == pb.SESSION_MODE_TTS_STREAMING
+        # A text-to-speech Open names a voice and no input format.
+        if speaks and (
+            opened.HasField("input_format") or not re.fullmatch(_SHORT_TEXT % 1, opened.voice)
+        ):
             raise _Ends("invalid_event")
         served = (self.deployment_id, self.descriptor_digest)
         if (target.deployment_id, target.descriptor_digest) != served:
@@ -277,8 +337,12 @@ class StreamServer:
             raise _Ends("stale_generation")
         audio = opened.input_format
         declared = (audio.encoding, audio.sample_rate_hz, audio.channels) in self.formats
+        if speaks:
+            declared = opened.voice in self.voices
+            encoding, rate, channels = self.output_format
+            audio = pb.AudioFormat(encoding=encoding, sample_rate_hz=rate, channels=channels)
         if (
-            opened.mode != pb.SESSION_MODE_STT_STREAMING
+            opened.mode not in (pb.SESSION_MODE_STT_STREAMING, pb.SESSION_MODE_TTS_STREAMING)
             or opened.language not in self.languages
             or not declared
         ):
@@ -288,7 +352,7 @@ class StreamServer:
         if self.live >= self.max_sessions:
             raise _Ends("session_count_limit")
         second = audio.sample_rate_hz * audio.channels * _SAMPLE_BYTES[audio.encoding]
-        return pb.Ready(
+        ready = pb.Ready(
             session_id=f"synthetic-session-{self.calls}",
             generation=self.generation,
             descriptor_digest=self.descriptor_digest,
@@ -297,22 +361,43 @@ class StreamServer:
                 heartbeat_interval_ms=self.heartbeat_interval_ms,
                 liveness_timeout_ms=30000,
                 max_duration_ms=3600000,
-                finalize_deadline_ms=10000,
+                finalize_deadline_ms=self.synthesis_deadline_ms if speaks else 10000,
                 output_stall_timeout_ms=self.output_stall_timeout_ms,
-                speech_to_text=pb.SpeechToTextLimits(
-                    min_frame_ms=self.min_frame_ms,
-                    max_frame_ms=self.max_frame_ms,
-                    max_utterance_ms=30000,
-                ),
             ),
             remaining_duration_ms=3600000,
-            input_format=audio,
             status=pb.SessionStatus(
                 state=pb.SESSION_STATE_ACTIVE,
                 input_credit=pb.InputCredit(bytes=pb.Usage(limit=second)),
                 output_metadata_bytes=pb.Usage(limit=16384),
             ),
         )
+        if not speaks:
+            ready.input_format.CopyFrom(audio)
+            ready.limits.speech_to_text.CopyFrom(
+                pb.SpeechToTextLimits(
+                    min_frame_ms=self.min_frame_ms,
+                    max_frame_ms=self.max_frame_ms,
+                    max_utterance_ms=30000,
+                )
+            )
+            return ready
+        ready.output_format.CopyFrom(audio)
+        ready.limits.text_to_speech.CopyFrom(
+            pb.TextToSpeechLimits(
+                max_segment_text_bytes=self.max_segment_text_bytes,
+                max_segment_audio_ms=10000,
+                max_synthesis_text_bytes=self.max_synthesis_text_bytes,
+                max_synthesis_audio_ms=120000,
+            )
+        )
+        # Two segments may wait beside the one being synthesized or delivered; two seconds
+        # of audio may wait undelivered.
+        credit = pb.InputCredit(
+            bytes=pb.Usage(limit=self.text_credit), waiting_segments=pb.Usage(limit=2)
+        )
+        ready.status.input_credit.CopyFrom(credit)
+        ready.status.output_pcm_bytes.limit = 2 * second
+        return ready
 
     async def Session(self, unused_requests: Any, context: Any) -> None:
         self.calls += 1
@@ -340,9 +425,20 @@ class _Live:
 
     def __init__(self, server: StreamServer, context: Any, ready: Any) -> None:
         self.server, self.context, self.ready = server, context, ready
-        audio = ready.input_format
+        self.speaks = ready.HasField("output_format")
+        audio = ready.output_format if self.speaks else ready.input_format
         self.rate, self.width = audio.sample_rate_hz, _SAMPLE_BYTES[audio.encoding] * audio.channels
         self.limit = ready.status.input_credit.bytes.limit
+        # Accepted segments whose synthesis has not started: id and bytes of text.
+        self.waiting: deque[tuple[int, int]] = deque()
+        # The started segment, the samples and chunks sent of it, and the samples still due.
+        self.segment: int | None = None
+        self.spoken = self.chunks = self.due = 0
+        self.last_segment = -1
+        # Text accepted since the last Finalize; segments and samples completed since its answer.
+        self.synthesis_text = self.completed = self.completed_samples = 0
+        self.text_bytes = self.audio_samples = self.segments = 0
+        self.stepping = False
         self.out = self.used = self.samples = self.last = self.finals = 0
         self.expected = 1
         self.utterance, self.utterance_start, self.revision = 1, 0, 0
@@ -361,6 +457,9 @@ class _Live:
 
     async def accepted(self) -> None:
         credit = pb.InputCredit(bytes=pb.Usage(used=self.used, limit=self.limit))
+        if self.speaks:
+            room = self.ready.status.input_credit.waiting_segments.limit
+            credit.waiting_segments.CopyFrom(pb.Usage(used=len(self.waiting), limit=room))
         await self.emit(accepted=pb.Accepted(accepted_sequence=self.last, input_credit=credit))
 
     async def pump(self) -> None:
@@ -368,6 +467,8 @@ class _Live:
             await self.hearing.wait()
         while (event := await self.context.read()) is not grpc.aio.EOF:
             self.inbox.put_nowait(("event", (event,)))
+            self.server.arrived += 1
+            self.server._notify()
         self.inbox.put_nowait(("half_close", ()))
 
     async def run(self) -> None:
@@ -389,9 +490,14 @@ class _Live:
             await self.context.abort(Code.UNAVAILABLE, "synthetic connection loss")
         if fault.endswith("undecodable"):
             await self.context.write(b"\xff")
-        if fault in ("unknown_event", "audio_chunk"):
+        strangers = {
+            "unknown_event": "added_server_body",
+            "audio_chunk": "tts_chunk_1_1",
+            "transcript": "stt_partial_1",
+        }
+        if fault in strangers:
             self.out += 1
-            strange = recorded("added_server_body" if fault == "unknown_event" else "tts_chunk_1_1")
+            strange = recorded(strangers[fault])
             strange.sequence = self.out
             await self.context.write(strange)
         self.server._notify()
@@ -409,6 +515,8 @@ class _Live:
 
     async def settle(self) -> None:
         """Send what the session owes unless a test holds it back, and close a drained session."""
+        if self.speaks:
+            return await self.voice()
         ends = self.finalize and not any(self.finalize == entry[3] for entry in self.owed)
         if not self.server.hold_finals:
             # A final transcript owed to an earlier endpoint comes before the Finalize's own.
@@ -429,7 +537,11 @@ class _Live:
             admission=pb.ADMISSION_ADMITTED,
             last_accepted_sequence=self.last,
             totals=pb.SessionTotals(
-                input_audio_samples=self.samples, utterances_completed=self.finals
+                input_audio_samples=self.samples,
+                input_text_bytes=self.text_bytes,
+                output_audio_samples=self.audio_samples,
+                utterances_completed=self.finals,
+                segments_completed=self.segments,
             ),
         )
         if reason is not None:
@@ -469,9 +581,9 @@ class _Live:
             # Repeated before its answer, a Finalize starts nothing and has no answer of its own.
             # Only the client's own Finalize or half-close makes a short frame the last.
             if not self.finalize:
-                self.finalize, self.short = event.sequence, False
-        elif body == "audio":
-            await self.audio(event)
+                self.finalize, self.short, self.synthesis_text = event.sequence, False, 0
+        elif body == ("text_segment" if self.speaks else "audio"):
+            await (self.text if self.speaks else self.audio)(event)
         else:
             # A second Open, a body the schema lacks, or input of another mode.
             raise _Ends("invalid_event")
@@ -553,3 +665,100 @@ class _Live:
         self.finals += 1
         if sequence:
             self.finalize = 0
+
+    async def text(self, event: Any) -> None:
+        segment, limits = event.text_segment, self.ready.limits.text_to_speech
+        size = len(segment.text.encode())
+        if self.finalize:
+            raise _Ends("illegal_transition")
+        if not segment.text.strip(" \t\n\v\f\r"):
+            raise _Ends("empty_input")
+        if (
+            segment.segment_id <= self.last_segment
+            or size > limits.max_segment_text_bytes
+            or self.synthesis_text + size > limits.max_synthesis_text_bytes
+            or not re.fullmatch(_SHORT_TEXT % 0, segment.turn_id)
+        ):
+            raise _Ends("invalid_event")
+        room = self.ready.status.input_credit.waiting_segments.limit
+        if self.used + size > self.limit or len(self.waiting) == room:
+            raise _Ends("input_credit_exceeded")
+        self.waiting.append((segment.segment_id, size))
+        self.last_segment, self.last = segment.segment_id, event.sequence
+        self.used, self.text_bytes = self.used + size, self.text_bytes + size
+        self.synthesis_text += size
+        if not self.server.hold_accepted:
+            await self.accepted()
+
+    async def start(self) -> None:
+        assert self.segment is None, "a segment is started while another holds the slot"
+        self.segment, size = self.waiting.popleft()
+        # Its bytes and its waiting place return now; the slot it takes returns when it completes.
+        self.used -= size
+        self.spoken = self.chunks = 0
+        self.due = 0 if self.server.hold_synthesis else self.server.segment_samples
+        if not self.server.hold_accepted:
+            await self.accepted()
+
+    async def speak(self, samples: int) -> None:
+        full = self.rate * 20 // 1000
+        while samples:
+            count = min(samples, full)
+            first = self.spoken * self.width % len(_TONE)
+            chunk = pb.AudioChunk(
+                segment_id=self.segment,
+                chunk_index=self.chunks,
+                segment_sample_offset=self.spoken,
+                format=self.ready.output_format,
+                data=(_TONE * (count * self.width))[first : first + count * self.width],
+            )
+            await self.emit(audio_chunk=chunk)
+            samples -= count
+            self.spoken += count
+            self.chunks += 1
+            self.audio_samples += count
+
+    async def complete(self) -> None:
+        done = pb.SegmentCompleted(
+            segment_id=self.segment, total_samples=self.spoken, chunk_count=self.chunks
+        )
+        await self.emit(segment_completed=done)
+        self.segment = None
+        self.completed += 1
+        self.completed_samples += self.spoken
+        self.segments += 1
+
+    async def more(self) -> None:
+        self.stepping = False
+
+    async def voice(self) -> None:
+        """Do the next thing a text session owes, one event at a time.
+
+        The rest is queued behind whatever arrived meanwhile, so a Cancel or
+        an end stops the output where it is.
+        """
+        held = self.server.hold_synthesis
+        if self.segment is not None and not held:
+            if self.due:
+                count = min(self.due, self.rate * 20 // 1000)
+                await self.speak(count)
+                self.due -= count
+            else:
+                await self.complete()
+        elif self.segment is None and self.waiting and not held:
+            await self.start()
+        elif self.segment is None and not self.waiting and self.finalize:
+            answer = pb.SynthesisCompleted(
+                segment_count=self.completed,
+                total_samples=self.completed_samples,
+                finalize_sequence=self.finalize,
+            )
+            await self.emit(synthesis_completed=answer)
+            self.finalize = self.completed = self.completed_samples = 0
+        elif self.segment is None and not self.waiting and self.draining and not self.done:
+            await self.close(None)
+        else:
+            return
+        if not self.stepping and not self.done:
+            self.stepping = True
+            self.inbox.put_nowait(("more", ()))

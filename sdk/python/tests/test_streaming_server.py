@@ -345,3 +345,267 @@ def test_a_cancel_a_ping_and_a_timer_end_as_recorded() -> None:
     )
     assert status is grpc.StatusCode.DEADLINE_EXCEEDED
     _ends(got, "closed_idle_timeout")
+
+
+def test_the_recorded_text_to_speech_session_is_served_frame_for_frame() -> None:
+    # The server has no synthesizer, so this supplies what one decides and nothing else: when
+    # each segment starts, how many samples it becomes, and when an Accepted goes out. Every
+    # other byte of the twelve recorded server frames is the server's own, and none differs.
+    server = StreamServer(hold_accepted=True, hold_synthesis=True)
+    first = [("start",), ("accept",), ("speak", 960), ("complete",)]
+    second = [("start",), ("accept",), ("speak", 680), ("complete",)]
+    turns: list[tuple[list[str], Steps]] = [
+        (["tts_open"], []),
+        (["tts_text_1", "tts_text_2"], [("accept",), *first, *second]),
+        (["tts_finalize"], []),
+    ]
+    session = frames("tts_session")
+    client = [name for name, kind, _ in session if kind == "ClientEvent"]
+    assert [name for names, _ in turns for name in names] == client
+
+    got, status = converse(
+        server, *(([recorded(name) for name in names], steps) for names, steps in turns)
+    )
+
+    assert status is grpc.StatusCode.OK
+    expected = [(name, encoded) for name, kind, encoded in session if kind == "ServerEvent"]
+    assert len(expected) == 12
+    assert got == [recorded(name) for name, _ in expected]
+    assert [event.SerializeToString() for event in got] == [encoded for _, encoded in expected]
+
+
+def _voiced(**changes: Any) -> Any:
+    opened = recorded("tts_open")
+    for name, value in changes.items():
+        if name == "input_format":
+            opened.open.input_format.CopyFrom(value)
+        else:
+            setattr(opened.open, name, value)
+    return opened
+
+
+@pytest.mark.parametrize(
+    ("reason", "opened"),
+    [
+        ("invalid_event", _voiced(voice="")),
+        ("invalid_event", _voiced(voice="v" * 65)),
+        ("invalid_event", _voiced(input_format=recorded("stt_open").open.input_format)),
+        ("backend_unsupported_capability", _voiced(voice="another_voice")),
+        ("backend_unsupported_capability", _voiced(language="xx")),
+    ],
+)
+def test_a_text_to_speech_open_is_refused_with_the_recorded_refusal(
+    reason: str, opened: Any
+) -> None:
+    server = StreamServer()
+
+    got, status = exchange(server, [_first(opened)])
+
+    assert (got, status) == ([], STATUS[reason])
+    assert server.refusals == [recorded(f"refused_{reason}")]
+
+
+def _text(sequence: int, segment: int, text: str = "synthetic sentence", turn: str = "") -> Any:
+    body = pb.TextSegment(segment_id=segment, text=text, turn_id=turn)
+    return pb.ClientEvent(sequence=sequence, session_id=_SESSION, text_segment=body)
+
+
+def _bodies(got: list[Any]) -> list[str | None]:
+    return [event.WhichOneof("body") for event in got]
+
+
+@pytest.mark.parametrize(
+    ("what", "events", "server"),
+    [
+        ("audio in a text-to-speech session", [_audio(2, 0)], StreamServer()),
+        ("an id that repeats the last", [_text(2, 5), _text(3, 5)], StreamServer()),
+        ("an id below an earlier one", [_text(2, 5), _text(3, 4)], StreamServer()),
+        ("text above the segment bound", [_text(2, 1, "x" * 513)], StreamServer()),
+        (
+            "text above the bound between two Finalizes",
+            [_text(2, 1, "x" * 400), _text(3, 2, "x" * 400)],
+            StreamServer(max_synthesis_text_bytes=700, hold_synthesis=True),
+        ),
+        ("a turn id above 64 characters", [_text(2, 1, turn="t" * 65)], StreamServer()),
+        ("a turn id that is not ASCII", [_text(2, 1, turn="tur\u00f1")], StreamServer()),
+    ],
+)
+def test_a_text_event_the_schema_does_not_allow_fails_the_session(
+    what: str, events: list[Any], server: StreamServer
+) -> None:
+    got, status = exchange(server, [recorded("tts_open"), *events], half_close=False)
+
+    assert status is grpc.StatusCode.INVALID_ARGUMENT, what
+    closed = got[-1].session_closed
+    assert closed.state == pb.SESSION_STATE_FAILED
+    assert closed.cause == recorded("refused_invalid_event").cause
+    # The event before the refused one was accepted, where there is one.
+    assert closed.last_accepted_sequence == (2 if len(events) > 1 else 0)
+
+
+@pytest.mark.parametrize("text", ["", " \t\r\n\v\f"])
+def test_a_segment_without_text_fails_the_session_as_empty_input(text: str) -> None:
+    events = [recorded("tts_open"), _text(2, 1, text)]
+
+    got, status = exchange(StreamServer(), events, half_close=False)
+
+    assert status is grpc.StatusCode.INVALID_ARGUMENT
+    closed = got[-1].session_closed
+    assert (closed.state, closed.cause) == (pb.SESSION_STATE_FAILED, end_cause("empty_input"))
+    assert closed.totals.input_text_bytes == 0
+
+
+def _credits(got: list[Any]) -> list[tuple[int, int]]:
+    """The bytes and the waiting segments each Accepted reports as used."""
+    credits = [event.accepted.input_credit for event in got if event.HasField("accepted")]
+    return [(credit.bytes.used, credit.waiting_segments.used) for credit in credits]
+
+
+def test_a_third_waiting_segment_fails_the_session_as_recorded() -> None:
+    server = StreamServer(hold_synthesis=True)
+    events = [recorded("tts_open"), _text(2, 1), _text(3, 2), _text(4, 3)]
+
+    got, status = exchange(server, events, half_close=False)
+
+    assert status is grpc.StatusCode.RESOURCE_EXHAUSTED
+    assert _credits(got) == [(18, 1), (36, 2)]
+    _ends(got, "failed_input_credit_exceeded")
+    assert got[-1].session_closed.last_accepted_sequence == 3
+
+
+def test_a_started_segment_returns_its_credit_and_keeps_a_slot_of_its_own() -> None:
+    server = StreamServer(hold_synthesis=True)
+    opening = ([recorded("tts_open"), _text(2, 1), _text(3, 2)], [("start",)])
+
+    got, status = converse(server, opening, ([_text(4, 3), _text(5, 4)], []), half_close=False)
+
+    # Two wait beside the one started; a fourth is above the credit.
+    assert status is grpc.StatusCode.RESOURCE_EXHAUSTED
+    assert _credits(got) == [(18, 1), (36, 2), (18, 1), (36, 2)]
+    assert got[-1].session_closed.last_accepted_sequence == 4
+
+
+def test_text_above_the_byte_credit_fails_the_session() -> None:
+    server = StreamServer(text_credit=600, hold_synthesis=True)
+    events = [recorded("tts_open"), _text(2, 1, "x" * 400), _text(3, 2, "x" * 400)]
+
+    got, status = exchange(server, events, half_close=False)
+
+    assert status is grpc.StatusCode.RESOURCE_EXHAUSTED
+    assert _credits(got) == [(400, 1)]
+    _ends(got, "failed_input_credit_exceeded")
+
+
+def test_text_before_the_answer_to_a_finalize_fails_the_session() -> None:
+    server = StreamServer(hold_synthesis=True)
+    events = [recorded("tts_open"), _text(2, 1), _finalize(3), _text(4, 2)]
+
+    got, status = exchange(server, events, half_close=False)
+
+    assert status is grpc.StatusCode.FAILED_PRECONDITION
+    closed = got[-1].session_closed
+    assert (closed.state, closed.cause) == (
+        pb.SESSION_STATE_FAILED,
+        end_cause("illegal_transition"),
+    )
+    assert closed.last_accepted_sequence == 2
+    assert "synthesis_completed" not in _bodies(got)
+
+
+def test_a_finalize_is_answered_after_its_segments_with_the_counts_since_the_last() -> None:
+    # 400 bytes twice is above the 700 allowed between two Finalizes, and the Finalize between
+    # them starts the count again.
+    server = StreamServer(max_synthesis_text_bytes=700, hold_synthesis=True)
+    sound = [("start",), ("speak", 960), ("complete",)]
+    first = ([recorded("tts_open"), _text(2, 1, "x" * 400), _finalize(3), _finalize(4)], sound)
+    second = ([_text(5, 2, "x" * 400), _finalize(6)], [("start",), ("speak", 100), ("complete",)])
+
+    got, status = converse(server, first, second, ([_finalize(7)], []))
+
+    assert status is grpc.StatusCode.OK
+    answers = [event.synthesis_completed for event in got if event.HasField("synthesis_completed")]
+    assert [(a.segment_count, a.total_samples, a.finalize_sequence) for a in answers] == [
+        (1, 960, 3),
+        (1, 100, 6),
+        (0, 0, 7),
+    ]
+    task = [body for body in _bodies(got) if body not in ("ready", "accepted")]
+    assert task == [
+        *["audio_chunk", "audio_chunk", "segment_completed", "synthesis_completed"],
+        *["audio_chunk", "segment_completed", "synthesis_completed"],
+        *["synthesis_completed", "session_closed"],
+    ]
+    totals = got[-1].session_closed.totals
+    assert (totals.input_text_bytes, totals.output_audio_samples, totals.segments_completed) == (
+        800,
+        1060,
+        2,
+    )
+
+
+def test_a_half_close_completes_every_accepted_segment_and_answers_no_finalize() -> None:
+    server = StreamServer(segment_samples=1000)
+
+    got, status = exchange(server, [recorded("tts_open"), _text(2, 1), _text(3, 2)])
+
+    assert status is grpc.StatusCode.OK
+    chunks = [event.audio_chunk for event in got if event.HasField("audio_chunk")]
+    # 20 ms is 480 samples: only a segment's last chunk is shorter.
+    assert [
+        (c.segment_id, c.chunk_index, c.segment_sample_offset, len(c.data)) for c in chunks
+    ] == [
+        (1, 0, 0, 960),
+        (1, 1, 480, 960),
+        (1, 2, 960, 80),
+        (2, 0, 0, 960),
+        (2, 1, 480, 960),
+        (2, 2, 960, 80),
+    ]
+    assert all(chunk.format == got[0].ready.output_format for chunk in chunks)
+    done = [event.segment_completed for event in got if event.HasField("segment_completed")]
+    assert [(d.segment_id, d.total_samples, d.chunk_count) for d in done] == [
+        (1, 1000, 3),
+        (2, 1000, 3),
+    ]
+    assert "synthesis_completed" not in _bodies(got)
+    task = [body for body in _bodies(got) if body not in ("ready", "accepted")]
+    assert task == [*[*["audio_chunk"] * 3, "segment_completed"] * 2, "session_closed"]
+    assert got[-1].session_closed.totals.segments_completed == 2
+
+
+def test_a_half_close_waits_for_a_segment_that_has_not_completed() -> None:
+    server = StreamServer(hold_synthesis=True)
+    sound = [("start",), ("speak", 480), ("complete",)]
+
+    got, status = converse(server, ([recorded("tts_open"), _text(2, 1)], sound))
+
+    assert status is grpc.StatusCode.OK
+    assert _bodies(got)[-3:] == ["audio_chunk", "segment_completed", "session_closed"]
+    assert got[-1].session_closed.totals.segments_completed == 1
+
+
+def test_a_cancel_stops_a_segments_audio_where_it_is() -> None:
+    server = StreamServer(hold_synthesis=True)
+    cancel = recorded("cancel")
+    cancel.sequence = 3
+    opening = ([recorded("tts_open"), _text(2, 1)], [("start",), ("speak", 480)])
+
+    got, status = converse(server, opening, ([cancel], []), half_close=False)
+
+    assert status is grpc.StatusCode.CANCELLED
+    assert _bodies(got)[-3:] == ["audio_chunk", "cancel_accepted", "session_closed"]
+    _ends(got, "closed_client_cancelled")
+    totals = got[-1].session_closed.totals
+    assert (totals.output_audio_samples, totals.segments_completed) == (480, 0)
+
+
+def test_an_end_the_server_decides_stops_its_own_synthesis_between_two_chunks() -> None:
+    # Fifty seconds of audio: the end is taken in turn with the chunks, not after them.
+    server = StreamServer(segment_samples=1_200_000)
+    opening = ([recorded("tts_open"), _text(2, 1)], [("end", "worker_shutdown")])
+
+    got, status = converse(server, opening, half_close=False)
+
+    assert status is grpc.StatusCode.UNAVAILABLE
+    assert _bodies(got).count("audio_chunk") < 2500
+    assert "segment_completed" not in _bodies(got)

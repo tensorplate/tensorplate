@@ -271,9 +271,10 @@ except TransportError:
 `tensorplate.speech` (the [`speech` extra](#speech-extra)) is an asyncio
 client for a serving worker's stream endpoint: one gRPC call per session,
 speaking the [stream session schema](../../protocol/README.md#streaming-session-envelope).
-It is asyncio only; there is no synchronous wrapper. Today it opens
-speech-to-text sessions. Text-to-speech sessions and discovery of the stream
-endpoint through the agent are not in the package yet, so the caller names
+It is asyncio only; there is no synchronous wrapper. It opens
+speech-to-text sessions, described first, and
+[text-to-speech sessions](#text-to-speech-sessions). Discovery of the stream
+endpoint through the agent is not in the package yet, so the caller names
 the endpoint and the deployment. The schema is a draft, and this client has
 been run against an in-process server built from the same schema, not yet
 against a worker: no worker serves speech sessions over it yet.
@@ -334,9 +335,11 @@ async def show_partials(session: SpeechToTextSession) -> None:
   each event taken, and never runs for a caller that has nothing to read.
   It can end a session before the server's timer would, since the server's
   clock stops once its output is delivered, and the transport's window
-  takes that output before the session reads it. A server that gives no
-  stall time turns the timer off. The iteration ends when the session
-  does, and raises the session's error if it failed.
+  takes that output before the session reads it. A `Ready` that gives no
+  stall time is refused at open with `StreamProtocolError`, since the schema
+  allows no limit of zero and nothing else ends a session whose events
+  nobody reads. The iteration ends when the session does, and raises the
+  session's error if it failed.
 - **Endpoint and target.** `SpeechClient(endpoint)` takes the `host:port` of
   the worker's stream endpoint, on loopback or forwarded to it, and opens one
   cleartext channel, which it closes with itself; create it inside a running
@@ -379,9 +382,12 @@ async def show_partials(session: SpeechToTextSession) -> None:
   `memoryview` of one), which is copied once. Anything else raises
   `TypeError` before anything is sent: an integer, a list, and a view of
   items other than bytes, which `memoryview.cast("B")` turns into one of
-  bytes. The client takes its credit from the
-  server's messages only, never from time. A frame outside the session's
-  frame bounds raises `ValueError` before anything is sent; a frame shorter
+  bytes. A frame that is empty or not a whole number of samples raises
+  `ValueError`. Both are raised at once, before any wait and whatever the
+  state of the session. The client takes its credit from the
+  server's messages only, never from time. Once the frame's turn has come,
+  a frame longer than the session's frame bound or larger than its whole
+  input credit raises `ValueError` before anything is sent; a frame shorter
   than the least one is allowed only as the last before `finalize()` or
   `close()`.
 - **Events.** Iterating a session (`async for event in session`) yields
@@ -412,7 +418,7 @@ exception. Its class follows the final status of the call:
 | Exception | Raised when |
 | --- | --- |
 | `InvalidEventError` | The server found an event or its input invalid. |
-| `PreconditionFailedError` | The deployment does not serve what was asked: a language or format it does not declare, another deployment or descriptor, a stale generation, input the session's state does not permit; or the endpoint does not serve stream sessions at all (`UNIMPLEMENTED`). |
+| `PreconditionFailedError` | The deployment does not serve what was asked: a language, format or voice it does not declare, another deployment or descriptor, a stale generation, input the session's state does not permit; or the endpoint does not serve stream sessions at all (`UNIMPLEMENTED`). |
 | `ResourceExhaustedError` | A bound was reached: the session count, the input credit, or output left unread too long, by the server's limit or by the client's own. |
 | `SessionTimeoutError` | One of the server's timers ended the session, or one of the client's own bounds passed. |
 | `ServiceUnavailableError` | Admission is closed, the worker is shutting down or retiring the deployment, the backend was lost, or the endpoint cannot be reached. |
@@ -462,6 +468,156 @@ session that stopped reading would not hold the server back until that much
 had been sent. A channel passed in with `channel=` has whatever options its
 owner gave it.
 
+### Text-to-speech sessions
+
+`client.synthesize(target, *, language, voice, ...)` returns a
+`TextToSpeechSession`: text segments go in, and each segment's audio comes
+back in chunks of 20 ms. What the section above says of a session holds here
+too: the one rule, the bounds, cancellation, liveness, no retry, and the
+errors. What differs is below.
+
+```python
+import asyncio
+from collections.abc import Awaitable, Callable
+
+from tensorplate.speech import AudioChunk, SpeechClient, Target, TextToSpeechSession
+
+
+async def speak(
+    endpoint: str, sentences: list[str], play: Callable[[bytes], Awaitable[None]]
+) -> int:
+    target = Target("my-deployment")
+    async with SpeechClient(endpoint) as client:
+        session = client.synthesize(target, language="en", voice="my-voice")
+        async with session:
+            # Audio is taken while text is sent, each in a task of its own.
+            player = asyncio.create_task(play_audio(session, play))
+            sender = asyncio.create_task(send(session, sentences))
+            try:
+                # Until both are done or one has failed. A player that failed takes no
+                # more audio, and the sender would wait behind the audio nobody takes.
+                await asyncio.wait({player, sender}, return_when=asyncio.FIRST_EXCEPTION)
+            finally:
+                # Take both outcomes on every path.
+                player.cancel()
+                sender.cancel()
+                outcomes = await asyncio.gather(player, sender, return_exceptions=True)
+            # The player's error first: the sender's, if it has one too, came of it.
+            for outcome in outcomes:
+                if isinstance(outcome, Exception):
+                    raise outcome
+    return sender.result()
+
+
+async def send(session: TextToSpeechSession, sentences: list[str]) -> int:
+    for sentence in sentences:
+        await session.send_text(sentence)
+    done = await session.finalize()
+    await session.close()
+    return done.total_samples
+
+
+async def play_audio(
+    session: TextToSpeechSession, play: Callable[[bytes], Awaitable[None]]
+) -> None:
+    async for event in session:
+        if isinstance(event, AudioChunk):
+            await play(event.data)  # 20 ms of session.output_format
+```
+
+- **Read audio while text is sent.** The one rule has less room here,
+  because audio is large. The credit `send_text()` waits for, the answer to
+  `finalize()` and the end `close()` waits for all arrive behind the audio
+  sent before them, and the session stops reading at two seconds of audio
+  its caller has not taken. A caller that sends first and reads afterwards
+  gets through only while everything fits. Against the in-process server,
+  `finalize()` or `close()` with nobody reading returns for up to two
+  seconds of audio in all (2.00 s returns, 2.02 s does not), and
+  `send_text()` returns for three segments of ten seconds, the one being
+  delivered and the two that may wait, and waits with a fourth. Past that the call waits, and
+  once the audio has gone untaken for the output stall time
+  (`session.limits.output_stall_timeout_ms`, five seconds by default) the
+  session ends and the call raises `ResourceExhaustedError`. So take the
+  audio in a task of its own, as `speak()` does. When that task fails, stop
+  the sender and raise the task's error, as `speak()` also does: a sender
+  left alone would wait out the stall time and raise
+  `ResourceExhaustedError` in place of the error that caused it.
+- **Sessions.** `client.synthesize(target, *, language, voice, trace_id="",
+  turn_id="", open_timeout=10.0, close_timeout=<follows the server>,
+  cancel_timeout=5.0)`.
+  The deployment declares its voices, and the server chooses the audio
+  format for the voice: `session.output_format` is an `AudioFormat`, and
+  `session.limits.text_to_speech` holds the text bounds. `close()`, or
+  leaving the block, has the server synthesize every segment it accepted and
+  ends once the session has read all of that audio, which takes as long as
+  the caller takes to play it less what the playback buffer holds. The
+  server allows itself `session.limits.finalize_deadline_ms` to deliver what
+  it accepted, two minutes by default. A `close_timeout` that is left out
+  follows that limit: it is the deadline the session's `Ready` declared
+  plus a margin of 30 seconds, so 150 seconds by default. A `close_timeout`
+  that is given is used as it is, a number of seconds or `None` for no
+  bound.
+- **Input and credit.** `send_text(text, *, turn_id="")` sends one complete
+  segment, a sentence or a clause, and returns its id: ids grow by one from
+  1, and a segment's events carry its id. It waits while the server's input
+  credit does not admit the segment. That credit has two budgets, bytes of
+  text and segments whose synthesis has not started (the worker lets two
+  wait), and both return as a segment's synthesis starts, which the server
+  reports behind the audio it sent first. Text that is not a `str` raises
+  `TypeError`; text that is empty, only whitespace or not encodable as
+  UTF-8, and a `turn_id` that is not at most 64 printable ASCII characters,
+  raise `ValueError`. Those are raised at once, before any wait and
+  whatever the state of the session. Once the segment's turn has come, text
+  above a bound of `session.limits.text_to_speech` (`max_segment_text_bytes`
+  for one segment, `max_synthesis_text_bytes` for the segments between two
+  `finalize()` calls, both in bytes of UTF-8) and a segment larger than the
+  session's whole input credit raise `ValueError` before anything is sent.
+- **Events.** Iterating the session yields each segment's `AudioChunk`
+  events and then its `SegmentCompleted`, segment after segment in the order
+  sent, and a `SynthesisCompleted` for each `finalize()`. A chunk carries
+  `segment_id`, `chunk_index`, `segment_sample_offset`, `format` and `data`:
+  20 ms of audio, less only in a segment's last chunk. The client holds the
+  server to that before it yields anything: a chunk in another format than
+  the session's, out of its place, of another segment than the oldest
+  unfinished one, or of another length, and a completion or closing total
+  that is not what was read, end the session with `StreamProtocolError`. A
+  session that ended with an error may have yielded part of a segment: a
+  segment is whole only once its `SegmentCompleted` was read.
+- **The playback buffer.** Audio the caller has not taken is held in the
+  session, up to two seconds of the output format counted in bytes of audio
+  (`PLAYBACK_BUFFER_MS` in `tensorplate.speech.tts`, 2000: 96,000 bytes of
+  24 kHz 16-bit mono). Other events are held up to 16 KiB,
+  as in every session. At either bound the session reads nothing more from
+  the server until something is taken. The transport's window then fills
+  and the server's writes stop. A worker holds no more than two seconds of
+  undelivered audio itself
+  ([serving-worker.md](../architecture/serving-worker.md#logical-sessions)),
+  so it stops synthesizing and drops nothing, and its credit stops
+  returning, so `send_text()` waits. A caller that plays audio as it takes
+  it therefore keeps the session at the pace of playback. The two seconds
+  are the session's buffer alone, not all the audio ahead of the player.
+  Beyond it the transport holds what its window let through, which is a
+  number of bytes and so a longer time in a format of fewer bytes a second:
+  in runs on one machine, 1.3 to 1.4 seconds more of 24 kHz 16-bit mono and
+  6.5 seconds more of 8 kHz mu-law. The server holds up to two seconds
+  beyond that. Taking nothing for the server's output stall time ends the
+  session with `ResourceExhaustedError`, and audio already held is still
+  yielded before the error. That end is the client's timer's unless the
+  caller takes audio again first: a session that has stopped reading does
+  not read the server's end either, so the end the server's own limit makes
+  (`reason == "slow_consumer"`) is seen only by a caller that resumes.
+- **Finalize.** `finalize()` completes the segments sent so far and returns
+  the `SynthesisCompleted` that names it, which counts those segments and
+  their samples; iteration yields it too, after their audio. The server
+  refuses text sent before that answer, so `send_text()` waits for it. The
+  answer arrives behind the audio, so it comes no sooner than the caller
+  takes that audio. Closing without a `finalize()` delivers the same audio
+  and no `SynthesisCompleted`.
+- **Stopping speech.** The schema has no cancel for a single segment yet.
+  To stop audio that is being synthesized, `cancel()` the session, which
+  drops what the session holds and has the server stop at once, and open
+  another.
+
 ## Endpoint resolution
 
 `ServingClient` and `VisionClient` resolve the worker URL exactly as
@@ -487,9 +643,9 @@ deliberately do **not** provide:
 
 - in-runtime camera or video ingest;
 - a DeepStream sink or any GStreamer integration;
-- a synchronous streaming client, text-to-speech sessions, or discovery of
-  a stream endpoint: the [streaming speech client](#streaming-speech-client)
-  is asyncio and opens speech-to-text sessions on an endpoint it is given;
+- a synchronous streaming client or discovery of a stream endpoint: the
+  [streaming speech client](#streaming-speech-client) is asyncio and opens
+  its sessions on an endpoint it is given;
 - any change to runtime serving behavior or ownership.
 
 These are separate, deferred capabilities tracked outside v0.1.3. The

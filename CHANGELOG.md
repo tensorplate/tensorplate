@@ -8,6 +8,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The Python SDK's streaming speech client no longer loses a wake-up on
+  Python 3.10 and 3.11. A session's reader that waited for room among the
+  events its caller has not taken could miss the take that made the room,
+  when that take came on the turn of the event loop the wait began on:
+  before Python 3.12 `asyncio.wait_for` starts what it is given one turn
+  late, and the wait then took the signal after the one already given. The
+  reader stayed stopped beside an empty buffer, and after the output stall
+  time the session ended with `ResourceExhaustedError` for events "left
+  unread" that had been read. The defect came with the speech-to-text
+  client, which is not released; a text-to-speech session meets it far
+  more readily, since its reader waits for room whenever audio arrives
+  faster than it is played. The wait is now bound to its signal when it is
+  asked for. A caller cancelled on the turn its call failed also no longer
+  leaves asyncio a task exception that nobody retrieved.
+  (V030-E04-F02-T03)
+
 - Three more tests no longer fail now and then for reasons that are not the
   code under test. Doctor's two `dpkg-query` tests wrote a stand-in
   executable and ran it, which can fail with "Text file busy" when another
@@ -186,7 +202,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `cancel()` abandons the session. Events are read while the session sends:
   a session holds 16 KiB of unread events and then reads nothing more from
   the server, and one left that way for the server's output stall time ends
-  with `ResourceExhaustedError`. The open, the close and the cancel are
+  with `ResourceExhaustedError`; a `Ready` that declares no stall time is
+  refused at open. A frame that is empty or not a whole number of samples
+  is refused at once, before any wait. The open, the close and the cancel are
   bounded (`open_timeout`, `close_timeout`, `cancel_timeout`); a timeout is
   one deadline over the whole call and ends the session. A cancelled caller
   gets its cancellation and the session stays open. Closing the client ends
@@ -198,9 +216,32 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   known; the client never retries. The client's own channel turns gRPC's
   bandwidth probe off so that a session that stops reading holds the
   server back within HTTP/2's window of about 64 KiB.
-  Text-to-speech sessions and discovery of the stream endpoint are not in
-  the package yet, and the client has been run against an in-process server
-  built from the schema, not against a worker. (V030-E04-F02-T03)
+  Discovery of the stream endpoint is not in the package yet, and the
+  client has been run against an in-process server built from the schema,
+  not against a worker. (V030-E04-F02-T03)
+
+- The Python SDK's streaming speech client opens text-to-speech sessions:
+  `SpeechClient.synthesize()` returns a `TextToSpeechSession`.
+  `send_text()` sends one text segment under the server's input credit
+  (its bytes, and its place among the segments that wait for synthesis)
+  and returns the segment's id. Iterating yields each segment's
+  `AudioChunk` events, 20 ms of `session.output_format` each, and then its
+  `SegmentCompleted`; `finalize()` returns the `SynthesisCompleted` that
+  names it. Audio the caller has not taken is held in a playback buffer of
+  two seconds of the output format, counted in bytes. At that bound the
+  session reads nothing more from the server, which holds the server's
+  synthesis and its credit back, so a caller that plays audio as it takes
+  it keeps the session at the pace of playback; audio left untaken for the
+  server's output stall time ends the session with
+  `ResourceExhaustedError`. Audio that is not in the format `Ready`
+  declared, out of order, or not what a completion or the closing totals
+  count ends the session with `StreamProtocolError`. Text the server would
+  refuse raises `ValueError` before it is sent, and text no session would
+  send (empty, only whitespace, not a `str`) at once, before any wait. A
+  `close_timeout` that is not given follows the server: the
+  `finalize_deadline_ms` its `Ready` declares plus 30 seconds, which is 150
+  seconds by default. Run against an in-process server only, like the rest
+  of the client. (V030-E04-F02-T03)
 
 - A gRPC stream listener in the serving worker that binds and refuses every
   `Open`: the worker does not serve stream sessions yet. In builds with
