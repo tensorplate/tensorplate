@@ -53,6 +53,32 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Agent status names generations and reports how a member's worker process
+  stands. Beside a singleton record, `active.generation` is the generation
+  serving at `active.serving_url`, read together with it, and
+  `candidate.generation` the one a deploy has prepared; a resident set of
+  one projects its committed generations into `active` and
+  `previous_active`, whichever generation serves. A resident-set member
+  gains `process` (`running` or `stopped`), `readiness` (`ready` or
+  `not_ready`, the agent's last judgement of that generation) and
+  `draining` (asked to stop, not reaped yet), and its `contact` is now
+  filled from the worker's control channel; all describe the member's
+  committed generation and are absent from an agent whose worker control
+  reports no processes. `tensorplate status` prints them, and its severity
+  and `tensorplate doctor`, which already judged `contact`, now see one: a
+  `serving` member reported `out_of_contact` reads `degraded`. The message
+  of `doctor`'s `ok` finding on a set counts the members whose worker is
+  stopped or draining apart from those the agent reports no contact for;
+  the verdict does not judge them. In JSON
+  `active`, `previous_active` and `candidate` always carry a `generation`
+  key, `null` when the agent named none. The fields are optional additions
+  to `agent_control.json` inside protocol 0.1: a status without them reads
+  as before, and a client built before them passes over them. No
+  production path writes a resident set yet, so the member fields appear
+  only on a state that already holds one. A generation handed to the
+  member registry with a descriptor is now also refused, `load_failed`,
+  while a worker that carries it is still draining. (V030-E03-F01-T03)
+
 - The serving worker's stream listener serves the remaining client events of
   the draft stream envelope, still behind a dispatch the worker does not
   build: a worker refuses every `Open` as before, and only tests give the
