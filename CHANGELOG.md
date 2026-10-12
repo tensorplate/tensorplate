@@ -8,6 +8,30 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- A start of the agent now settles the transaction it finds and starts the
+  recorded active deployment again in one pass. Before, a transaction
+  interrupted while its candidate was prepared, warming or promoted was
+  quarantined by one start and the deployment that had been serving came
+  back only at the start after it; a deploy or rollback interrupted earlier
+  was run again at the start, before the control socket opened, and failed
+  that start when it was refused; and a transaction interrupted after its
+  last phase and before it was cleared was never settled, so the committed
+  deployment was not started at any later start. A transaction found before
+  its commit is now ended as failed with a quarantine entry, for a deploy
+  and for a rollback, and nothing of it is run again; one found at or after
+  its commit is cleared. The commit write records `promoted` with the
+  records it moves, the end of a transaction and each failure are one state
+  write, and the phases `active`, `rolled_back` and `failed` are no longer
+  written to a transaction in flight. A restore refused by the staged copy
+  or by the descriptor document (a staged directory or manifest that is
+  gone or does not read, a document that is missing or is not the
+  record's) no longer ends the start with exit code 5: the agent comes up
+  with the refusal as `last_error` and the deployment not serving. It still
+  exits when its own state write fails or the restored worker does not come
+  up. `recovery.action` in status reports `restore_active`,
+  `quarantine_candidate`, `no_op` or `operator_required`; the `resume_*`
+  values and `finalize_promotion` stay in the schema and are never
+  reported. (V030-E03-F01-T04)
 - The protocol crate's backend-probe tests no longer fail now and then with
   an interpreter reported missing. Their stand-in interpreters, and the
   package inventory's stand-in `dpkg-query`, were written and then run,

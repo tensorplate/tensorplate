@@ -333,18 +333,41 @@ received -> verified -> staged -> capacity_checked -> prepared
           -> warmed -> promoted -> active
 ```
 
-Terminal failure states: `failed`, `rolled_back`.
+The agent records the phases up to `promoted` on the transaction in
+flight. `promoted` is recorded by the commit: one state write moves the
+records (`active` to `previous_active` and the candidate to `active` for a
+deploy, the swap for a rollback) and sets the phase, so a start that finds
+`promoted` with the records moved reads a committed transaction. `active`,
+`failed` and `rolled_back` remain values of the phase and are no longer
+written to a transaction in flight: the write that ends a transaction
+clears it.
 
-Replayable phases (safe to retry from scratch on restart): `received`,
-`verified`, `staged`, `capacity_checked`. Worker-side phases
-(`prepared`, `warmed`, `promoted`) are not replayable; a candidate
-interrupted there is quarantined.
+A transaction ends in one state write:
+
+- after its commit, the write that clears it also clears `last_error`;
+- a deploy that fails is moved to the quarantine list, with the phase it
+  had recorded and the failure, in the write that clears it and its
+  candidate record;
+- a rollback that fails is cleared in the write that records the failure
+  as `last_error`; it makes no quarantine entry, because the record it
+  would have restored is still a valid deployment.
+
+No phase is run again at a start, whatever it is: see
+[Restart recovery](#restart-recovery-v01-e08-f07).
 
 The coordinator persists each phase to the durable state store
 **before** the next phase begins. A crash mid-transaction therefore
 either leaves the in-flight transaction at the last successfully
 persisted phase (which the recovery planner can read) or at the
 phase-just-before that one if the failing phase did not commit.
+
+The old member is still retired before the commit write. When that write
+fails (a full disk), the agent goes on serving the candidate while the
+state names the old record and the transaction stays in flight; later
+transactions are refused as busy, and the next start ends the transaction
+and starts the old record. The same holds for the write that ends a
+committed transaction: until the agent restarts, later transactions are
+refused as busy, and that start clears it.
 
 A deploy of a format 0.2 bundle derives the bundle's
 [deployment descriptor](#deployment-descriptor-documents) after
@@ -469,38 +492,86 @@ generation of the same configuration.
 
 ## Restart recovery (V01-E08-F07)
 
-The recovery planner reads durable state and (best-effort) the worker's
-actual active deployment, and returns one of:
+On process startup, before binding the local control socket, the agent
+makes one pass over the durable state. It decides from the records alone;
+the deployment a worker control reports serving is never read as a commit.
 
-- `no_op` — desired and actual agree.
-- `resume_verify` / `resume_stage` / `resume_prepare` — replayable
-  in-flight phase, safe to retry from scratch.
-- `quarantine_candidate` — in-flight transaction stopped at a
-  worker-side phase; agent moves it to the quarantine list and clears
-  the candidate slot.
-- `restore_active` — desired active recorded, worker reports no
-  active deployment (typical on a fresh device boot).
-- `operator_required` — desired and actual disagree in a way recovery
-  can't reason about (e.g., the worker is running a deployment that is
-  not the recorded active).
+1. **Settle the transaction in flight**, in at most one state write.
+   - Interrupted before its commit, in any phase: it is ended as failed.
+     It is moved to the quarantine list with the phase it had reached, its
+     candidate record is cleared, and the records stay as they were before
+     it. This holds for a deploy and for a rollback.
+   - At or after its commit: it is cleared, and the records it wrote
+     stand.
+   - Recorded `failed` and not cleared (a state an earlier release could
+     leave): it is cleared, and its failure becomes `last_error`.
 
-On process startup, the agent applies the recovery action before binding
-the local control socket. Replayable transactions are resumed through the
-normal coordinator path, unsafe worker-side candidates are quarantined,
-and promoted-but-not-finalized transactions are finalized only when the
-worker-reported active deployment matches the transaction target.
-`restore_active` starts an active record that names a
+   A deploy has committed when its phase is `promoted` or later and its
+   candidate record is gone. A rollback has committed when `active` names
+   the generation the rollback named, or, for a record that names no
+   descriptor, when `active` is the transaction's deployment and bundle
+   and `previous_active` is not.
+2. **Start the `active` record again**, in the same pass, unless the
+   worker control already serves it (no start of the agent finds that: a
+   new agent process holds no worker). `last_error` is cleared once it
+   serves.
+
+Nothing of a transaction is run again at a start: a deploy interrupted
+before its candidate was prepared is not deployed again from its bundle
+path, and a rollback is not rolled back again. No state the pass finds
+needs a second start: an agent killed inside the pass leaves either the
+state it found or a committed record with no transaction, and the next
+start finishes from there.
+
+The restore starts an active record that names a
 [deployment descriptor](#deployment-descriptor-documents) at a new
-generation, named on the record before a worker is asked for; a recorded
-document that is missing or is not the one named fails the restore, and
-with it the start, as a missing staged manifest does. Two records are not
-restored and do not fail the start: one whose id cannot name a member, and
-one that names a descriptor while another bundle is staged under its id
-(see the [staged bundle check](#member-registry)). The agent comes up with
-the reason in `last_error` and that deployment not serving.
+generation, named on the record before a worker is asked for. What a
+start does when the restore cannot be made:
 
-Recovery is **state-diff based**; the planner never replays commands
-just because they appeared in the original request order.
+| The restore finds | The start |
+| --- | --- |
+| an id that cannot name a member | comes up; `last_error` says why; the deployment is not serving |
+| another bundle staged under the id than the record names (see the [staged bundle check](#member-registry)) | the same |
+| the staged directory gone, or a staged manifest that is missing, cannot be read, is incomplete or names no model artifact, or a staged artifact that is missing or altered | the same |
+| a descriptor document that is missing, is not a regular file, does not verify, is another identity's or describes another bundle | the same |
+| a re-stamp of the descriptor that is refused | the same |
+| a state write of its own that fails, or a descriptor document it cannot write | ends with exit code `5` |
+| a worker that cannot be started, exits while loading, is not ready within `worker.warm_timeout_ms` or exits before it is promoted | ends with exit code `5`, with the reason in `last_error` |
+
+The refusals in the first five rows are decided by files that no restart
+of the agent changes, so the agent stays up for `deploy` and `rollback`,
+which both need its socket. Each refusal ends with "is not serving until
+it is deployed again", except the first, which names the id rule.
+
+Status reports what a start would do now as `recovery.action`:
+
+- `restore_active` — the `active` record would be started again. The
+  reason names a transaction the pass would settle first.
+- `quarantine_candidate` — a transaction would be ended as failed and
+  there is nothing to start.
+- `no_op` — nothing to settle and nothing to start, or a committed
+  transaction to clear beside a record that is serving.
+- `operator_required` — no transaction and no `active` record, while the
+  worker control serves a deployment. No start meets this, and the pass
+  changes nothing.
+
+`resume_verify`, `resume_stage`, `resume_prepare`, `resume_warm` and
+`finalize_promotion` remain values of the control schema and are never
+reported.
+
+What an operator reads after a start that ended a transaction is the
+quarantine entry: the transaction id, the deployment id, the phase it had
+reached and the error. `last_error` carries the same error only while
+nothing serves; it is cleared when the restore serves, so an agent that
+ended a deploy and came back serving the old deployment reports `ready`
+with one more entry in `quarantined`.
+
+The agent records no process id of a worker. A worker that an earlier
+agent process started is ended by the packaged service, not by the pass:
+the systemd unit keeps the default control-group kill, and the Homebrew
+launchd job does not set `AbandonProcessGroup`, so no worker outlives the
+agent under either. Where an agent is run by hand and killed, the pass
+does not end a worker it left behind: nothing records one.
 
 ## Versioning policy
 
@@ -990,19 +1061,13 @@ error, and the CLI exits 3 with the code `unavailable`. The transaction stays in
 it wrote, exactly as an agent that was killed leaves it, and the next
 start's recovery treats it as it treats that:
 
-- Interrupted before its candidate was prepared, a deploy is run again
-  from its bundle path, and a rollback is run again. The caller that was
-  answered the `unavailable` error finds it completed.
-- Interrupted while its candidate was prepared or warming, the candidate
-  is quarantined and that start launches nothing: status is degraded with
-  the recovery's reason in `last_error`, and the deployment that was
-  serving comes back at the start after that. An agent killed during a
-  deploy behaved this way before it handled the signal. Nothing makes
-  that second start happen: the agent exited 0, which the packaged unit's
-  `Restart=on-failure` does not restart, so after
-  `systemctl restart tensorplate-agent` during a deploy's warm the node
-  serves nothing until the agent is started once more or a deployment is
-  deployed.
+- Interrupted before its commit, in any phase, the transaction is ended
+  as failed with a quarantine entry and none of it is run again: the
+  caller that was answered the `unavailable` error deploys or rolls back
+  again.
+- The deployment that was serving is started again in that same start, so
+  after `systemctl restart tensorplate-agent` during a deploy's warm the
+  node serves what it served before the deploy.
 
 A failure the deploy met just before the stop began is not recorded
 either. A deploy or rollback that arrives after the flag is refused with
