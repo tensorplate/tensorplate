@@ -666,7 +666,9 @@ TEST_P(BoundedJobBridgeConformance, ASessionUnloadedBeforeItsPrimeIsUnavailable)
 // that BridgeUnderTest::lose_backend() took away before the prime. The header
 // does not say whether the first still applies to a backend that is gone, so
 // either is accepted, and nothing later in the list: the class is that of
-// Choices::refuses_vad_frames.
+// Choices::refuses_vad_frames. The case passes whether or not the bridge has
+// noticed the loss: nothing waits for that, and a bridge that answers
+// `backend_not_ready` before its prime answers it either way.
 TEST_P(BoundedJobBridgeConformance, ABackendLostBeforeThePrimeIsNotReadyOrUnavailable) {
   ASSERT_TRUE(set_sink(sink).has_value());
   under->lose_backend();

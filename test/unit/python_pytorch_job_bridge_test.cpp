@@ -480,7 +480,8 @@ TEST(JobBridgeAfterItsSession, IsUnavailableAlsoWhenItWasBuiltWithoutABufferMana
 TEST_F(JobBridgeTest, ABackendLostBeforeThePrimeIsNotReadyAsBeforeItWasLost) {
   ASSERT_TRUE(h.session->load(speech_spec()).has_value());
   peer.close();
-  // The channel's reader has left once an exchange fails.
+  // The loss, noticed: the channel's reader has left once an exchange fails.
+  // The answers below are the same before that.
   ASSERT_FALSE(h.unary("health_check").has_value());
   expect_refused(h.bridge->submit(h.stt(1, 1)), Error::Code::NotReady, "backend_not_ready");
   expect_refused(h.bridge->health(), Error::Code::NotReady, "backend_not_ready");

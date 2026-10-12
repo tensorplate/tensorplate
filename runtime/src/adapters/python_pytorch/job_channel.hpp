@@ -353,7 +353,9 @@ class JobChannel {
   ///   Error::Code::Unavailable, "backend_unavailable" (as submit() answers
   ///   it, also when that became true while the call waited; or the answer
   ///   cannot be read as one, or is an `error_event`);
-  ///   Error::Code::Timeout, "health_timeout" at `deadline`;
+  ///   Error::Code::Timeout, "health_timeout" when the call wakes at
+  ///   `deadline` and no answer has come: one that came by the time the
+  ///   caller runs again is returned, also after `deadline`;
   ///   ipc::encode_frame()'s refusal.
   [[nodiscard]] Result<void> probe_health(TimePoint deadline);
 

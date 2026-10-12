@@ -32,6 +32,13 @@
 //
 //   - of a submit's input it checks the type and the payload's length only,
 //     and keeps the payload for the test to read;
+//   - it has no backend: a job ends as the test says. The thread that plays
+//     one (job_bridge_harness.hpp) always completes a job with the fixture
+//     bridge's result. It never raises and reports no progress, and a submit
+//     is refused as not permitted only when a test arms it;
+//   - that thread lets a job it holds go once an unload waits behind it. A
+//     runner's job may end so; it may also outlast the unload's bound, which
+//     that thread never plays and no conformance case reaches;
 //   - it has no bound on the unary requests that wait, and it writes a unary
 //     answer under the job lock, where the runner writes it outside;
 //   - an id of its own for a frame without one is the next `s<n>`, where the
