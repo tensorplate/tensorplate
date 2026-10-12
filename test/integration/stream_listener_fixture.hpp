@@ -449,6 +449,8 @@ class Served {
 
   serving::StreamListener& listener() { return *listener_; }
   SteeredDispatch& dispatch() { return *dispatch_; }
+  /// The channel calls are made on, for a client the fixture does not build.
+  [[nodiscard]] std::shared_ptr<grpc::Channel> channel() const { return channel_; }
 
  private:
   SystemSchedulerClock system_clock_;

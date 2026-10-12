@@ -87,10 +87,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   stream drain and HTTP drain take their end from one shared window, which
   the worker logs as `drain_ends_ns` on both. The open handshake timeout,
   the limit on unadmitted calls, the bound on a call that never sends `Open`
-  and the refusal of compression are still not enforced; a client event
-  that does not decode closes its session as a half-close does instead of
-  failing it, and one over the 64 KiB receive limit ends its call with a
-  transport status and no `SessionClosed`. Two comments of the stream
+  and the refusal of compression are still not enforced, and a client
+  event over the 64 KiB receive limit ends its call with a transport status
+  and no `SessionClosed`. A client message that does not parse as a client
+  event, for example a truncated one or a `TextSegment` whose text is not
+  UTF-8, fails its session with `invalid_event` and nothing behind it is
+  read: the listener registers its method raw and parses client events and
+  serializes server events itself, since gRPC reports a message a typed
+  method cannot parse as a failed read, which is all a half-close is. Two
+  comments of the stream
   schema are corrected: an utterance that reaches the longest length granted
   is ended there, not split, and input is refused only while a session is
   finalizing for a `Finalize`, which can end shortly before the answer is

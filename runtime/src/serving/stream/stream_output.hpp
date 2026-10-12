@@ -41,7 +41,9 @@ class CallWriter {
   CallWriter& operator=(const CallWriter&) = delete;
   virtual ~CallWriter() = default;
 
-  /// `event` stays unchanged until the write is answered.
+  /// `event` stays unchanged until the write is answered. A writer that
+  /// cannot send it may answer before this returns: CallOutput::finish(), then
+  /// CallOutput::write_done(false).
   virtual void start_write(const ::tensorplate::stream::v1::ServerEvent& event) = 0;
   virtual void finish(const grpc::Status& status) = 0;
   /// Ends the call without waiting for the peer: a write in flight is

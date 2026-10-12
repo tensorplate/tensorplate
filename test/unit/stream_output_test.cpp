@@ -408,6 +408,20 @@ TEST(StreamOutput, ABodyTheStreamDidNotQueueEndsTheCallAsInternal) {
   EXPECT_TRUE(path.writer.sequences().empty());
 }
 
+// A writer that cannot send an event answers the write before start_write()
+// returns: the call ends once, with the writer's status and not as cancelled.
+TEST(StreamOutput, AWriterMayAnswerAWriteItCannotSendFromInsideItsStart) {
+  Path path;
+  path.writer.on_write = [&] {
+    path.out->finish({grpc::StatusCode::INTERNAL, "output this server cannot send"});
+    path.out->write_done(false);
+  };
+  path.offer(OutputKind::Control);
+  path.offer(OutputKind::Control);
+  EXPECT_EQ(path.writer.codes(), (Codes{grpc::StatusCode::INTERNAL}));
+  EXPECT_EQ(path.writer.sequences().size(), 1U);
+}
+
 TEST(StreamOutput, TaskOutputIsEncodedWhenItIsTakenInTheSessionsFormat) {
   Path path{SessionBudgets::for_text_input(48'000).value()};
   tensorplate::serving::AudioChunkOutput chunk;
