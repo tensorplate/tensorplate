@@ -829,7 +829,10 @@ TEST_F(JobChannelTest, AHealthProbeThatIsAnsweredLeavesTheWaitingExchangesQueued
   EXPECT_EQ(prime.outcome().value().value("kind", ""), "prime_response");
 }
 
-// The number, not the constant: nothing else in the tree states it.
+// The number, not the constant: nothing else in the tree states it. With the
+// table full the last three entries of submit's list all apply, so their
+// order shows: a duplicate id is refused as one, and an id the wire cannot
+// carry for capacity.
 TEST_F(JobChannelTest, TheSeventeenthUnreleasedJobIsRefused) {
   ASSERT_NO_FATAL_FAILURE(up());
   peer.stop_reading();
@@ -838,6 +841,10 @@ TEST_F(JobChannelTest, TheSeventeenthUnreleasedJobIsRefused) {
   }
   expect_refused(h.channel.submit(JobChannelHarness::tts(17, 1)), Error::Code::ResourceExhausted,
                  "job_capacity_exhausted");
+  expect_refused(h.channel.submit(JobChannelHarness::tts(16, 1)), Error::Code::ConfigInvalid,
+                 "duplicate_job_id");
+  expect_refused(h.channel.submit(JobChannelHarness::tts(kMaxWireInteger + 1, 1)),
+                 Error::Code::ResourceExhausted, "job_capacity_exhausted");
 }
 
 // -- Cancel and session release. -------------------------------------------------
@@ -1825,6 +1832,20 @@ TEST_F(JobChannelTest, AChannelRetiredWhileItRunsIsUnavailableEndsItsJobAndStart
   h.stop(kSessionUnloaded);
   ASSERT_FALSE(started.has_value());
   EXPECT_EQ(started.error().context.value_or(""), "job_channel_retired");
+}
+
+// The record itself: the refusal's return value is the same either way.
+TEST_F(JobChannelTest, ARetiredChannelRecordsNoReleaseItRefuses) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  h.stop(kSessionUnloaded);
+  // Stopped and not retired: the caller takes session 5 as released, and so
+  // does the channel.
+  expect_refused(h.release(5), Error::Code::Unavailable, "backend_unavailable");
+  ASSERT_EQ(h.channel.released_session_runs(), 1U);
+  h.channel.retire();
+  // Not next to 5: recorded, it would be a run of its own.
+  expect_refused(h.release(8), Error::Code::Unavailable, "backend_unavailable");
+  EXPECT_EQ(h.channel.released_session_runs(), 1U);
 }
 
 TEST_F(JobChannelTest, RetiringAChannelEndsAHealthCallThatWaits) {
