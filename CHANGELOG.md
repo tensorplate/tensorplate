@@ -8,6 +8,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The Python SDK's streaming speech client no longer loses a wake-up on
+  Python 3.10 and 3.11. A session's reader that waited for room among the
+  events its caller has not taken could miss the take that made the room,
+  when that take came on the turn of the event loop the wait began on:
+  before Python 3.12 `asyncio.wait_for` starts what it is given one turn
+  late, and the wait then took the signal after the one already given. The
+  reader stayed stopped beside an empty buffer, and after the output stall
+  time the session ended with `ResourceExhaustedError` for events "left
+  unread" that had been read. The defect came with the speech-to-text
+  client, which is not released; a text-to-speech session meets it far
+  more readily, since its reader waits for room whenever audio arrives
+  faster than it is played. The wait is now bound to its signal when it is
+  asked for. A caller cancelled on the turn its call failed also no longer
+  leaves asyncio a task exception that nobody retrieved.
+  (V030-E04-F02-T03)
+
 - Three more tests no longer fail now and then for reasons that are not the
   code under test. Doctor's two `dpkg-query` tests wrote a stand-in
   executable and ran it, which can fail with "Text file busy" when another
