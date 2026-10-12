@@ -8,6 +8,7 @@ server that breaks a rule is the recorded session with one frame changed.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -27,7 +28,7 @@ from stream_server import REPOSITORY, Playback, StreamServer, frames, recorded
 from tensorplate.speech import tts
 from tensorplate.speech._buffer import EventBuffer
 from tensorplate.stream.v1 import session_pb2 as pb
-from test_streaming_client import at_once, run, stopped_clock, turns
+from test_streaming_client import NO_PING_MS, NO_STALL_MS, at_once, run, stopped_clock, turns
 
 TARGET = speech.Target("synthetic-deployment", 7, "sha256:" + "0" * 64)
 PCM = speech.AudioFormat("pcm_s16le", 24000)
@@ -37,9 +38,6 @@ CHUNK = 960
 HELD = 96_000
 # Ten seconds of audio: five hundred chunks.
 LONG = 240_000
-# A stall time no run reaches, for a test that leaves the reader waiting and is not about
-# the stall timer.
-NO_STALL_MS = 3_600_000
 Scenario = Callable[[StreamServer, speech.TextToSpeechSession], Awaitable[Any]]
 
 
@@ -238,6 +236,7 @@ _SECOND_UNFINISHED: Edit = ("tts_segment_2", "", LEFT_OUT)
         ("no text bounds", [("tts_ready", f"{_BOUNDS}.max_segment_text_bytes", 0)]),
         ("no text bounds", [("tts_ready", f"{_BOUNDS}.max_synthesis_text_bytes", 0)]),
         ("no output stall time", [("tts_ready", "ready.limits.output_stall_timeout_ms", 0)]),
+        ("no heartbeat interval", [("tts_ready", "ready.limits.heartbeat_interval_ms", 0)]),
         ("no output format", [("tts_ready", _READY, None)]),
         ("no output format", [("tts_ready", f"{_READY}.encoding", 7)]),
         ("no output format", [("tts_ready", f"{_READY}.sample_rate_hz", 0)]),
@@ -693,7 +692,9 @@ def test_the_stall_timer_for_audio_lasts_what_ready_gives_and_restarts_with_a_ch
 
     play(
         scenario,
-        StreamServer(hold_synthesis=True, output_stall_timeout_ms=8000, heartbeat_interval_ms=0),
+        StreamServer(
+            hold_synthesis=True, output_stall_timeout_ms=8000, heartbeat_interval_ms=NO_PING_MS
+        ),
     )
 
 
@@ -942,6 +943,7 @@ def test_a_text_to_speech_session_is_obtained_from_the_client_with_its_bounds() 
     [
         (120_000, {}, 150.0),
         (300_000, {}, 330.0),
+        (300_000, {"close_timeout": speech.Follow.FINALIZE_DEADLINE}, 330.0),
         (300_000, {"close_timeout": 150.0}, 150.0),
         (300_000, {"close_timeout": None}, None),
     ],
@@ -965,6 +967,17 @@ def test_a_close_without_a_timeout_is_bounded_by_the_servers_finalize_deadline_a
 
     play(scenario, StreamServer(synthesis_deadline_ms=deadline_ms), **given)
     assert tts.CLOSE_MARGIN_S == 30.0
+
+
+def test_the_default_close_timeout_is_a_public_name_and_reads_as_one() -> None:
+    close_timeout = inspect.signature(speech.SpeechClient.synthesize).parameters["close_timeout"]
+
+    assert close_timeout.default is speech.Follow.FINALIZE_DEADLINE
+    assert (close_timeout.annotation, repr(close_timeout.default)) == (
+        "float | Follow | None",
+        "Follow.FINALIZE_DEADLINE",
+    )
+    assert "Follow" in speech.__all__
 
 
 def test_closing_the_client_ends_a_text_to_speech_session_made_from_it() -> None:

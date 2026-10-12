@@ -40,13 +40,14 @@ from tensorplate.speech.events import (  # noqa: E402
     TranscriptSegment,
 )
 from tensorplate.speech.stt import SpeechToTextEvent, SpeechToTextSession  # noqa: E402
-from tensorplate.speech.tts import TextToSpeechEvent, TextToSpeechSession  # noqa: E402
+from tensorplate.speech.tts import Follow, TextToSpeechEvent, TextToSpeechSession  # noqa: E402
 
 __all__ = [
     "AudioChunk",
     "AudioFormat",
     "EndpointDetected",
     "FinalTranscript",
+    "Follow",
     "InvalidEventError",
     "PartialTranscript",
     "PreconditionFailedError",

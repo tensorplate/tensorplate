@@ -297,18 +297,30 @@ async def transcribe(endpoint: str, frames: list[bytes]) -> str:
     async with SpeechClient(endpoint) as client:
         session = client.transcribe(target, language="en", input_format=audio)
         async with session:
-            # Events are read while audio is sent, in a task of their own.
+            # Events are read while audio is sent, each in a task of its own.
             reader = asyncio.create_task(show_partials(session))
+            sender = asyncio.create_task(send_frames(session, frames))
             try:
-                for frame in frames:  # 20 ms of audio each
-                    await session.send_audio(frame)
-                final = await session.finalize()
-                await session.close()
-                await reader
+                # Until both are done or one has failed. A reader that failed takes no
+                # more events, and the sender would wait behind the events nobody takes.
+                await asyncio.wait({reader, sender}, return_when=asyncio.FIRST_EXCEPTION)
             finally:
-                # A session that fails fails its reader too: take that outcome on every path.
+                # Take both outcomes on every path.
                 reader.cancel()
-                await asyncio.gather(reader, return_exceptions=True)
+                sender.cancel()
+                outcomes = await asyncio.gather(reader, sender, return_exceptions=True)
+            # The reader's error first: the sender's, if it has one too, came of it.
+            for outcome in outcomes:
+                if isinstance(outcome, Exception):
+                    raise outcome
+    return sender.result()
+
+
+async def send_frames(session: SpeechToTextSession, frames: list[bytes]) -> str:
+    for frame in frames:  # 20 ms of audio each
+        await session.send_audio(frame)
+    final = await session.finalize()
+    await session.close()
     return final.text
 
 
@@ -324,10 +336,14 @@ async def show_partials(session: SpeechToTextSession) -> None:
   A session holds up to 16 KiB of events its caller has not taken and then
   reads nothing more from the server, so `send_audio()`, `finalize()` and
   `close()` wait until some are taken. Iterate the session in a task of its
-  own, as above, and take that task's outcome when the session fails, since
-  the iteration fails with it. A session whose held events stay untaken for
-  the server's output stall time (`session.limits.output_stall_timeout_ms`,
-  five seconds by default) is ended by the client with
+  own, as `transcribe()` does, and take that task's outcome when the session
+  fails, since the iteration fails with it. When that task fails by itself,
+  stop the sender and raise the task's error, as `transcribe()` also does: a
+  sender left alone would wait behind the events nobody takes and raise
+  `ResourceExhaustedError` in place of the error that caused it. A session
+  whose held events stay untaken for the server's output stall time
+  (`session.limits.output_stall_timeout_ms`, five seconds by default) is
+  ended by the client with
   `ResourceExhaustedError`, the error the server's own limit on unread
   output ends it with; no call waits for ever on events nobody reads. That
   timer is the client's own: it runs only while the session has stopped
@@ -359,7 +375,10 @@ async def show_partials(session: SpeechToTextSession) -> None:
   same and returns the session's `SessionTotals`. Leaving it on an exception
   or a cancellation cancels the session, as `cancel()` does: the server is
   told, and every event not yet taken is dropped. `session.limits` holds the
-  timers and frame bounds the server reported.
+  timers and frame bounds the server reported. `trace_id` and `turn_id` are
+  at most 64 printable ASCII characters each; the client sends them as
+  given, and the server refuses an open with any other
+  (`InvalidEventError`).
 - **Bounds.** Every wait for the server but one has a bound, in seconds,
   counted from the call on the event loop's clock and covering all of it:
   the wait behind another task's write, the write, and the answer.
@@ -375,7 +394,11 @@ async def show_partials(session: SpeechToTextSession) -> None:
 - **Cancellation.** A task cancelled while it is inside a session method gets
   its `CancelledError`, and the session stays open. A frame or a Finalize it
   was writing at that moment is still sent, because gRPC cancels a call
-  whose write is cancelled; one it was still waiting to send is not.
+  whose write is cancelled; one it was still waiting to send is not. A task
+  cancelled on the turn of the event loop in which its call fails gets
+  `CancelledError` too, and that call's error is not raised: an error that
+  ended the session is raised by the session's next use, and a `ValueError`
+  for a frame or a text that was not sent is not reported at all.
 - **Input and credit.** `send_audio(data)` sends one frame in the session's
   input format and waits while the server's input credit does not admit it.
   `data` is `bytes` or a contiguous view of bytes (a `bytearray`, a
@@ -406,8 +429,11 @@ async def show_partials(session: SpeechToTextSession) -> None:
   `send_audio()` waits for it, also when the `finalize()` that asked was
   cancelled meanwhile, and a second `finalize()` waits its turn the same way.
 - **Liveness.** The session sends the schema's `Ping` at the interval the
-  server gave when the session became ready, and none when it gave no
-  interval.
+  server gave when the session became ready
+  (`session.limits.heartbeat_interval_ms`). A `Ready` that gives no interval
+  is refused at open with `StreamProtocolError`, as one that gives no stall
+  time is: the schema allows no limit of zero, and a session that sent no
+  `Ping` would be ended by the server for it.
 - **No retry.** The client never reopens, resends or replays. A session that
   was refused, failed or lost is reported once, and opening another is the
   caller's decision.
@@ -543,7 +569,7 @@ async def play_audio(
   left alone would wait out the stall time and raise
   `ResourceExhaustedError` in place of the error that caused it.
 - **Sessions.** `client.synthesize(target, *, language, voice, trace_id="",
-  turn_id="", open_timeout=10.0, close_timeout=<follows the server>,
+  turn_id="", open_timeout=10.0, close_timeout=Follow.FINALIZE_DEADLINE,
   cancel_timeout=5.0)`.
   The deployment declares its voices, and the server chooses the audio
   format for the voice: `session.output_format` is an `AudioFormat`, and
@@ -552,11 +578,11 @@ async def play_audio(
   ends once the session has read all of that audio, which takes as long as
   the caller takes to play it less what the playback buffer holds. The
   server allows itself `session.limits.finalize_deadline_ms` to deliver what
-  it accepted, two minutes by default. A `close_timeout` that is left out
-  follows that limit: it is the deadline the session's `Ready` declared
-  plus a margin of 30 seconds, so 150 seconds by default. A `close_timeout`
-  that is given is used as it is, a number of seconds or `None` for no
-  bound.
+  it accepted, two minutes by default. The default `close_timeout`,
+  `Follow.FINALIZE_DEADLINE` (`Follow` is in `tensorplate.speech`), follows
+  that limit: it is the deadline the session's `Ready` declared plus a
+  margin of 30 seconds, so 150 seconds by default. A `close_timeout` given
+  as a number of seconds, or `None` for no bound, is used as it is.
 - **Input and credit.** `send_text(text, *, turn_id="")` sends one complete
   segment, a sentence or a clause, and returns its id: ids grow by one from
   1, and a segment's events carry its id. It waits while the server's input

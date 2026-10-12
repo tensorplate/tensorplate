@@ -14,6 +14,7 @@ import dataclasses
 import gc
 import inspect
 import os
+import re
 import typing
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from typing import Any
@@ -52,6 +53,10 @@ STEREO = speech.AudioFormat("pcm_s16le", 48000, channels=2)
 FRAME = bytes(640)
 # 320 ms of STEREO: one fits the 64 KiB HTTP/2 window and a second does not.
 LARGE = bytes(320 * 192)
+# A stall time and a heartbeat interval no run reaches, for a test that leaves the reader
+# waiting, or stops the clock, and is not about that timer.
+NO_STALL_MS = 3_600_000
+NO_PING_MS = 3_600_000
 Scenario = Callable[[StreamServer, speech.SpeechToTextSession], Awaitable[Any]]
 
 
@@ -87,10 +92,13 @@ def play(scenario: Scenario, server: StreamServer | None = None, **options: Any)
     return run(main)
 
 
-def deaf(fault: str = "deaf") -> StreamServer:
+def deaf(fault: str = "deaf", **server: Any) -> StreamServer:
     """A server that reads nothing after the Open until `hear()`, serving STEREO."""
     return StreamServer(
-        fault=fault, formats=((pb.AUDIO_ENCODING_PCM_S16LE, 48000, 2),), max_frame_ms=320
+        fault=fault,
+        formats=((pb.AUDIO_ENCODING_PCM_S16LE, 48000, 2),),
+        max_frame_ms=320,
+        **server,
     )
 
 
@@ -343,6 +351,8 @@ def test_a_server_event_this_session_does_not_know_is_passed_over_and_counted(fa
             speech.InvalidEventError,
             "INVALID_ARGUMENT",
         ),
+        (StreamServer(), {"turn_id": "t" * 65}, speech.InvalidEventError, "INVALID_ARGUMENT"),
+        (StreamServer(), {"trace_id": "trac\u00e9"}, speech.InvalidEventError, "INVALID_ARGUMENT"),
         (StreamServer(admission_open=False), {}, speech.ServiceUnavailableError, "UNAVAILABLE"),
         (StreamServer(max_sessions=0), {}, speech.ResourceExhaustedError, "RESOURCE_EXHAUSTED"),
     ],
@@ -478,7 +488,7 @@ def test_a_write_that_races_the_end_of_the_call_and_loses_its_cause_is_a_server_
             assert failure.admitted is True
         await finish(session)
 
-    play(scenario, deaf(), input_format=STEREO)
+    play(scenario, deaf(output_stall_timeout_ms=NO_STALL_MS), input_format=STEREO)
 
 
 @pytest.mark.parametrize(
@@ -953,13 +963,13 @@ def test_close_stops_the_ping_task_before_the_session_ends() -> None:
     play(scenario, StreamServer(hold_finals=True))
 
 
-def test_a_ready_without_a_heartbeat_interval_means_no_ping() -> None:
+def test_a_ready_without_a_heartbeat_interval_is_refused_at_open() -> None:
     async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
-        async with session:
-            assert session.limits.heartbeat_interval_ms == 0
-            assert session._pinger is None
-            await session.send_audio(FRAME)
-            await session.finalize()
+        with pytest.raises(speech.StreamProtocolError, match="no heartbeat interval") as caught:
+            await session.open()
+        assert caught.value.admitted is None
+        assert session._pinger is None
+        await fake.until(lambda: fake.live == 0)
         assert "ping" not in fake.bodies()
 
     play(scenario, StreamServer(heartbeat_interval_ms=0))
@@ -1044,7 +1054,7 @@ def test_a_reader_cancelled_while_it_is_held_still_ends_the_session() -> None:
             await session.close(timeout=1)
         await fake.until(lambda: fake.live == 0)
 
-    play(scenario)
+    play(scenario, StreamServer(output_stall_timeout_ms=NO_STALL_MS))
 
 
 def documented(**server: Any) -> tuple[dict[str, Any], StreamServer]:
@@ -1070,6 +1080,30 @@ def test_the_documented_example_reads_events_while_it_sends(
     assert run(main) == "synthetic transcript"
     assert capsys.readouterr().out.count("x" * 1000) == 40
     assert fake.bodies() == ["open", *["audio"] * 40, "finalize"]
+
+
+def test_the_documented_example_raises_its_readers_error_when_reading_fails() -> None:
+    # Forty frames fit the input credit and draw 40 KiB of partial transcripts, with no stall
+    # timer to speak of: an example that left its sender waiting for the Finalize's answer
+    # behind the events nobody takes would not return.
+    example, fake = documented(partial_bytes=1000, output_stall_timeout_ms=NO_STALL_MS)
+    failure = RuntimeError("the display failed")
+
+    def show(text: str) -> None:
+        raise failure
+
+    example["print"] = show
+
+    async def main() -> None:
+        async with fake.serving() as endpoint:
+            with pytest.raises(RuntimeError) as caught:
+                await example["transcribe"](endpoint, [FRAME] * 40)
+            assert caught.value is failure
+            await fake.until(lambda: fake.live == 0)
+            assert fake.closed[0].cause.reason == pb.FAILURE_REASON_CLIENT_CANCELLED
+
+    # `run` fails on a task whose exception nobody took.
+    run(main)
 
 
 def test_the_documented_example_takes_its_readers_outcome_when_the_session_fails() -> None:
@@ -1128,7 +1162,7 @@ def test_the_stall_timer_lasts_what_ready_gives_and_restarts_with_each_event_tak
         with pytest.raises(speech.ResourceExhaustedError, match=r"left unread for 8\.0 s"):
             await session.close()
 
-    play(scenario, StreamServer(output_stall_timeout_ms=8000, heartbeat_interval_ms=0))
+    play(scenario, StreamServer(output_stall_timeout_ms=8000, heartbeat_interval_ms=NO_PING_MS))
 
 
 def test_the_stall_timer_runs_only_while_the_reader_is_held_by_unread_events() -> None:
@@ -1147,7 +1181,7 @@ def test_the_stall_timer_runs_only_while_the_reader_is_held_by_unread_events() -
             await session.send_audio(FRAME)
             assert (await session.finalize()).end_sample_offset == 320
 
-    play(scenario, StreamServer(output_stall_timeout_ms=8000, heartbeat_interval_ms=0))
+    play(scenario, StreamServer(output_stall_timeout_ms=8000, heartbeat_interval_ms=NO_PING_MS))
 
 
 def test_a_ready_without_a_stall_time_is_refused_at_open() -> None:
@@ -1277,6 +1311,31 @@ def test_a_caller_cancelled_as_its_call_fails_leaves_asyncio_nothing_to_report(
     play(scenario)
 
 
+def test_a_caller_cancelled_once_its_call_has_failed_gets_its_cancellation_and_not_the_error() -> (
+    None
+):
+    async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
+        outcomes = []
+        async with session:
+            for turns_before_the_cancel in (1, 2, 3, 4):
+                failed: list[bool] = []
+
+                async def fail(failed: list[bool] = failed) -> None:
+                    failed.append(True)
+                    raise KeyError("the work's own failure")
+
+                caller = asyncio.create_task(session._within(fail(), None))
+                for _ in range(turns_before_the_cancel):
+                    await asyncio.sleep(0)
+                caller.cancel()
+                outcomes.append((bool(failed), caller))
+                await asyncio.wait({caller})
+        # Which turn it is belongs to asyncio; on one of them the work had failed already.
+        assert (True, True) in [(failed, caller.cancelled()) for failed, caller in outcomes]
+
+    play(scenario)
+
+
 def test_a_sender_cancelled_in_a_write_leaves_the_session_open_and_its_frame_sent() -> None:
     async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
         async with session:
@@ -1331,7 +1390,7 @@ def test_a_write_grpc_refuses_ends_the_session_with_a_typed_error_past_a_full_bu
         # The reader was let past the bound with the event it held.
         assert len(events) == 17
 
-    play(scenario)
+    play(scenario, StreamServer(output_stall_timeout_ms=NO_STALL_MS))
 
 
 def test_send_audio_takes_bytes_and_contiguous_views_of_bytes() -> None:
@@ -1542,6 +1601,8 @@ def test_the_public_names_are_the_sdks_own_types() -> None:
         for member, function in _surface(exported):
             for part, hint in typing.get_type_hints(function).items():
                 named[f"{member}({part})"] = hint
+            # No private name in what a caller reads: an annotation or a default's repr.
+            assert not re.search(r"\b_[A-Za-z]", str(inspect.signature(function))), member
             for parameter in inspect.signature(function).parameters.values():
                 if parameter.default is not inspect.Parameter.empty:
                     named[f"{member}({parameter.name}=)"] = type(parameter.default)

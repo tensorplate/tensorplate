@@ -123,7 +123,9 @@ class SpeechToTextSession(Session[SpeechToTextEvent]):
         than the session's frame bound, or larger than its whole input
         credit, raises ``ValueError`` and sends nothing; a frame shorter
         than the least one is allowed only as the last before
-        ``finalize()`` or ``close()``.
+        ``finalize()`` or ``close()``. A caller cancelled on the turn this
+        call fails gets ``CancelledError``, and the call's error is not
+        raised.
         """
         frame = _frame(data)
         if not frame or len(frame) % self._sample_width:
@@ -163,7 +165,8 @@ class SpeechToTextSession(Session[SpeechToTextEvent]):
         meanwhile. `timeout`, in seconds, bounds the whole call, the wait
         for its turn included. A timeout ends the session: the call is
         cancelled and ``SessionTimeoutError`` raised, here and from every
-        later use.
+        later use. A caller cancelled on the turn this call fails gets
+        ``CancelledError``, and the call's error is not raised.
         """
         return await self._bounded(self._final(), timeout, "answer to Finalize")
 

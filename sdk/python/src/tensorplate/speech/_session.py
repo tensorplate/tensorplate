@@ -148,6 +148,10 @@ class Session(Generic[EventT]):
 
     A task cancelled inside a method gets its ``CancelledError`` and the
     session stays open; an event it was writing at that moment is still sent.
+    A task cancelled on the turn of the event loop in which its call fails
+    gets ``CancelledError`` too, and that call's error is not raised: an
+    error that ended the session is raised by the session's next use, and a
+    ``ValueError`` for input that was not sent is not reported at all.
     """
 
     # Whether the session's input is text segments, which the waiting-segment credit bounds.
@@ -266,7 +270,8 @@ class Session(Generic[EventT]):
         answer arrives within the session's `open_timeout`, and
         ``SessionClosedError`` for a session that was opened before or whose
         client or channel is closed. Entering the session with ``async
-        with`` calls this.
+        with`` calls this. A caller cancelled on the turn this call fails
+        gets ``CancelledError``, and the call's error is not raised.
         """
         if self._call is not None or self._ended:
             raise SessionClosedError("the session was opened before, or its client is closed")
@@ -299,7 +304,8 @@ class Session(Generic[EventT]):
         session's `close_timeout` does when none is given: past it the call
         is cancelled and ``SessionTimeoutError`` raised. Raises the
         session's error if it failed. Leaving ``async with`` without an
-        exception calls this.
+        exception calls this. A caller cancelled on the turn this call
+        fails gets ``CancelledError``, and the call's error is not raised.
         """
         self._opened()
         bound = self._close_timeout if timeout is None else timeout
@@ -638,15 +644,16 @@ class Session(Generic[EventT]):
         ):
             raise self._violation("Ready names another generation or descriptor")
         self._take_credit(ready.status.input_credit)
+        limits = ready.limits
         # Without it nothing would end a session whose events nobody reads.
-        if not ready.limits.output_stall_timeout_ms:
+        if not limits.output_stall_timeout_ms:
             raise self._violation("Ready declares no output stall time")
+        # Without it no Ping would be sent, and the server would end the session for that.
+        if not limits.heartbeat_interval_ms:
+            raise self._violation("Ready declares no heartbeat interval")
         self._check_ready(ready)
         self._session_id, self._ready = ready.session_id, ready
-        # No interval means that the server expects no Ping.
-        if ready.limits.heartbeat_interval_ms:
-            interval = ready.limits.heartbeat_interval_ms / 1000
-            self._pinger = asyncio.create_task(self._ping(interval))
+        self._pinger = asyncio.create_task(self._ping(limits.heartbeat_interval_ms / 1000))
 
     def _take_accepted(self, accepted: pb.Accepted) -> None:
         if not self._accepted <= accepted.accepted_sequence <= self._last_input:
