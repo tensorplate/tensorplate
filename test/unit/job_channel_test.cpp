@@ -19,9 +19,11 @@ TEST(JobChannel, FeatureFlagDisabled) {
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -1886,6 +1888,38 @@ TEST_F(JobChannelTest, OnceItsSinkIsDetachedTheJobSideIsRefusedAndSendsNothing) 
   EXPECT_TRUE(peer.sent("job_cancel", 0).empty());
   EXPECT_TRUE(peer.sent("session_release", 0).empty());
   EXPECT_EQ(peer.sent("job_submit", 1).size(), 1U);
+}
+
+// The detach holds the last reference, and the deleter stands where the
+// sink's destructor runs: a thread that reads the channel meanwhile is
+// answered, so the channel's mutex was let go first.
+TEST(JobChannelDetach, TheLastReferenceToTheSinkIsLetGoOutsideTheChannelsMutex) {
+  JobChannel channel(nullptr, std::chrono::seconds{5});
+  testing::RecordingJobEventSink recording;
+  std::promise<void> read;
+  std::thread reader;
+  std::optional<bool> answered;
+  bool detached = false;
+  std::shared_ptr<JobEventSink> sink(&recording, [&](JobEventSink*) {
+    if (detached) {
+      return;  // Kept past the detach, which the test reports below.
+    }
+    reader = std::thread([&] {
+      (void)channel.backlog();
+      read.set_value();
+    });
+    answered =
+        read.get_future().wait_for(JobChannelHarness::kPatience) == std::future_status::ready;
+  });
+  const auto set = channel.set_event_sink(std::move(sink));
+  channel.detach_event_sink();
+  detached = true;
+  if (reader.joinable()) {
+    reader.join();
+  }
+  ASSERT_TRUE(set.has_value());
+  ASSERT_TRUE(answered.has_value()) << "the channel kept the sink";
+  EXPECT_TRUE(*answered) << "the sink was let go under the channel's mutex";
 }
 
 // -- The backlog. ----------------------------------------------------------------

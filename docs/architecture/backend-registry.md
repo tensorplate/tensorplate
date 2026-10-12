@@ -897,7 +897,9 @@ its message (a death test). For lifecycle calls from a callback: an `unload`
 and a `prime` made on the channel's reader are refused, nothing is sent, and
 the sidecar and the jobs live on; and an `unload` made from a callback that
 another unload's stop is delivering is refused on that thread.
-`test/unit/job_channel_test.cpp` holds the detached channel's job side.
+`test/unit/job_channel_test.cpp` holds the detached channel's job side, and
+that the detach lets the last reference to the sink go outside the channel's
+mutex.
 
 `test/integration/python_pytorch_job_bridge_runner_test.cpp` runs the same
 suite over the in-tree runner and its fixture backend. Nothing can hold the
