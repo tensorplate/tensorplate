@@ -189,13 +189,11 @@ fn a_handed_generation_is_refused_unless_it_is_above_every_generation_the_regist
             let handed = reference(stale);
             let error = d.registry.prepare("tx", &handed, WARM).unwrap_err();
             let record = error.to_record();
-            assert!(
-                matches!(error, AgentError::DeploymentDescriptor { .. }),
-                "{error}"
-            );
-            assert!(record.code == ErrorCode::LoadFailed && !record.recoverable);
+            // Another attempt takes a new generation: recoverable.
+            assert!(matches!(error, AgentError::Internal(_)), "{error}");
+            assert!(record.code == ErrorCode::Internal && record.recoverable);
             let says = format!(
-                "of `stt` generation {} is not started: the registry holds generation 2",
+                "`stt` generation {} is not started: the registry holds generation 2",
                 stale.generation
             );
             assert!(record.message.contains(&says), "owed {owed}: {record:?}");
@@ -212,11 +210,8 @@ fn a_handed_generation_is_refused_unless_it_is_above_every_generation_the_regist
 fn refused_as_held(d: &Described, handed: &CandidateRef, held: u64) {
     let error = d.registry.prepare("tx", handed, WARM).unwrap_err();
     let record = error.to_record();
-    assert!(
-        matches!(error, AgentError::DeploymentDescriptor { .. }),
-        "{error}"
-    );
-    assert!(record.code == ErrorCode::LoadFailed && !record.recoverable);
+    assert!(matches!(error, AgentError::Internal(_)), "{error}");
+    assert!(record.code == ErrorCode::Internal && record.recoverable);
     let says = format!("is not started: the registry holds generation {held}");
     assert!(record.message.contains(&says), "{record:?}");
 }
@@ -329,7 +324,14 @@ fn a_record_started_again_is_launched_as_the_generation_its_reference_names() {
     let d = described();
     let recorded = d.active();
 
-    let again = start_again(&d.store, &recorded, "entry.json".into(), Start::Restore).unwrap();
+    let again = start_again(
+        &d.store,
+        &d.registry,
+        &recorded,
+        "entry.json".into(),
+        Start::Restore,
+    );
+    let again = again.unwrap().reference().clone();
     d.serve(&again);
 
     let second = d.first.restamp(2).unwrap();

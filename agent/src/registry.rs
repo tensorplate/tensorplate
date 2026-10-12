@@ -20,7 +20,6 @@ use std::time::{Duration, Instant};
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
 use tensorplate_protocol::agent_state::ErrorRecord;
 use tensorplate_protocol::worker_control::{CandidateRef, MemberRef};
-use tensorplate_protocol::ErrorCode;
 
 use crate::bundle::StagedManifest;
 use crate::config::{AgentConfig, WorkerConfig};
@@ -383,7 +382,7 @@ struct Members {
     candidate: Option<u64>,
     /// The candidate's deploy gave up on it; it is not promoted any more.
     candidate_abandoned: bool,
-    /// Calls to `prepare` that have not returned.
+    /// Calls to `prepare` that have not returned, and holds not released.
     preparing: usize,
     restart: Restart,
     /// When each restart inside [`RESTART_WINDOW`] was made, oldest first.
@@ -523,10 +522,10 @@ impl Members {
         self.by_generation.insert(generation, member);
     }
 
-    /// Whether a deploy holds the member: it is preparing a candidate, or
-    /// has one it may still promote. No restart starts meanwhile, so a
-    /// generation allocated for the candidate is newer than the one it
-    /// replaces; a handed one is checked by [`Self::admissible`].
+    /// Whether a deploy holds the member: it has taken a hold, is preparing
+    /// a candidate, or has one it may still promote. No restart starts
+    /// meanwhile, so a generation allocated for the candidate, or taken
+    /// under the hold and handed over, is newer than the one it replaces.
     fn held_by_a_deploy(&self) -> bool {
         self.preparing > 0 || (self.candidate.is_some() && !self.candidate_abandoned)
     }
@@ -550,13 +549,12 @@ impl Members {
         };
         let live = self.by_generation.keys().next_back().copied();
         let newest = live.max(owed).max(self.draining.newest());
+        // A generation taken under a hold is above them all; one that is
+        // not was handed twice, and another attempt takes a new one.
         match newest.filter(|held| generation <= *held) {
-            Some(held) => Err(AgentError::DeploymentDescriptor {
-                code: ErrorCode::LoadFailed,
-                message: format!(
-                    "of `{deployment_id}` generation {generation} is not started: the registry holds generation {held}, and a generation handed to it must be above every one it holds"
-                ),
-            }),
+            Some(held) => Err(AgentError::Internal(format!(
+                "`{deployment_id}` generation {generation} is not started: the registry holds generation {held}, and a generation handed to it must be above every one it holds"
+            ))),
             None => Ok(()),
         }
     }
@@ -1446,6 +1444,18 @@ impl WorkerControl for MemberRegistry {
             if members.names(members.candidate, &candidate.deployment_id) {
                 members.candidate_abandoned = true;
             }
+        }
+    }
+
+    fn hold(&self) {
+        if let Ok(mut members) = self.members() {
+            members.preparing += 1;
+        }
+    }
+
+    fn release(&self) {
+        if let Ok(mut members) = self.members() {
+            members.preparing = members.preparing.saturating_sub(1);
         }
     }
 

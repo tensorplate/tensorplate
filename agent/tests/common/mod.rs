@@ -29,10 +29,14 @@ use std::sync::Arc;
 use sha2::Digest;
 
 use tempfile::TempDir;
+use tensorplate_agent::backend_detection::{
+    BackendProbeReport, BackendProbeState, RunnerProfileProbe,
+};
 use tensorplate_agent::config::{AgentConfig, BackendCapability, ControlTransport};
 use tensorplate_agent::coordinator::Coordinator;
 use tensorplate_agent::state::StateStore;
 use tensorplate_agent::worker::{MockBehavior, MockWorkerControl};
+use tensorplate_protocol::backend_descriptor::{ComputeType, RunnerProfile};
 use tensorplate_protocol::bundle_manifest::DeviceFamily;
 use tensorplate_protocol::SCHEMA_VERSION;
 
@@ -108,6 +112,42 @@ impl Harness {
     pub fn bundle_dir(&self, name: &str) -> PathBuf {
         self.td.path().join(format!("bundle-{name}"))
     }
+}
+
+fn installed_runner(id: &str, compute_types: &[ComputeType]) -> RunnerProfileProbe {
+    RunnerProfileProbe {
+        profile: RunnerProfile {
+            id: id.into(),
+            interpreter: "/opt/env/bin/python".into(),
+            environment_root: "/opt/env".into(),
+            library_search_paths: Vec::new(),
+            packages: vec!["speech-runtime".into()],
+            compute_types: compute_types.to_vec(),
+        },
+        state: BackendProbeState::Runnable,
+        observed: None,
+    }
+}
+
+/// The probe report of an agent with both speech runner profiles installed
+/// and runnable. A deploy of a bundle that names one needs it.
+pub fn speech_probes() -> BTreeMap<String, BackendProbeReport> {
+    BTreeMap::from([(
+        "python_pytorch".to_string(),
+        BackendProbeReport {
+            backend_name: "python_pytorch".into(),
+            descriptor_path: PathBuf::from("backend.json"),
+            state: BackendProbeState::Runnable,
+            install_hint: None,
+            runner_profiles: vec![
+                installed_runner(
+                    "faster_whisper",
+                    &[ComputeType::Float16, ComputeType::Float32],
+                ),
+                installed_runner("kokoro", &[ComputeType::Float32]),
+            ],
+        },
+    )])
 }
 
 #[derive(Clone, Copy, Default)]

@@ -545,8 +545,9 @@ pub struct DeployStatus {
 pub struct DeploymentSummary {
     pub deployment_id: String,
     /// The deployment's generation, when the agent knows it: the one
-    /// serving at `serving_url`, the one being prepared, or a resident-set
-    /// member's committed one.
+    /// serving at `serving_url`, the one being prepared, the one a retained
+    /// deployment was last started as, or a resident-set member's committed
+    /// one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<u64>,
     pub bundle_digest: String,

@@ -327,19 +327,22 @@ impl Coordinator {
             DeployState::CapacityChecked,
         )?;
 
-        // Build the candidate ref handed to the worker.
-        let candidate_ref = CandidateRef {
-            deployment_id: deployment_id.to_string(),
-            staged_path: staged_path.display().to_string(),
-            bundle_digest: verified.manifest_digest.clone(),
-            generation: None,
-            descriptor_digest: None,
-            configuration_digest: None,
-            backend_hint: verified.manifest.backend_hint.clone(),
-            model_class: verified.manifest.model_class.as_str().to_string(),
-            bundle_name: Some(verified.manifest.name.clone()),
-            bundle_version: Some(verified.manifest.version.clone()),
+        // The reference handed to the worker. Just before `prepare`: a format
+        // 0.2 bundle's generation is taken here, under a hold `prepare` ends.
+        let first = crate::descriptor_store::Deploy {
+            transaction_id: &transaction_id,
+            record: &candidate_record,
             artifact_relative_path: verified.manifest.model_artifact().map(|a| a.path.clone()),
+            format_version: &verified.manifest.format_version,
+            probes: &self.backend_probes,
+        };
+        let worker = self.worker.as_ref();
+        let in_hand = match crate::descriptor_store::start_deploy(&self.store, worker, &first) {
+            Ok(in_hand) => in_hand,
+            Err(err) => {
+                let reached = DeployState::CapacityChecked;
+                return self.fail(&transaction_id, deployment_id, reached, err);
+            }
         };
 
         // Phase: prepared.
@@ -348,10 +351,8 @@ impl Coordinator {
             deployment_id: deployment_id.to_string(),
         });
         let prepare_timeout = Duration::from_millis(self.config.worker.prepare_timeout_ms);
-        if let Err(err) = self
-            .worker
-            .prepare(&transaction_id, &candidate_ref, prepare_timeout)
-        {
+        let (candidate_ref, prepared) = in_hand.prepare(&transaction_id, prepare_timeout);
+        if let Err(err) = prepared {
             self.emit(&WorkerEvent::Failure {
                 transaction_id: transaction_id.clone(),
                 deployment_id: deployment_id.to_string(),
@@ -533,13 +534,19 @@ impl Coordinator {
             DeployState::CapacityChecked,
         )?;
 
-        // Just before `prepare`: a restart that takes a generation in between
-        // makes the registry refuse the one this reference names.
+        // Just before `prepare`: a described record's generation is taken
+        // here, under a hold `prepare` ends.
         let start = crate::descriptor_store::Start::Rollback(&transaction_id);
-        let again =
-            crate::descriptor_store::start_again(&self.store, &prev, artifact_relative_path, start);
-        let candidate_ref = match again {
-            Ok(candidate) => candidate,
+        let (store, worker) = (&self.store, self.worker.as_ref());
+        let again = crate::descriptor_store::start_again(
+            store,
+            worker,
+            &prev,
+            artifact_relative_path,
+            start,
+        );
+        let in_hand = match again {
+            Ok(in_hand) => in_hand,
             Err(err) => return self.fail_rollback(&transaction_id, &prev.deployment_id, err),
         };
 
@@ -548,10 +555,8 @@ impl Coordinator {
             deployment_id: prev.deployment_id.clone(),
         });
         let prepare_timeout = Duration::from_millis(self.config.worker.prepare_timeout_ms);
-        if let Err(err) = self
-            .worker
-            .prepare(&transaction_id, &candidate_ref, prepare_timeout)
-        {
+        let (candidate_ref, prepared) = in_hand.prepare(&transaction_id, prepare_timeout);
+        if let Err(err) = prepared {
             return self.fail_rollback(&transaction_id, &prev.deployment_id, err);
         }
         let mut prepared = Prepared::new(self.worker.as_ref(), &candidate_ref);
@@ -659,7 +664,15 @@ impl Coordinator {
                 summary.serving_url = Some(serving.serving_url);
             }
         }
-        let mut previous = state.previous_active.as_ref().map(deployment_summary);
+        // Nothing serves the retained record: its generation is the one it
+        // was last started as, where it names a descriptor.
+        let mut previous = state.previous_active.as_ref().map(|retained| {
+            let generation = retained.generation;
+            DeploymentSummary {
+                generation,
+                ..deployment_summary(retained)
+            }
+        });
         let live = self.worker.live_members();
         // Beside a durable resident set the singleton slots are empty; a
         // size-1 serving set projects into them for clients that read only

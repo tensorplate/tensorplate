@@ -4,20 +4,31 @@
 //! one file per deployment generation, named by the records that carry its
 //! identity. A document is written inside the state update that names it,
 //! so one that cannot be written fails the update, and a crash between the
-//! two writes leaves a document no record names.
+//! two writes leaves a document no record names. That update also takes the
+//! generation, under a hold on the worker control that lasts until `prepare`
+//! has returned.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
 use tensorplate_protocol::agent_state::{AgentState, DeploymentRecord, TransactionKind};
+use tensorplate_protocol::backend_descriptor::RunnerProfile;
+use tensorplate_protocol::bundle_profile::PROFILE_FORMAT_VERSION;
+use tensorplate_protocol::deployment_descriptor::DeploymentDescriptorError;
 use tensorplate_protocol::worker_control::CandidateRef;
-use tensorplate_protocol::{ArtifactRole, DeploymentDescriptor, DescriptorIdentity, ErrorCode};
+use tensorplate_protocol::{
+    AdmissionMode, ArtifactRole, DeploymentDescriptor, DescriptorIdentity, DescriptorInputs,
+    ErrorCode, MemberQuota, ProtocolError,
+};
 
+use crate::backend_detection::BackendProbeReport;
 use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
+use crate::worker::WorkerControl;
 
 const PREFIX: &str = "descriptor-";
 const SUFFIX: &str = ".json";
@@ -422,10 +433,38 @@ pub(crate) enum Start<'a> {
     Rollback(&'a str),
 }
 
+/// The refusal to start `record` again when the bundle staged at its path is
+/// not the one it names: staging is keyed by the deployment id, so a later
+/// deploy under the id replaced it. None when the staged bundle is the
+/// record's, and for a record that does not name a descriptor, which is
+/// started from whatever is staged.
+///
+/// # Errors
+///
+/// The staged manifest's own error when it cannot be read.
+pub(crate) fn another_bundle_staged(record: &DeploymentRecord) -> AgentResult<Option<AgentError>> {
+    if !matches!(record.descriptor_identity(), Ok(Some(_))) {
+        return Ok(None);
+    }
+    let (id, digest) = (&record.deployment_id, &*record.bundle_digest);
+    let staged_path = &*record.staged_path;
+    let staged = crate::bundle::staged_manifest(Path::new(staged_path))?.bundle_digest;
+    if crate::bundle::bundle_digests_equal(&staged, digest) {
+        return Ok(None);
+    }
+    Ok(Some(AgentError::BundleIntegrity {
+        path: "manifest.json".into(),
+        reason: format!(
+            "`{id}` is not started again: the bundle staged at `{staged_path}` is `{staged}`, not the `{digest}` its record names"
+        ),
+    }))
+}
+
 /// The reference `record` is started again from. For a record that names a
 /// descriptor, one state update takes the next generation, re-stamps the
 /// descriptor for it, names it where `start` says and writes its document;
-/// the reference names it. A record that names none is referenced as it is.
+/// the reference names it, in hand under a hold on `worker`. A record that
+/// names none is referenced as it is.
 ///
 /// # Errors
 ///
@@ -435,45 +474,29 @@ pub(crate) enum Start<'a> {
 /// stands where `start` reads it, its document is refused or describes
 /// another bundle, or a rollback's transaction is not in flight; and the
 /// errors of the state update.
-pub(crate) fn start_again(
+pub(crate) fn start_again<'w>(
     store: &StateStore,
+    worker: &'w dyn WorkerControl,
     record: &DeploymentRecord,
     artifact_relative_path: String,
     start: Start<'_>,
-) -> AgentResult<CandidateRef> {
+) -> AgentResult<InHand<'w>> {
     let id = &record.deployment_id;
-    let reference = CandidateRef {
-        deployment_id: id.clone(),
-        staged_path: record.staged_path.clone(),
-        bundle_digest: record.bundle_digest.clone(),
-        generation: None,
-        descriptor_digest: None,
-        configuration_digest: None,
-        backend_hint: record.backend_hint.clone(),
-        model_class: record.model_class.clone(),
-        bundle_name: Some(record.bundle_name.clone()),
-        bundle_version: Some(record.bundle_version.clone()),
-        artifact_relative_path: Some(artifact_relative_path),
-    };
+    let reference = reference_of(record, Some(artifact_relative_path));
     let named = record.descriptor_identity();
     let named = named.map_err(|e| unusable(format!("of `{id}` is not named: its record {e}")))?;
     let Some(identity) = named else {
-        return Ok(reference);
+        return Ok(InHand::as_recorded(worker, reference));
     };
     // `prepare` reads no staged manifest for a reference that names a descriptor.
-    let (digest, staged_path) = (&*record.bundle_digest, &*record.staged_path);
-    let staged = crate::bundle::staged_manifest(Path::new(staged_path))?.bundle_digest;
-    if !crate::bundle::bundle_digests_equal(&staged, digest) {
-        return Err(AgentError::BundleIntegrity {
-            path: "manifest.json".into(),
-            reason: format!(
-                "`{id}` is not started again: the bundle staged at `{staged_path}` is `{staged}`, not the `{digest}` its record names"
-            ),
-        });
+    if let Some(refusal) = another_bundle_staged(record)? {
+        return Err(refusal);
     }
+    let (digest, staged_path) = (&*record.bundle_digest, &*record.staged_path);
     let descriptors = DescriptorStore::new(store.state_dir());
     let path = descriptors.path(id, identity.generation)?;
     let unstamped = |reason: String| refused(&path, format!("is not re-stamped: {reason}"));
+    let guard = Held::new(worker);
     let next = store.update(|state| {
         let (slot, held) = match start {
             Start::Restore => (&state.active, "active"),
@@ -516,13 +539,215 @@ pub(crate) fn start_again(
         descriptors.write(&next)?;
         Ok(next)
     })?;
-    let (generation, descriptor_digest, configuration_digest) = naming(&next);
-    Ok(CandidateRef {
-        generation,
-        descriptor_digest,
-        configuration_digest,
-        ..reference
-    })
+    Ok(InHand::naming(worker, reference, &next, guard))
+}
+
+/// What a deploy starts the first generation of a staged bundle from.
+pub(crate) struct Deploy<'a> {
+    pub(crate) transaction_id: &'a str,
+    /// The candidate record, as the deploy recorded it.
+    pub(crate) record: &'a DeploymentRecord,
+    pub(crate) artifact_relative_path: Option<String>,
+    /// The verified manifest's; only a format 0.2 bundle gets a descriptor.
+    pub(crate) format_version: &'a str,
+    pub(crate) probes: &'a BTreeMap<String, BackendProbeReport>,
+}
+
+/// The reference a deploy starts its candidate from. For a format 0.2
+/// bundle the staged copy is verified again, then one state update takes
+/// the next generation, derives the descriptor from that copy, names it on
+/// the candidate record and the deploy's transaction and writes its
+/// document; the reference names it, in hand under a hold on `worker`. A
+/// bundle of another format is referenced as it was before descriptors.
+///
+/// The quota is the default: none is assigned yet, and it is not a limit.
+/// The runtime version is the one this agent runs, whatever its
+/// configuration gives the compatibility check to judge against.
+///
+/// # Errors
+///
+/// For a format 0.2 bundle: the staged copy's own error when it does not
+/// verify, and [`AgentError::BundleIntegrity`] when it is not the bundle
+/// the record names; [`AgentError::DeploymentDescriptor`] when the candidate
+/// record or the transaction no longer stands, or the descriptor cannot be
+/// derived (`unsupported` for a runner profile that is not installed or a
+/// compute type it does not list, `config_invalid` otherwise); and the
+/// errors of the state update.
+pub(crate) fn start_deploy<'w>(
+    store: &StateStore,
+    worker: &'w dyn WorkerControl,
+    deploy: &Deploy<'_>,
+) -> AgentResult<InHand<'w>> {
+    let record = deploy.record;
+    let id = &record.deployment_id;
+    let reference = reference_of(record, deploy.artifact_relative_path.clone());
+    if deploy.format_version != PROFILE_FORMAT_VERSION {
+        return Ok(InHand::as_recorded(worker, reference));
+    }
+    let (digest, staged_path) = (&*record.bundle_digest, &*record.staged_path);
+    let staged = crate::bundle::staged_bundle(Path::new(staged_path))?;
+    if !crate::bundle::bundle_digests_equal(&staged.manifest_digest, digest) {
+        return Err(AgentError::BundleIntegrity {
+            path: "manifest.json".into(),
+            reason: format!(
+                "`{id}` is not started: the bundle staged at `{staged_path}` is `{}`, not the `{digest}` that was verified",
+                staged.manifest_digest
+            ),
+        });
+    }
+    // No report for the backend: no profile is known to be installed.
+    let report = deploy.probes.get(&record.backend_hint);
+    let probed = report
+        .into_iter()
+        .flat_map(|report| &report.runner_profiles);
+    let installed: Vec<RunnerProfile> = probed.map(|probe| probe.profile.clone()).collect();
+    let descriptors = DescriptorStore::new(store.state_dir());
+    let underived = |reason: String| unusable(format!("of `{id}` is not derived: {reason}"));
+    let guard = Held::new(worker);
+    let derived = store.update(|state| {
+        if state.candidate.as_ref() != Some(record) {
+            return Err(underived("the candidate record is not its deploy's".into()));
+        }
+        let generation = state.allocate_generation(1);
+        let generation = generation.map_err(|e| underived(e.to_string()))?;
+        let inputs = DescriptorInputs {
+            deployment_id: id,
+            generation,
+            admission_mode: AdmissionMode::Production,
+            staged_path,
+            quota: MemberQuota::default(),
+            runtime_version: tensorplate_protocol::version(),
+            runner_profiles: &installed,
+            acceptance_profile_digest: None,
+        };
+        let derived = DeploymentDescriptor::derive(&staged, &inputs);
+        let derived = derived.map_err(|e: DeploymentDescriptorError| {
+            let message = format!("of `{id}` is not derived: {e}");
+            let code = ProtocolError::from(e).code;
+            AgentError::DeploymentDescriptor { code, message }
+        })?;
+        let (generation, descriptor_digest, configuration_digest) = naming(&derived);
+        let in_flight = state.in_flight_transaction.as_mut().filter(|tx| {
+            tx.transaction_id == deploy.transaction_id
+                && tx.kind == TransactionKind::Deploy
+                && tx.deployment_id == *id
+        });
+        let transaction = in_flight.ok_or_else(|| {
+            let transaction_id = deploy.transaction_id;
+            underived(format!(
+                "deploy transaction `{transaction_id}` is not in flight"
+            ))
+        })?;
+        state.candidate = Some(DeploymentRecord {
+            generation,
+            descriptor_digest: descriptor_digest.clone(),
+            configuration_digest: configuration_digest.clone(),
+            ..record.clone()
+        });
+        transaction.generation = generation;
+        transaction.descriptor_digest = descriptor_digest;
+        transaction.configuration_digest = configuration_digest;
+        descriptors.write(&derived)?;
+        Ok(derived)
+    })?;
+    Ok(InHand::naming(worker, reference, &derived, guard))
+}
+
+/// The reference of `record` before any descriptor is named on it.
+fn reference_of(record: &DeploymentRecord, artifact_relative_path: Option<String>) -> CandidateRef {
+    CandidateRef {
+        deployment_id: record.deployment_id.clone(),
+        staged_path: record.staged_path.clone(),
+        bundle_digest: record.bundle_digest.clone(),
+        generation: None,
+        descriptor_digest: None,
+        configuration_digest: None,
+        backend_hint: record.backend_hint.clone(),
+        model_class: record.model_class.clone(),
+        bundle_name: Some(record.bundle_name.clone()),
+        bundle_version: Some(record.bundle_version.clone()),
+        artifact_relative_path,
+    }
+}
+
+/// A hold on a worker control, released when dropped.
+struct Held<'w>(&'w dyn WorkerControl);
+
+impl<'w> Held<'w> {
+    fn new(worker: &'w dyn WorkerControl) -> Self {
+        worker.hold();
+        Self(worker)
+    }
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// A reference on its way to `prepare`. One that names a descriptor was
+/// given its generation under a hold taken before that generation was: the
+/// worker control starts none by itself until `prepare` has returned, so
+/// every generation it holds by then is older than the one handed to it.
+pub(crate) struct InHand<'w> {
+    worker: &'w dyn WorkerControl,
+    reference: CandidateRef,
+    held: Option<Held<'w>>,
+}
+
+impl<'w> InHand<'w> {
+    /// A reference that names no descriptor: the worker control takes its
+    /// generation itself, inside `prepare`.
+    fn as_recorded(worker: &'w dyn WorkerControl, reference: CandidateRef) -> Self {
+        Self {
+            worker,
+            reference,
+            held: None,
+        }
+    }
+
+    fn naming(
+        worker: &'w dyn WorkerControl,
+        reference: CandidateRef,
+        descriptor: &DeploymentDescriptor,
+        held: Held<'w>,
+    ) -> Self {
+        let (generation, descriptor_digest, configuration_digest) = naming(descriptor);
+        Self {
+            worker,
+            reference: CandidateRef {
+                generation,
+                descriptor_digest,
+                configuration_digest,
+                ..reference
+            },
+            held: Some(held),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reference(&self) -> &CandidateRef {
+        &self.reference
+    }
+
+    /// Ask the worker control to prepare the reference, and return it with
+    /// the answer. The hold ends here: from its `prepare` on the worker
+    /// control holds the member for the candidate itself.
+    pub(crate) fn prepare(
+        self,
+        transaction_id: &str,
+        timeout: Duration,
+    ) -> (CandidateRef, AgentResult<()>) {
+        let Self {
+            worker,
+            reference,
+            held,
+        } = self;
+        let prepared = worker.prepare(transaction_id, &reference, timeout);
+        drop(held);
+        (reference, prepared)
+    }
 }
 
 /// The restart stamp of an agent that keeps descriptor documents: in one

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -17,7 +17,7 @@ use crate::worker::{WorkerControl, WorkerReadiness};
 
 /// Puts a directory where a state write makes its first temporary file, so
 /// no later write lands, or takes it away again.
-fn refuse_state_writes(state_dir: &Path, refuse: bool) {
+pub(super) fn refuse_state_writes(state_dir: &Path, refuse: bool) {
     let in_the_way = state_dir.join("state.json.bak.tmp");
     if refuse {
         fs::create_dir(in_the_way).unwrap();
@@ -31,22 +31,15 @@ fn refuse_state_writes(state_dir: &Path, refuse: bool) {
 /// `stt@3` names generation 3 of `stt` and its document reads back as that
 /// descriptor, `stt@3?` names one whose document does not, `stt` names
 /// none, `-` is an empty slot.
-fn view(state_dir: &Path) -> [String; 4] {
+pub(super) fn view(state_dir: &Path) -> [String; 4] {
     let state = StateStore::open(state_dir).unwrap().snapshot().unwrap();
-    let descriptors = DescriptorStore::new(state_dir);
-    let show = |id: &str, identity: Option<DescriptorIdentity<'_>>| match identity {
-        None => id.to_owned(),
-        Some(named) => {
-            let unread = descriptors.read(id, named).map_or("?", |_| "");
-            format!("{id}@{}{unread}", named.generation)
-        }
-    };
-    let record = |slot: &Option<DeploymentRecord>| match slot {
-        Some(record) => show(&record.deployment_id, record.descriptor_identity().unwrap()),
-        None => "-".to_owned(),
-    };
+    let record = |slot: &Option<DeploymentRecord>| shown(state_dir, slot);
     let transaction = match &state.in_flight_transaction {
-        Some(tx) => show(&tx.deployment_id, tx.descriptor_identity().unwrap()),
+        Some(tx) => show(
+            state_dir,
+            &tx.deployment_id,
+            tx.descriptor_identity().unwrap(),
+        ),
         None => "-".to_owned(),
     };
     let counter = state
@@ -57,57 +50,129 @@ fn view(state_dir: &Path) -> [String; 4] {
     [active, previous, transaction, counter]
 }
 
+fn show(state_dir: &Path, id: &str, identity: Option<DescriptorIdentity<'_>>) -> String {
+    let Some(named) = identity else {
+        return id.to_owned();
+    };
+    let read = DescriptorStore::new(state_dir).read(id, named);
+    format!("{id}@{}{}", named.generation, read.map_or("?", |_| ""))
+}
+
+/// What the record in `slot` names, as [`view`] shows it.
+pub(super) fn shown(state_dir: &Path, slot: &Option<DeploymentRecord>) -> String {
+    match slot {
+        Some(record) => show(
+            state_dir,
+            &record.deployment_id,
+            record.descriptor_identity().unwrap(),
+        ),
+        None => "-".to_owned(),
+    }
+}
+
 /// One call to `prepare`: the reference, what a start would have read at
 /// that moment, and the descriptor the registry would have read for it.
-struct Asked {
-    reference: CandidateRef,
-    view: [String; 4],
-    resolved: Option<DeploymentDescriptor>,
+pub(super) struct Asked {
+    pub(super) reference: CandidateRef,
+    pub(super) view: [String; 4],
+    pub(super) resolved: Option<DeploymentDescriptor>,
+    /// What the candidate record named at that moment.
+    pub(super) candidate: String,
+    /// What a start would have read when the hold in force was taken; none
+    /// when the worker control was not held.
+    pub(super) held_since: Option<[String; 4]>,
 }
 
 /// A worker control that records what it is asked to prepare.
 #[derive(Default)]
-struct Worker {
+pub(super) struct Worker {
     state_dir: PathBuf,
     asked: Mutex<Vec<Asked>>,
     /// `prepare` ends the agent as a kill would: no later state write lands.
     killed_at_prepare: bool,
+    /// The same, at the first hold.
+    killed_at_hold: bool,
+    /// The same, in this call (`prepare` or `warm`) for this generation.
+    killed_in: Option<(&'static str, u64)>,
     stopping: AtomicBool,
     active: Option<String>,
+    /// The view at each hold that has not been released.
+    holds: Mutex<Vec<[String; 4]>>,
+    /// Releases of a hold that was never taken.
+    unmatched_releases: AtomicUsize,
 }
 
 impl Worker {
-    fn killed() -> Self {
+    pub(super) fn killed() -> Self {
         Self {
             killed_at_prepare: true,
             ..Self::default()
         }
     }
-    fn serving(deployment_id: &str) -> Self {
+    pub(super) fn killed_at_its_hold() -> Self {
+        Self {
+            killed_at_hold: true,
+            ..Self::default()
+        }
+    }
+    pub(super) fn killed_in(call: &'static str, generation: u64) -> Self {
+        Self {
+            killed_in: Some((call, generation)),
+            ..Self::default()
+        }
+    }
+    /// End the agent as a kill would: no later state write lands.
+    fn kill(&self) -> AgentError {
+        refuse_state_writes(&self.state_dir, true);
+        self.stopping.store(true, Ordering::SeqCst);
+        AgentError::WorkerExited("killed".into())
+    }
+    pub(super) fn serving(deployment_id: &str) -> Self {
         Self {
             active: Some(deployment_id.into()),
             ..Self::default()
         }
     }
+    /// Whether every hold was released and nothing else was.
+    pub(super) fn released(&self) -> bool {
+        self.holds.lock().unwrap().is_empty() && self.unmatched_releases.load(Ordering::SeqCst) == 0
+    }
 }
 
 impl WorkerControl for Worker {
+    fn hold(&self) {
+        self.holds.lock().unwrap().push(view(&self.state_dir));
+        if self.killed_at_hold {
+            refuse_state_writes(&self.state_dir, true);
+            self.stopping.store(true, Ordering::SeqCst);
+        }
+    }
+    fn release(&self) {
+        if self.holds.lock().unwrap().pop().is_none() {
+            self.unmatched_releases.fetch_add(1, Ordering::SeqCst);
+        }
+    }
     fn prepare(&self, _: &str, candidate: &CandidateRef, _: Duration) -> AgentResult<()> {
         let descriptors = DescriptorStore::new(&self.state_dir);
         let generation = candidate.generation.unwrap_or(0);
+        let read = StateStore::open(&self.state_dir).unwrap();
         self.asked.lock().unwrap().push(Asked {
             reference: candidate.clone(),
             view: view(&self.state_dir),
             resolved: resolve(Some(&descriptors), candidate, generation).unwrap(),
+            candidate: shown(&self.state_dir, &read.snapshot().unwrap().candidate),
+            held_since: self.holds.lock().unwrap().last().cloned(),
         });
-        if self.killed_at_prepare {
-            refuse_state_writes(&self.state_dir, true);
-            self.stopping.store(true, Ordering::SeqCst);
-            return Err(AgentError::WorkerExited("killed".into()));
+        if self.killed_at_prepare || self.killed_in == Some(("prepare", generation)) {
+            return Err(self.kill());
         }
         Ok(())
     }
     fn warm(&self, _: &str, candidate: &CandidateRef, _: Duration) -> AgentResult<WorkerReadiness> {
+        let generation = candidate.generation.unwrap_or(0);
+        if self.killed_in == Some(("warm", generation)) {
+            return Err(self.kill());
+        }
         let deployment_id = candidate.deployment_id.clone();
         let ready = true;
         Ok(WorkerReadiness {
@@ -128,25 +193,27 @@ impl WorkerControl for Worker {
 }
 
 /// One run of the agent over a state directory.
-struct Agent {
-    store: Arc<StateStore>,
-    worker: Arc<Worker>,
-    coordinator: Coordinator,
+pub(super) struct Agent {
+    pub(super) store: Arc<StateStore>,
+    pub(super) worker: Arc<Worker>,
+    pub(super) coordinator: Coordinator,
 }
 
 impl Agent {
-    /// The one call the worker control got to `prepare`.
-    fn asked(&self) -> Asked {
+    /// The one call the worker control got to `prepare`, which ended the
+    /// hold it was made under.
+    pub(super) fn asked(&self) -> Asked {
         let mut asked = self.worker.asked.lock().unwrap();
         assert_eq!(asked.len(), 1);
+        assert!(self.worker.released());
         asked.remove(0)
     }
-    fn never_asked(&self) -> bool {
-        self.worker.asked.lock().unwrap().is_empty()
+    pub(super) fn never_asked(&self) -> bool {
+        self.worker.asked.lock().unwrap().is_empty() && self.worker.released()
     }
     /// Put a transaction in flight that is about to ask for its worker and
     /// names no descriptor.
-    fn in_flight(&self, kind: TransactionKind, id: &str, deployment_id: &str) {
+    pub(super) fn in_flight(&self, kind: TransactionKind, id: &str, deployment_id: &str) {
         let phase = DeployState::CapacityChecked;
         let transaction = serde_json::json!({
             "transaction_id": id, "deployment_id": deployment_id, "phase": phase, "kind": kind,
@@ -159,7 +226,9 @@ impl Agent {
         self.store.update(begin).unwrap();
     }
     fn again(&self, record: &DeploymentRecord, start: Start<'_>) -> AgentResult<CandidateRef> {
-        start_again(&self.store, record, "entry.json".into(), start)
+        let worker = self.worker.as_ref();
+        let in_hand = start_again(&self.store, worker, record, "entry.json".into(), start)?;
+        Ok(in_hand.reference().clone())
     }
     /// The `active` and the `previous_active` record.
     fn records(&self) -> [DeploymentRecord; 2] {
@@ -177,24 +246,24 @@ impl Agent {
 }
 
 /// Where the agent of a test keeps its state and its staged bundles.
-struct Host {
-    td: TempDir,
-    descriptors: DescriptorStore,
+pub(super) struct Host {
+    pub(super) td: TempDir,
+    pub(super) descriptors: DescriptorStore,
 }
 
-fn host() -> Host {
+pub(super) fn host() -> Host {
     let td = TempDir::new().unwrap();
     let descriptors = DescriptorStore::new(td.path().join("state"));
     Host { td, descriptors }
 }
 
 impl Host {
-    fn state_dir(&self) -> PathBuf {
+    pub(super) fn state_dir(&self) -> PathBuf {
         self.td.path().join("state")
     }
     /// The speech-to-text fixture bundle staged for `id`, as a deploy
     /// stages it.
-    fn staged(&self, id: &str) -> PathBuf {
+    pub(super) fn staged(&self, id: &str) -> PathBuf {
         let staged = self.td.path().join("staging").join(id);
         fs::create_dir_all(&staged).unwrap();
         for file in ["manifest.json", "entry.json"] {
@@ -204,7 +273,7 @@ impl Host {
         staged
     }
     /// Stage another bundle for `stt`; returns its digest.
-    fn restage(&self) -> String {
+    pub(super) fn restage(&self) -> String {
         let staged = self.staged("stt");
         let manifest = fs::read_to_string(staged.join("manifest.json")).unwrap();
         let (was, is) = ("\"version\": \"0.2.0\"", "\"version\": \"0.2.1\"");
@@ -216,15 +285,16 @@ impl Host {
     }
     /// Start the agent as `main` does up to its recovery: open the state,
     /// then prune. Returns how many documents the prune removed.
-    fn start(&self, worker: Worker) -> (Agent, usize) {
-        let config = serde_json::json!({
-            "socket_path": self.td.path().join("agent.sock"),
-            "state_dir": self.state_dir(),
-            "staging_dir": self.td.path().join("staging"),
-            "available_backends": ["mock"],
-            "device_memory_bytes": 8_u64 << 30,
-        });
-        let config: crate::config::AgentConfig = serde_json::from_value(config).unwrap();
+    pub(super) fn start(&self, worker: Worker) -> (Agent, usize) {
+        self.start_probed(worker, probes())
+    }
+    /// [`Self::start`] for an agent that holds `probes`.
+    pub(super) fn start_probed(
+        &self,
+        worker: Worker,
+        probes: BTreeMap<String, BackendProbeReport>,
+    ) -> (Agent, usize) {
+        let config = agent_config(self.td.path());
         let store = Arc::new(StateStore::open(self.state_dir()).unwrap());
         let pruned = prune_at_start(&store).unwrap();
         let state_dir = self.state_dir();
@@ -232,8 +302,8 @@ impl Host {
             state_dir,
             ..worker
         });
-        let config = config.validate().unwrap();
         let coordinator = Coordinator::new(config, store.clone(), worker.clone());
+        let coordinator = coordinator.with_backend_probes(probes);
         let agent = Agent {
             store,
             worker,
@@ -261,16 +331,16 @@ impl Host {
         deploy(&agent.store, &self.descriptors, "tts", &staged).unwrap();
         (agent, first)
     }
-    fn view(&self) -> [String; 4] {
+    pub(super) fn view(&self) -> [String; 4] {
         view(&self.state_dir())
     }
-    fn last_error(&self) -> Option<ErrorRecord> {
+    pub(super) fn last_error(&self) -> Option<ErrorRecord> {
         let read = StateStore::open(self.state_dir()).unwrap();
         read.snapshot().unwrap().last_error
     }
     /// The quarantined transactions, as `tx@Promoted`, and whether the last
     /// error is that of the latest one.
-    fn quarantined(&self) -> (String, bool) {
+    pub(super) fn quarantined(&self) -> (String, bool) {
         let read = StateStore::open(self.state_dir()).unwrap();
         let state = read.snapshot().unwrap();
         let show = |q: &QuarantineRecord| format!("{}@{:?}", q.transaction_id, q.phase);
@@ -279,7 +349,7 @@ impl Host {
         (shown.join(" "), latest == state.last_error.as_ref())
     }
     /// The documents in the state directory, as `stt-1 tts-2`.
-    fn documents(&self) -> String {
+    pub(super) fn documents(&self) -> String {
         let entries = fs::read_dir(self.state_dir()).unwrap();
         let names = entries.map(|e| e.unwrap().file_name().into_string().unwrap());
         let mut documents: Vec<_> = names.filter(|name| is_document(name)).collect();
@@ -314,6 +384,9 @@ fn a_restore_names_and_writes_the_next_generation_before_it_asks_for_a_worker() 
 
     assert_eq!(summary.action, RecoveryAction::RestoreActive);
     let asked = agent.asked();
+    // The hold began before the generation was taken.
+    let before = ["stt@1", "-", "-", "2"].map(String::from);
+    assert_eq!(asked.held_since, Some(before));
     assert_eq!(asked.view, ["stt@2", "-", "-", "3"]);
     assert_eq!(asked.resolved, Some(first.restamp(2).unwrap()));
     assert_eq!(host.view(), ["stt@2", "-", "-", "3"]);
@@ -334,17 +407,36 @@ fn a_restore_of_a_record_that_names_no_descriptor_writes_and_names_nothing() {
 
     let asked = agent.asked();
     assert_eq!(asked.reference, naming(&reference(&first), [false; 3]));
+    assert_eq!(asked.held_since, None);
     assert_eq!(asked.view, ["stt", "-", "-", "2"]);
     assert_eq!(host.view(), ["stt", "-", "-", "2"]);
     assert_eq!(host.documents(), "stt-1");
 }
 
 #[test]
-fn a_restore_is_refused_unless_the_document_and_the_staged_bundle_are_the_records() {
-    type Broken = (fn(&Host, &Agent), &'static str);
+fn a_restore_of_a_record_that_names_no_descriptor_starts_whatever_is_staged_under_its_id() {
+    let host = host();
+    let (agent, first) = host.restoring(Worker::default());
+    undescribe(&agent, |state| state.active.as_mut());
+    let staged = host.restage();
+
+    apply_startup(&agent.coordinator).unwrap();
+
+    // As before descriptors: the staged bundle is not compared with the record's.
+    let asked = agent.asked();
+    assert_ne!(asked.reference.bundle_digest, staged);
+    assert_eq!(asked.reference, naming(&reference(&first), [false; 3]));
+    assert_eq!(host.last_error(), None);
+}
+
+#[test]
+fn a_restore_fails_the_start_unless_the_staged_copy_reads_and_the_document_is_the_records() {
+    type Broken = (fn(&Host, &Agent), &'static str, ErrorCode);
+    let load_failed = ErrorCode::LoadFailed;
     let missing: Broken = (
         |host, _| fs::remove_file(host.document()).unwrap(),
         "descriptor-stt-1.json` is missing",
+        load_failed,
     );
     let another: Broken = (
         |host, _| {
@@ -353,10 +445,13 @@ fn a_restore_is_refused_unless_the_document_and_the_staged_bundle_are_the_record
             host.descriptors.write(&other).unwrap();
         },
         "descriptor-stt-1.json` is generation 1 of `stt` (",
+        load_failed,
     );
-    let restaged: Broken = (
-        |host, _| drop(host.restage()),
-        "`stt` is not started again: the bundle staged at",
+    // Whether the staged bundle is the record's cannot be told.
+    let unreadable: Broken = (
+        |host, _| fs::remove_file(host.staged("stt").join("manifest.json")).unwrap(),
+        "bundle manifest is invalid",
+        ErrorCode::ConfigInvalid,
     );
     // The record and the staged bundle agree; the document describes another.
     let renamed: Broken = (
@@ -369,17 +464,45 @@ fn a_restore_is_refused_unless_the_document_and_the_staged_bundle_are_the_record
             agent.store.update(rename).unwrap();
         },
         "descriptor-stt-1.json` is not re-stamped: it describes bundle `sha256:",
+        load_failed,
     );
-    for (broken, says) in [missing, another, restaged, renamed] {
+    // The staged manifest is the record's, so its digest compares equal; the
+    // restore fails on the artifact the manifest names.
+    let gone: Broken = (
+        |host, _| fs::remove_file(host.staged("stt").join("entry.json")).unwrap(),
+        "artifact `entry.json` failed integrity check: missing on disk",
+        load_failed,
+    );
+    let altered: Broken = (
+        |host, _| fs::write(host.staged("stt").join("entry.json"), b"{}").unwrap(),
+        "artifact `entry.json` failed integrity check: digest mismatch",
+        load_failed,
+    );
+    let no_directory: Broken = (
+        |host, _| fs::remove_dir_all(host.staged("stt")).unwrap(),
+        "does not exist or is not a directory",
+        ErrorCode::ConfigInvalid,
+    );
+    for (broken, says, code) in [
+        missing,
+        another,
+        unreadable,
+        renamed,
+        gone,
+        altered,
+        no_directory,
+    ] {
         let host = host();
         let (agent, _) = host.restoring(Worker::default());
         broken(&host, &agent);
         let before = (host.view(), host.documents());
 
-        let error = apply_startup(&agent.coordinator).unwrap_err().to_record();
+        let error = apply_startup(&agent.coordinator)
+            .expect_err(says)
+            .to_record();
 
-        let load_failed = error.code == ErrorCode::LoadFailed && !error.recoverable;
-        assert!(load_failed && error.message.contains(says), "{error:?}");
+        let refused = error.code == code && !error.recoverable;
+        assert!(refused && error.message.contains(says), "{error:?}");
         assert_eq!(host.last_error(), Some(error));
         assert_eq!((host.view(), host.documents()), before, "{says}");
         assert!(agent.never_asked() && before.0[3] == "2", "{says}");
@@ -435,6 +558,9 @@ fn a_rollback_names_the_next_generation_on_its_transaction_and_the_swap_on_the_r
 
     assert_eq!(outcome.deployment_id, "stt");
     let asked = agent.asked();
+    // The hold began before the generation was taken.
+    let before = ["tts@2", "stt@1", "stt", "3"].map(String::from);
+    assert_eq!(asked.held_since, Some(before));
     assert_eq!(asked.view, ["tts@2", "stt@1", "stt@3", "4"]);
     assert_eq!(asked.resolved, Some(first.restamp(3).unwrap()));
     assert_eq!(host.view(), ["stt@3", "tts@2", "-", "4"]);
@@ -455,6 +581,7 @@ fn a_rollback_to_a_record_that_names_no_descriptor_writes_and_names_nothing() {
 
     let asked = agent.asked();
     assert_eq!(asked.reference, naming(&reference(&first), [false; 3]));
+    assert_eq!(asked.held_since, None);
     assert_eq!(asked.view, ["tts@2", "stt", "stt", "3"]);
     assert_eq!(host.view(), ["stt", "tts@2", "-", "3"]);
     assert_eq!(host.documents(), "stt-1 tts-2");

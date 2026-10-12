@@ -589,7 +589,7 @@
         "deployment_id": {"type": "string", "minLength": 1},
         "generation": {
           "$ref": "#/definitions/StateCounter",
-          "description": "The deployment's generation, when the agent knows it: for `active`, the generation of the worker serving at `serving_url`, read together with that URL; for `candidate`, the generation being prepared; for a slot projected from a resident set, the member's committed generation. Absent otherwise."
+          "description": "The deployment's generation, when the agent knows it: for `active`, the generation of the worker serving at `serving_url`, read together with that URL; for `candidate`, the generation being prepared; for `previous_active`, the generation the retained deployment was last started as, when its record names a deployment descriptor; for a slot projected from a resident set, the member's committed generation. Absent otherwise."
         },
         "bundle_digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"},
         "bundle_name": {"type": "string"},

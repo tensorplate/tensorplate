@@ -129,8 +129,12 @@ and they travel together: a record or reference that carries one or two of
 the three is refused. A state file that carries any of them is state
 version `0.2`, and a generation a record names is below the file's
 `next_generation`. A deployment with no descriptor carries none of the
-three and is read and written as before. No deploy records an identity
-yet. The descriptor a record names is a document beside the agent's state
+three and is read and written as before. The agent derives a descriptor
+when it deploys a format 0.2 bundle, from the staged copy it has verified
+again, and records its identity on the candidate record, the deploy's
+transaction and, at the promotion, the active record; a format 0.1 bundle
+gets none. The descriptor a record names is a document beside the agent's
+state
 ([agent.md](../architecture/agent.md#deployment-descriptor-documents)).
 
 ### Re-stamping
