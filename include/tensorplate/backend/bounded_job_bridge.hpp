@@ -72,9 +72,11 @@ namespace tensorplate {
 /// Obligations of the sink: a callback returns promptly without blocking or
 /// throwing. It may call submit(), cancel() and release_session() on the
 /// bridge, whose events then arrive after it returns; it never calls
-/// health() or set_event_sink(). A receiver releases the buffer of every
-/// AudioChunkResult it receives exactly once, including when it discards the
-/// event, for example a late event of a cancelled job or a stale generation.
+/// health() or set_event_sink(). A callback never unloads or destroys the
+/// backend session the bridge belongs to, and never destroys the bridge. A
+/// receiver releases the buffer of every AudioChunkResult it receives exactly
+/// once, including when it discards the event, for example a late event of a
+/// cancelled job or a stale generation.
 class JobEventSink {
  public:
   virtual ~JobEventSink() = default;
