@@ -105,8 +105,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   never taken for their answer. At most one probe is unanswered at a time;
   a later call waits for the same one, a caller whose deadline passes gets
   `health_timeout` and leaves it standing, and an answer that comes after
-  every caller gave up is dropped by its id. The send queue's bound grows
-  by the probe's one frame, to 2,082. (V030-E04-F03-T03)
+  every caller gave up is dropped by its id. A call that waits when
+  admission closes returns `backend_unavailable` then, not at its deadline.
+  The send queue's bound grows by the probe's one frame, to 2,082.
+  (V030-E04-F03-T03)
 
 - Agent status names generations and reports how a member's worker process
   stands. Beside a singleton record, `active.generation` is the generation

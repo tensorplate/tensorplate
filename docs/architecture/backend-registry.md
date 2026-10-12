@@ -502,12 +502,18 @@ declared neither class a lane runs (`unsupported`,
   with an id of its own and reads the answer's `health.ready`: false is
   `backend_not_ready`, and an answer that cannot be read as a health
   report, or an `error_event` naming the probe, is `backend_unavailable`.
-  The channel's state is read again once the answer is in and comes first,
-  so an unload that began meanwhile answers `backend_unavailable` whatever
-  the sidecar said. The probe is matched
-  by its `message_id` ahead of the exchange slot, so it is answered beside
-  a `prime` or an `unload` that waits and its answer is never taken for
-  theirs. At most one probe is unanswered. It belongs to the channel, not
+  The channel's state is read again when the call's wait ends and comes
+  first: an unload that closes admission meanwhile wakes the caller, which
+  returns `backend_unavailable` before its deadline, whatever the sidecar
+  said and also when it said nothing. While the probe is unanswered it is
+  matched by its `message_id` ahead of the exchange slot, so it is answered
+  beside a `prime` or an `unload` that waits and its answer is not taken
+  for theirs. The id guards the slot no longer than that: a second frame
+  carrying the id of a probe already answered, which only a faulty sidecar
+  sends, is a stray frame like any other, handed to the exchange that waits
+  (the session then ends the connection over the id) and dropped and counted
+  when none does. At most one probe is unanswered. It belongs to the
+  channel, not
   to a caller: while the channel admits, a call made beside a probe that
   stands sends nothing and waits for its answer, each caller with its own
   deadline, and a caller whose deadline

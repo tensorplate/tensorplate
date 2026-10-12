@@ -190,9 +190,9 @@ class JobChannel {
   /// The backend can run jobs: submit() takes them from here on.
   void admit_jobs() noexcept;
 
-  /// The backend is about to unload: submit() refuses from here on. cancel()
-  /// and release_session() still reach the sidecar, which acts on them while
-  /// an unreleased job remains.
+  /// The backend is about to unload: submit() refuses from here on and a
+  /// probe_health() that waits returns. cancel() and release_session() still
+  /// reach the sidecar, which acts on them while an unreleased job remains.
   void close_admission() noexcept;
 
   /// Sends a unary request and waits for its response: the next frame that is

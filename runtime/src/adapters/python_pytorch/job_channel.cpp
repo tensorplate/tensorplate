@@ -212,6 +212,8 @@ void JobChannel::close_admission() noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
   if (phase_ == Phase::Started || phase_ == Phase::Admitting) {
     phase_ = Phase::Closing;
+    // A health call waits for an answer the sidecar may never send.
+    probe_cv_.notify_all();
   }
 }
 
@@ -432,16 +434,18 @@ Result<void> JobChannel::probe_health(TimePoint deadline) {
   // The channel lets go of the probe when it ends; this caller reads it after.
   const std::shared_ptr<HealthProbe> probe = probe_;
   ++probe->waiting;
-  probe_cv_.wait_until(lock, deadline, [&probe] { return probe->outcome.has_value(); });
+  probe_cv_.wait_until(lock, deadline, [this, &probe] {
+    return probe->outcome.has_value() || not_running_locked().has_value();
+  });
   --probe->waiting;
+  // The channel's state first, as for a call made now: an unload may have
+  // closed admission while the call waited, answered or not.
+  if (auto refused = not_running_locked(); refused.has_value()) {
+    return unexpected(std::move(*refused));
+  }
   const std::optional<Result<void>> outcome = probe->outcome;
   if (!outcome.has_value()) {
     return refuse(Error::Code::Timeout, "health_timeout");
-  }
-  // The channel's state first, as for a call made now: an unload may have
-  // closed admission while the answer was on its way.
-  if (auto refused = not_running_locked(); refused.has_value()) {
-    return unexpected(std::move(*refused));
   }
   return *outcome;
 }

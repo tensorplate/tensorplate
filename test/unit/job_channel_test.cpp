@@ -131,8 +131,8 @@ JobChannel::TimePoint patient() {
 // A health call that waits on a thread of its own, joined before it goes.
 class WaitingHealth {
  public:
-  explicit WaitingHealth(JobChannel& channel)
-      : thread_([this, &channel] { outcome_ = channel.probe_health(patient()); }) {}
+  explicit WaitingHealth(JobChannel& channel, JobChannel::TimePoint deadline = patient())
+      : thread_([this, &channel, deadline] { outcome_ = channel.probe_health(deadline); }) {}
   ~WaitingHealth() {
     if (thread_.joinable()) {
       thread_.join();
@@ -1370,15 +1370,16 @@ TEST_F(JobChannelTest, AnUnloadThatBeginsWhileAHealthCallWaitsMakesItUnavailable
   expect_refused(health.outcome(), Error::Code::Unavailable, "backend_unavailable");
 }
 
-// The channel's state comes first, whatever the sidecar answered.
-TEST_F(JobChannelTest, AnUnloadThatBeginsWhileAHealthCallWaitsOutranksAnAnswerOfNotReady) {
+// No answer comes: the close itself ends the call, well before its deadline.
+TEST_F(JobChannelTest, AnUnloadThatBeginsWhileAHealthCallWaitsEndsItWithoutAnAnswer) {
   ASSERT_NO_FATAL_FAILURE(up());
   peer.hold_health();
-  peer.report_not_ready();
-  WaitingHealth health(h.channel);
-  ASSERT_EQ(peer.sent("health_check", 1).size(), 1U);
+  WaitingHealth health(h.channel, passed() + 10 * JobChannelHarness::kPatience);
+  ASSERT_TRUE(h.wait([&] { return h.channel.health_waiters() == 1; }));
   h.channel.close_admission();
-  peer.release_health();
+  EXPECT_TRUE(h.wait([&] { return h.channel.health_waiters() == 0; }));
+  // A caller the close had not woken ends here, as a stop ends it.
+  h.stop(kSessionUnloaded);
   expect_refused(health.outcome(), Error::Code::Unavailable, "backend_unavailable");
 }
 
