@@ -168,7 +168,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   refusal of `submit`, last in its order: `config_invalid` with a reason of
   the backend's own naming for a request the backend cannot carry as given;
   this bridge answers `wire_integer_out_of_range` and `pcm_buffer_invalid`.
-  (V030-E04-F03-T03)
+  The header also states that a sink callback never unloads or destroys the
+  backend session the bridge belongs to and never destroys the bridge. This
+  bridge's destructor detaches the sink: when it returns no sink callback is
+  running and none follows, and the events of jobs still open are dropped.
+  The adapter refuses a `prime` or an `unload` made from a sink callback
+  (`internal`, `lifecycle_call_in_sink_callback`) before anything is sent or
+  stopped. (V030-E04-F03-T03)
 
 - The serving worker's stream listener serves the remaining client events of
   the draft stream envelope, still behind a dispatch the worker does not
