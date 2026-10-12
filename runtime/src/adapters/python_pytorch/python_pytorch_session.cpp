@@ -722,6 +722,10 @@ Result<void> register_python_pytorch_backend(BackendRegistry& registry) {
         return make_python_pytorch_session(hooks, configured(), default_fork_exec_launcher());
       },
       [](ExecutionSessionRuntimeHooks hooks) -> Result<SessionWithBridge> {
+        if (hooks.buffer_manager == nullptr) {
+          // Every load would be refused: the bridge could never run a job.
+          return adapters::python_pytorch::buffer_manager_missing();
+        }
         auto built = make_python_pytorch_session_with_bridge(hooks, configured(),
                                                              default_fork_exec_launcher());
         return SessionWithBridge{std::move(built.session), std::move(built.bridge)};

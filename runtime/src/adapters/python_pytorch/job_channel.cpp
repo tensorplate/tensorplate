@@ -150,6 +150,9 @@ bool JobChannel::live_locked() const noexcept {
 }
 
 std::optional<Error> JobChannel::not_running_locked() const {
+  if (retired_) {
+    return refusal(Error::Code::Unavailable, "backend_unavailable");
+  }
   if (phase_ == Phase::Idle || phase_ == Phase::Started || manager_ == nullptr) {
     return refusal(Error::Code::NotReady, "backend_not_ready");
   }
@@ -163,6 +166,9 @@ std::optional<Error> JobChannel::not_running_locked() const {
 
 Result<void> JobChannel::start(ipc::UnixSocket& socket, const std::vector<JobClass>& job_classes) {
   std::unique_lock<std::mutex> lock(mutex_);
+  if (retired_) {
+    return refuse(Error::Code::Internal, "job_channel_retired");
+  }
   if (phase_ != Phase::Idle && phase_ != Phase::Stopped) {
     return unexpected(Error::Code::Internal, "job channel already started");
   }
@@ -291,9 +297,9 @@ void JobChannel::stop(std::string_view reason, const std::function<void()>& reap
 
 void JobChannel::retire() noexcept {
   std::lock_guard<std::mutex> lock(mutex_);
-  if (phase_ == Phase::Idle) {
-    phase_ = Phase::Stopped;
-  }
+  retired_ = true;
+  // A health call that waits returns for the state, as when admission closes.
+  probe_cv_.notify_all();
 }
 
 // -- The job side. ---------------------------------------------------------------
@@ -383,6 +389,10 @@ Result<void> JobChannel::release_session(std::uint64_t session_key, std::uint64_
   std::lock_guard<std::mutex> lock(mutex_);
   if (!sink_) {
     return refuse(Error::Code::NotReady, "event_sink_missing");
+  }
+  if (retired_) {
+    // No job is taken again, so there is no key to keep from one.
+    return refuse(Error::Code::Unavailable, "backend_unavailable");
   }
   if (!live_locked()) {
     // The caller takes the session as released and never submits its key
@@ -678,7 +688,7 @@ void JobChannel::deliver(const std::vector<Delivery>& deliveries) {
 // -- Under the mutex. ------------------------------------------------------------
 
 std::optional<JobEvent> JobChannel::unloaded_locked(const JobEvent& event) const {
-  if (phase_ != Phase::Closing || event.kind() != JobEventKind::Failed) {
+  if (phase_ != Phase::Closing) {
     return std::nullopt;
   }
   std::optional<Error> error = event.error();

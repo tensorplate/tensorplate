@@ -1769,7 +1769,8 @@ TEST_F(JobChannelTest, AJobFailedAsUnavailableWhileTheChannelAdmitsKeepsTheSidec
 
 // -- A channel whose session is gone. --------------------------------------------
 
-TEST(JobChannelAdmission, ARetiredChannelThatNeverStartedAnswersAsAStoppedOne) {
+TEST(JobChannelAdmission, ARetiredChannelThatNeverStartedIsUnavailableAndStartsNoMore) {
+  ScriptedSidecar peer;
   JobChannelHarness h;
   ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
   expect_refused(h.channel.probe_health(patient()), Error::Code::NotReady, "backend_not_ready");
@@ -1780,18 +1781,62 @@ TEST(JobChannelAdmission, ARetiredChannelThatNeverStartedAnswersAsAStoppedOne) {
                    "backend_unavailable");
     expect_refused(h.release(1), Error::Code::Unavailable, "backend_unavailable");
   }
+  const auto started = h.connect(peer.launcher());
+  ASSERT_FALSE(started.has_value());
+  EXPECT_EQ(started.error().context.value_or(""), "job_channel_retired");
   EXPECT_TRUE(h.sink->events().empty());
   EXPECT_TRUE(h.sink->session_releases().empty());
 }
 
-TEST_F(JobChannelTest, RetiringAChannelThatWasStartedChangesNothing) {
-  up();
+// Stopped and without a buffer manager it answered "backend_not_ready".
+TEST(JobChannelAdmission, ARetiredChannelIsUnavailableAlsoWithoutABufferManager) {
+  ScriptedSidecar peer;
+  JobChannelHarness h(std::chrono::seconds{5}, /*with_manager=*/false);
+  ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
+  ASSERT_TRUE(h.connect(peer.launcher()).has_value());
+  h.stop(kSessionUnloaded);
+  expect_refused(h.channel.submit(h.stt(1, 1)), Error::Code::NotReady, "backend_not_ready");
+  expect_refused(h.channel.probe_health(patient()), Error::Code::NotReady, "backend_not_ready");
   h.channel.retire();
-  EXPECT_TRUE(h.channel.probe_health(patient()).has_value());
+  expect_refused(h.channel.submit(h.stt(1, 1)), Error::Code::Unavailable, "backend_unavailable");
+  expect_refused(h.channel.probe_health(patient()), Error::Code::Unavailable,
+                 "backend_unavailable");
+}
+
+// Retired while it runs, which no session does: unavailable at once, its open
+// job still ends, and the stop that follows is its last.
+TEST_F(JobChannelTest, AChannelRetiredWhileItRunsIsUnavailableEndsItsJobAndStartsNoMore) {
+  ASSERT_NO_FATAL_FAILURE(up());
   ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
   ASSERT_EQ(peer.take_job(), 1U);
+  h.channel.retire();
+  expect_refused(h.channel.submit(h.stt(2, 1)), Error::Code::Unavailable, "backend_unavailable");
+  expect_refused(h.channel.probe_health(patient()), Error::Code::Unavailable,
+                 "backend_unavailable");
+  expect_refused(h.release(1), Error::Code::Unavailable, "backend_unavailable");
   peer.complete(1, transcript());
-  EXPECT_TRUE(h.wait_kinds(1, {Accepted, Completed, Released}));
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted, Completed, Released}));
+  EXPECT_TRUE(peer.sent("session_release", 0).empty());
+
+  h.stop(kSessionUnloaded);
+  ScriptedSidecar next;
+  const auto started = h.connect(next.launcher());
+  // Reaps the process of the refused start while its sidecar stands.
+  h.stop(kSessionUnloaded);
+  ASSERT_FALSE(started.has_value());
+  EXPECT_EQ(started.error().context.value_or(""), "job_channel_retired");
+}
+
+TEST_F(JobChannelTest, RetiringAChannelEndsAHealthCallThatWaits) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.hold_health();
+  WaitingHealth health(h.channel, passed() + 10 * JobChannelHarness::kPatience);
+  ASSERT_TRUE(h.wait([&] { return h.channel.health_waiters() == 1; }));
+  h.channel.retire();
+  EXPECT_TRUE(h.wait([&] { return h.channel.health_waiters() == 0; }));
+  // A caller the retire had not woken ends here, as a stop ends it.
+  h.stop(kSessionUnloaded);
+  expect_refused(health.outcome(), Error::Code::Unavailable, "backend_unavailable");
 }
 
 // -- The backlog. ----------------------------------------------------------------

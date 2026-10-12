@@ -85,6 +85,9 @@ class BridgeUnderTest {
     /// waiting together; one more is refused by submit or ended with `failed`.
     /// Zero states no bound.
     std::size_t open_jobs = 0;
+    /// The largest job id the backend carries: a larger one is a request it
+    /// cannot carry as given. Zero states that it carries every id.
+    std::uint64_t largest_job_id = 0;
   };
 
   BridgeUnderTest() = default;
@@ -854,6 +857,31 @@ TEST_P(BoundedJobBridgeConformance, OneJobBeyondTheBackendsBoundIsTurnedAway) {
   for (std::uint64_t job_id = 1; job_id < beyond; ++job_id) {
     EXPECT_TRUE(wait_kinds(job_id, {Accepted, Completed, Released})) << job_id;
   }
+}
+
+// submit: "Error::Code::ConfigInvalid with a reason of the backend's own
+// naming: the backend cannot carry the request as given", last in the list, so
+// a releasing session is refused ahead of it. "After a method fails, no event
+// is delivered because of that call." BridgeUnderTest::Choices::largest_job_id.
+TEST_P(BoundedJobBridgeConformance, ARequestTheBackendCannotCarryIsRefusedWithAReasonOfItsOwn) {
+  if (!stated(choices.largest_job_id != 0, "largest_job_id")) {
+    return;
+  }
+  ASSERT_NO_FATAL_FAILURE(ready());
+  const std::uint64_t beyond = choices.largest_job_id + 1;
+  const Result<void> refused = resubmit(decode(beyond, 5));
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.error().code, Error::Code::ConfigInvalid);
+  const std::string reason = refused.error().context.value_or("");
+  EXPECT_FALSE(reason.empty());
+  EXPECT_NE(reason, "duplicate_job_id");
+  // The largest id is carried.
+  ASSERT_TRUE(submit(decode(choices.largest_job_id, 5)).has_value());
+  EXPECT_TRUE(wait_kinds(choices.largest_job_id, {Accepted, Completed, Released}));
+  ASSERT_TRUE(settled());
+  EXPECT_TRUE(sink->kinds_for(beyond).empty());
+  ASSERT_TRUE(release(5).has_value());
+  expect_refused(resubmit(decode(beyond, 5)), Error::Code::NotReady, "session_releasing");
 }
 
 // -- Cancel. ---------------------------------------------------------------------

@@ -159,11 +159,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   new factory yet. The bridge submits, cancels and releases through the
   adapter's job channel, refuses a zero session key or generation ahead of
   everything else, and answers `health()` from the channel's health probe
-  within the adapter's health timeout. An unload cancels no job: the jobs that
-  wait end `failed` with `session_unloaded` and the running one ends as its
-  backend ends it. The bridge conformance cases now run against this bridge
-  over a scripted sidecar and, for the cases that need no held job, over the
-  in-tree sidecar runner. (V030-E04-F03-T03)
+  within the adapter's health timeout. The registered factory refuses hooks
+  without a buffer manager (`config_invalid`). An unload cancels no job: the
+  jobs that wait end `failed` with `session_unloaded` and the running one ends
+  as its backend ends it. The bridge conformance cases now run against this
+  bridge over a scripted sidecar and, for the cases that need no held job,
+  over the in-tree sidecar runner. `bounded_job_bridge.hpp` documents one more
+  refusal of `submit`, last in its order: `config_invalid` with a reason of
+  the backend's own naming for a request the backend cannot carry as given;
+  this bridge answers `wire_integer_out_of_range` and `pcm_buffer_invalid`.
+  (V030-E04-F03-T03)
 
 - The serving worker's stream listener serves the remaining client events of
   the draft stream envelope, still behind a dispatch the worker does not
@@ -770,8 +775,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   unload arrived with the reason `session_unloaded`, as the bridge's contract
   names it; the sink received the sidecar's `backend_unavailable`. After a
   session is destroyed its job channel answers `backend_unavailable` also when
-  the session was never loaded; it answered `backend_not_ready`.
-  (V030-E04-F03-T03)
+  the session was never loaded or has no buffer manager, where it answered
+  `backend_not_ready`, and it is not started again. (V030-E04-F03-T03)
 
 - The Python/PyTorch adapter's job channel records a session as released
   also when its release is refused because the connection has ended or the

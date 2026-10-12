@@ -143,7 +143,8 @@ class ScriptedSidecarBridgeUnderTest final : public BridgeUnderTest {
             .runs_one_job_at_a_time = true,
             .ends_a_waiting_job_at_its_cancel = true,
             .fails_a_held_job_that_was_cancelled = true,
-            .open_jobs = 1 + FixtureJobBridge::kWaitingJobs};
+            .open_jobs = 1 + FixtureJobBridge::kWaitingJobs,
+            .largest_job_id = adapters::python_pytorch::kMaxWireInteger};
   }
   BoundedJobBridge& bridge() override { return *built_.bridge; }
   BufferManager& buffers() override { return *buffers_; }

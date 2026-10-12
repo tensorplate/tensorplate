@@ -1,18 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The BoundedJobBridge of the Python/PyTorch adapter: the job side of a
-// session's JobChannel behind the public interface
-// (tensorplate/backend/bounded_job_bridge.hpp). It refuses a zero session key
-// and a zero generation ahead of everything the channel checks, gives
-// health() its deadline, and passes every other call through: job_channel.hpp
-// says what each one does on the socket.
-//
-// The bridge holds the channel, not the session, and may outlive the session.
-// It starts, stops and waits for nothing of the session's lifecycle, and it is
-// not told of an unload: an unload cancels no job. The sidecar fails the jobs
-// that wait when the unload arrives ("session_unloaded") and lets the one it
-// runs end by itself; the caller cancels what it does not want to wait for
-// before it unloads (python_pytorch_session.hpp has the bound).
+// session's JobChannel (job_channel.hpp) behind the public interface. It holds
+// the channel, not the session, may outlive the session, and takes no part in
+// the session's lifecycle: an unload cancels no job.
 //
 // Internal: nothing outside the adapter includes this header.
 
@@ -37,8 +28,12 @@ class JobBridge final : public BoundedJobBridge {
 
   [[nodiscard]] Result<void> set_event_sink(std::shared_ptr<JobEventSink> sink) override;
 
-  /// JobChannel::submit(): the interface's refusals in its order, then the
-  /// channel's own for a request the wire or the buffer manager cannot carry.
+  /// JobChannel::submit(): the interface's refusals in its order. The last,
+  /// for a request this backend cannot carry, is Error::Code::ConfigInvalid
+  /// with "wire_integer_out_of_range" (an identity or input field above
+  /// kMaxWireInteger) or "pcm_buffer_invalid" (a window the buffer manager
+  /// does not hold). ipc::encode_frame()'s refusal, which has no reason, is
+  /// beyond what a JobRequest can hold.
   [[nodiscard]] Result<void> submit(JobRequest request) override;
 
   [[nodiscard]] Result<void> cancel(std::uint64_t job_id) override;
@@ -47,8 +42,12 @@ class JobBridge final : public BoundedJobBridge {
   /// then JobChannel::release_session(). After "backend_unavailable" the
   /// channel counts the key as released: a job for it is refused
   /// ("session_releasing") on every later load of the session. The one
-  /// exception is a release made before the session's first load, which is
-  /// not recorded.
+  /// exception is a channel that was never started, which records nothing.
+  /// Beyond the interface's list: Error::Code::ConfigInvalid,
+  /// "wire_integer_out_of_range" for a key or generation above
+  /// kMaxWireInteger, and Error::Code::ResourceExhausted,
+  /// "session_release_capacity_exhausted" while kMaxPendingSessionReleases
+  /// releases are unacknowledged.
   [[nodiscard]] Result<void> release_session(std::uint64_t session_key,
                                              std::uint64_t generation) override;
 

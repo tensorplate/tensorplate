@@ -194,7 +194,8 @@ class JobChannel {
   /// stop(). Jobs are refused until admit_jobs().
   ///
   /// @return Error::Code::Internal when the channel is already started, with
-  ///   "socket_closed" when `socket` is not open, or with
+  ///   "job_channel_retired" after retire(), with "socket_closed" when
+  ///   `socket` is not open, or with
   ///   "job_channel_thread_unavailable" when a thread cannot be created;
   ///   Error::Code::Unsupported, "job_class_unsupported" when `job_classes`
   ///   holds neither class a lane runs (`stt_decode`, `tts_synthesis`).
@@ -240,10 +241,12 @@ class JobChannel {
   /// joinable threads.
   void stop(std::string_view reason, const std::function<void()>& reap);
 
-  /// The session is gone and nothing will start the channel again: one that
-  /// never started answers as a stopped one from here on, "backend_unavailable"
-  /// where it answered "backend_not_ready". Changes nothing else, and nothing
-  /// at all for a channel that was started, which stop() ends first.
+  /// The session is gone. One-way, whatever the channel's state: from here on
+  /// start() is refused, and submit(), release_session() and probe_health()
+  /// answer "backend_unavailable" ahead of every other check of that state,
+  /// the buffer manager's included; a probe_health() that waits returns. Ends
+  /// nothing: the session calls stop() first, and a channel retired while it
+  /// runs still delivers its jobs' events until stop().
   void retire() noexcept;
 
   // -- The job side: any thread, a sink callback included. -------------------
@@ -256,6 +259,7 @@ class JobChannel {
   ///
   /// @return success, or the first of these that applies:
   ///   Error::Code::NotReady, "event_sink_missing";
+  ///   Error::Code::Unavailable, "backend_unavailable" (after retire());
   ///   Error::Code::NotReady, "backend_not_ready" (before admit_jobs(), or
   ///   without a buffer manager);
   ///   Error::Code::Unavailable, "backend_unavailable" (admission closed, the
@@ -289,10 +293,11 @@ class JobChannel {
   /// Never refused for room in the queue: every pending release has a place.
   ///
   /// @return success, or Error::Code::NotReady, "event_sink_missing";
-  ///   Error::Code::Unavailable, "backend_unavailable" (not started, or the
-  ///   connection ended: the caller takes the session as released, and a
-  ///   channel that was ever started, or was retired, records it so, unless
-  ///   the key or the generation is one encode_session_release() refuses);
+  ///   Error::Code::Unavailable, "backend_unavailable" (retired, not
+  ///   started, or the connection ended: the caller takes the session as
+  ///   released, and a channel that was ever started and is not retired
+  ///   records it so, unless the key or the generation is one
+  ///   encode_session_release() refuses);
   ///   Error::Code::ResourceExhausted,
   ///   "session_release_capacity_exhausted" (kMaxPendingSessionReleases are
   ///   unacknowledged); or encode_session_release()'s refusal of a zero key
@@ -430,6 +435,7 @@ class JobChannel {
   std::condition_variable probe_cv_;
 
   Phase phase_ = Phase::Idle;
+  bool retired_ = false;
   /// The reader left its loop; set until stop() has finished.
   bool ended_ = false;
   /// stop() is ending the connection: its reason is the jobs' failure.

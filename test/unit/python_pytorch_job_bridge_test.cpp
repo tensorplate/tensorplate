@@ -25,6 +25,7 @@ TEST(JobBridge, FeatureFlagDisabled) {
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "tensorplate/backend/bounded_job_bridge.hpp"
@@ -37,6 +38,7 @@ TEST(JobBridge, FeatureFlagDisabled) {
 
 #include "adapters/python_pytorch/job_bridge.hpp"
 #include "adapters/python_pytorch/job_channel.hpp"
+#include "adapters/python_pytorch/job_wire.hpp"
 #include "adapters/python_pytorch/python_pytorch_session.hpp"
 #include "adapters/python_pytorch/sidecar_process.hpp"
 #include "job_bridge_harness.hpp"
@@ -86,6 +88,9 @@ void expect_refused(const Result<void>& result, Error::Code code, std::string_vi
   EXPECT_EQ(result.error().context.value_or(""), reason);
 }
 
+// A buffer manager, a sink and requests, bound to no channel.
+struct Bench final : testing::JobBench {};
+
 class JobBridgeTest : public ::testing::Test {
  protected:
   // Loaded and primed: the bridge takes jobs.
@@ -119,19 +124,22 @@ TEST_F(JobBridgeTest, ASessionBuiltWithABridgeLoadsWithJobsWhateverItsConfigurat
   EXPECT_TRUE(h.wait_kinds(1, {Accepted}));
 }
 
-TEST(JobBridgeRegistration, TheRegisteredBackendBuildsABridgeWhoseSessionLoadsWithJobs) {
+TEST(JobBridgeRegistration, TheRegisteredBackendBuildsABridgeOnlyWithABufferManager) {
   BackendRegistry registry;
   ASSERT_TRUE(register_python_pytorch_backend(registry).has_value());
-  // No buffer manager in the hooks.
-  auto built = registry.create_session_with_bridge(kBackendName);
+  const auto refused = registry.create_session_with_bridge(kBackendName);
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.error(), Error::make(Error::Code::ConfigInvalid,
+                                         "python_pytorch adapter requires a BufferManager hook"));
+  // A session alone needs none until it runs a request.
+  EXPECT_TRUE(registry.create_session(kBackendName).has_value());
+
+  Bench bench;
+  ExecutionSessionRuntimeHooks hooks{};
+  hooks.buffer_manager = bench.manager.get();
+  const auto built = registry.create_session_with_bridge(kBackendName, hooks);
   ASSERT_TRUE(built.has_value()) << built.error().message;
   expect_refused(built.value().bridge->health(), Error::Code::NotReady, "backend_not_ready");
-  // A load with jobs is refused for the missing buffer manager before any
-  // sidecar is started; one without jobs would start the interpreter.
-  const auto loaded = built.value().session->load(speech_spec());
-  ASSERT_FALSE(loaded.has_value());
-  EXPECT_EQ(loaded.error(), Error::make(Error::Code::ConfigInvalid,
-                                        "python_pytorch adapter requires a BufferManager hook"));
 }
 
 // -- Refusals ahead of the channel's. ----------------------------------------------
@@ -354,6 +362,54 @@ TEST_F(JobBridgeTest, ABridgeWhoseSessionWasDestroyedBeforeItsFirstLoadIsUnavail
   expect_refused(h.bridge->health(), Error::Code::Unavailable, "backend_unavailable");
   EXPECT_TRUE(h.sink->events().empty());
   EXPECT_TRUE(h.sink->session_releases().empty());
+}
+
+// The session of a bridge built without a buffer manager can never load, which
+// only the factory below the registered one allows.
+TEST(JobBridgeAfterItsSession, IsUnavailableAlsoWhenItWasBuiltWithoutABufferManager) {
+  Bench bench;
+  ScriptedSidecar peer;
+  auto built = make_python_pytorch_session_with_bridge({}, patient(), peer.launcher());
+  ASSERT_TRUE(built.bridge->set_event_sink(bench.sink).has_value());
+  expect_refused(built.bridge->health(), Error::Code::NotReady, "backend_not_ready");
+  built.session.reset();
+  expect_refused(built.bridge->submit(bench.stt(1, 1)), Error::Code::Unavailable,
+                 "backend_unavailable");
+  expect_refused(built.bridge->release_session(5, 1), Error::Code::Unavailable,
+                 "backend_unavailable");
+  expect_refused(built.bridge->health(), Error::Code::Unavailable, "backend_unavailable");
+  EXPECT_TRUE(bench.sink->events().empty());
+}
+
+// -- A backend lost before the prime. ------------------------------------------------
+
+TEST_F(JobBridgeTest, ABackendLostBeforeThePrimeIsNotReadyAsBeforeItWasLost) {
+  ASSERT_TRUE(h.session->load(speech_spec()).has_value());
+  peer.close();
+  // The channel's reader has left once an exchange fails.
+  ASSERT_FALSE(h.unary("health_check").has_value());
+  expect_refused(h.bridge->submit(h.stt(1, 1)), Error::Code::NotReady, "backend_not_ready");
+  expect_refused(h.bridge->health(), Error::Code::NotReady, "backend_not_ready");
+  EXPECT_TRUE(h.sink->events().empty());
+}
+
+// -- Requests this backend cannot carry. ---------------------------------------------
+
+TEST_F(JobBridgeTest, ARequestTheWireOrTheBufferManagerCannotCarryIsRefusedWithTheAdaptersReason) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  expect_refused(h.bridge->submit(h.stt(kMaxWireInteger + 1, 1)), Error::Code::ConfigInvalid,
+                 "wire_integer_out_of_range");
+  expect_refused(h.bridge->submit(h.stt(1, kMaxWireInteger + 1)), Error::Code::ConfigInvalid,
+                 "wire_integer_out_of_range");
+  const JobRequest gone = h.stt(1, 1);
+  ASSERT_TRUE(h.manager->release(std::get<AudioFrames>(gone.payload()).pcm.buffer).has_value());
+  expect_refused(h.bridge->submit(gone), Error::Code::ConfigInvalid, "pcm_buffer_invalid");
+  expect_refused(h.bridge->release_session(kMaxWireInteger + 1, 1), Error::Code::ConfigInvalid,
+                 "wire_integer_out_of_range");
+  EXPECT_TRUE(h.sink->events().empty());
+  // None of them took its job id or its session key.
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  EXPECT_TRUE(h.wait_kinds(1, {Accepted}));
 }
 
 // -- A release the backend could not take. -------------------------------------------

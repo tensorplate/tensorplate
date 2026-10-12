@@ -146,7 +146,11 @@ class BoundedJobBridge {
   ///   - Error::Code::ConfigInvalid, "duplicate_job_id": a job with the same
   ///     job_id has not been released yet;
   ///   - Error::Code::ResourceExhausted, "job_capacity_exhausted": the
-  ///     backend's bounded admission is full.
+  ///     backend's bounded admission is full;
+  ///   - Error::Code::ConfigInvalid with a reason of the backend's own
+  ///     naming: the backend cannot carry the request as given, for example
+  ///     an identity above what its wire represents or a buffer it does not
+  ///     hold.
   [[nodiscard]] virtual Result<void> submit(JobRequest request) = 0;
 
   /// Requests cancellation of a submitted job. Idempotent: repeating it, or

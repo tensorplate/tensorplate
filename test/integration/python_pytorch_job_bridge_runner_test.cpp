@@ -38,6 +38,7 @@ TEST(JobBridgeRunner, FeatureFlagDisabled) {
 #include "tensorplate/core/job_result.hpp"
 #include "tensorplate/core/model_spec.hpp"
 
+#include "adapters/python_pytorch/job_wire.hpp"
 #include "adapters/python_pytorch/python_pytorch_session.hpp"
 #include "adapters/python_pytorch/sidecar_process.hpp"
 #include "bounded_job_bridge_conformance.hpp"
@@ -91,7 +92,10 @@ class RunnerBridgeUnderTest final : public BridgeUnderTest {
   }
   ~RunnerBridgeUnderTest() override { unload(); }
 
-  Choices choices() const override { return {.refuses_vad_frames = true}; }
+  Choices choices() const override {
+    return {.refuses_vad_frames = true,
+            .largest_job_id = adapters::python_pytorch::kMaxWireInteger};
+  }
   BoundedJobBridge& bridge() override { return *built_.bridge; }
   BufferManager& buffers() override { return *buffers_; }
   void prime() override {
