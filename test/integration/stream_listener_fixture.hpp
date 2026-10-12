@@ -414,9 +414,15 @@ class Served {
     stub_ = wire::SessionService::NewStub(channel_);
   }
 
-  Client connect(std::chrono::milliseconds deadline = std::chrono::seconds{20}) {
+  /// A call that has sent nothing; `compression` is what it announces for its
+  /// messages.
+  Client connect(std::chrono::milliseconds deadline = std::chrono::seconds{20},
+                 grpc_compression_algorithm compression = GRPC_COMPRESS_NONE) {
     Client client;
     client.context->set_deadline(std::chrono::system_clock::now() + deadline);
+    if (compression != GRPC_COMPRESS_NONE) {
+      client.context->set_compression_algorithm(compression);
+    }
     client.call = stub_->Session(client.context.get());
     return client;
   }

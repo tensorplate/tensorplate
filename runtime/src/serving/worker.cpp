@@ -669,11 +669,12 @@ ServingExitCode ServingWorker::stop() {
     impl_->pipeline->set_stopping(true);
   }
   impl_->health.set_state(ServingState::Stopping);
-  // Stop the HTTP listener first so new admissions stop.
+  // The stream sessions drain first: the HTTP stop waits for its handlers
+  // with no deadline of its own. The router already refuses new requests.
+  impl_->stop_stream_listener();
   if (impl_->server != nullptr) {
     impl_->server->stop();
   }
-  impl_->stop_stream_listener();
   // Drain + cleanup.
   impl_->run_drain();
   // Release async-store entries.

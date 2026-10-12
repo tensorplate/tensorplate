@@ -681,10 +681,12 @@ std::optional<std::chrono::steady_clock::time_point> logged_drain_end(const std:
   return std::nullopt;
 }
 
-// A stop waits for a unary request in flight before it reaches the stream
-// listener, which keeps listening until then. Both drains end with the one
-// window that began when shutdown was asked, however late each one starts.
-TEST(StreamListener, TheWorkersStopWaitsForAUnaryRequestInFlightThenClosesItsStreamListener) {
+// A stop ends the stream listener before it waits for a unary request in
+// flight, which therefore cannot use up the window stream sessions drain in.
+// Both drains end with the one window that began when shutdown was asked.
+// The worker gives its listener no dispatch, so no session exists here: what
+// a listener's stop does to its sessions is shown on the listener itself.
+TEST(StreamListener, TheWorkersStopEndsItsStreamListenerWhileAUnaryRequestIsStillInFlight) {
   auto gate = std::make_shared<InferGate>();
   tensorplate::BackendRegistry registry;
   auto capability =
@@ -745,20 +747,22 @@ TEST(StreamListener, TheWorkersStopWaitsForAUnaryRequestInFlightThenClosesItsStr
   const auto refused = served.open(open_event(wire::SESSION_MODE_STT_STREAMING));
   EXPECT_NE(refused.error_message().find("FAILURE_REASON_ADMISSION_CLOSED"), std::string::npos)
       << refused.error_message();
+  // The HTTP side still answers beside the request it holds: 503, stopping.
+  EXPECT_EQ(tensorplate::testing::HttpClient("127.0.0.1", http_port).get("/health").status, 503);
   auto exit_code = tensorplate::ServingExitCode::Internal;
   stopper = std::thread([&] {
     exit_code = served.worker->stop();
     stop_returned = true;
   });
-  // The stop has begun once the HTTP listener no longer accepts.
-  ASSERT_TRUE(eventually([&] { return !accepts(AF_INET, http_port); }));
+  // The request is still held at its gate, which only this test opens.
+  ASSERT_TRUE(eventually([&] { return !accepts(AF_INET, served.port); }))
+      << "the stop waited for the unary request before it reached the stream listener";
   EXPECT_FALSE(stop_returned) << "the stop did not wait for the request in flight";
-  EXPECT_TRUE(accepts(AF_INET, served.port)) << "the stream listener was stopped first";
   gate->release();
   stopper.join();
   const auto log = ::testing::internal::GetCapturedStderr();
   EXPECT_EQ(exit_code, tensorplate::ServingExitCode::Ok);
-  EXPECT_FALSE(accepts(AF_INET, served.port)) << "the stream listener outlived the stop";
+  EXPECT_FALSE(accepts(AF_INET, http_port)) << "the HTTP listener outlived the stop";
   for (const auto* drain : {"stream listener stopping", "draining requests"}) {
     SCOPED_TRACE(drain);
     const auto end = logged_drain_end(log, drain);
