@@ -342,7 +342,8 @@ pub struct DescriptorInputs<'a> {
     /// artifact paths resolve under it.
     pub staged_path: &'a str,
     pub quota: MemberQuota,
-    /// The runtime's own version, as [`crate::version`] reports it.
+    /// The runtime version the bundle was verified against: the agent's
+    /// configured one, which is [`crate::version`] unless it is overridden.
     pub runtime_version: &'a str,
     /// The installed backend descriptor's runner profiles.
     pub runner_profiles: &'a [RunnerProfile],

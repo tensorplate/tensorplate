@@ -67,8 +67,8 @@ fn a_deploy_a_start_of_the_agent_and_a_rollback_each_start_from_one_descriptor_o
     assert_eq!(asked.held_since, Some(unnamed));
     assert_eq!(asked.view, ["-", "-", "stt@1", "2"]);
     assert_eq!(asked.candidate, "stt@1");
-    let named = identity_of(&asked.reference).unwrap();
-    assert_eq!(named, Some(first.identity()));
+    assert_ne!(RUNTIME, tensorplate_protocol::version());
+    assert_eq!(asked.reference, reference(&first));
     assert_eq!(asked.resolved.as_ref(), Some(&first));
     assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
     assert_eq!(host.documents(), "stt-1");
@@ -173,6 +173,31 @@ fn a_deploy_takes_no_generation_when_its_document_cannot_be_written() {
     assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
 }
 
+#[test]
+fn a_deploy_under_a_serving_id_that_fails_after_staging_leaves_its_record_unrestorable() {
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    agent.deploy("stt", STT).unwrap();
+    drop(agent.asked());
+    // The second deploy stages another bundle under the id, then fails.
+    let unfinished = host.state_dir().join("descriptor-stt-2.json.tmp");
+    fs::create_dir(&unfinished).unwrap();
+    agent.deploy("stt", TTS).unwrap_err();
+    fs::remove_dir(unfinished).unwrap();
+    assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
+
+    // Staging is keyed by the id alone: the record's bundle is gone from it.
+    let (next, pruned) = host.start(Worker::default());
+    assert_eq!(pruned, 0);
+    let error = apply_startup(&next.coordinator).unwrap_err().to_record();
+
+    let load_failed = error.code == ErrorCode::LoadFailed && !error.recoverable;
+    let says = "`stt` is not started again: the bundle staged at";
+    assert!(load_failed && error.message.contains(says), "{error:?}");
+    assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
+    assert!(next.never_asked() && host.last_error() == Some(error));
+}
+
 /// What a deploy of `stt` hands [`start_deploy`].
 struct Handed {
     record: DeploymentRecord,
@@ -205,7 +230,7 @@ fn a_bundle_of_another_format_is_referenced_without_its_staged_copy_being_read()
         record: &handed.record,
         artifact_relative_path: None,
         format_version: "0.1",
-        runtime_version: "0.3.1",
+        runtime_version: RUNTIME,
         probes: &handed.probes,
     };
     let before = (host.view(), host.candidate());
@@ -244,7 +269,7 @@ fn about_to_prepare(host: &Host) -> (Agent, Handed) {
     let handed = Handed {
         record: candidate,
         transaction_id: "tx",
-        runtime_version: "0.3.1",
+        runtime_version: RUNTIME,
         probes: probes(),
     };
     (agent, handed)
@@ -266,7 +291,7 @@ fn a_deploy_is_refused_unless_its_staged_copy_its_records_and_the_installation_a
     let load_failed = (ErrorCode::LoadFailed, false);
     let config_invalid = (ErrorCode::ConfigInvalid, false);
     let not_in_flight = "of `stt` is not derived: deploy transaction `tx` is not in flight";
-    let cases: [(Broken, (ErrorCode, bool), &str); 9] = [
+    let cases: [(Broken, (ErrorCode, bool), &str); 10] = [
         (
             |host, _, _| drop(host.restage()),
             load_failed,
@@ -309,6 +334,15 @@ fn a_deploy_is_refused_unless_its_staged_copy_its_records_and_the_installation_a
             },
             (ErrorCode::Unsupported, false),
             "runner profile `faster_whisper` cannot load compute type `float16`",
+        ),
+        // The profile is installed, under another backend than the bundle's.
+        (
+            |_, _, handed| {
+                let report = handed.probes.remove("python_pytorch").unwrap();
+                handed.probes.insert("tensorrt".into(), report);
+            },
+            (ErrorCode::Unsupported, false),
+            "of `stt` is not derived: runner profile `faster_whisper` is not installed",
         ),
         (
             |_, agent, handed| {

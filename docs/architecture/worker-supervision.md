@@ -284,8 +284,13 @@ cannot be read counts as a restart that could not be launched.
 
 No restart starts while a deploy holds the member, from the moment its
 `prepare` begins until its candidate is promoted or fails, its `warm`
-gives up, or its transaction returns without promoting it. A promoted
-generation is therefore never older than the one it replaces.
+gives up, or its transaction returns without promoting it. A transaction
+that hands the registry a generation (a deploy of a format 0.2 bundle, and
+a rollback or a restore of a record that names a deployment descriptor)
+holds the member earlier, from before it takes that generation
+(`WorkerControl::hold`). A promoted generation is therefore never older
+than the one it replaces; [agent.md](agent.md#member-registry) gives the
+order that makes it so.
 
 On SIGTERM or SIGINT the agent asks every worker, serving and candidate, to
 drain, kills what is still running at the one 10-second stop deadline they

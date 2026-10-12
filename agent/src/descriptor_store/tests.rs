@@ -20,6 +20,9 @@ mod deploy;
 mod start_again;
 
 const STAGED: &str = "/var/lib/tensorplate/bundles/staging/stt";
+/// The runtime version the agents of these tests are configured with; not
+/// this crate's, which a descriptor must not state in its place.
+pub(crate) const RUNTIME: &str = "0.3.9";
 const ELSEWHERE: &str = "/var/lib/tensorplate/bundles/staging/other";
 
 fn repo(relative: &str) -> PathBuf {
@@ -40,7 +43,7 @@ pub(crate) fn derive(id: &str, generation: u64, staged_path: &str) -> Deployment
         admission_mode: AdmissionMode::Production,
         staged_path,
         quota: MemberQuota::default(),
-        runtime_version: "0.3.1",
+        runtime_version: RUNTIME,
         runner_profiles: &installed.runner_profiles,
         acceptance_profile_digest: None,
     };
@@ -87,7 +90,7 @@ pub(crate) fn agent_config(root: &Path) -> AgentConfig {
         "backend_capabilities": {"python_pytorch": served},
         "device_memory_bytes": 8_u64 << 30,
         "device_family": "x86_64",
-        "runtime_version": "0.3.1",
+        "runtime_version": RUNTIME,
     });
     let config: AgentConfig = serde_json::from_value(config).unwrap();
     config.validate().unwrap()
@@ -278,7 +281,9 @@ fn a_document_reads_back_only_as_the_descriptor_its_identity_names() {
     let written = fs::read_to_string(&path).unwrap();
     assert_eq!(DeploymentDescriptor::from_json(&written).unwrap(), named);
 
-    for damaged in ["{".to_owned(), written.replace("0.3.1", "0.3.2")] {
+    let edited = written.replace(RUNTIME, "0.3.2");
+    assert_ne!(edited, written);
+    for damaged in ["{".to_owned(), edited] {
         fs::write(&path, damaged).unwrap();
         let message = refusal(f.read(named.identity()));
         assert!(message.contains("does not verify"), "{message}");

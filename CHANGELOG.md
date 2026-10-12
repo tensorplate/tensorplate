@@ -319,7 +319,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   is not the bundle that was verified is `load_failed`; a descriptor that
   cannot be derived refuses the deploy with `unsupported` (a runner profile
   that is not installed, or that does not list the bundle's compute type)
-  or `config_invalid`, names nothing and takes no generation. The
+  or `config_invalid`, names nothing and takes no generation. Two
+  configurations a format 0.1 deploy accepts are `config_invalid` for a
+  format 0.2 deploy, after staging: a `staging_dir` with a `.` or `..`
+  segment, and a configured `runtime_version` outside the descriptor's
+  form (1 to 64 ASCII letters, digits and `.+~-`). The
   descriptor records admission mode `production` and the default member
   quota: no quota is assigned yet, the value is not a limit, and every
   configuration digest changes when one is first assigned. It states the
@@ -339,7 +343,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   generation it holds is now `internal` and recoverable, where it was
   `load_failed`; only a generation handed twice reaches it. Agent status
   reports `previous_active.generation` for a retained record that names a
-  descriptor: the generation that deployment was last started as. A format
+  descriptor: the generation that deployment was last started as. Known
+  and not changed: staging is keyed by the deployment id alone, so a deploy
+  under the id of a serving format 0.2 deployment that fails after staging
+  leaves that deployment's record naming a bundle that is no longer
+  staged. Its worker is not restarted, as before, and now its restore at
+  the next start of the agent is refused with `load_failed` and the start
+  fails, where an agent that recorded no descriptor started the other
+  bundle; deploying the id again while the agent is up repairs it. A format
   0.1 bundle deploys as before: nothing is derived, read again, held or
   written for it, its records carry no identity, and with the mock worker
   control its state file stays state version `0.1`. (V030-E02-F01-T04)

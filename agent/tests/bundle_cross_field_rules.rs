@@ -236,10 +236,11 @@ fn every_rule_fixture_gets_its_code_from_deploy_before_anything_is_staged() {
         let h = Harness::new();
         let coord = agent(&h, PREVIEW_ROW, true);
         deploy(&coord, "accepted", &path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        assert_eq!(
-            h.store.snapshot().unwrap().active.unwrap().deployment_id,
-            "accepted"
-        );
+        let active = h.store.snapshot().unwrap().active.unwrap();
+        assert_eq!(active.deployment_id, "accepted");
+        // Every one is format 0.2: its deploy derived and named a descriptor.
+        let named = active.descriptor_identity().unwrap();
+        assert!(named.is_some(), "{}", path.display());
     }
 }
 

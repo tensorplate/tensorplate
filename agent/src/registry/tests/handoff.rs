@@ -14,19 +14,36 @@ use crate::descriptor_store::tests::{agent_config, probes};
 const STT: &str = "v0_2/speech_stt_streaming";
 const TTS: &str = "v0_2/speech_tts_streaming";
 
-/// The registry, behind a `prepare` that first runs a supervision step: the
-/// agent's loop may run one between a transaction's state update and its
-/// `prepare`.
+/// Where the agent's loop runs a supervision step during a transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Step {
+    /// As the hold is asked for, before the registry has it: the last
+    /// moment a restart can begin.
+    BeforeTheHold,
+    /// Between the transaction's state update and its `prepare`.
+    BeforePrepare,
+}
+
+/// The registry, with a supervision step run at `step` of each transaction.
 struct Stepped {
     f: Arc<Fixture>,
+    step: Step,
     /// What each of those steps did.
     steps: Mutex<Vec<Vec<MemberEvent>>>,
 }
 
+impl Stepped {
+    fn step(&self, at: Step) {
+        if self.step == at {
+            let stepped = self.f.registry.supervise();
+            self.steps.lock().unwrap().push(stepped);
+        }
+    }
+}
+
 impl WorkerControl for Stepped {
     fn prepare(&self, tx: &str, candidate: &CandidateRef, timeout: Duration) -> AgentResult<()> {
-        let stepped = self.f.registry.supervise();
-        self.steps.lock().unwrap().push(stepped);
+        self.step(Step::BeforePrepare);
         self.f.registry.prepare(tx, candidate, timeout)
     }
     fn warm(
@@ -44,6 +61,7 @@ impl WorkerControl for Stepped {
         self.f.registry.abandon(candidate);
     }
     fn hold(&self) {
+        self.step(Step::BeforeTheHold);
         self.f.registry.hold();
     }
     fn release(&self) {
@@ -72,10 +90,10 @@ struct Wired {
 }
 
 fn wired() -> Wired {
-    wired_with(|_| {})
+    wired_with(Step::BeforePrepare, |_| {})
 }
 
-fn wired_with(configure: impl FnOnce(&mut AgentConfig)) -> Wired {
+fn wired_with(step: Step, configure: impl FnOnce(&mut AgentConfig)) -> Wired {
     let root = TempDir::new().unwrap();
     let mut config = agent_config(root.path());
     configure(&mut config);
@@ -94,6 +112,7 @@ fn wired_with(configure: impl FnOnce(&mut AgentConfig)) -> Wired {
     let steps = Mutex::default();
     let worker = Arc::new(Stepped {
         f: f.clone(),
+        step,
         steps,
     });
     let coordinator = Coordinator::new(config, store.clone(), worker.clone());
@@ -143,14 +162,22 @@ impl Wired {
         let launched = self.f.launcher.launched.lock().unwrap();
         launched.iter().map(|h| h.spec.member.generation).collect()
     }
-    /// Whether no supervision step inside a `prepare` did anything.
+    /// Whether no supervision step of a transaction did anything.
     fn stepped_idle(&self) -> bool {
         self.worker.steps.lock().unwrap().iter().all(Vec::is_empty)
+    }
+    /// What the last supervision step of a transaction did.
+    fn last_step(&self) -> Vec<MemberEvent> {
+        self.worker.steps.lock().unwrap().last().cloned().unwrap()
     }
 }
 
 fn restarted(generation: u64) -> [MemberEvent; 1] {
-    let member = MemberRef::new("stt", generation);
+    restarted_as("stt", generation)
+}
+
+fn restarted_as(id: &str, generation: u64) -> [MemberEvent; 1] {
+    let member = MemberRef::new(id, generation);
     [MemberEvent::Restarted { member }]
 }
 
@@ -201,6 +228,34 @@ fn a_restart_due_after_a_rollback_took_its_generation_waits_and_the_rollback_is_
 }
 
 #[test]
+fn a_restart_that_begins_as_a_deploy_asks_for_the_hold_takes_the_older_generation() {
+    let w = wired_with(Step::BeforeTheHold, |_| {});
+    w.deploy("stt", STT).unwrap();
+    w.stop(1);
+
+    w.deploy("tts", TTS).unwrap();
+
+    // The restart began before the hold, so before the deploy's generation.
+    assert_eq!(w.last_step(), restarted(2));
+    assert_eq!(w.launched(), [1, 2, 3]);
+    assert_eq!(w.named(), ["tts@3", "stt@2", "4"]);
+}
+
+#[test]
+fn a_restart_that_begins_as_a_rollback_asks_for_the_hold_takes_the_older_generation() {
+    let w = wired_with(Step::BeforeTheHold, |_| {});
+    w.deploy("stt", STT).unwrap();
+    w.deploy("tts", TTS).unwrap();
+    w.stop(2);
+
+    w.coordinator.rollback(None).unwrap();
+
+    assert_eq!(w.last_step(), restarted_as("tts", 3));
+    assert_eq!(w.launched(), [1, 2, 3, 4]);
+    assert_eq!(w.named(), ["stt@4", "tts@3", "5"]);
+}
+
+#[test]
 fn a_restart_already_starting_when_a_deploy_takes_its_generation_is_older_and_yields() {
     let w = wired();
     w.deploy("stt", STT).unwrap();
@@ -236,7 +291,9 @@ fn a_restart_already_starting_when_a_deploy_takes_its_generation_is_older_and_yi
 
 #[test]
 fn a_deploy_after_one_whose_candidate_never_became_ready_takes_a_new_generation() {
-    let w = wired_with(|config| config.worker.warm_timeout_ms = 40);
+    let w = wired_with(Step::BeforePrepare, |config| {
+        config.worker.warm_timeout_ms = 40;
+    });
     w.deploy("stt", STT).unwrap();
     w.f.probe.models.lock().unwrap().remove(&CANDIDATE_PORT);
 
