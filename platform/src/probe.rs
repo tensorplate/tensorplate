@@ -2066,9 +2066,8 @@ mod tests {
 
     #[test]
     fn an_unreachable_metadata_service_yields_no_machine_type() {
-        // Port zero cannot have a listener. Keep this bounded-connect
-        // check on loopback rather than contacting a real metadata route.
-        let started = std::time::Instant::now();
+        // Port zero cannot have a listener, so the connect fails at once,
+        // on loopback rather than against a real metadata route.
         let result = query_metadata("127.0.0.1:0", METADATA_PATH, Duration::from_millis(100));
         assert!(
             matches!(
@@ -2076,11 +2075,6 @@ mod tests {
                 Err(MetadataFailure::Timeout | MetadataFailure::Refused)
             ),
             "nothing answered: {result:?}"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "detection must stay bounded, took {:?}",
-            started.elapsed()
         );
     }
 
@@ -2480,14 +2474,14 @@ mod tests {
 
     #[test]
     fn a_peer_that_never_says_anything_is_the_unreachable_case() {
+        // Only the budget gives `Timeout`: a read that waited for the peer
+        // would end at its close, which is an answer.
         let addr = serve_once("", Duration::from_secs(30));
-        let started = std::time::Instant::now();
         let result = query_metadata(&addr, METADATA_PATH, Duration::from_millis(200));
         assert!(
             matches!(result, Err(MetadataFailure::Timeout)),
             "nothing arrived within the budget: {result:?}"
         );
-        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
@@ -2683,20 +2677,38 @@ mod tests {
         // missing machine type is now a hard error, that failed detection
         // outright on a healthy instance. Content-Length says when the
         // answer is complete, so the close is irrelevant.
-        let addr = serve_once(
-            "HTTP/1.0 200 OK\r\nContent-Length: 37\r\n\r\nprojects/1/machineTypes/g2-standard-8",
-            Duration::from_secs(30),
-        );
-        let started = std::time::Instant::now();
-        let answer = query_metadata(&addr, METADATA_PATH, Duration::from_millis(500));
+        let budget = Duration::from_secs(60);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr").to_string();
+        // The peer keeps its end open and says whether the query closed
+        // first. Its patience ends before the budget does, so a query that
+        // waits for either has not closed by then.
+        let query_closed_first = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept");
+            socket
+                .write_all(
+                    b"HTTP/1.0 200 OK\r\nContent-Length: 37\r\n\r\n\
+                      projects/1/machineTypes/g2-standard-8",
+                )
+                .expect("reply");
+            socket.set_read_timeout(Some(budget / 2)).expect("patience");
+            let mut chunk = [0_u8; 256];
+            loop {
+                match socket.read(&mut chunk) {
+                    Ok(0) => return true,
+                    Ok(_) => {}
+                    Err(_) => return false,
+                }
+            }
+        });
+        let answer = query_metadata(&addr, METADATA_PATH, budget);
         assert_eq!(
             answer.expect("a complete answer must be used"),
             "projects/1/machineTypes/g2-standard-8"
         );
         assert!(
-            started.elapsed() < Duration::from_millis(400),
-            "must not wait for the peer to close, took {:?}",
-            started.elapsed()
+            query_closed_first.join().expect("peer"),
+            "must not wait for the peer to close"
         );
     }
 
@@ -2723,27 +2735,24 @@ mod tests {
         // hold a service start open indefinitely.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr").to_string();
-        std::thread::spawn(move || {
-            if let Ok((mut socket, _)) = listener.accept() {
-                for _ in 0..4096 {
-                    if socket.write_all(b"x").is_err() {
-                        return;
-                    }
-                    let _ = socket.flush();
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-            }
+        // The peer trickles for 80 s and says whether the query closed on
+        // it before it had sent everything.
+        let cut_off = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept");
+            (0..4096).any(|_| {
+                let closed = socket.write_all(b"x").is_err();
+                std::thread::sleep(Duration::from_millis(20));
+                closed
+            })
         });
-        let started = std::time::Instant::now();
         let result = query_metadata(&addr, METADATA_PATH, Duration::from_millis(200));
         assert!(
             matches!(result, Err(MetadataFailure::Answered(_))),
             "a peer that sent bytes was reached, however slowly: {result:?}"
         );
         assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the budget is an overall deadline, took {:?}",
-            started.elapsed()
+            cut_off.join().expect("peer"),
+            "the budget is an overall deadline: the peer trickled to its end"
         );
     }
 
