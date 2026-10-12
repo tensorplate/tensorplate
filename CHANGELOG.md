@@ -353,8 +353,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   generation. After one that did not complete, the serving deployment's
   worker is not restarted, as before, and no later start of the agent
   restores it; no failed deploy is needed, since a deploy killed or stopped
-  after `prepared` leaves the same state as one refused or failed after
-  staging. Such a start no longer fails: it starts nothing for that
+  after `prepared` leaves the same staged bundle, though the first start
+  after it quarantines the candidate and shows the quarantine's error, and
+  only later starts record the refusal and leave the agent up. Such a start
+  no longer fails: it starts nothing for that
   deployment, records the `load_failed` refusal as `last_error` and comes up
   with its socket open, so status reports `agent_state: degraded`, the
   error, and `active` without a `generation` or a `serving_url`. Deploying

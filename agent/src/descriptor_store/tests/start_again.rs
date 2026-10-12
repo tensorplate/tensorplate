@@ -466,13 +466,40 @@ fn a_restore_fails_the_start_unless_the_staged_copy_reads_and_the_document_is_th
         "descriptor-stt-1.json` is not re-stamped: it describes bundle `sha256:",
         load_failed,
     );
-    for (broken, says, code) in [missing, another, unreadable, renamed] {
+    // The staged manifest is the record's, so its digest compares equal; the
+    // restore fails on the artifact the manifest names.
+    let gone: Broken = (
+        |host, _| fs::remove_file(host.staged("stt").join("entry.json")).unwrap(),
+        "artifact `entry.json` failed integrity check: missing on disk",
+        load_failed,
+    );
+    let altered: Broken = (
+        |host, _| fs::write(host.staged("stt").join("entry.json"), b"{}").unwrap(),
+        "artifact `entry.json` failed integrity check: digest mismatch",
+        load_failed,
+    );
+    let no_directory: Broken = (
+        |host, _| fs::remove_dir_all(host.staged("stt")).unwrap(),
+        "does not exist or is not a directory",
+        ErrorCode::ConfigInvalid,
+    );
+    for (broken, says, code) in [
+        missing,
+        another,
+        unreadable,
+        renamed,
+        gone,
+        altered,
+        no_directory,
+    ] {
         let host = host();
         let (agent, _) = host.restoring(Worker::default());
         broken(&host, &agent);
         let before = (host.view(), host.documents());
 
-        let error = apply_startup(&agent.coordinator).unwrap_err().to_record();
+        let error = apply_startup(&agent.coordinator)
+            .expect_err(says)
+            .to_record();
 
         let refused = error.code == code && !error.recoverable;
         assert!(refused && error.message.contains(says), "{error:?}");
