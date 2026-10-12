@@ -183,6 +183,25 @@ TEST_F(JobBridgeTest, HealthGivesUpAtItsTimeoutAndALaterCallIsAnswered) {
   EXPECT_TRUE(h.bridge->health().has_value());
 }
 
+// The answer is held, so only a bridge that has its configured timeout still
+// waits when the sidecar lets it go.
+TEST_F(JobBridgeTest, TheFactorysBridgeWaitsForAHeldHealthAnswerWithItsConfiguredTimeout) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.hold_health();
+  std::atomic<bool> returned{false};
+  Result<void> answered = unexpected(Error::Code::Internal, "not run");
+  std::thread caller([&] {
+    answered = h.bridge->health();
+    returned = true;
+  });
+  const bool waiting =
+      h.wait([&] { return h.channel->health_waiters() == 1 || returned.load(); }) && !returned;
+  peer.release_health();
+  caller.join();
+  EXPECT_TRUE(waiting);
+  EXPECT_TRUE(answered.has_value());
+}
+
 TEST_F(JobBridgeTest, AnEventAJobsOrderRefusesBecomesItsFailureAndLateOrForeignOnesAreDropped) {
   ASSERT_NO_FATAL_FAILURE(up());
   ASSERT_NO_FATAL_FAILURE(run_job_1());

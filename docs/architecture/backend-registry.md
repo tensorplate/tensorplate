@@ -818,7 +818,8 @@ case was loosened for this bridge.
 
 `test/unit/python_pytorch_job_bridge_test.cpp` holds what the cases leave to a
 binding: `job_not_permitted`; `health_timeout`, with a timeout of zero against
-a sidecar that holds its health answers; the `failed` that replaces an event a
+a sidecar that holds its health answers, and the configured timeout reaching
+the bridge the factory builds; the `failed` that replaces an event a
 job's order refuses, and a late and a foreign event dropped; bridge calls
 answered while an unload waits behind a running job; calls from several
 threads at once; and the session's destruction, loaded, never loaded and
