@@ -23,6 +23,7 @@ TEST(JobBridge, FeatureFlagDisabled) {
 #include <latch>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -94,6 +95,40 @@ void expect_refused(const Result<void>& result, Error::Code code, std::string_vi
 
 // A buffer manager, a sink and requests, bound to no channel.
 struct Bench final : testing::JobBench {};
+
+// The health timeout a bridge of this adapter was built with.
+std::chrono::milliseconds health_timeout_of(const BoundedJobBridge& bridge) {
+  return dynamic_cast<const JobBridge&>(bridge).health_timeout();
+}
+
+// An environment variable set, or unset for null, until the end of the scope.
+class ScopedEnvironment {
+ public:
+  ScopedEnvironment(const char* name, const char* value) : name_(name) {
+    if (const char* old = std::getenv(name); old != nullptr) {  // NOLINT(concurrency-mt-unsafe)
+      saved_ = old;
+    }
+    set(value);
+  }
+  ~ScopedEnvironment() { set(saved_.has_value() ? saved_->c_str() : nullptr); }
+
+  ScopedEnvironment(const ScopedEnvironment&) = delete;
+  ScopedEnvironment& operator=(const ScopedEnvironment&) = delete;
+  ScopedEnvironment(ScopedEnvironment&&) = delete;
+  ScopedEnvironment& operator=(ScopedEnvironment&&) = delete;
+
+ private:
+  void set(const char* value) {
+    if (value != nullptr) {
+      (void)::setenv(name_, value, 1);  // NOLINT(concurrency-mt-unsafe)
+    } else {
+      (void)::unsetenv(name_);  // NOLINT(concurrency-mt-unsafe)
+    }
+  }
+
+  const char* name_;
+  std::optional<std::string> saved_;
+};
 
 class JobBridgeTest : public ::testing::Test {
  protected:
@@ -186,9 +221,42 @@ TEST_F(JobBridgeTest, HealthGivesUpAtItsTimeoutAndALaterCallIsAnswered) {
   EXPECT_TRUE(h.bridge->health().has_value());
 }
 
-// The answer is held, so only a bridge that has its configured timeout still
-// waits when the sidecar lets it go.
-TEST_F(JobBridgeTest, TheFactorysBridgeWaitsForAHeldHealthAnswerWithItsConfiguredTimeout) {
+// The value itself, read from the bridge the factory built: a health call
+// that is answered shows no timeout but zero.
+TEST(JobBridgeHealthTimeout, TheFactoryHandsItsBridgeTheConfiguredValue) {
+  Bench bench;
+  ScriptedSidecar peer;
+  ExecutionSessionRuntimeHooks hooks{};
+  hooks.buffer_manager = bench.manager.get();
+  PythonPytorchConfig config;
+  config.health_timeout = std::chrono::milliseconds{4'321};
+  const auto built = make_python_pytorch_session_with_bridge(hooks, config, peer.launcher());
+  EXPECT_EQ(health_timeout_of(*built.bridge), std::chrono::milliseconds{4'321});
+  const auto plain = make_python_pytorch_session_with_bridge(hooks, {}, peer.launcher());
+  EXPECT_EQ(health_timeout_of(*plain.bridge), kDefaultHealthTimeout);
+}
+
+TEST(JobBridgeHealthTimeout, TheRegisteredEntryHandsItsBridgeTheEnvironmentsValue) {
+  Bench bench;
+  ExecutionSessionRuntimeHooks hooks{};
+  hooks.buffer_manager = bench.manager.get();
+  BackendRegistry registry;
+  ASSERT_TRUE(register_python_pytorch_backend(registry).has_value());
+  {
+    const ScopedEnvironment named("TP_PYTHON_PYTORCH_HEALTH_TIMEOUT_MS", "4321");
+    const auto built = registry.create_session_with_bridge(kBackendName, hooks);
+    ASSERT_TRUE(built.has_value()) << built.error().message;
+    EXPECT_EQ(health_timeout_of(*built.value().bridge), std::chrono::milliseconds{4'321});
+  }
+  const ScopedEnvironment unnamed("TP_PYTHON_PYTORCH_HEALTH_TIMEOUT_MS", nullptr);
+  const auto built = registry.create_session_with_bridge(kBackendName, hooks);
+  ASSERT_TRUE(built.has_value()) << built.error().message;
+  EXPECT_EQ(health_timeout_of(*built.value().bridge), kDefaultHealthTimeout);
+}
+
+// The answer is held, so a bridge that waits no time has given up when the
+// sidecar lets it go. How long it waits is held by the two tests above.
+TEST_F(JobBridgeTest, AHealthCallStillWaitsWhenTheSidecarLetsItsHeldAnswerGo) {
   ASSERT_NO_FATAL_FAILURE(up());
   peer.hold_health();
   std::atomic<bool> returned{false};

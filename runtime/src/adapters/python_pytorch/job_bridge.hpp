@@ -73,6 +73,11 @@ class JobBridge final : public BoundedJobBridge {
   /// JobChannel::probe_health() with `health_timeout` from now as its deadline.
   [[nodiscard]] Result<void> health() override;
 
+  /// The `health_timeout` the bridge was built with.
+  [[nodiscard]] std::chrono::milliseconds health_timeout() const noexcept {
+    return health_timeout_;
+  }
+
  private:
   const std::shared_ptr<JobChannel> channel_;
   const std::chrono::milliseconds health_timeout_;
