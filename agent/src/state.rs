@@ -537,9 +537,10 @@ impl StateStore {
 
 /// Require `candidate`, which a promotion makes active, to name the
 /// descriptor identity the deploy transaction of its deployment names, and
-/// none when no such transaction names one. A deploy names both in one
-/// update, so nothing reaches the refusal; it would leave the transaction in
-/// flight at `Promoted` while the worker serves the candidate.
+/// none when no such transaction names one. The refusal is not reached: a
+/// deploy names both in one update. It would leave the worker serving the
+/// candidate and the transaction in flight at `Promoted`, and every later
+/// transaction refused as busy until the agent restarts.
 fn named_as_its_deploy(
     candidate: &DeploymentRecord,
     transaction: Option<&TransactionRecord>,
