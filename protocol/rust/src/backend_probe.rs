@@ -732,7 +732,6 @@ mod tests {
 
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     fn write(path: &Path, body: &str) {
@@ -761,12 +760,11 @@ mod tests {
         )
     }
 
+    /// A stand-in interpreter at `dir/name` that runs the shell script `body`.
     fn make_executable_stub(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        write(&path, body);
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&path, perms).unwrap();
+        fs::create_dir_all(dir).unwrap();
+        crate::test_script::stage(&path, body);
         path
     }
 
@@ -890,7 +888,7 @@ mod tests {
             "fake-python",
             // Fake interpreter: prints a version on first call (-c "import
             // sys; ..."), fails on any other -c invocation.
-            "#!/bin/sh\nif [ \"$2\" = 'import sys;print(f\"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\")' ]; then\n  echo '3.11.0'\n  exit 0\nfi\necho 'ModuleNotFoundError' >&2\nexit 1\n",
+            "if [ \"$2\" = 'import sys;print(f\"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\")' ]; then\n  echo '3.11.0'\n  exit 0\nfi\necho 'ModuleNotFoundError' >&2\nexit 1\n",
         );
         let p = td.path().join("backend.json");
         write(
@@ -910,7 +908,7 @@ mod tests {
         let stub = make_executable_stub(
             td.path(),
             "fake-python",
-            "#!/bin/sh\nif [ \"$2\" = 'import sys;print(f\"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\")' ]; then\n  echo '3.11.0'\n  exit 0\nfi\nexit 0\n",
+            "if [ \"$2\" = 'import sys;print(f\"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\")' ]; then\n  echo '3.11.0'\n  exit 0\nfi\nexit 0\n",
         );
         let p = td.path().join("backend.json");
         write(&p, &descriptor_with_python(&stub, Some("evil; rm -rf /")));
@@ -965,7 +963,7 @@ mod tests {
             td,
             "own-python",
             &format!(
-                "#!/bin/sh\ncase \"$2\" in\n  '{OWN_VERSION_QUERY}') echo 3.12.3; exit 0 ;;\n  'import tensorplate_pytorch_backend') exit 0 ;;\nesac\necho 'ModuleNotFoundError: No module named torch' >&2\nexit 1\n"
+                "case \"$2\" in\n  '{OWN_VERSION_QUERY}') echo 3.12.3; exit 0 ;;\n  'import tensorplate_pytorch_backend') exit 0 ;;\nesac\necho 'ModuleNotFoundError: No module named torch' >&2\nexit 1\n"
             ),
         );
         if let Some(body) = profile_interpreter {
@@ -1006,7 +1004,7 @@ mod tests {
     /// with `import_status` for the backend module import.
     fn profile_python(version: &str, import_status: u8) -> String {
         format!(
-            "#!/bin/sh\ndir=\"$(dirname \"$0\")\"\ncase \"$2\" in\n  '{INTERPRETER_QUERY_MARKER}'*) env > \"$dir/environment.interpreter\"; echo '{{\"version\": \"{version}\", \"sys_version\": \"{version} (main) [GCC]\", \"prefix\": \"/opt/env\"}}'; exit 0 ;;\n  'import tensorplate_pytorch_backend') env > \"$dir/environment.import\"; echo 'ImportError: no sidecar module' >&2; exit {import_status} ;;\nesac\nexit 1\n"
+            "dir=\"$(dirname \"$0\")\"\ncase \"$2\" in\n  '{INTERPRETER_QUERY_MARKER}'*) env > \"$dir/environment.interpreter\"; echo '{{\"version\": \"{version}\", \"sys_version\": \"{version} (main) [GCC]\", \"prefix\": \"/opt/env\"}}'; exit 0 ;;\n  'import tensorplate_pytorch_backend') env > \"$dir/environment.import\"; echo 'ImportError: no sidecar module' >&2; exit {import_status} ;;\nesac\nexit 1\n"
         )
     }
 
@@ -1098,7 +1096,7 @@ mod tests {
         let failing = TempDir::new().unwrap();
         let failing_descriptor = staged_profile(
             failing.path(),
-            Some("#!/bin/sh\necho '{\"version\": \"3.12.3\", \"sys_version\": \"3.12.3\", \"prefix\": \"/opt/env\"}'\nexit 1\n"),
+            Some("echo '{\"version\": \"3.12.3\", \"sys_version\": \"3.12.3\", \"prefix\": \"/opt/env\"}'\nexit 1\n"),
             "3.10",
         );
 
@@ -1223,35 +1221,22 @@ mod tests {
     }
 
     #[test]
-    fn a_command_that_does_not_finish_is_killed_at_the_limit() {
-        let td = TempDir::new().unwrap();
-        let pid_file = td.path().join("pid");
-        let started = std::time::Instant::now();
-        let result = run_bounded(
-            Command::new("sh")
-                .arg("-c")
-                .arg("echo $$ > \"$0\"; exec sleep 30")
-                .arg(&pid_file),
-            Duration::from_millis(300),
-        );
+    fn a_command_that_does_not_finish_is_reported_with_the_limit_it_was_given() {
+        // The kill and the reap are asserted where the process handle is:
+        // `package_inventory::tests::a_query_that_does_not_answer_is_killed`.
+        let result = run_bounded(Command::new("sleep").arg("30"), Duration::from_millis(300));
         assert_eq!(result.unwrap_err(), "did not finish: no exit within 300ms");
-        assert!(started.elapsed() < Duration::from_secs(10));
-        let pid = fs::read_to_string(&pid_file).unwrap();
-        assert!(
-            !Path::new("/proc").join(pid.trim()).exists(),
-            "the command is still running"
-        );
     }
 
     #[test]
     fn a_process_the_command_leaves_holding_its_output_does_not_hold_the_caller() {
-        let started = std::time::Instant::now();
+        // Only the grace for an open pipe gives this error: had the call
+        // waited for the pipe to close, it would have the command's output.
         let result = run_bounded(
             Command::new("sh").arg("-c").arg("sleep 20 & exit 0"),
             Duration::from_secs(30),
         );
         assert_eq!(result.unwrap_err(), "left its output open after it exited");
-        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]
@@ -1276,56 +1261,98 @@ mod tests {
         .starts_with("did not start: "));
     }
 
+    /// Longer than any stand-in below takes to answer, on any machine.
+    const AMPLE: Duration = Duration::from_secs(60);
+
     #[test]
-    fn an_interpreter_that_does_not_answer_in_time_is_missing_and_does_not_hold_the_probe() {
+    fn an_interpreter_that_does_not_answer_within_the_limit_is_missing() {
+        // The interpreter answers each query after a second, so the limit
+        // alone decides whether its answer is waited for.
         let td = TempDir::new().unwrap();
-        let descriptor = staged_profile(td.path(), Some("#!/bin/sh\nexec sleep 30\n"), "3.10");
-        let started = std::time::Instant::now();
-        let report = probe_backend_with_inventory(
-            &descriptor,
-            &ProbeOptions {
+        let slow = format!("sleep 1\n{}", profile_python("3.12.3", 0));
+        let descriptor = staged_profile(td.path(), Some(&slow), "3.10");
+        let profile = |timeout| {
+            let options = ProbeOptions {
                 staged_root: Some(td.path().to_path_buf()),
-                timeout: Duration::from_millis(300),
+                timeout,
                 ..ProbeOptions::default()
-            },
-            &EveryPackage,
-        );
-        assert!(started.elapsed() < Duration::from_secs(10));
+            };
+            probe_backend_with_inventory(&descriptor, &options, &EveryPackage)
+                .runner_profiles
+                .remove(0)
+        };
+
+        let waited_for = profile(AMPLE);
+        assert_eq!(waited_for.state, BackendProbeState::Runnable);
+        assert!(waited_for.observed.is_some());
+
+        let cut_off = profile(Duration::from_millis(300));
         assert_eq!(
-            report.runner_profiles[0].state,
+            cut_off.state,
             BackendProbeState::PythonInterpreterMissing {
                 interpreter: "/opt/env/bin/python".into()
             }
         );
+        assert_eq!(cut_off.observed, None);
     }
 
     #[test]
     fn a_framework_import_is_given_longer_than_the_other_queries() {
+        // Every query takes this interpreter a second, so which limit a
+        // query was given shows in whether its answer was waited for.
         let td = TempDir::new().unwrap();
         let python = make_executable_stub(
             td.path(),
             "python",
             &format!(
-                "#!/bin/sh\ncase \"$2\" in\n  '{OWN_VERSION_QUERY}') echo 3.12.3 ;;\n  'import torch;'*) sleep 1; echo 2.9.0 ;;\n  *) exit 1 ;;\nesac\n"
+                "sleep 1\ncase \"$2\" in\n  '{OWN_VERSION_QUERY}') echo 3.12.3 ;;\n  'import torch;'*) echo 2.9.0 ;;\n  *) exit 1 ;;\nesac\n"
             ),
         );
-        let descriptor = td.path().join("backend.json");
+        let version_and_framework = td.path().join("backend.json");
         write(
-            &descriptor,
+            &version_and_framework,
             &descriptor_with_python(&python, None).replacen(
                 "\"python\":",
                 "\"pytorch\": {\"required\": true}, \"python\":",
                 1,
             ),
         );
-        let report = probe_backend(
-            &descriptor,
-            &ProbeOptions {
-                timeout: Duration::from_millis(200),
-                ..ProbeOptions::default()
-            },
+        // No `python` section: the framework import is the only query.
+        let framework_only = td.path().join("framework-only.json");
+        write(
+            &framework_only,
+            &format!(
+                r#"{{
+                    "schema_version": "{}",
+                    "backend_name": "python_pytorch",
+                    "package_name": "x",
+                    "package_version": "0.1.0",
+                    "pytorch": {{"required": true}}
+                }}"#,
+                crate::SCHEMA_VERSION
+            ),
         );
-        assert_eq!(report.state, BackendProbeState::Runnable);
+        let state = |descriptor: &Path, timeout| {
+            let options = ProbeOptions {
+                python_fallback: Some(python.clone()),
+                timeout,
+                ..ProbeOptions::default()
+            };
+            probe_backend(descriptor, &options).state
+        };
+        let short = Duration::from_millis(200);
+
+        assert_eq!(
+            state(&version_and_framework, AMPLE),
+            BackendProbeState::Runnable
+        );
+        assert_eq!(
+            state(&version_and_framework, short),
+            BackendProbeState::PythonInterpreterMissing {
+                interpreter: python.display().to_string()
+            }
+        );
+        assert_eq!(state(&framework_only, short), BackendProbeState::Runnable);
     }
 
     #[test]
@@ -1334,8 +1361,8 @@ mod tests {
         let descriptor = staged_profile(
             td.path(),
             Some(&format!(
-                "#!/bin/sh\npwd > \"$(dirname \"$0\")/cwd\"\n{}",
-                profile_python("3.12.3", 0).trim_start_matches("#!/bin/sh\n")
+                "pwd > \"$(dirname \"$0\")/cwd\"\n{}",
+                profile_python("3.12.3", 0)
             )),
             "3.10",
         );

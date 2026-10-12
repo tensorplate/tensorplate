@@ -50,6 +50,8 @@ mod test_script {
     /// Puts `script` at `path` for a test to execute, as `<path>.body` run by
     /// a link to a checked-in script. A file a test writes and then executes
     /// fails with "Text file busy" when another test thread forks in between.
+    /// The protocol crate's tests have the same helper over their own copy of
+    /// the script (`protocol/rust/src/lib.rs`).
     pub(super) fn stage(path: &Path, script: &str) {
         std::os::unix::fs::symlink(
             Path::new(env!("CARGO_MANIFEST_DIR"))

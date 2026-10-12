@@ -212,7 +212,6 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
     use std::path::Path;
 
@@ -450,13 +449,10 @@ mod tests {
                  printf 'tprec-leaf\\tinstalled\\n'"
             ),
         );
-        let started = Instant::now();
+        // A query blocked on a full pipe never exits: its answer would be
+        // the limit's error.
         let installed = ask(&program, &["tprec-leaf"]).unwrap();
         assert_eq!(installed, BTreeSet::from(["tprec-leaf".to_string()]));
-        assert!(
-            started.elapsed() < Duration::from_secs(4),
-            "waited for the deadline"
-        );
     }
 
     #[test]
@@ -516,11 +512,11 @@ mod tests {
         }
     }
 
-    /// An executable in `dir` standing in for `dpkg-query`.
+    /// An executable in `dir` standing in for `dpkg-query`, running the
+    /// shell script `body`.
     fn stub(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("dpkg-query-stub");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::stage(&path, body);
         path
     }
 
@@ -528,25 +524,12 @@ mod tests {
         ask_within(program, names, Duration::from_secs(5))
     }
 
-    /// Asks the stub again while the kernel refuses to execute it: a test
-    /// on another thread that forks in the instant the stub is being
-    /// written holds it open for writing until its own exec.
     fn ask_within(
         program: &Path,
         names: &[&str],
         timeout: Duration,
     ) -> Result<BTreeSet<String>, String> {
-        let inventory = DpkgInventory::with_program(program, timeout);
-        let names = names.iter().copied().collect();
-        for _ in 0..500 {
-            match inventory.installed(&names) {
-                Err(e) if e.contains("Text file busy") => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                answer => return answer,
-            }
-        }
-        panic!("{} stayed busy", program.display());
+        DpkgInventory::with_program(program, timeout).installed(&names.iter().copied().collect())
     }
 
     #[test]

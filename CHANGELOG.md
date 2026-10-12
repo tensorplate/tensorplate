@@ -8,6 +8,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The protocol crate's backend-probe tests no longer fail now and then with
+  an interpreter reported missing. Their stand-in interpreters, and the
+  package inventory's stand-in `dpkg-query`, were written and then run,
+  which fails with "Text file busy" when another test thread forks in
+  between; they are now links to a checked-in script that is never written
+  (the protocol crate's own copy of the one the CLI's tests use). The test
+  that a framework import is given longer than the other queries no longer
+  needs a query answered within 200 ms: its stand-in takes a second for
+  every query, so the limit each was given shows in whether its answer was
+  waited for. No test of the protocol crate or of the platform crate's
+  metadata query asserts an elapsed time any more; each reads which path
+  ended the wait from the result, or from the stand-in peer. The metadata
+  query tests whose peer answers and closes gave the query 300 or 500 ms,
+  which a loaded machine exceeded; they now give it 60 seconds, since the
+  close ends the read and not the budget. (V030-E01-F03)
+
 - The Python SDK's streaming speech client no longer loses a wake-up on
   Python 3.10 and 3.11. A session's reader that waited for room among the
   events its caller has not taken could miss the take that made the room,
