@@ -40,9 +40,11 @@ use tensorplate_protocol::agent_control::{
 use tensorplate_protocol::bundle_manifest::DeviceFamily;
 use tensorplate_protocol::{ErrorCode, SCHEMA_VERSION};
 
-const WARM_TIMEOUT: Duration = Duration::from_secs(10);
+/// Far longer than a deploy takes on a loaded machine, so that `PROMPT`, a
+/// tenth of it, is a bound that load does not reach.
+const WARM_TIMEOUT: Duration = Duration::from_secs(600);
 /// A deploy that answers this fast did not wait for the warm timeout.
-const PROMPT: Duration = Duration::from_secs(5);
+const PROMPT: Duration = Duration::from_secs(WARM_TIMEOUT.as_secs() / 10);
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/worker_stderr")
@@ -347,10 +349,9 @@ fn exit_without_a_startup_record_is_load_failed_with_the_exit_status() {
         "{}",
         error.message
     );
-    // Its stderr closed with it, so the agent does not wait for a record.
     assert!(
-        elapsed < Duration::from_millis(750),
-        "deploy took {elapsed:?}"
+        elapsed < PROMPT,
+        "deploy took {elapsed:?} of a {WARM_TIMEOUT:?} warm timeout"
     );
 }
 

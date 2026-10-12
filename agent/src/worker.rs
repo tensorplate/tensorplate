@@ -415,24 +415,41 @@ pub fn agent_stderr_sink() -> WorkerStderrSink {
 /// lines; without a record the exit status is all there is.
 pub(crate) fn startup_error(status: ExitStatus, stderr: &Mutex<WorkerStderr>) -> AgentError {
     let deadline = Instant::now() + STDERR_DRAIN_WAIT;
+    let record = last_startup_record(stderr, || {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+        true
+    });
+    match record {
+        Some(failure) => AgentError::WorkerStartupFailed {
+            code: failure.code,
+            message: failure.message,
+        },
+        None => AgentError::WorkerExited(status.to_string()),
+    }
+}
+
+/// The startup record on `stderr`, looked for again after each `pause`
+/// that answers true; none once the stderr has closed or `pause` refuses.
+fn last_startup_record(
+    stderr: &Mutex<WorkerStderr>,
+    mut pause: impl FnMut() -> bool,
+) -> Option<StartupFailure> {
     loop {
         if let Ok(mut shared) = stderr.lock() {
             if let Some(failure) = shared.startup_failure.take() {
-                return AgentError::WorkerStartupFailed {
-                    code: failure.code,
-                    message: failure.message,
-                };
+                return Some(failure);
             }
             if shared.closed {
-                break;
+                return None;
             }
         }
-        if Instant::now() >= deadline {
-            break;
+        if !pause() {
+            return None;
         }
-        std::thread::sleep(Duration::from_millis(5));
     }
-    AgentError::WorkerExited(status.to_string())
 }
 
 pub(crate) fn get_health_json(
@@ -845,5 +862,61 @@ mod tests {
         let forwarded = forwarded.lock().expect("lock");
         assert_eq!(forwarded.len(), padding + record.len() + 1);
         assert!(forwarded.ends_with(format!("{record}\n").as_bytes()));
+    }
+
+    fn a_startup_failure() -> super::StartupFailure {
+        super::StartupFailure {
+            code: tensorplate_protocol::ErrorCode::OomError,
+            message: "m".into(),
+        }
+    }
+
+    #[test]
+    fn a_closed_stderr_without_a_record_ends_the_wait_before_any_pause() {
+        let stderr = std::sync::Mutex::new(super::WorkerStderr {
+            startup_failure: None,
+            closed: true,
+        });
+        let mut pauses = 0;
+
+        let record = super::last_startup_record(&stderr, || {
+            pauses += 1;
+            false
+        });
+
+        assert_eq!(record, None);
+        assert_eq!(pauses, 0);
+    }
+
+    #[test]
+    fn a_record_that_arrives_during_a_pause_is_read_after_it() {
+        let stderr = std::sync::Mutex::new(super::WorkerStderr::default());
+        let mut pauses = 0;
+
+        let record = super::last_startup_record(&stderr, || {
+            pauses += 1;
+            if pauses == 1 {
+                stderr.lock().expect("lock").startup_failure = Some(a_startup_failure());
+            }
+            pauses == 1
+        });
+
+        assert_eq!(record, Some(a_startup_failure()));
+        assert_eq!(pauses, 1);
+    }
+
+    #[test]
+    fn a_pause_that_refuses_ends_the_wait_on_an_open_stderr() {
+        let stderr = std::sync::Mutex::new(super::WorkerStderr::default());
+        let mut pauses = 0;
+
+        let record = super::last_startup_record(&stderr, || {
+            pauses += 1;
+            assert!(pauses <= 3, "the wait went on after its pause refused");
+            pauses < 3
+        });
+
+        assert_eq!(record, None);
+        assert_eq!(pauses, 3);
     }
 }
