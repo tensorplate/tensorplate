@@ -519,10 +519,12 @@ the deployment a worker control reports serving is never read as a commit.
      leave): it is cleared, and its failure becomes `last_error`.
 
    A deploy has committed when its phase is `promoted` or later and its
-   candidate record is gone. A rollback has committed when `active` names
-   the generation the rollback named, or, for a record that names no
-   descriptor, when `active` is the transaction's deployment and bundle
-   and `previous_active` is not.
+   candidate record is gone. A rollback has committed when its phase is
+   `promoted` or later and `active` is the transaction's deployment at the
+   generation the rollback named or a later one of the same configuration
+   (a restart of the member names a later one), or, for a record that
+   names no descriptor, when `active` is the transaction's deployment and
+   bundle and `previous_active` is not.
 2. **Start the `active` record again**, in the same pass, unless the
    worker control already serves it (no start of the agent finds that: a
    new agent process holds no worker). `last_error` is cleared once it
@@ -550,9 +552,11 @@ start does when the restore cannot be made:
 | a state write of its own that fails, or a descriptor document it cannot write | ends with exit code `5` |
 | a worker that cannot be started, exits while loading, is not ready within `worker.warm_timeout_ms` or exits before it is promoted | ends with exit code `5`, with the reason in `last_error` |
 
-The refusals in the first five rows are decided by files that no restart
-of the agent changes, so the agent stays up for `deploy` and `rollback`,
-which both need its socket. Each refusal ends with "is not serving until
+The refusals in the first five rows are decided by the staged copy and
+the descriptor document, so the agent stays up for `deploy` and
+`rollback`, which both need its socket. A staged manifest that cannot be
+read for another reason (its permissions) is refused the same way. The
+start also prints each refusal on its standard error. Each refusal ends with "is not serving until
 it is deployed again", except the first, which names the id rule.
 
 Status reports what a start would do now as `recovery.action`:

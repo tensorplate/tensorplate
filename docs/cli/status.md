@@ -42,6 +42,8 @@ the deployment that was serving again reports `ready`, no `last_error`
 and one more quarantine entry (see [restart
 recovery](../architecture/agent.md#restart-recovery-v01-e08-f07)).
 `in_flight_transaction` never carries a `failure` from this agent.
+`recovery.reason` says what a start of the agent would do now, so during
+a deploy it names that deploy as one a start would end.
 
 If the snapshot file is missing or malformed, the CLI renders the
 observability block as `available: false` with a reason — it does **not**

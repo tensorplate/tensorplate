@@ -13,6 +13,7 @@ use tensorplate_protocol::agent_state::TransactionKind;
 use tensorplate_protocol::deploy_transaction::DeployState;
 
 use crate::recovery::apply_startup;
+use crate::registry::{durable_generations, Restamp};
 
 impl Host {
     /// A started agent whose `active` is `tts` at generation 1, described,
@@ -299,6 +300,59 @@ fn a_committed_transaction_whose_end_write_failed_is_busy_until_a_start_clears_i
 }
 
 #[test]
+fn a_committed_rollback_whose_record_a_member_restart_named_again_is_cleared_by_the_next_start() {
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    agent.deploy("tts", TTS).unwrap();
+    agent.deploy("stt", STT).unwrap();
+    // Nine writes; every one lands but the one that ends the transaction.
+    agent.store.kill_after_writes(8);
+    let ended = agent.coordinator.rollback(None);
+    assert!(matches!(ended, Err(AgentError::Io(_))), "{ended:?}");
+    agent.store.kill_after_writes(usize::MAX);
+    let state = agent.store.snapshot().unwrap();
+    let tx = state.in_flight_transaction.clone().unwrap();
+    assert_eq!(tx.phase, DeployState::Promoted);
+    let active = state.active.clone().unwrap();
+    assert_eq!(active.deployment_id, "tts");
+    assert_eq!(active.generation, tx.generation);
+
+    // The serving member stops and is restarted: the registry's restart stamp.
+    let recipe = CandidateRef {
+        deployment_id: active.deployment_id.clone(),
+        staged_path: active.staged_path.clone(),
+        bundle_digest: active.bundle_digest.clone(),
+        backend_hint: active.backend_hint.clone(),
+        model_class: active.model_class.clone(),
+        bundle_name: Some(active.bundle_name.clone()),
+        bundle_version: Some(active.bundle_version.clone()),
+        artifact_relative_path: Some("entry.json".into()),
+        generation: active.generation,
+        descriptor_digest: active.descriptor_digest.clone(),
+        configuration_digest: active.configuration_digest.clone(),
+    };
+    let generation = durable_generations(agent.store.clone())().unwrap();
+    let descriptors = Arc::new(DescriptorStore::new(host.state_dir()));
+    let stamp = restart_stamp(agent.store.clone(), descriptors);
+    stamp(&Restamp {
+        recipe: &recipe,
+        stopped_generation: active.generation.unwrap(),
+        generation,
+    })
+    .unwrap();
+    drop(agent);
+
+    let (action, next) = host.one_start(Worker::default());
+
+    assert_eq!(action, RecoveryAction::RestoreActive);
+    assert_eq!(next.asked().reference.deployment_id, "tts");
+    assert_eq!(host.ids(), ["tts", "stt"]);
+    assert!(host.settled() && host.quarantined().0.is_empty());
+    assert_eq!(host.last_error(), None);
+    let _ = tx;
+}
+
+#[test]
 fn a_failed_transaction_whose_one_ending_write_did_not_land_is_ended_by_the_next_start() {
     // A deploy refused when its descriptor is derived: six writes, then the
     // one that ends it. Killed before that one, the start ends it instead.
@@ -552,7 +606,7 @@ fn a_promotion_is_not_read_from_a_deployment_id_the_active_record_shares_with_it
 
     let (action, _) = host.one_start(Worker::serving("stt"));
 
-    assert_ne!(action, RecoveryAction::FinalizePromotion);
+    assert_eq!(action, RecoveryAction::QuarantineCandidate);
     assert!(host.settled());
     assert_eq!(host.quarantined().0, "tx@Warmed");
 }
@@ -575,7 +629,7 @@ fn a_swap_is_not_read_from_a_deployment_id_both_records_share() {
 
     let (action, _) = host.one_start(Worker::serving("stt"));
 
-    assert_ne!(action, RecoveryAction::FinalizePromotion);
+    assert_eq!(action, RecoveryAction::QuarantineCandidate);
     assert_eq!(host.quarantined().0, "tx@Warmed");
     let [active, previous, transaction, _] = host.view();
     assert!(active.starts_with("stt@") && active != "stt@1" && active != "stt@3");

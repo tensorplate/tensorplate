@@ -42,7 +42,7 @@ enum Settle {
     /// It was interrupted before its commit: it is ended as failed, with a
     /// quarantine record, and the records stay as they were before it.
     Ended,
-    /// It was recorded failed and not cleared: it is cleared.
+    /// A rollback was recorded failed and not cleared: it is cleared.
     Failed,
 }
 
@@ -65,6 +65,10 @@ fn committed(state: &AgentState, tx: &TransactionRecord) -> bool {
                 && state.candidate.is_none()
         }
         TransactionKind::Rollback => {
+            // Only the swap moves the records of a rollback at `promoted`.
+            if !matches!(tx.phase, DeployState::Promoted | DeployState::RolledBack) {
+                return false;
+            }
             let Some(active) = state.active.as_ref() else {
                 return false;
             };
@@ -74,10 +78,13 @@ fn committed(state: &AgentState, tx: &TransactionRecord) -> bool {
                     && digest.is_some_and(|d| bundle_digests_equal(d, &record.bundle_digest))
             };
             match tx.descriptor_identity() {
-                // Only the swap copies the generation a rollback named.
+                // The swap copies the generation a rollback named; a restart
+                // of the member then names a later one of that configuration.
                 Ok(Some(named)) => {
                     active.deployment_id == tx.deployment_id
-                        && active.descriptor_identity() == Ok(Some(named))
+                        && matches!(active.descriptor_identity(), Ok(Some(now))
+                            if now.generation >= named.generation
+                                && now.configuration_digest == named.configuration_digest)
                 }
                 // Two records of one id and one bundle read as not swapped:
                 // either reading starts the same bundle.
@@ -133,18 +140,23 @@ fn served(worker: &dyn WorkerControl, record: &DeploymentRecord) -> Served {
 fn pass(state: &AgentState, worker: &dyn WorkerControl) -> Pass {
     let (settle, settled) = match state.in_flight_transaction.as_ref() {
         None => (Settle::Nothing, None),
-        Some(tx) if tx.phase == DeployState::Failed => (
+        // A deploy recorded failed still holds its candidate record, which
+        // only the quarantine clears.
+        Some(tx) if tx.phase == DeployState::Failed && tx.kind == TransactionKind::Rollback => (
             Settle::Failed,
-            Some(format!("{} was recorded failed: cleared", describe(tx))),
+            Some(format!(
+                "{} is recorded failed: a start clears it",
+                describe(tx)
+            )),
         ),
         Some(tx) if committed(state, tx) => (
             Settle::Forward,
-            Some(format!("{} had committed: cleared", describe(tx))),
+            Some(format!("{} has committed: a start clears it", describe(tx))),
         ),
         Some(tx) => (
             Settle::Ended,
             Some(format!(
-                "{} was interrupted at `{}`, before its commit: ended as failed",
+                "{} is at `{}`, before its commit: a start ends it as failed",
                 describe(tx),
                 label(tx.phase)
             )),
@@ -252,21 +264,6 @@ pub fn apply_startup(coordinator: &Coordinator) -> AgentResult<RecoverySummary> 
     Ok(pass.summary)
 }
 
-/// Whether `err` of a restore was decided by the files it reads, the staged
-/// copy and the descriptor document, which no restart of the agent changes.
-/// Every other error is the agent's own: its state store, or a document it
-/// could not write.
-fn decided_by_files(err: &AgentError) -> bool {
-    matches!(
-        err,
-        AgentError::DeploymentDescriptor { .. }
-            | AgentError::BundleManifest(_)
-            | AgentError::BundleUnsupported(_)
-            | AgentError::BundleIntegrity { .. }
-            | AgentError::BundleMissing(_)
-    )
-}
-
 /// Start the active record's deployment again. A restore refused by what
 /// is on disk leaves the record not serving, with the refusal as
 /// `last_error` and no error returned, so the operator can deploy or roll
@@ -285,6 +282,7 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
             "{}; `{}` is not serving until it is deployed again",
             record.message, active.deployment_id
         );
+        eprintln!("startup recovery: not restored: {}", record.message);
         store.set_last_error(Some(record))
     };
     // An id recorded before deployment ids were restricted cannot be started
@@ -294,6 +292,7 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
             "recorded active deployment `{}` was not restored: its id cannot name a member (1 to 128 of ASCII letters, digits, `-`, `_` or `.`); deploy it again under such an id",
             active.deployment_id
         ));
+        eprintln!("startup recovery: not restored: {err}");
         return store.set_last_error(Some(err.to_record()));
     }
     // Another bundle is staged under the id than the record names, as a
@@ -310,7 +309,10 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
     let worker = coordinator.worker_client().as_ref();
     let in_hand = match start_again(store, worker, &active, artifact, Start::Restore) {
         Ok(in_hand) => in_hand,
-        Err(err) if decided_by_files(&err) => return refuse(err.to_record()),
+        // The staged copy was read above, so what is left to refuse is the
+        // descriptor document. Every other error is the agent's own: its
+        // state store, or a document it could not write.
+        Err(err @ AgentError::DeploymentDescriptor { .. }) => return refuse(err.to_record()),
         Err(err) => {
             store.set_last_error(Some(err.to_record()))?;
             return Err(err);
@@ -535,6 +537,143 @@ mod tests {
             };
             assert_eq!((summary.action, ended), (action, quarantined), "{phase:?}");
             assert!(snap.in_flight_transaction.is_none(), "{phase:?}");
+        }
+    }
+
+    /// One start over `active`, `previous_active` and `transaction`, with
+    /// nothing to restore: whether it ended the transaction as failed.
+    fn ends(
+        active: DeploymentRecord,
+        previous: Option<DeploymentRecord>,
+        transaction: TransactionRecord,
+    ) -> bool {
+        let td = TempDir::new().expect("td");
+        let cfg = config(td.path());
+        let store = Arc::new(StateStore::open(&cfg.state_dir).expect("open"));
+        let serving = active.deployment_id.clone();
+        store
+            .update(|s| {
+                // Above every generation a record here names.
+                s.next_generation = Some(10);
+                s.active = Some(active);
+                s.previous_active = previous;
+                s.in_flight_transaction = Some(transaction);
+                Ok(())
+            })
+            .expect("update");
+        let coordinator = Coordinator::new(cfg, store.clone(), Arc::new(mock(Some(&serving))));
+        apply_startup(&coordinator).expect("apply");
+        let snap = store.snapshot().expect("snap");
+        assert!(snap.in_flight_transaction.is_none());
+        snap.quarantined.len() == 1
+    }
+
+    fn described(id: &str, generation: u64, configuration: &str) -> DeploymentRecord {
+        DeploymentRecord {
+            generation: Some(generation),
+            descriptor_digest: Some(format!("sha256:d{generation}")),
+            configuration_digest: Some(configuration.into()),
+            ..record(id)
+        }
+    }
+
+    #[test]
+    fn a_described_rollback_is_read_as_committed_from_its_phase_and_the_generation_it_named() {
+        let rollback = |phase| TransactionRecord {
+            kind: TransactionKind::Rollback,
+            generation: Some(3),
+            descriptor_digest: Some("sha256:d3".into()),
+            configuration_digest: Some("sha256:c1".into()),
+            ..tx("tx", phase)
+        };
+        let promoted = DeployState::Promoted;
+        let swapped = described("d", 3, "sha256:c1");
+        assert!(!ends(swapped.clone(), None, rollback(promoted)));
+        assert!(!ends(
+            swapped.clone(),
+            None,
+            rollback(DeployState::RolledBack)
+        ));
+        // A restart of the member named a later generation on the record.
+        assert!(!ends(
+            described("d", 4, "sha256:c1"),
+            None,
+            rollback(promoted)
+        ));
+        // Not swapped: an earlier generation, another configuration, another
+        // deployment, or a phase before the commit.
+        assert!(ends(
+            described("d", 2, "sha256:c1"),
+            None,
+            rollback(promoted)
+        ));
+        assert!(ends(
+            described("d", 4, "sha256:c2"),
+            None,
+            rollback(promoted)
+        ));
+        assert!(ends(
+            described("e", 4, "sha256:c1"),
+            None,
+            rollback(promoted)
+        ));
+        assert!(ends(swapped, None, rollback(DeployState::Warmed)));
+    }
+
+    #[test]
+    fn a_rollback_between_records_that_name_no_descriptor_is_read_from_their_ids_and_bundles() {
+        let rollback = |phase| TransactionRecord {
+            kind: TransactionKind::Rollback,
+            bundle_digest: Some("sha256:cafe".into()),
+            ..tx("tx", phase)
+        };
+        let promoted = DeployState::Promoted;
+        let other_bundle = || DeploymentRecord {
+            bundle_digest: "sha256:beef".into(),
+            ..record("d")
+        };
+        // Swapped: `active` is the rollback's and the retained record is not.
+        assert!(!ends(record("d"), Some(record("e")), rollback(promoted)));
+        assert!(!ends(record("d"), Some(other_bundle()), rollback(promoted)));
+        // Two records of one id and one bundle read as not swapped.
+        assert!(ends(record("d"), Some(record("d")), rollback(promoted)));
+        assert!(ends(other_bundle(), Some(record("d")), rollback(promoted)));
+        assert!(ends(record("e"), Some(record("d")), rollback(promoted)));
+        assert!(ends(
+            record("d"),
+            Some(record("e")),
+            rollback(DeployState::Warmed)
+        ));
+    }
+
+    #[test]
+    fn a_rollback_recorded_failed_is_cleared_with_its_failure_and_a_deploy_is_quarantined() {
+        let failure = ErrorRecord::new(ErrorCode::LoadFailed, "the runner refused the model");
+        for kind in [TransactionKind::Rollback, TransactionKind::Deploy] {
+            let td = TempDir::new().expect("td");
+            let cfg = config(td.path());
+            let store = Arc::new(StateStore::open(&cfg.state_dir).expect("open"));
+            let failed = TransactionRecord {
+                kind,
+                failure: Some(failure.clone()),
+                ..tx("tx", DeployState::Failed)
+            };
+            store
+                .update(|s| {
+                    s.candidate = (kind == TransactionKind::Deploy).then(|| record("d"));
+                    s.in_flight_transaction = Some(failed);
+                    Ok(())
+                })
+                .expect("update");
+            let coordinator = Coordinator::new(cfg, store.clone(), Arc::new(mock(None)));
+
+            apply_startup(&coordinator).expect("apply");
+
+            let snap = store.snapshot().expect("snap");
+            assert!(snap.in_flight_transaction.is_none() && snap.candidate.is_none());
+            assert_eq!(snap.last_error, Some(failure.clone()), "{kind:?}");
+            let quarantined = usize::from(kind == TransactionKind::Deploy);
+            assert_eq!(snap.quarantined.len(), quarantined, "{kind:?}");
         }
     }
 
