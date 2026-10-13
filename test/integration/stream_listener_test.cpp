@@ -9,11 +9,13 @@
 #include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -542,6 +544,76 @@ TEST(StreamListener, LocalhostBindsTheIpv4LoopbackOnly) {
   EXPECT_FALSE(accepts(AF_INET6, port)) << "localhost was resolved, not mapped";
 }
 
+/// An HTTP/2 connection to `port` on loopback that opens no call. Once the
+/// server has acknowledged its SETTINGS it reads nothing more, so it answers
+/// nothing the server sends, until it is closed.
+class SilentConnection {
+ public:
+  explicit SilentConnection(std::uint16_t port) : fd_(::socket(AF_INET, SOCK_STREAM, 0)) {
+    constexpr std::uint8_t kSettings = 4;
+    // The client preface, then a SETTINGS frame that sets nothing.
+    std::string hello{"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"};
+    hello.append({0, 0, 0, static_cast<char>(kSettings), 0, 0, 0, 0, 0});
+    // A server that never acknowledges fails the test instead of hanging it.
+    const timeval patience{20, 0};
+    (void)::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &patience, sizeof(patience));
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(port);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): POSIX socket address.
+    if (::connect(fd_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0 ||
+        ::write(fd_, hello.data(), hello.size()) != static_cast<ssize_t>(hello.size())) {
+      return;
+    }
+    // Frames: a 24-bit length, a type, flags, a stream id, then the payload.
+    for (std::string frame; read_exactly(frame, 9);) {
+      const auto length = (static_cast<std::size_t>(static_cast<std::uint8_t>(frame[0])) << 16U) |
+                          (static_cast<std::size_t>(static_cast<std::uint8_t>(frame[1])) << 8U) |
+                          static_cast<std::uint8_t>(frame[2]);
+      const bool settings = static_cast<std::uint8_t>(frame[3]) == kSettings;
+      const bool acknowledgement = (static_cast<std::uint8_t>(frame[4]) & 1U) != 0;
+      if (!read_exactly(frame, length)) {
+        return;
+      }
+      if (settings && acknowledgement) {
+        established_ = true;
+        return;
+      }
+    }
+  }
+  ~SilentConnection() { close(); }
+  SilentConnection(const SilentConnection&) = delete;
+  SilentConnection& operator=(const SilentConnection&) = delete;
+
+  /// The server has read this connection's preface and answered it.
+  [[nodiscard]] bool established() const noexcept { return established_; }
+
+  void close() noexcept {
+    if (fd_ >= 0) {
+      ::close(fd_);
+      fd_ = -1;
+    }
+  }
+
+ private:
+  bool read_exactly(std::string& bytes, std::size_t size) const {
+    bytes.assign(size, '\0');
+    std::size_t have = 0;
+    while (have < size) {
+      const auto got = ::read(fd_, bytes.data() + have, size - have);
+      if (got <= 0) {
+        return false;
+      }
+      have += static_cast<std::size_t>(got);
+    }
+    return true;
+  }
+
+  int fd_;
+  bool established_ = false;
+};
+
 /// A worker with the stream listener on an ephemeral port, read back from the
 /// line the worker logs when it binds.
 struct StreamingWorker {
@@ -683,8 +755,9 @@ std::optional<std::chrono::steady_clock::time_point> logged_drain_end(const std:
 
 // A stop ends the stream listener before it waits for a unary request in
 // flight, which therefore cannot use up the window stream sessions drain in.
-// The HTTP port still answers once shutdown is asked; after the stream port
-// it closes too, before the request in flight has been waited for.
+// The HTTP port still answers once shutdown is asked, and with the stream
+// port closed for as long as the stream listener is stopping; then it closes
+// too, before the request in flight has been waited for.
 // Both drains end with the one window that began when shutdown was asked.
 // The worker gives its listener no dispatch, so no session exists here: what
 // a listener's stop does to its sessions is shown on the listener itself.
@@ -751,6 +824,12 @@ TEST(StreamListener, TheWorkersStopEndsItsStreamListenerWhileAUnaryRequestIsStil
       << refused.error_message();
   // The HTTP side still answers beside the request it holds: 503, stopping.
   EXPECT_EQ(tensorplate::testing::HttpClient("127.0.0.1", http_port).get("/health").status, 503);
+  // The gate between the two ports. gRPC's shutdown closes the port, sends
+  // each connection a ping and waits for the connection to end; this one does
+  // not answer, so the stream listener's stop stays there until the test ends
+  // the connection (gRPC itself would after 20 s).
+  SilentConnection unanswering{served.port};
+  ASSERT_TRUE(unanswering.established());
   auto exit_code = tensorplate::ServingExitCode::Internal;
   stopper = std::thread([&] {
     exit_code = served.worker->stop();
@@ -759,6 +838,13 @@ TEST(StreamListener, TheWorkersStopEndsItsStreamListenerWhileAUnaryRequestIsStil
   // The request is still held at its gate, which only this test opens.
   ASSERT_TRUE(eventually([&] { return !accepts(AF_INET, served.port); }))
       << "the stop waited for the unary request before it reached the stream listener";
+  // The stream listener is still stopping, so the HTTP listener's stop has
+  // not begun: its port accepts and answers.
+  ASSERT_TRUE(accepts(AF_INET, http_port))
+      << "the HTTP port closed while the stream listener was still stopping";
+  EXPECT_EQ(tensorplate::testing::HttpClient("127.0.0.1", http_port).get("/health").status, 503);
+  EXPECT_FALSE(stop_returned);
+  unanswering.close();
   // The HTTP listener's stop comes next. It closes the port first and then
   // waits for the request, so nothing answers on it for the rest of the stop.
   ASSERT_TRUE(eventually([&] { return !accepts(AF_INET, http_port); }))

@@ -427,12 +427,20 @@ runs speech jobs is wired in.
   drain after that has nothing left of the window to wait in. Queued unary
   requests are cancelled (step 3 of the shutdown flow below) only after
   the stream listener and then the HTTP listener have stopped. A test
-  holds the order with a unary request held at a gate: `/health` answers
-  503 once shutdown is asked; the stream listener's port closes while the
-  request is still in flight; the HTTP port closes next, with the request
-  still held. No test holds the HTTP port open during a stream drain: a
-  worker gives its listener no dispatch yet, so none of its sessions lives
-  long enough to hold one. The stopped
+  holds the order of the two ports, with a unary request held at one gate
+  and the stream listener's stop held at another: `/health` answers 503
+  once shutdown is asked; the stream listener's port closes while the
+  request is still in flight; with that port closed and the stream
+  listener still stopping, the HTTP port accepts and `/health` still
+  answers 503; the HTTP port closes next, with the request still held.
+  The second gate is a connection that opens no call and does not answer
+  the ping gRPC sends a connection it is shutting down: gRPC's shutdown
+  closes the port first and then waits for its connections to end, such a
+  one for up to 20 s (gRPC's limit on that ping, inside the drain window),
+  and the test ends the connection itself. A stop whose HTTP port closes
+  first fails the test. No test holds the HTTP port open during a stream
+  drain: a worker gives its listener no dispatch yet, so none of its
+  sessions lives long enough to hold one. The stopped
   listener stays in place until the worker is destroyed, so a `shutdown()`
   on another thread never finds it gone. The control channel and the signal
   pipe are unchanged and still end with the worker.
