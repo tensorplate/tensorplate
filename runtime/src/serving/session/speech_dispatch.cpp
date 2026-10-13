@@ -126,8 +126,16 @@ struct SpeechJobDispatch::Core final : JobEventSink {
   explicit Core(BufferManager& buffers_in) noexcept : buffers(buffers_in) {}
 
   void on_accepted(const JobEvent& /*event*/) noexcept override {}
-  // No job asks for progress, and the bridge delivers none that was not asked.
-  void on_progress(const JobEvent& /*event*/) noexcept override {}
+  // No job of the dispatch asks for progress, and the bridge delivers none
+  // that was not asked for: a fragment is another submitter's, and dropped.
+  void on_progress(const JobEvent& event) noexcept override {
+    const auto& fragment = event.result();
+    if (const auto* chunk =
+            fragment.has_value() ? std::get_if<AudioChunkResult>(&fragment->payload()) : nullptr;
+        chunk != nullptr) {
+      HeldBuffer{buffers, chunk->pcm.buffer}.reset();
+    }
+  }
   // Queueing can only fail for want of memory, which ends the worker here as
   // it would on any other thread.
   // NOLINTNEXTLINE(bugprone-exception-escape)

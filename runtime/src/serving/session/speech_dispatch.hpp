@@ -91,10 +91,11 @@ struct SpeechDispatchStats {
 ///
 /// Every session opened here is released through the bridge once: at its
 /// cleanup, or at stop(). Each audio result's buffer is released once,
-/// whether its audio was delivered or dropped, and a job's input buffer when
-/// the backend reports the job released. The inputs of jobs never reported
-/// released go when the dispatch and the bridge are both gone, so the bridge
-/// is destroyed only after the backend session was unloaded.
+/// whether its audio was delivered or dropped, a progress fragment's as it
+/// arrives, and a job's input buffer when the backend reports the job
+/// released. The inputs of jobs never reported released go when the dispatch
+/// and the bridge are both gone, so the bridge is destroyed only after the
+/// backend session was unloaded.
 class SpeechJobDispatch final : public SessionDispatch {
  public:
   /// Registers the dispatch as `bridge`'s event sink. `buffers` and `clock`,

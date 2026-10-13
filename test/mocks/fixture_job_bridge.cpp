@@ -279,6 +279,11 @@ void FixtureJobBridge::end_running_locked() {
   } else if (next_failure_.has_value()) {
     rules_.queue_failed(running_, *std::exchange(next_failure_, std::nullopt));
   } else if (auto result = result_(job->second.request, buffers_); result.has_value()) {
+    if (options_.progress_when_allowed && job->second.request.progress_limit() > 0) {
+      if (auto fragment = result_(job->second.request, buffers_); fragment.has_value()) {
+        rules_.queue_progress(running_, 1, std::move(fragment).value());
+      }
+    }
     rules_.queue_completed(running_, std::move(result).value());
   } else {
     rules_.queue_failed(running_, result.error());

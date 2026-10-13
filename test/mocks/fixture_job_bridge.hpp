@@ -25,7 +25,8 @@
 // the prime a session release is taken and acknowledged, and a backend lost
 // or a session unloaded before the prime answers `backend_unavailable`, not
 // `backend_not_ready`. FixtureJobBridgeOptions turns two of the rules above
-// into the other outcome the bridge header allows.
+// into the other outcome the bridge header allows, and adds the one event the
+// runner's backends never deliver: `progress`, for a job that allows it.
 //
 // It differs from the adapter with a real sidecar in six ways:
 //
@@ -100,6 +101,11 @@ struct FixtureJobBridgeOptions {
   /// A cancellation comes too late for its job, started or not: the job runs
   /// to its end and completes, with no `cancel_acknowledged`.
   bool cancels_arrive_late = false;
+  /// A job whose request allows progress delivers one fragment before it
+  /// completes: what its result function returns, called once more. For a
+  /// receiver that has to settle a fragment; the two together must stay
+  /// within one result's ceilings, or the job's event order fails the job.
+  bool progress_when_allowed = false;
 };
 
 class FixtureJobBridge final : public BoundedJobBridge {

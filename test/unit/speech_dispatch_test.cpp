@@ -40,9 +40,10 @@ using Bytes = std::vector<std::byte>;
 /// 20 ms of 16 kHz mono 16-bit PCM.
 constexpr std::size_t kFrameBytes = 640;
 
-JobRequest foreign_synthesis(std::uint64_t job_id) {
+/// A job of a submitter other than the dispatch, on the same bridge.
+JobRequest foreign_synthesis(std::uint64_t job_id, std::uint32_t progress_limit = 0) {
   return JobRequest::create({job_id, 999, SpeechUnderTest::kGeneration}, JobClass::TtsSynthesis,
-                            TextSegment{"hi"}, JobOptions{"en", "voice-a", 1000})
+                            TextSegment{"hi"}, JobOptions{"en", "voice-a", 1000}, progress_limit)
       .value();
 }
 
@@ -578,6 +579,31 @@ TEST(SpeechJobDispatch, AnotherSubmittersJobEndingLeavesTheLaneToTheJobInFlight)
   speech.release_jobs();
   ASSERT_NO_FATAL_FAILURE(binding.expect_segment(running, 1, "one"));
   ASSERT_NO_FATAL_FAILURE(binding.expect_segment(waiting, 1, "two"));
+}
+
+std::unique_ptr<DispatchUnderTest> speech_dispatch_over_a_backend_with_progress(
+    const SchedulerClock& clock) {
+  return std::make_unique<SpeechUnderTest>(clock,
+                                           FixtureJobBridgeOptions{.progress_when_allowed = true});
+}
+
+// The dispatch's jobs ask for no progress, and a bridge delivers none that
+// was not asked for. Another submitter's job may ask: its fragment reaches
+// this sink as its result does, in a buffer of its own.
+TEST(SpeechJobDispatch, AProgressFragmentIsDroppedAndItsAudioReleased) {
+  Binding binding(&speech_dispatch_over_a_backend_with_progress);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_text();
+  ASSERT_TRUE(binding.settle());
+  ASSERT_TRUE(speech.fixture->submit(foreign_synthesis(1000, 1)).has_value());
+  ASSERT_TRUE(binding.settle());
+  EXPECT_TRUE(speech.fixture->refusals().empty());
+  EXPECT_EQ(speech.buffers_in_use(), 0U);
+  EXPECT_EQ(speech.strategy->stats().jobs_discarded, 1U);
+
+  // A job of the dispatch's own allows none, so it gets none.
+  binding.text(key, 1, "hi");
+  ASSERT_NO_FATAL_FAILURE(binding.expect_segment(key, 1, "hi"));
 }
 
 TEST(SpeechJobDispatch, ABackendLostWhileACancelWaitsForItsReleaseFailsTheSession) {
