@@ -418,7 +418,8 @@ TEST(SpeechJobDispatch, ASessionThatFailedWhileItWaitedForTheLaneIsNotServed) {
 
 /// The job's end reaches the dispatch ahead of its session's cancel, where the
 /// cases above force it behind: the result is taken, the cancel then drops
-/// what it yielded, and the session is released once all the same.
+/// what it yielded, no other job is submitted, and the session is released
+/// once all the same.
 void a_job_that_ends_ahead_of_its_sessions_cancel(Binding& binding, std::uint64_t key) {
   SpeechUnderTest& speech = speech_of(binding);
   ASSERT_TRUE(binding.settle());
@@ -435,6 +436,7 @@ void a_job_that_ends_ahead_of_its_sessions_cancel(Binding& binding, std::uint64_
   ASSERT_TRUE(binding.settle());
   EXPECT_FALSE(binding.output(key)->take().has_value());
   EXPECT_EQ(speech.bridge->releases(key), 1U);
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
   EXPECT_EQ(speech.buffers_in_use(), 0U);
   EXPECT_EQ(speech.strategy->stats().jobs_completed, 1U);
   EXPECT_EQ(speech.strategy->stats().jobs_discarded, 0U);
@@ -452,6 +454,19 @@ TEST(SpeechJobDispatch, ADecodeThatEndsAheadOfItsSessionsCancelIsTakenAndItsFina
   Binding binding(&speech_dispatch);
   const auto key = binding.open_audio();
   speech_of(binding).hold_jobs();
+  one_utterance(binding, key);
+  ASSERT_NO_FATAL_FAILURE(a_job_that_ends_ahead_of_its_sessions_cancel(binding, key));
+}
+
+// The first utterance's final meets a queue the cancel has suppressed, which
+// is where the dispatch learns that the session takes no more output: the
+// utterance behind it is not submitted, though the cleanup is still to come.
+TEST(SpeechJobDispatch, ADecodeThatEndsAheadOfItsSessionsCancelStartsNoJobForTheUtteranceBehindIt) {
+  Binding binding(&speech_dispatch);
+  const auto key = binding.open_audio();
+  speech_of(binding).hold_jobs();
+  // Ended by the limit: the session still takes the audio of a second one.
+  ASSERT_TRUE(binding.audio_in_long_frames(key, utterance_at_the_limit(binding, key, 5)));
   one_utterance(binding, key);
   ASSERT_NO_FATAL_FAILURE(a_job_that_ends_ahead_of_its_sessions_cancel(binding, key));
 }
