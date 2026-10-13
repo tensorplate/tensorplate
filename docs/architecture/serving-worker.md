@@ -1274,8 +1274,10 @@ partial transcripts and endpointing.
   An ended utterance keeps its audio until its job has it, and nothing
   paces the client behind a slow decode, so the dispatch bounds what
   waits: three utterances may have ended without their final (the one
-  being decoded and two behind it), and a fourth fails the session with
-  `resource_exhausted` (`utterance_backlog_exceeded`).
+  being decoded and two behind it), and a fourth, ended by the limit or
+  by a Finalize, fails the session with `resource_exhausted`
+  (`utterance_backlog_exceeded`). No stream reason names that, so a
+  stream reports it as `internal`.
 - **Text input.** A segment is one `tts_synthesis` with the session's
   language and voice at normal speed. Its single audio result stays in
   the backend's buffer and is cut from there into chunks of 20 ms: a
@@ -1286,11 +1288,19 @@ partial transcripts and endpointing.
   segments between one Finalize and the next is kept here: a segment
   whose audio takes them over the terms' `max_synthesis_audio` fails the
   session with `resource_exhausted` (`synthesis_audio_limit_exceeded`)
-  before any of it is queued.
+  before any of it is queued; a stream reports that as `internal` too.
+  A reader that takes no audio leaves its session holding that one
+  result, at most about 1.4 MB of the worker's buffer pool, until the
+  session manager's no-progress limit ends the session. Nothing here
+  bounds the sum: enough such readers exhaust the pool, and other
+  sessions' jobs then fail for want of a buffer. Only the number of
+  sessions against the pool's size bounds it.
 - **One lane.** One job is in flight for the whole dispatch, and sessions
   are served in the order their work became ready. A job keeps the lane
   until the backend ends it, also when its session was cancelled
-  meanwhile: that is where a cancel waits behind the backend. With one
+  meanwhile: that is where a cancel waits behind the backend. No
+  deadline covers the job in flight: one the backend never ends keeps
+  the lane, and every session's work waits behind it. With one
   job in flight nothing else is queued behind it in the backend. The
   dispatch records the longest wait between a session's release and the
   backend's acknowledgement (`stats()`), for measuring that cost. The
@@ -1307,7 +1317,8 @@ job, after it was reported ready.
 **Threads.** One thread of the dispatch makes every report to the
 manager, every offer to an output queue and every bridge call but two:
 `create()` registers the sink, and `stop()` releases the sessions still
-open on its caller's thread, once that thread has ended. The
+open, and cancels the job of one whose release was refused, on its
+caller's thread, once that thread has ended. The
 binding's calls and the bridge's callbacks only queue for it under one
 mutex, which is held for nothing else: no call to the manager, a queue,
 the bridge or the buffer manager is made with it held. A callback
@@ -1327,14 +1338,19 @@ nothing and would otherwise wait behind a running job. The cleanup is
 acknowledged when the backend reports the session released. A release
 the bridge answers `backend_unavailable` is a released session and is
 acknowledged at once; any other refusal leaves the slot held. A session
-never opened here is acknowledged without a bridge call.
+never opened here is acknowledged without a bridge call. A refused
+release cancelled nothing and is not asked again: if that session's job
+is still in flight at `stop()`, the job is cancelled there, so that the
+unload that follows has no job of the dispatch's to wait for.
 
 **Buffers.** The buffer of an audio result is released exactly once:
 when its last chunk was cut, or when the result is dropped (its session
 is ending or gone, the job is not the one in flight, or the dispatch has
 stopped). A job's input buffer is released when the backend reports the
 job released, also after `stop()`; a job never reported released keeps
-it.
+it. The dispatch's jobs ask for no progress, so a progress fragment that
+reaches its sink is another submitter's: it is dropped and its audio
+buffer released as it arrives.
 
 **Backend outcomes.** A failed job, or a submit the bridge refuses,
 fails the session with a cause whose reason is the stream's:
@@ -1355,13 +1371,20 @@ session learns of it at its next job, from the refused submit. A
 capacity refusal is not a load condition here: one job is in flight and
 the dispatch is the bridge's only submitter, so it means that invariant
 was broken, and it fails the session the same way however it arrives.
+The table's last row covers the bridge's generic refusals, which pass
+through as they are and read on a stream as their code does:
+`backend_not_ready` as `worker_not_ready`; an identity the backend's
+wire cannot carry, a buffer it does not hold and a duplicate job id as
+`config_invalid`; a pool without room for an utterance's buffer as
+`oom`.
 The dispatch never ends a session as `deployment_retired` or
 `worker_shutdown`; those are the causes the worker gives a drain.
 
 `test/unit/session_dispatch_test.cpp` runs the contract cases against it
 over the fixture job bridge, once for each outcome that backend can be
 told to choose (capacity refused by `submit`; a cancelled job that
-completes), with results that follow their input.
+completes) and once with every callback run before the bridge call that
+caused it returns, with results that follow their input.
 `test/unit/speech_dispatch_test.cpp` holds what the cases leave to it:
 the job requests, the lane's order, each row of the table above, one
 release a session, and the buffer accounting of every path.

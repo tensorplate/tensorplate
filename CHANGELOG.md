@@ -154,11 +154,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   ended by a Finalize, a half-close or the 30-second limit is one decode
   whose text becomes the final transcript; a text segment is one synthesis
   whose audio is cut into 20 ms chunks under the output queue's
-  backpressure. One job is in flight at a time. A session fails with
-  `resource_exhausted` when a fourth utterance ends before the first of
-  three has its final, or when its segments since the last Finalize yield
-  more audio than it was granted. The serving worker does not construct it
-  yet, so a worker still refuses every stream session. (V030-E04-F03-T02)
+  backpressure. One job is in flight at a time, and no deadline covers
+  it. A session fails with `resource_exhausted`, which a stream reports
+  as `internal`, when a fourth utterance ends, by the limit or by a
+  Finalize, before the first of three has its final, or when its
+  segments since the last Finalize yield more audio than it was granted.
+  The serving worker does not construct it yet, so a worker still refuses
+  every stream session. (V030-E04-F03-T02)
 
 - A health probe in the Python/PyTorch adapter's job channel, for the job
   bridge that will sit on it; nothing calls it yet. It answers from the
