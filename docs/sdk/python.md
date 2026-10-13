@@ -75,9 +75,10 @@ extra also fixes the dependency range and the
 failure mode, and the wheel carries the
 [stream schema's modules](#stream-schema-modules). On the server side, a
 feature-ON serving worker with `streaming.enabled` opens a loopback gRPC
-stream listener, but it refuses every `Open` until the worker runs speech
-jobs (see
-[serving-worker.md](../architecture/serving-worker.md#stream-listener)).
+stream listener. With a speech model on a backend that runs speech jobs it
+serves stream sessions; with a deployment of another model class it refuses
+every `Open` (see
+[serving-worker.md](../architecture/serving-worker.md#the-speech-dispatch-in-the-worker)).
 `import tensorplate`
 never imports `tensorplate.speech`, `tensorplate.stream`, grpc or protobuf,
 so the unary client keeps no third-party dependency. Importing

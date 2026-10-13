@@ -72,11 +72,13 @@ In a feature-ON build with `streaming.enabled`, `start()` opens the gRPC
 as `stream listener bound`. The listener (`runtime/src/serving/stream/`, all
 internal) owns a `SessionManager` that admits one session at a time with the
 protocol's default timers, and drives the [session
-dispatch](#session-dispatch) it is given. **The worker gives it none yet**: it
-constructs no speech dispatch, so every `Open` is refused with
-`backend_unsupported_capability`, and the log line says `serves_sessions:
-false`. A streaming worker does not serve sessions until the dispatch that
-runs speech jobs is wired in.
+dispatch](#session-dispatch) it is given. For a speech deployment on a
+backend that builds its session with a job bridge the worker gives it the
+speech dispatch
+([The speech dispatch in the worker](#the-speech-dispatch-in-the-worker)) and
+the log line says `serves_sessions: true`. For any other deployment it gives
+none: every `Open` is refused with `backend_unsupported_capability`, and the
+line says `serves_sessions: false`.
 
 - **API and threads.** The listener uses gRPC's callback API: no thread per
   call. gRPC's own threads run each call's reactions, which apply one client
@@ -458,9 +460,13 @@ The `ServingWorker::create(config)` factory builds, in this order:
    calls `load` + `prime`. `deployment.model.runner_profile`, when
    present, reaches the backend on the `ModelSpec`; the `python_pytorch`
    adapter starts its sidecar in that installed profile's environment.
+   A speech deployment that serves stream sessions gets its session
+   together with its job bridge
+   ([The speech dispatch in the worker](#the-speech-dispatch-in-the-worker)).
 4. `InferScheduler` through `make_scheduler` (V01-E06), with the
    system steady-clock and a scheduler-event sink that mirrors
-   metrics and health.
+   metrics and health. The speech dispatch, when the session came with a
+   bridge, is constructed once that clock exists.
 5. `AsyncPolicyStore`, `ServingPipeline`, `RequestRouter`, and the
    `HttpServer`.
 
@@ -1256,8 +1262,9 @@ either order.
 internal) is the dispatch that runs backend jobs: it turns session input
 into typed jobs through one `BoundedJobBridge`
 ([backend-registry.md](backend-registry.md), "Sessions with a job
-bridge") and their results into task output. The serving worker does not
-construct it yet, so a worker still refuses every stream session.
+bridge") and their results into task output. The serving worker constructs
+it for a speech deployment
+([The speech dispatch in the worker](#the-speech-dispatch-in-the-worker)).
 
 It is **provisional**: the least that serves one transcription and one
 synthesis, standing in for the mode handlers that will own windows,
@@ -1388,6 +1395,139 @@ caused it returns, with results that follow their input.
 `test/unit/speech_dispatch_test.cpp` holds what the cases leave to it:
 the job requests, the lane's order, each row of the table above, one
 release a session, and the buffer accounting of every path.
+
+### The speech dispatch in the worker
+
+In a feature-ON build, a worker with `streaming.enabled` whose
+`deployment.model` has the model class `speech` asks the registry for its
+session together with its job bridge
+(`BackendRegistry::create_session_with_bridge`), loads and primes the
+session as any other, constructs a `SpeechJobDispatch` over the bridge, the
+worker's buffer manager and the clock the listener's session manager runs
+on, and gives it to the stream listener. The listener then admits an `Open`
+and the dispatch serves it. Every job identity carries generation 1: a
+worker with `streaming.enabled` has no `deployment.generation`.
+
+The model class is part of the condition because a session built with its
+bridge loads with speech jobs enabled, and a backend refuses that load for a
+model that runs none.
+
+| Deployment | Session | Stream sessions |
+| --- | --- | --- |
+| `speech` model, backend registered with a bridge factory | with its bridge, loaded with speech jobs | served |
+| the same, on a runner that offers no speech jobs | the load with speech jobs is refused | none: `create()` fails with the load's error (`unsupported`; `speech_jobs_not_offered` when the runner lists no such capability) |
+| `speech` model, backend without one (`job_bridge_unsupported`) | `create_session`, loaded without jobs | every `Open` refused (`backend_unsupported_capability`) |
+| another model class, or the mock session | `create_session`; the bridge factory is not called | every `Open` refused; unary requests served as before |
+| `streaming.enabled` false | `create_session`, loaded without jobs | no listener |
+
+Any other failure to build the pair fails `create()` with the factory's
+error, and so does a bridge that refuses the dispatch as its event sink,
+after the session was loaded; the session goes with the failed worker.
+
+Two things differ from a worker without the dispatch. A speech deployment
+with `streaming.enabled` whose runner offers no speech jobs is not built
+(the second row); without `streaming.enabled` it loads as before. And a
+session built with its bridge takes no tensor request, so a worker that
+serves stream sessions answers a unary `/infer` with a failure
+(`unsupported`, `tensor_inference_unsupported`).
+
+**A start that fails.** When the stream listener cannot start, for example
+because its port is taken, it stops a dispatch it has attached, and a
+dispatch is attached to a listener once. `start()` returns the listener's
+error, and every later `start()` of that worker returns the same error
+without opening either listener: another stream listener would bind and
+admit sessions that nothing serves. The worker does not tell a failure
+before the attach apart; any failed start of the listener with the dispatch
+is final. A worker without a dispatch starts again as before.
+
+It is **provisional**, as the dispatch is. The worker serves one stream
+session at a time. It grants both input kinds whatever the model runs: its
+configuration does not say which job classes a deployment has, so a session
+whose mode the backend does not run is admitted and fails at its first job:
+the bridge refuses a job of a class the backend did not declare when it is
+submitted, and the session ends as `backend_unsupported_capability`.
+Nothing is refused at negotiation beyond what a job request could not
+carry, and one job is in flight. The dispatch's two bounds on a session
+(`utterance_backlog_exceeded`, `synthesis_audio_limit_exceeded`) have no
+reason of their own in the stream schema: the listener's mapping names such
+a failure `internal`, which no test drives through a worker.
+
+**Order of construction and of destruction.** The bridge's destructor
+detaches its event sink: once it returns no callback runs or follows, and
+what the session's unload or destructor ends afterwards reaches nobody. The
+sink is the dispatch's, the bridge keeps it, and it holds the input buffer
+of every job the backend has not reported released. The worker therefore
+keeps this order:
+
+1. Construction: the buffer manager; the session with its bridge, `load`,
+   `prime`; the clock; the dispatch, which starts its thread and registers
+   its sink with the bridge; the scheduler and the unary components. The
+   listener is started by `start()` with the dispatch.
+2. `stop()`: the stream listener stops, which stops the dispatch; the
+   dispatch releases through the bridge every session still open, and the
+   bridge cancels that session's job. After the HTTP drain the worker
+   unloads the session, with the stopped dispatch and the bridge still in
+   place: the last events of the jobs the unload ends reach the sink, and
+   each job's input buffer is given back. An unload cancels nothing and
+   waits behind a job the backend is running, up to the adapter's bound.
+3. Destruction, after `stop()`: the listener, the dispatch, the bridge,
+   the unary components, the session, the buffer manager.
+
+`unload` is reached only from `stop()`, on its caller's thread, never from
+a sink callback.
+
+**A drain.** `shutdown()` drains the open session with `worker_shutdown`. A
+segment already accepted is still synthesized and delivered inside the
+drain window, and the session then closes with that cause. A session whose
+job outlasts the window has its call cancelled by the listener's stop and
+is released through the bridge once by the dispatch, at the cleanup the
+abort asks for or, when its thread has not reached that, at its stop. Its
+job is ended by the unload. The dispatch itself gives no session
+`worker_shutdown`.
+
+**What the worker logs.** `stream listener bound` carries
+`serves_sessions`. Once the listener has stopped, `speech dispatch stopped`
+carries the dispatch's counters as of the last step of its thread:
+`jobs_submitted`, `jobs_completed`, `jobs_failed`, `jobs_discarded`,
+`releases_refused` and `longest_release_wait_ms`. A job the unload ends is
+in none of the last four, and a job the bridge refuses when it is submitted
+is in none at all. No metric is exported for them.
+
+**Tests.** `test/integration/speech_worker_test.cpp` drives a worker over
+gRPC in process: one transcription and one synthesis segment, each against
+a scripted sidecar and against the in-tree sidecar runner with its fixture
+backend; a client cancel while the backend holds the segment's job (the
+session is released once, the next session is served); a lost client while
+its utterance is decoded behind a held backend (released once, the job's
+audio given back only when the backend lets go of the job); a job the
+backend takes and refuses, and a session of a mode the backend does not
+run; a drain that delivers the segment in flight, and a stop at the end of
+the drain window whose unload ends the job, with the job's audio still out
+while the unload waits behind the job and back when the stop returns; a
+start that could not bind and is not retried, and the same start of a
+worker without a dispatch, which is; a worker that is never started; the
+refused unary request; and each row of the table above.
+The file is part of the listener's test binary, so the release and the
+address-sanitizer legs run it and the thread-sanitizer leg, which cannot
+run a gRPC call, does not. The worker's lines for the dispatch compile only
+with the feature, which the clang-tidy job leaves off.
+
+What the tests hold of the order is step 2: destroying the dispatch and the
+bridge ahead of the unload gives the job's audio back while the backend
+still runs the job, and the stop case fails. The order of step 3 has no
+test: a worker's destructor always runs `stop()` first, after which the
+listener no longer calls the dispatch and the session's destructor has
+nothing left to end, so no order of those three can be told apart from
+outside. Step 3 is declared as the registry's header describes a pair
+destroyed in order. That the `speech dispatch stopped` line is written
+after the listener's stop, not before it, has no case either: no case moves
+a counter during that stop.
+
+A call the client cancels or loses with an utterance open can reach the
+listener as the end of the client's stream before the cancellation: the
+utterance is then ended as a half-close ends it and its decode is submitted
+ahead of the release that cancels it. The lost-client case holds both
+orders.
 
 ## Test surface
 
