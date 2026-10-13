@@ -84,6 +84,12 @@ The FIFO scheduler keeps the key on the envelope from `admit()` to
 `next()` and does not read it: dispatch order stays first-in first-out
 whatever the keys.
 
+Speech jobs do not pass through `InferScheduler`. `SpeechJobDispatch`
+([serving-worker.md](serving-worker.md), "The speech dispatch") submits
+each one to the backend session's job bridge itself and keeps one in
+flight, so this scheduler's queue, deadlines and in-flight accounting
+never see a speech job.
+
 ## Monotonic deadline domain
 
 Every deadline decision uses the injected `SchedulerClock` (defaulting

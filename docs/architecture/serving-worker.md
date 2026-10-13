@@ -72,8 +72,8 @@ In a feature-ON build with `streaming.enabled`, `start()` opens the gRPC
 as `stream listener bound`. The listener (`runtime/src/serving/stream/`, all
 internal) owns a `SessionManager` that admits one session at a time with the
 protocol's default timers, and drives the [session
-dispatch](#session-dispatch) it is given. **The worker gives it none yet**: no
-speech dispatch is built, so every `Open` is refused with
+dispatch](#session-dispatch) it is given. **The worker gives it none yet**: it
+constructs no speech dispatch, so every `Open` is refused with
 `backend_unsupported_capability`, and the log line says `serves_sessions:
 false`. A streaming worker does not serve sessions until the dispatch that
 runs speech jobs is wired in.
@@ -1271,12 +1271,22 @@ partial transcripts and endpointing.
   segment of the final transcript, over the whole utterance. An utterance
   without audio runs no job (a job request cannot carry an empty window)
   and yields a final without segments, as does a result without text.
+  An ended utterance keeps its audio until its job has it, and nothing
+  paces the client behind a slow decode, so the dispatch bounds what
+  waits: three utterances may have ended without their final (the one
+  being decoded and two behind it), and a fourth fails the session with
+  `resource_exhausted` (`utterance_backlog_exceeded`).
 - **Text input.** A segment is one `tts_synthesis` with the session's
   language and voice at normal speed. Its single audio result stays in
   the backend's buffer and is cut from there into chunks of 20 ms: a
   chunk is cut only when the one before it was queued, so backpressure
   holds one chunk and nothing grows. The buffer is released when the last
-  chunk was cut, and the segment's completion follows.
+  chunk was cut, and the segment's completion follows. The longest audio
+  of one segment is kept by a job result's own ceiling; the audio of the
+  segments between one Finalize and the next is kept here: a segment
+  whose audio takes them over the terms' `max_synthesis_audio` fails the
+  session with `resource_exhausted` (`synthesis_audio_limit_exceeded`)
+  before any of it is queued.
 - **One lane.** One job is in flight for the whole dispatch, and sessions
   are served in the order their work became ready. A job keeps the lane
   until the backend ends it, also when its session was cancelled
@@ -1295,14 +1305,20 @@ a language or a voice the backend refuses fails the session at its first
 job, after it was reported ready.
 
 **Threads.** One thread of the dispatch makes every report to the
-manager, every offer to an output queue and every bridge call. The
+manager, every offer to an output queue and every bridge call but two:
+`create()` registers the sink, and `stop()` releases the sessions still
+open on its caller's thread, once that thread has ended. The
 binding's calls and the bridge's callbacks only queue for it under one
 mutex, which is held for nothing else: no call to the manager, a queue,
 the bridge or the buffer manager is made with it held. A callback
 therefore never waits on the manager or the backend, never calls
 `health()`, and never unloads or destroys the backend session or the
 bridge. The bridge keeps the object its callbacks run on, so a callback
-that arrives after `stop()` still settles its buffers.
+that arrives after `stop()` still settles its buffers. That object holds
+the input buffer of every job not yet reported released, and releases
+what is left when it goes, which is when the dispatch and the bridge are
+both gone: whoever owns the bridge destroys it only after the backend
+session was unloaded, when no job reads its input any more.
 
 **Releases.** Every session opened here is released through the bridge
 exactly once, whether or not it ran a job: at its cleanup, or at
@@ -1331,7 +1347,10 @@ fails the session with a cause whose reason is the stream's:
 | `job_capacity_exhausted`, from `submit` or as `failed` | the bridge's error unchanged (`resource_exhausted`; `internal` on a stream) |
 | any other failure | the bridge's error unchanged; its code decides the stream's reason |
 
-After a backend was lost with no job open, nothing is delivered: the
+A job the backend's loss ends while its session's cancel still waits
+for the release applies the `backend_reset` event too: that session ends
+as failed, and keeps its slot until the release is confirmed. After a
+backend was lost with no job open, nothing is delivered: the
 session learns of it at its next job, from the refused submit. A
 capacity refusal is not a load condition here: one job is in flight and
 the dispatch is the bridge's only submitter, so it means that invariant
