@@ -187,8 +187,9 @@ TEST(StreamBounds, ARefusedCallGivesItsPlaceBackWhenItIsDone) {
 // A call refused with no place left is cancelled: its client reads CANCELLED
 // and no reason. No test here has a peer that does not read, so real calls
 // never fill the thirty-two places; a listener given none runs the same
-// path, once from the watch thread and once from inside the method handler,
-// where a call refused on arrival is ended.
+// path from each place a bound refuses: the watch thread, the closing of
+// admission, and the method handler, where a call refused on arrival is
+// ended.
 TEST(StreamBounds, ACallRefusedWithNoPlaceLeftIsCancelledAndReadsNoReason) {
   TimedListener timed{0};
   auto silent = timed.silent_call();
@@ -198,7 +199,13 @@ TEST(StreamBounds, ACallRefusedWithNoPlaceLeftIsCancelledAndReadsNoReason) {
   EXPECT_EQ(overdue.error_message().find("open refused"), std::string::npos)
       << overdue.error_message();
 
+  auto waited_on = timed.silent_call();
   timed.listener().stop_admission();
+  const auto at_close = ended_unanswered(waited_on);
+  EXPECT_EQ(at_close.error_code(), grpc::StatusCode::CANCELLED) << at_close.error_message();
+  EXPECT_EQ(at_close.error_message().find("open refused"), std::string::npos)
+      << at_close.error_message();
+
   auto late = timed.served.connect();
   const auto on_arrival = ended_unanswered(late);
   EXPECT_EQ(on_arrival.error_code(), grpc::StatusCode::CANCELLED) << on_arrival.error_message();
