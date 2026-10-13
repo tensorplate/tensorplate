@@ -3,11 +3,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <thread>
 #include <variant>
 #include <vector>
 
@@ -30,6 +32,7 @@ namespace {
 using namespace std::chrono_literals;
 using namespace tensorplate::serving;
 using Binding = ReferenceBinding;
+using Effect = LogicalSessionEffect;
 using Event = LogicalSessionEvent;
 using State = LogicalSessionState;
 using Bytes = std::vector<std::byte>;
@@ -242,6 +245,43 @@ TEST(SpeechJobDispatch, AReleaseTheBridgeRefusesLeavesTheSlotHeld) {
   EXPECT_EQ(speech.strategy->stats().releases_refused, 1U);
 }
 
+TEST(SpeechJobDispatch, AReleaseTheBridgeRefusesStillReleasesTheSpeechTheSessionHeld) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_text();
+  const auto queue = binding.output(key);
+  binding.text(key, 1, std::string(queue->pcm_usage().limit() / 160 + 64, 'x'));
+  ASSERT_TRUE(binding.eventually([&] { return queue->pcm_usage().available() < 960; }));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.buffers_in_use(), 1U);
+  speech.bridge->refuse_next_release();
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.manager->held_slots(), 1U);
+  EXPECT_EQ(speech.buffers_in_use(), 0U);
+}
+
+TEST(SpeechJobDispatch, ASessionThatEndedWhileItWaitedForTheLaneIsNotServed) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto running = binding.open_text();
+  const auto waiting = binding.open_text();
+  speech.hold_jobs();
+  binding.text(running, 1, "one");
+  ASSERT_TRUE(binding.settle());
+  binding.text(waiting, 1, "two");
+  ASSERT_TRUE(binding.settle());
+  // Its release refused, the session stays, ended, where the lane finds it.
+  speech.bridge->refuse_next_release();
+  ASSERT_TRUE(binding.manager->apply(waiting, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  speech.release_jobs();
+  ASSERT_NO_FATAL_FAILURE(binding.expect_segment(running, 1, "one"));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
+  EXPECT_EQ(speech.strategy->stats().sessions, 2U);
+}
+
 /// Another submitter fills the backend, so the session's one job finds no
 /// room: refused by submit() itself or ended by `failed`, as the backend
 /// chooses.
@@ -267,6 +307,12 @@ void capacity_fails_the_session(DispatchFactory factory) {
   ASSERT_TRUE(binding.settle());
   EXPECT_EQ(speech.buffers_in_use(), 0U);
   EXPECT_EQ(speech.strategy->stats().jobs_completed, 0U);
+
+  // The job that found no room left the lane free.
+  const auto next = binding.open_audio();
+  one_utterance(binding, next);
+  ASSERT_TRUE(binding.read_as<EndpointDetectedOutput>(next).has_value());
+  EXPECT_TRUE(binding.read_as<FinalTranscriptOutput>(next).has_value());
 }
 
 TEST(SpeechJobDispatch, CapacityRefusedByAFailedJobFailsTheSession) {
@@ -313,6 +359,233 @@ TEST(SpeechJobDispatch, ACancelledJobThatFailsKeepsTheLaneUntilItEnds) {
 TEST(SpeechJobDispatch, ACancelledJobThatCompletesIsDroppedAndItsAudioReleased) {
   ASSERT_NO_FATAL_FAILURE(
       a_cancelled_job_keeps_the_lane_until_it_ends(&speech_dispatch_with_late_cancels));
+}
+
+// The lane frees between a waiting session's failure and its cleanup: the
+// session is still there, with its segment, and is not served.
+TEST(SpeechJobDispatch, ASessionThatFailedWhileItWaitedForTheLaneIsNotServed) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto running = binding.open_text();
+  const auto waiting = binding.open_text();
+  speech.hold_jobs();
+  binding.text(running, 1, "one");
+  ASSERT_TRUE(binding.settle());
+  binding.text(waiting, 1, "two");
+  ASSERT_TRUE(binding.settle());
+
+  // The initialize hook holds the manager's serialized section. Input of the
+  // wrong kind parks the thread on its credit, and the running job's end
+  // queues behind it, ahead of the cleanup the failure will ask for.
+  const auto terms = binding.dispatch().negotiate(binding.under_test->audio_request()).value();
+  bool ended_behind = false;
+  const auto opened = binding.manager->open(
+      Binding::kGeneration, budgets_for(terms).value(), [&](std::uint64_t other) {
+        speech.strategy->audio(waiting, patterned_bytes(kFrameBytes, 1));
+        speech.release_jobs();
+        ended_behind = speech.fixture->settled(Binding::kPatience);
+        return speech.strategy->open_session(other, terms);
+      });
+  ASSERT_TRUE(opened.has_value());
+  ASSERT_TRUE(ended_behind);
+  ASSERT_TRUE(binding.ends_as(waiting, State::Failed));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_segment(running, 1, "one"));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
+}
+
+/// The job's end reaches the dispatch ahead of its session's cancel, where the
+/// cases above force it behind: the result is taken, the cancel then drops
+/// what it yielded, and the session is released once all the same.
+void a_job_that_ends_ahead_of_its_sessions_cancel(Binding& binding, std::uint64_t key) {
+  SpeechUnderTest& speech = speech_of(binding);
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(speech.bridge->submitted().size(), 1U);
+  bool ended_first = false;
+  // Inside the cancel, before the dispatch is shown it.
+  binding.before_next(key, Event::Cancel, [&] {
+    speech.release_jobs();
+    ended_first = speech.fixture->settled(Binding::kPatience);
+  });
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(ended_first);
+  EXPECT_TRUE(binding.ends_as(key, State::Closed));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_FALSE(binding.output(key)->take().has_value());
+  EXPECT_EQ(speech.bridge->releases(key), 1U);
+  EXPECT_EQ(speech.buffers_in_use(), 0U);
+  EXPECT_EQ(speech.strategy->stats().jobs_completed, 1U);
+  EXPECT_EQ(speech.strategy->stats().jobs_discarded, 0U);
+}
+
+TEST(SpeechJobDispatch, ASynthesisThatEndsAheadOfItsSessionsCancelIsTakenAndItsAudioReleased) {
+  Binding binding(&speech_dispatch);
+  const auto key = binding.open_text();
+  speech_of(binding).hold_jobs();
+  binding.text(key, 1, "hello");
+  ASSERT_NO_FATAL_FAILURE(a_job_that_ends_ahead_of_its_sessions_cancel(binding, key));
+}
+
+TEST(SpeechJobDispatch, ADecodeThatEndsAheadOfItsSessionsCancelIsTakenAndItsFinalIsNotQueued) {
+  Binding binding(&speech_dispatch);
+  const auto key = binding.open_audio();
+  speech_of(binding).hold_jobs();
+  one_utterance(binding, key);
+  ASSERT_NO_FATAL_FAILURE(a_job_that_ends_ahead_of_its_sessions_cancel(binding, key));
+}
+
+TEST(SpeechJobDispatch, TheLongestReleaseWaitIsWhatACancelCostBehindTheJobInFlight) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto behind_its_job = binding.open_text();
+  const auto idle = binding.open_audio();
+  speech.hold_jobs();
+  binding.text(behind_its_job, 1, "hello");
+  ASSERT_TRUE(binding.settle());
+  ASSERT_TRUE(binding.manager->apply(behind_its_job, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.strategy->stats().longest_release_wait, 0ms);
+  // By the manager's clock, which only the test moves.
+  binding.clock.advance(70ms);
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(behind_its_job, State::Closed));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.strategy->stats().longest_release_wait, 70ms);
+
+  // A shorter wait leaves the longest standing.
+  ASSERT_TRUE(binding.manager->apply(idle, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.ends_as(idle, State::Closed));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.strategy->stats().longest_release_wait, 70ms);
+}
+
+// A dispatch is shown a Finalize after the manager applied it, so the
+// completion it applies for an endpoint's finalization may already have
+// answered a Finalize it has not been shown.
+TEST(SpeechJobDispatch, ACompletionAppliedBeforeAFinalizeWasShownAnswersIt) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const auto terms = binding.terms(key);
+  const Bytes audio = patterned_bytes(static_cast<std::size_t>(terms.max_utterance.count()) *
+                                          terms.audio_format.bytes_per_second() / 1000,
+                                      5);
+  speech.hold_jobs();
+  ASSERT_TRUE(binding.audio_in_long_frames(key, audio));
+  ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Finalizing; }));
+  ASSERT_TRUE(binding.settle());
+
+  // The endpoint's job ends inside the Finalize, before the dispatch is shown it.
+  bool ended_first = false;
+  binding.before_next(key, Event::Finalize, [&] {
+    speech.release_jobs();
+    ended_first = speech.fixture->settled(Binding::kPatience);
+  });
+  ASSERT_TRUE(binding.manager->apply(key, Event::Finalize).has_value());
+  ASSERT_TRUE(ended_first);
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0, audio, 0));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Active);
+
+  binding.dispatch().finalize(key, 7);
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2,
+                                               audio.size() / terms.audio_format.bytes_per_sample(),
+                                               {}, 7));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Active);
+}
+
+// A lifecycle message is delivered through the same queue and reported the
+// same way; it is not the segment's output.
+TEST(SpeechJobDispatch, OnlyDeliveredTaskOutputReturnsASegmentsActiveSlot) {
+  Binding binding(&speech_dispatch);
+  const auto key = binding.open_text();
+  ASSERT_TRUE(binding.settle());
+  ASSERT_TRUE(binding.lifecycle(key, 16));
+  binding.text(key, 1, "hi");
+  ASSERT_TRUE(binding.settle());
+  // The speech went back to the pool when its last chunk was cut, unread.
+  EXPECT_EQ(speech_of(binding).buffers_in_use(), 0U);
+  const std::size_t chunks = (binding.under_test->speech("hi").size() + 959) / 960;
+  for (std::size_t chunk = 0; chunk < chunks; ++chunk) {
+    ASSERT_TRUE(binding.read_as<AudioChunkOutput>(key).has_value());
+  }
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.lifecycle_read(key), 1U);
+  // Its completion is still to be delivered.
+  EXPECT_EQ(binding.manager->status(key).value().input_queue_depth, 1U);
+  ASSERT_TRUE(binding.read_as<SegmentCompletedOutput>(key).has_value());
+  EXPECT_TRUE(binding.eventually(
+      [&] { return binding.manager->status(key).value().input_queue_depth == 0; }));
+}
+
+TEST(SpeechJobDispatch, AnotherSubmittersJobEndingLeavesTheLaneToTheJobInFlight) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto running = binding.open_text();
+  const auto waiting = binding.open_text();
+  speech.hold_jobs();
+  binding.text(running, 1, "one");
+  ASSERT_TRUE(binding.settle());
+  binding.text(waiting, 1, "two");
+  ASSERT_TRUE(binding.settle());
+  // A waiting job ends at its cancel, while the dispatch's own is in flight.
+  ASSERT_TRUE(speech.fixture->submit(foreign_synthesis(1000)).has_value());
+  ASSERT_TRUE(speech.fixture->cancel(1000).has_value());
+  ASSERT_TRUE(speech.fixture->release_session(999, SpeechUnderTest::kGeneration).has_value());
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
+  EXPECT_EQ(speech.strategy->stats().jobs_discarded, 1U);
+  EXPECT_EQ(speech.strategy->stats().sessions, 2U);
+
+  speech.release_jobs();
+  ASSERT_NO_FATAL_FAILURE(binding.expect_segment(running, 1, "one"));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_segment(waiting, 1, "two"));
+}
+
+TEST(SpeechJobDispatch, ABackendLostWhileACancelWaitsForItsReleaseFailsTheSession) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_text();
+  speech.hold_jobs();
+  binding.text(key, 1, "hello");
+  ASSERT_TRUE(binding.settle());
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::CancelRequested);
+
+  speech.fixture->lose_backend();
+  ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Failed; }));
+  ASSERT_TRUE(binding.settle());
+  // The release it asked for is confirmed only by the unload.
+  EXPECT_EQ(binding.manager->held_slots(), 1U);
+  speech.fixture->unload();
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "backend_reset");
+  EXPECT_EQ(speech.bridge->releases(key), 1U);
+}
+
+// The job's failure reaches the dispatch ahead of the cancel, for a session
+// the manager already holds as cancel-requested: it still ends as failed.
+TEST(SpeechJobDispatch, ABackendLostAheadOfItsSessionsCancelFailsTheSession) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_text();
+  speech.hold_jobs();
+  binding.text(key, 1, "hello");
+  ASSERT_TRUE(binding.settle());
+  bool failed_first = false;
+  binding.before_next(key, Event::Cancel, [&] {
+    speech.fixture->lose_backend();
+    failed_first = speech.fixture->settled(Binding::kPatience);
+  });
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(failed_first);
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "backend_reset");
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.bridge->releases(key), 1U);
+  EXPECT_EQ(speech.strategy->stats().jobs_failed, 1U);
 }
 
 TEST(SpeechJobDispatch, SessionsAreServedInTheOrderTheirWorkBecameReady) {
@@ -486,6 +759,270 @@ TEST(SpeechJobDispatch, SpeechThatArrivesAfterStopIsReleased) {
   ASSERT_TRUE(speech.fixture->settled(Binding::kPatience));
   EXPECT_EQ(speech.buffers_in_use(), 0U);
   EXPECT_FALSE(binding.output(key)->take().has_value());
+}
+
+// negotiate() cannot know what the backend runs, so the session is granted
+// and its first job decides.
+TEST(SpeechJobDispatch, AJobClassTheBackendDoesNotRunFailsTheSessionAtItsFirstJob) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  speech.bridge->refuse_class(JobClass::TtsSynthesis);
+  const auto refused = binding.open_text();
+  binding.text(refused, 1, "hi");
+  ASSERT_TRUE(binding.ends_as(refused, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(refused)->code, Error::Code::Unsupported);
+  EXPECT_EQ(binding.manager->tombstone(refused)->reason, "backend_unsupported_capability");
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.strategy->stats().jobs_submitted, 0U);
+
+  const auto served = binding.open_audio();
+  one_utterance(binding, served);
+  ASSERT_TRUE(binding.read_as<EndpointDetectedOutput>(served).has_value());
+  EXPECT_TRUE(binding.read_as<FinalTranscriptOutput>(served).has_value());
+}
+
+Result<JobResult> nothing_heard(const JobRequest& /*request*/, BufferManager& /*buffers*/) {
+  return JobResult::create(TranscriptResult{"", {}, {}});
+}
+
+std::unique_ptr<DispatchUnderTest> speech_dispatch_that_hears_nothing(const SchedulerClock& clock) {
+  return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{}, nothing_heard);
+}
+
+TEST(SpeechJobDispatch, ADecodeWithoutTextYieldsAFinalWithoutSegments) {
+  Binding binding(&speech_dispatch_that_hears_nothing);
+  const auto key = binding.open_audio();
+  one_utterance(binding, key);
+  ASSERT_TRUE(binding.read_as<EndpointDetectedOutput>(key).has_value());
+  const auto transcript = binding.read_as<FinalTranscriptOutput>(key);
+  ASSERT_TRUE(transcript.has_value());
+  EXPECT_TRUE(transcript->segments.empty());
+  EXPECT_EQ(transcript->finalize_sequence, 1U);
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech_of(binding).strategy->stats().jobs_completed, 1U);
+}
+
+TEST(SpeechJobDispatch, UtterancesThatEndFasterThanTheyAreDecodedFailTheSession) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const auto terms = binding.terms(key);
+  const Bytes utterance = patterned_bytes(static_cast<std::size_t>(terms.max_utterance.count()) *
+                                              terms.audio_format.bytes_per_second() / 1000,
+                                          3);
+  speech.hold_jobs();
+  // The one being decoded and two behind it.
+  for (int ended = 0; ended < 3; ++ended) {
+    ASSERT_TRUE(binding.audio_in_long_frames(key, utterance));
+  }
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Finalizing);
+
+  (void)binding.audio_in_long_frames(key, utterance);
+  ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Failed; }));
+  // Its release waits behind the job the backend still holds.
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->code, Error::Code::ResourceExhausted);
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "utterance_backlog_exceeded");
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
+  EXPECT_EQ(speech.buffers_in_use(), 0U);
+}
+
+Result<JobResult> the_longest_speech_whatever_the_text(const JobRequest& /*request*/,
+                                                       BufferManager& buffers) {
+  const auto buffer = buffers.allocate(kMaxAudioChunkBytes);
+  if (!buffer) {
+    return unexpected(buffer.error());
+  }
+  const auto pcm = buffers.data(*buffer).value();
+  std::fill(pcm.begin(), pcm.end(), std::byte{0});
+  return JobResult::create(
+      AudioChunkResult{kJobOutputAudioFormat, PcmWindow{*buffer, 0, kMaxAudioChunkBytes}, 0});
+}
+
+std::unique_ptr<DispatchUnderTest> speech_dispatch_with_the_longest_speech(
+    const SchedulerClock& clock) {
+  return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{},
+                                           the_longest_speech_whatever_the_text);
+}
+
+/// Reads one segment's chunks to its completion.
+void read_segment(Binding& binding, std::uint64_t key) {
+  for (;;) {
+    const auto next = binding.read(key);
+    ASSERT_TRUE(next.has_value());
+    if (std::holds_alternative<SegmentCompletedOutput>(*next)) {
+      return;
+    }
+    ASSERT_TRUE(std::holds_alternative<AudioChunkOutput>(*next));
+  }
+}
+
+// Only the dispatch sees how much audio a text yields.
+TEST(SpeechJobDispatch, SegmentsBetweenTwoFinalizesYieldNoMoreAudioThanWasGranted) {
+  Binding binding(&speech_dispatch_with_the_longest_speech);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_text();
+  ASSERT_EQ(binding.terms(key).max_synthesis_audio, 3 * binding.terms(key).max_segment_audio);
+  // Exactly what was granted, twice: a Finalize starts the count again.
+  std::uint64_t segment = 0;
+  for (int round = 0; round < 2; ++round) {
+    for (int sent = 0; sent < 3; ++sent) {
+      binding.text(key, ++segment, "a");
+      ASSERT_NO_FATAL_FAILURE(read_segment(binding, key));
+    }
+    binding.finalize(key, 9);
+    ASSERT_TRUE(binding.read_as<SynthesisCompletedOutput>(key).has_value());
+    ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Active; }));
+  }
+  for (int sent = 0; sent < 3; ++sent) {
+    binding.text(key, ++segment, "a");
+    ASSERT_NO_FATAL_FAILURE(read_segment(binding, key));
+  }
+  binding.text(key, ++segment, "a");
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->code, Error::Code::ResourceExhausted);
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "synthesis_audio_limit_exceeded");
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.buffers_in_use(), 0U);
+  EXPECT_FALSE(binding.output(key)->take().has_value());
+}
+
+Result<JobResult> speech_behind_an_offset(const JobRequest& request, BufferManager& buffers) {
+  constexpr std::size_t kOffset = 64;
+  const auto speech = speech_following(std::get<TextSegment>(request.payload()).text);
+  const auto buffer = buffers.allocate(kOffset + speech.size());
+  if (!buffer) {
+    return unexpected(buffer.error());
+  }
+  const auto pcm = buffers.data(*buffer).value();
+  std::fill(pcm.begin(), pcm.end(), std::byte{0x55});
+  std::copy(speech.begin(), speech.end(), pcm.begin() + kOffset);
+  return JobResult::create(
+      AudioChunkResult{kJobOutputAudioFormat, PcmWindow{*buffer, kOffset, speech.size()}, 0});
+}
+
+std::unique_ptr<DispatchUnderTest> speech_dispatch_with_speech_behind_an_offset(
+    const SchedulerClock& clock) {
+  return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{},
+                                           speech_behind_an_offset);
+}
+
+TEST(SpeechJobDispatch, SpeechIsCutFromTheResultsWindowOfItsBuffer) {
+  Binding binding(&speech_dispatch_with_speech_behind_an_offset);
+  const auto key = binding.open_text();
+  binding.text(key, 1, "hello there");
+  ASSERT_NO_FATAL_FAILURE(binding.expect_segment(key, 1, "hello there"));
+}
+
+TEST(SpeechJobDispatch, StopWakesAWaitForIdle) {
+  const FakeSchedulerClock clock;
+  SpeechUnderTest speech(clock);
+  // No manager is attached, so the result stays queued and the wait asleep.
+  ASSERT_TRUE(speech.fixture->submit(foreign_synthesis(1)).has_value());
+  ASSERT_TRUE(speech.fixture->settled(Binding::kPatience));
+  bool idle = false;
+  // A wait nobody wakes outlasts the test's own time limit.
+  std::thread waiter([&] { idle = speech.strategy->wait_idle(10min); });
+  EXPECT_FALSE(speech.strategy->wait_idle(50ms));
+  speech.strategy->stop();
+  waiter.join();
+  EXPECT_TRUE(idle);
+}
+
+TEST(SpeechJobDispatch, AResultStillQueuedAtStopIsDroppedAndItsAudioReleased) {
+  const FakeSchedulerClock clock;
+  SpeechUnderTest speech(clock);
+  // No manager is attached, so nothing is taken off the queue.
+  ASSERT_TRUE(speech.fixture->submit(foreign_synthesis(1)).has_value());
+  ASSERT_TRUE(speech.fixture->settled(Binding::kPatience));
+  EXPECT_EQ(speech.buffers_in_use(), 1U);
+  speech.strategy->stop();
+  EXPECT_EQ(speech.buffers_in_use(), 0U);
+}
+
+Result<JobResult> a_transcript_whatever_was_asked(const JobRequest& /*request*/,
+                                                  BufferManager& /*buffers*/) {
+  return JobResult::create(TranscriptResult{"hello", {}, {}});
+}
+
+std::unique_ptr<DispatchUnderTest> speech_dispatch_with_transcripts_only(
+    const SchedulerClock& clock) {
+  return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{},
+                                           a_transcript_whatever_was_asked);
+}
+
+// A bridge checks a result's kind against its job's class, so a result of the
+// wrong kind never reaches a session as one.
+TEST(SpeechJobDispatch, AResultOfTheWrongKindReachesTheDispatchAsAFailedJob) {
+  Binding binding(&speech_dispatch_with_transcripts_only);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_text();
+  binding.text(key, 1, "hi");
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->code, Error::Code::InferenceFailed);
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "result_kind_mismatch");
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.strategy->stats().jobs_failed, 1U);
+  EXPECT_EQ(speech.strategy->stats().jobs_completed, 0U);
+}
+
+std::unique_ptr<DispatchUnderTest> speech_dispatch_with_a_small_pool(const SchedulerClock& clock) {
+  BufferManagerConfig pool;
+  pool.capacity_bytes = kFrameBytes;
+  pool.max_buffer_bytes = 0;
+  return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{}, result_following_input,
+                                           pool);
+}
+
+TEST(SpeechJobDispatch, AnUtteranceThePoolHasNoBufferForFailsItsSessionAndSubmitsNothing) {
+  Binding binding(&speech_dispatch_with_a_small_pool);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto fits = binding.open_audio();
+  one_utterance(binding, fits);
+  ASSERT_TRUE(binding.read_as<EndpointDetectedOutput>(fits).has_value());
+  ASSERT_TRUE(binding.read_as<FinalTranscriptOutput>(fits).has_value());
+
+  const auto too_long = binding.open_audio();
+  binding.audio(too_long, patterned_bytes(2 * kFrameBytes, 1));
+  binding.finalize(too_long, 1);
+  ASSERT_TRUE(binding.ends_as(too_long, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(too_long)->code, Error::Code::OOMError);
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
+  EXPECT_EQ(speech.buffers_in_use(), 0U);
+  EXPECT_EQ(binding.live_state(fits), State::Active);
+}
+
+// settle() rests on wait_idle(): a command taken off the queue and still
+// being handled is not idle.
+TEST(SpeechJobDispatch, ACommandBeingHandledIsNotIdle) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes frame = patterned_bytes(kFrameBytes, 1);
+  ASSERT_TRUE(binding.settle());
+  const auto accepted = binding.manager->accept_input(key, frame.size());
+  ASSERT_TRUE(accepted.has_value());
+  ASSERT_TRUE(accepted->effects.contains(Effect::AcceptInput));
+  ASSERT_TRUE(binding.settle());
+
+  // The initialize hook holds the manager's serialized section, which the
+  // frame's credit return waits for.
+  const auto terms = binding.dispatch().negotiate(binding.under_test->text_request()).value();
+  bool idle_inside = true;
+  const auto opened = binding.manager->open(Binding::kGeneration, budgets_for(terms).value(),
+                                            [&](std::uint64_t other) {
+                                              speech.strategy->audio(key, frame);
+                                              idle_inside = speech.strategy->wait_idle(50ms);
+                                              return speech.strategy->open_session(other, terms);
+                                            });
+  ASSERT_TRUE(opened.has_value());
+  EXPECT_FALSE(idle_inside);
+  EXPECT_TRUE(speech.strategy->wait_idle(Binding::kPatience));
+  EXPECT_EQ(binding.manager->status(key).value().input_credit_bytes.used(), 0U);
 }
 
 Result<JobResult> speech_in_a_buffer_nobody_holds(const JobRequest& /*request*/,

@@ -77,7 +77,7 @@ namespace tensorplate::testing {
 
 /// Passes every call to the bridge behind it and counts what the dispatch
 /// asked. It can answer one session release as the adapter does when its
-/// release record is full.
+/// release record is full, and a job class as a backend that does not run it.
 class CountingJobBridge final : public BoundedJobBridge {
  public:
   explicit CountingJobBridge(std::shared_ptr<BoundedJobBridge> inner) : inner_(std::move(inner)) {}
@@ -89,6 +89,10 @@ class CountingJobBridge final : public BoundedJobBridge {
     {
       const std::lock_guard guard(mu_);
       submitted_.push_back(request);
+      if (refused_class_ == request.job_class()) {
+        return unexpected(Error::make(Error::Code::Unsupported, "job_class_unsupported",
+                                      "job_class_unsupported"));
+      }
     }
     return inner_->submit(std::move(request));
   }
@@ -118,13 +122,17 @@ class CountingJobBridge final : public BoundedJobBridge {
     const std::lock_guard guard(mu_);
     refuse_next_release_ = true;
   }
+  void refuse_class(JobClass job_class) {
+    const std::lock_guard guard(mu_);
+    refused_class_ = job_class;
+  }
   /// How often release_session() was called for `session_key`.
   [[nodiscard]] std::uint64_t releases(std::uint64_t session_key) const {
     const std::lock_guard guard(mu_);
     const auto found = releases_.find(session_key);
     return found == releases_.end() ? 0 : found->second;
   }
-  /// Every request submit() was called with, in order.
+  /// Every request submit() was called with, in order, the refused too.
   [[nodiscard]] std::vector<JobRequest> submitted() const {
     const std::lock_guard guard(mu_);
     return submitted_;
@@ -137,6 +145,7 @@ class CountingJobBridge final : public BoundedJobBridge {
   std::map<std::uint64_t, std::uint64_t> releases_;
   std::vector<JobRequest> submitted_;
   bool refuse_next_release_ = false;
+  std::optional<JobClass> refused_class_;
   std::atomic<std::uint64_t> health_calls_{0};
 };
 
@@ -145,8 +154,9 @@ class SpeechUnderTest final : public DispatchUnderTest {
   static constexpr std::uint64_t kGeneration = 9;
 
   explicit SpeechUnderTest(const SchedulerClock& clock, FixtureJobBridgeOptions options = {},
-                           FixtureJobBridge::ResultFunction result = result_following_input)
-      : buffers(BufferManager::create({}).value()),
+                           FixtureJobBridge::ResultFunction result = result_following_input,
+                           BufferManagerConfig pool = {})
+      : buffers(BufferManager::create(std::move(pool)).value()),
         fixture(std::make_shared<FixtureJobBridge>(*buffers, std::move(result), options)),
         bridge(std::make_shared<CountingJobBridge>(fixture)),
         strategy(

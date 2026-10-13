@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <condition_variable>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <variant>
 
@@ -25,6 +26,9 @@ static_assert(kOutputFormat.bytes_per_second() * kLongestSeconds == kMaxAudioChu
 /// The waiting segments and the one being delivered.
 constexpr std::uint32_t kSynthesisSegments = SessionBudgets::kWaitingTextSegments + 1;
 constexpr std::uint16_t kNormalSpeed = 1000;
+/// The utterances of a session that ended and have no final yet: the one
+/// being decoded and those behind it. One more fails the session.
+constexpr std::size_t kEndedUtterances = 3;
 constexpr std::uint64_t kMicrosPerSecond = 1'000'000;
 
 /// A segment's interval is rounded outward: its start down, its end up.
@@ -55,6 +59,11 @@ Error wrong_input_kind() {
   return Error::make(Error::Code::Internal, "input of a kind the session does not take",
                      "wrong_input_kind");
 }
+
+/// The bridge's word for a job that ended because the backend was lost.
+bool backend_was_reset(const Error& error) {
+  return error.code == Error::Code::Unavailable && error.context == "backend_reset";
+}
 }  // namespace
 
 SpeechJobDispatch::HeldBuffer::HeldBuffer(HeldBuffer&& other) noexcept
@@ -62,11 +71,9 @@ SpeechJobDispatch::HeldBuffer::HeldBuffer(HeldBuffer&& other) noexcept
 
 SpeechJobDispatch::HeldBuffer& SpeechJobDispatch::HeldBuffer::operator=(
     HeldBuffer&& other) noexcept {
-  if (this != &other) {
-    reset();
-    buffers_ = std::exchange(other.buffers_, nullptr);
-    ref_ = other.ref_;
-  }
+  // What this held goes with `other`.
+  std::swap(buffers_, other.buffers_);
+  std::swap(ref_, other.ref_);
   return *this;
 }
 
@@ -207,11 +214,17 @@ Result<std::unique_ptr<SpeechJobDispatch>> SpeechJobDispatch::create(
                                   "speech dispatch needs a nonzero generation", "generation_zero"));
   }
   auto core = std::make_shared<Core>(buffers);
-  if (auto set = bridge->set_event_sink(core); !set) {
+  std::unique_ptr<SpeechJobDispatch> dispatch;
+  try {
+    dispatch.reset(new SpeechJobDispatch(bridge, core, clock, options));
+  } catch (const std::system_error&) {
+    return unexpected(Error::make(Error::Code::Internal, "speech dispatch thread could not start",
+                                  "dispatch_thread_unavailable"));
+  }
+  if (auto set = bridge->set_event_sink(std::move(core)); !set) {
     return unexpected(set.error());
   }
-  return std::unique_ptr<SpeechJobDispatch>(
-      new SpeechJobDispatch(std::move(bridge), std::move(core), clock, options));
+  return dispatch;
 }
 
 SpeechJobDispatch::SpeechJobDispatch(std::shared_ptr<BoundedJobBridge> bridge,
@@ -366,7 +379,8 @@ void SpeechJobDispatch::handle(SessionManager& manager, Command command) {
   if (auto* ended = std::get_if<JobEnded>(&command.body)) {
     job_ended(manager, key, *ended);
   } else if (std::holds_alternative<Command::SessionReleased>(command.body)) {
-    if (const auto it = sessions_.find(key); it != sessions_.end() && it->second.releasing) {
+    // The bridge acknowledges only a release it was asked for.
+    if (const auto it = sessions_.find(key); it != sessions_.end()) {
       stats_.longest_release_wait =
           std::max(stats_.longest_release_wait, clock_.now() - it->second.release_asked);
       acknowledge(manager, key);
@@ -374,7 +388,7 @@ void SpeechJobDispatch::handle(SessionManager& manager, Command command) {
   } else if (const auto* transition = std::get_if<Moved>(&command.body)) {
     moved(manager, key, *transition);
   }
-  if (const auto it = sessions_.find(key); it != sessions_.end() && !it->second.releasing) {
+  if (const auto it = sessions_.find(key); it != sessions_.end()) {
     hand_over(manager, key, it->second, command);
     pump(manager, key, it->second);
   }
@@ -406,9 +420,7 @@ void SpeechJobDispatch::hand_over(SessionManager& manager, std::uint64_t key, Se
     }
   } else if (const auto* delivered = std::get_if<Command::Delivered>(&command.body)) {
     // Any delivery can make room for a held item; only task output counts.
-    if (delivered->task_output && session.undelivered > 0) {
-      --session.undelivered;
-    }
+    session.undelivered -= delivered->task_output ? 1 : 0;
   }
 }
 
@@ -483,13 +495,18 @@ void SpeechJobDispatch::job_ended(SessionManager& manager, std::uint64_t key, Jo
   // The lane is free whatever became of the job's session.
   in_flight_.reset();
   const auto it = sessions_.find(key);
+  const auto* error = std::get_if<Error>(&ended.outcome);
   if (it == sessions_.end() || it->second.ended) {
     ++stats_.jobs_discarded;
+    // A cancel that still waits for its release ends as failed instead.
+    if (it != sessions_.end() && error != nullptr && backend_was_reset(*error)) {
+      (void)manager.apply(key, Event::BackendReset, *error);
+    }
     return;
   }
   Session& session = it->second;
   session.job = JobState::None;
-  if (const auto* error = std::get_if<Error>(&ended.outcome)) {
+  if (error != nullptr) {
     ++stats_.jobs_failed;
     fail_for_backend(manager, key, session, *error);
     return;
@@ -502,6 +519,17 @@ void SpeechJobDispatch::job_ended(SessionManager& manager, std::uint64_t key, Jo
   }
   if (auto* speech = std::get_if<SpeechAudio>(&ended.outcome);
       speech != nullptr && session.active && !session.active->synthesized) {
+    const StreamAudioFormat& format = session.terms.audio_format;
+    const std::uint64_t granted =
+        static_cast<std::uint64_t>(session.terms.max_synthesis_audio.count()) *
+        format.sample_rate_hz / 1000;
+    if (session.samples_finished + speech->bytes / format.bytes_per_sample() > granted) {
+      fail(manager, key, session,
+           Error::make(Error::Code::ResourceExhausted,
+                       "segments since the last Finalize yield more audio than was granted",
+                       "synthesis_audio_limit_exceeded"));
+      return;
+    }
     session.active->audio = std::move(*speech);
     session.active->synthesized = true;
     return;
@@ -523,7 +551,7 @@ void SpeechJobDispatch::start_next(SessionManager& manager) {
     const std::uint64_t key = lane_.front();
     lane_.pop_front();
     const auto it = sessions_.find(key);
-    if (it == sessions_.end() || it->second.ended || it->second.job != JobState::Queued) {
+    if (it == sessions_.end() || it->second.ended) {
       continue;
     }
     Session& session = it->second;
@@ -596,12 +624,19 @@ void SpeechJobDispatch::take_audio(SessionManager& manager, std::uint64_t key, S
     if (session.samples_accepted - session.utterance_start < longest) {
       continue;
     }
-    const auto applied = manager.apply(key, Event::AutomaticEndpoint);
-    if (!applied) {
+    if (session.ended_utterances.size() >= kEndedUtterances) {
+      fail(manager, key, session,
+           Error::make(Error::Code::ResourceExhausted,
+                       "audio arrived faster than its utterances were decoded",
+                       "utterance_backlog_exceeded"));
+      return;
+    }
+    // The sink shows the finalization this starts before the utterance's job
+    // can end, so it is recorded from there.
+    if (!manager.apply(key, Event::AutomaticEndpoint)) {
       session.ended = true;
       return;
     }
-    session.finalizing = session.finalizing || applied->effects.contains(Effect::StartFinalize);
     end_utterance(session, EndpointReason::DurationLimit, 0);
   }
 }
@@ -638,7 +673,7 @@ void SpeechJobDispatch::fail_for_backend(SessionManager& manager, std::uint64_t 
                                          Session& session, const Error& error) {
   const std::string_view reason = error.context ? std::string_view{*error.context} : "";
   session.ended = true;
-  if (error.code == Error::Code::Unavailable && reason == "backend_reset") {
+  if (backend_was_reset(error)) {
     (void)manager.apply(key, Event::BackendReset, error);
     return;
   }
@@ -652,8 +687,7 @@ void SpeechJobDispatch::fail_for_backend(SessionManager& manager, std::uint64_t 
 }
 
 void SpeechJobDispatch::pump(SessionManager& manager, std::uint64_t key, Session& session) {
-  // Nothing is produced before the first transition names the queue.
-  while (session.output && !session.ended) {
+  while (!session.ended) {
     if (!session.held.empty()) {
       if (!offer_held(manager, key, session)) {
         return;

@@ -61,9 +61,14 @@ struct SpeechDispatchStats {
 ///   Finalize, a half-close or the 30 s limit ends the utterance, whose audio
 ///   is one `stt_decode`. Its result is the final's one segment, over the
 ///   whole utterance; no audio, or no text, yields a final without segments.
+///   Three utterances may have ended without their final; a fourth fails the
+///   session (`utterance_backlog_exceeded`).
 /// - Text: a segment is one `tts_synthesis`, whose one audio result is cut
 ///   into chunks of kAudioChunkDuration. A chunk is cut only when the one
 ///   before it was queued, so backpressure holds one chunk and nothing grows.
+///   A segment whose audio takes the segments since the last Finalize over
+///   SessionTerms::max_synthesis_audio fails the session
+///   (`synthesis_audio_limit_exceeded`).
 /// - One job is in flight for the whole dispatch, sessions in the order their
 ///   work became ready. A job keeps the lane until the backend ends it, also
 ///   once its session is gone.
@@ -72,9 +77,12 @@ struct SpeechDispatchStats {
 /// profile permits is known only to the backend: a language, a voice or a job
 /// class it refuses fails the session at its first job.
 ///
-/// One thread of its own makes every report, offer and bridge call. The
-/// bridge's callbacks only queue for it, so they never wait on the manager, a
-/// queue or the backend. A session failure carries the stream's reason:
+/// One thread of its own makes every report, every offer and every bridge
+/// call but two: create() registers the sink, and stop() releases the
+/// sessions still open on its caller's thread, once that thread has ended.
+/// The bridge's callbacks only queue for it, so they never wait on the
+/// manager, a queue or the backend. A session failure carries the stream's
+/// reason:
 /// `backend_reset` for a job the backend's loss ended (applied as the
 /// `backend_reset` event), `backend_unavailable` for a backend that is gone or
 /// unloaded, `backend_unsupported_capability` for a job class or an option
@@ -83,13 +91,16 @@ struct SpeechDispatchStats {
 /// Every session opened here is released through the bridge once: at its
 /// cleanup, or at stop(). Each audio result's buffer is released once,
 /// whether its audio was delivered or dropped, and a job's input buffer when
-/// the backend reports the job released.
+/// the backend reports the job released. The inputs of jobs never reported
+/// released go when the dispatch and the bridge are both gone, so the bridge
+/// is destroyed only after the backend session was unloaded.
 class SpeechJobDispatch final : public SessionDispatch {
  public:
   /// Registers the dispatch as `bridge`'s event sink. `buffers` and `clock`,
   /// the manager's, outlive the dispatch and the bridge.
   /// @return ConfigInvalid with context "job_bridge_null" or
-  ///   "generation_zero", or the bridge's refusal of the sink.
+  ///   "generation_zero", Internal with context
+  ///   "dispatch_thread_unavailable", or the bridge's refusal of the sink.
   [[nodiscard]] static Result<std::unique_ptr<SpeechJobDispatch>> create(
       std::shared_ptr<BoundedJobBridge> bridge, BufferManager& buffers, const SchedulerClock& clock,
       SpeechDispatchOptions options = {});
