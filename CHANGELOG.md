@@ -779,6 +779,40 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The serving worker's stream listener bounds a call before it has a
+  session. It waits on at most 32 calls for their `Open`, and on each for
+  at most 5 s: a call beyond the 32 is refused when it arrives with
+  `session_count_limit`, and a call that has sent nothing after 5 s with
+  `idle_timeout` (status `DEADLINE_EXCEEDED`). Both were open-ended. When
+  admission closes, a call that has not sent its `Open` is refused at once
+  with `admission_closed`, and so is every call that arrives later, without
+  its `Open` being read; such a call used to hold the gRPC server for the
+  whole drain window. A refused call lasts until its status is written,
+  which a peer that does not read puts off, so two more bounds hold such
+  calls: the server announces at most 64 concurrent streams on a
+  connection (a client with more calls than that on one channel has the
+  surplus queued by its own channel), and the listener keeps at most 32
+  refused calls that are not done, over all connections; a call refused
+  beyond them is cancelled, so its client reads `CANCELLED` and no reason.
+  A refused call has no time limit and the number of connections is not
+  limited. The server enables no compression algorithm, so gRPC
+  ends a call that announces one with `UNIMPLEMENTED`, where the listener
+  answered a compressed `Open` with `Ready`. Its bandwidth probe is off, so
+  a connection starts with the HTTP/2 default window of 65,535 bytes for a
+  stream and for the connection instead of 4 MiB; gRPC still widens both
+  for a message it is receiving, up to the 64 KiB receive limit. At
+  shutdown the worker
+  stops the stream listener before the HTTP listener, so a unary request
+  in flight no longer uses up the window the stream sessions drain in; the
+  HTTP port stays open until the stream listener has stopped, and
+  `/health` answers 503 as it does from the moment shutdown is asked. In
+  the worst case a stop now takes the drain window and then the HTTP
+  listener's wait for a request in flight, where it took about the longer
+  of the two. The stream schema's
+  comment on the reasons that precede admission names the two new uses,
+  and the golden frames gain an `Open` refused with `idle_timeout`; no
+  field or enum value changes. (V030-E04-F02-T02)
+
 - The Python/PyTorch adapter's job channel ends a job that waited when an
   unload arrived with the reason `session_unloaded`, as the bridge's contract
   names it; the sink received the sidecar's `backend_unavailable`. After a
