@@ -106,6 +106,10 @@ class SpeechJobDispatch final : public SessionDispatch {
       SpeechDispatchOptions options = {});
 
   ~SpeechJobDispatch() override;
+  SpeechJobDispatch(const SpeechJobDispatch&) = delete;
+  SpeechJobDispatch& operator=(const SpeechJobDispatch&) = delete;
+  SpeechJobDispatch(SpeechJobDispatch&&) = delete;
+  SpeechJobDispatch& operator=(SpeechJobDispatch&&) = delete;
 
   [[nodiscard]] SpeechDispatchStats stats() const;
   /// Waits until nothing handed over or reported so far is left to work on.
@@ -236,7 +240,8 @@ class SpeechJobDispatch final : public SessionDispatch {
   void run();
   void handle(SessionManager& manager, Command command);
   /// An input, a Finalize or a delivery the binding handed over.
-  void hand_over(SessionManager& manager, std::uint64_t key, Session& session, Command& command);
+  static void hand_over(SessionManager& manager, std::uint64_t key, Session& session,
+                        Command& command);
   void moved(SessionManager& manager, std::uint64_t key, const Moved& moved);
   /// Releases an opened session through the bridge, once.
   void release(SessionManager& manager, std::uint64_t key, Session& session);
@@ -245,12 +250,13 @@ class SpeechJobDispatch final : public SessionDispatch {
   /// Submits the job of the session that has waited longest, while the lane
   /// is free.
   void start_next(SessionManager& manager);
-  /// The session's next job, its input buffer in `input` when it has one.
-  [[nodiscard]] Result<JobRequest> next_request(std::uint64_t key, Session& session,
-                                                HeldBuffer& input);
+  /// The session's next job, its input buffer in `input` when it has one;
+  /// none, and the session failed, when the request cannot be made.
+  [[nodiscard]] std::optional<JobRequest> next_request(SessionManager& manager, std::uint64_t key,
+                                                       Session& session, HeldBuffer& input);
   void want_job(std::uint64_t key, Session& session);
-  void take_audio(SessionManager& manager, std::uint64_t key, Session& session,
-                  std::span<const std::byte> frame);
+  static void take_audio(SessionManager& manager, std::uint64_t key, Session& session,
+                         std::span<const std::byte> frame);
   void pump(SessionManager& manager, std::uint64_t key, Session& session);
   /// Offers the oldest held item. False while the queue has no room or once
   /// it stopped taking task output.
@@ -259,7 +265,9 @@ class SpeechJobDispatch final : public SessionDispatch {
   /// another command arrives.
   [[nodiscard]] bool advance_audio(SessionManager& manager, std::uint64_t key, Session& session);
   [[nodiscard]] bool advance_text(SessionManager& manager, std::uint64_t key, Session& session);
-  [[nodiscard]] bool advance_segment(SessionManager& manager, std::uint64_t key, Session& session);
+  /// `segment` is the session's active one.
+  [[nodiscard]] bool advance_segment(SessionManager& manager, std::uint64_t key, Session& session,
+                                     ActiveSegment& segment);
   /// Produces the oldest ended utterance's endpoint and final, once its job
   /// has ended.
   [[nodiscard]] bool complete_utterance(SessionManager& manager, std::uint64_t key,

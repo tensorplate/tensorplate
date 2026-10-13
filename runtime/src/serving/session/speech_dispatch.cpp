@@ -128,12 +128,17 @@ struct SpeechJobDispatch::Core final : JobEventSink {
   void on_accepted(const JobEvent& /*event*/) noexcept override {}
   // No job asks for progress, and the bridge delivers none that was not asked.
   void on_progress(const JobEvent& /*event*/) noexcept override {}
+  // Queueing can only fail for want of memory, which ends the worker here as
+  // it would on any other thread.
+  // NOLINTNEXTLINE(bugprone-exception-escape)
   void on_completed(const JobEvent& event) noexcept override { job_ended(event); }
+  // NOLINTNEXTLINE(bugprone-exception-escape)
   void on_failed(const JobEvent& event) noexcept override { job_ended(event); }
   void on_cancel_acknowledged(const JobEvent& /*event*/) noexcept override {}
   void on_released(const JobEvent& event) noexcept override {
     (void)take_input(event.identity().job_id);
   }
+  // NOLINTNEXTLINE(bugprone-exception-escape)
   void on_session_released(std::uint64_t session_key,
                            std::uint64_t /*generation*/) noexcept override {
     Command command;
@@ -216,12 +221,13 @@ Result<std::unique_ptr<SpeechJobDispatch>> SpeechJobDispatch::create(
   auto core = std::make_shared<Core>(buffers);
   std::unique_ptr<SpeechJobDispatch> dispatch;
   try {
-    dispatch.reset(new SpeechJobDispatch(bridge, core, clock, options));
+    dispatch = std::unique_ptr<SpeechJobDispatch>(
+        new SpeechJobDispatch(std::move(bridge), core, clock, options));
   } catch (const std::system_error&) {
     return unexpected(Error::make(Error::Code::Internal, "speech dispatch thread could not start",
                                   "dispatch_thread_unavailable"));
   }
-  if (auto set = bridge->set_event_sink(std::move(core)); !set) {
+  if (auto set = dispatch->bridge_->set_event_sink(std::move(core)); !set) {
     return unexpected(set.error());
   }
   return dispatch;
@@ -557,9 +563,8 @@ void SpeechJobDispatch::start_next(SessionManager& manager) {
     Session& session = it->second;
     session.job = JobState::None;
     HeldBuffer input;
-    auto request = next_request(key, session, input);
+    auto request = next_request(manager, key, session, input);
     if (!request) {
-      fail(manager, key, session, request.error());
       continue;
     }
     const std::uint64_t job_id = request->identity().job_id;
@@ -580,23 +585,31 @@ void SpeechJobDispatch::start_next(SessionManager& manager) {
   }
 }
 
-Result<JobRequest> SpeechJobDispatch::next_request(std::uint64_t key, Session& session,
-                                                   HeldBuffer& input) {
+std::optional<JobRequest> SpeechJobDispatch::next_request(SessionManager& manager,
+                                                          std::uint64_t key, Session& session,
+                                                          HeldBuffer& input) {
   const JobIdentity identity{next_job_id_++, key, options_.generation};
   if (session.active) {
-    return JobRequest::create(
-        identity, JobClass::TtsSynthesis, TextSegment{session.active->text},
-        JobOptions{session.terms.language, session.terms.voice, kNormalSpeed});
+    auto synthesis =
+        JobRequest::create(identity, JobClass::TtsSynthesis, TextSegment{session.active->text},
+                           JobOptions{session.terms.language, session.terms.voice, kNormalSpeed});
+    if (!synthesis) {
+      fail(manager, key, session, synthesis.error());
+      return std::nullopt;
+    }
+    return std::move(synthesis).value();
   }
   EndedUtterance& utterance = session.ended_utterances.front();
   const auto buffer = core_->buffers.allocate(utterance.audio.size());
   if (!buffer) {
-    return unexpected(buffer.error());
+    fail(manager, key, session, buffer.error());
+    return std::nullopt;
   }
   input = HeldBuffer{core_->buffers, *buffer};
   const auto bytes = core_->buffers.data(*buffer);
   if (!bytes) {
-    return unexpected(bytes.error());
+    fail(manager, key, session, bytes.error());
+    return std::nullopt;
   }
   std::copy(utterance.audio.begin(), utterance.audio.end(), bytes->begin());
   const std::size_t size = utterance.audio.size();
@@ -604,10 +617,15 @@ Result<JobRequest> SpeechJobDispatch::next_request(std::uint64_t key, Session& s
   utterance.audio = {};
   JobOptions options;
   options.language = session.terms.language;
-  return JobRequest::create(
+  auto decode = JobRequest::create(
       identity, JobClass::SttDecode,
       AudioFrames{kJobInputAudioFormat, PcmWindow{*buffer, 0, size}, utterance.first_sample},
       std::move(options));
+  if (!decode) {
+    fail(manager, key, session, decode.error());
+    return std::nullopt;
+  }
+  return std::move(decode).value();
 }
 
 void SpeechJobDispatch::take_audio(SessionManager& manager, std::uint64_t key, Session& session,
@@ -782,7 +800,7 @@ bool SpeechJobDispatch::advance_audio(SessionManager& manager, std::uint64_t key
 
 bool SpeechJobDispatch::advance_text(SessionManager& manager, std::uint64_t key, Session& session) {
   if (session.active) {
-    return advance_segment(manager, key, session);
+    return advance_segment(manager, key, session, *session.active);
   }
   if (!session.waiting.empty()) {
     if (!manager.start_text_segment(key)) {
@@ -816,8 +834,7 @@ bool SpeechJobDispatch::advance_text(SessionManager& manager, std::uint64_t key,
 }
 
 bool SpeechJobDispatch::advance_segment(SessionManager& manager, std::uint64_t key,
-                                        Session& session) {
-  ActiveSegment& segment = *session.active;
+                                        Session& session, ActiveSegment& segment) {
   if (!segment.synthesized) {
     want_job(key, session);
     return false;
