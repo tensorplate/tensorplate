@@ -361,20 +361,33 @@ either leaves the in-flight transaction at the last successfully
 persisted phase (which the recovery planner can read) or at the
 phase-just-before that one if the failing phase did not commit.
 
-The old member is still retired before the commit write. When that write
-fails (a full disk), the agent goes on serving the candidate while the
-state names the old record and the transaction stays in flight; later
-transactions are refused as busy, and the next start ends the transaction
-and starts the old record.
+Every state write inside a transaction can fail without a crash (a full
+disk): the write that begins it aside, these are the write of a phase, of
+the bundle digest, of the candidate record or of a generation, the write
+that ends a failed transaction, the commit, and the write that ends a
+committed one. A write that fails before its commit rename (see the
+[durable state store](#durable-state-store-v01-e08-f02)) changes nothing:
+the request is answered with an `internal` error and the transaction stays
+in flight at the phase it had recorded. Nothing clears it while the agent
+runs. Every later `deploy` and `rollback` is refused: the control response
+is `status: busy` with the error `not_ready`, "agent_busy". It carries no
+transaction id; status shows the transaction as `in_flight_transaction`.
+Restart the agent: its start settles the transaction (see
+[Restart recovery](#restart-recovery-v01-e08-f07)). What that start finds
+depends on the write that failed:
 
-When the write that ends a committed transaction fails, the deployment is
-committed and serving and the transaction stays in flight at `promoted`.
-The operator sees the `deploy` or `rollback` answered with an `internal`
-error, status showing the new deployment as `active` beside
-`in_flight: phase=promoted`, and every later `deploy` and `rollback`
-refused as busy, naming that transaction. Nothing clears it while the
-agent runs: restart the agent. That start clears the transaction, makes no
-quarantine entry and starts the committed deployment again.
+- A write before the commit, the one that ends a failed transaction
+  included: the candidate, if one was prepared, is abandoned when the
+  request returns, and what served before goes on serving. The start ends
+  the transaction as failed, with a quarantine entry.
+- The commit write. The old member is still retired before it, so the
+  agent goes on serving the candidate while the state names the old
+  record. The start ends the transaction as failed and starts the old
+  record.
+- The write that ends a committed transaction. The deployment is committed
+  and serving, and status shows the new deployment as `active` beside
+  `in_flight: phase=promoted`. The start clears the transaction, makes no
+  quarantine entry and starts the committed deployment again.
 
 A transaction in flight never carries a `failure`: the write that records
 why a transaction failed is the one that clears it, so this agent never
