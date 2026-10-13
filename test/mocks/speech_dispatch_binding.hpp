@@ -4,6 +4,8 @@
 // The speech dispatch over the fixture job bridge, as the dispatch contract's
 // cases and its own know it.
 
+#include <gtest/gtest.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -163,6 +165,13 @@ class SpeechUnderTest final : public DispatchUnderTest {
             serving::SpeechJobDispatch::create(bridge, *buffers, clock, {kGeneration}).value()) {
     fixture->prime();
   }
+  /// With the dispatch stopped and the backend unloaded no job reads a buffer
+  /// and no result is on its way: every case ends with the pool read.
+  ~SpeechUnderTest() override {
+    strategy->stop();
+    fixture->unload();
+    EXPECT_EQ(buffers_in_use(), 0U);
+  }
 
   serving::SessionDispatch& dispatch() override { return *strategy; }
   serving::SessionRequest audio_request() const override {
@@ -210,9 +219,18 @@ class SpeechUnderTest final : public DispatchUnderTest {
   void hold_jobs() override { fixture->hold_jobs(); }
   void release_jobs() override { fixture->release_jobs(); }
 
-  /// Buffers nobody has released.
-  [[nodiscard]] std::size_t buffers_in_use() const { return buffers->accounting().active_count; }
+  /// Buffers nobody has released. A release the pool refused is a second
+  /// release of one buffer, so every reading also holds that there was none
+  /// but those the case's own backend caused (`stale_results`).
+  [[nodiscard]] std::size_t buffers_in_use() const {
+    const auto pool = buffers->accounting();
+    EXPECT_EQ(pool.release_failures, stale_results) << "a buffer was released twice";
+    return pool.active_count;
+  }
 
+  /// Results the case's backend gave in a buffer it had released itself: the
+  /// dispatch's one release of each is refused.
+  std::uint64_t stale_results = 0;
   std::unique_ptr<BufferManager> buffers;
   std::shared_ptr<FixtureJobBridge> fixture;
   std::shared_ptr<CountingJobBridge> bridge;

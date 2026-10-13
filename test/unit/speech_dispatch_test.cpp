@@ -1040,11 +1040,16 @@ std::unique_ptr<DispatchUnderTest> speech_dispatch_with_unreadable_speech(
 
 TEST(SpeechJobDispatch, SpeechInABufferThatCannotBeReadFailsTheSession) {
   Binding binding(&speech_dispatch_with_unreadable_speech);
+  SpeechUnderTest& speech = speech_of(binding);
+  // The backend released the buffer itself: the dispatch's release is refused.
+  speech.stale_results = 1;
   const auto key = binding.open_text();
   binding.text(key, 1, "hi");
   EXPECT_TRUE(binding.ends_as(key, State::Failed));
   EXPECT_EQ(binding.manager->held_slots(), 0U);
   EXPECT_FALSE(binding.output(key)->take().has_value());
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.buffers_in_use(), 0U);
 }
 }  // namespace
 }  // namespace tensorplate::testing
