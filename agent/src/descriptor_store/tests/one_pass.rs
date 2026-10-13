@@ -197,6 +197,99 @@ fn one_start_settles_a_deploy_killed_after_any_of_its_durable_writes() {
     }
 }
 
+/// The format 0.1 fixture bundle at another version, which is another
+/// bundle: its manifest's digest differs.
+fn another_format_0_1_bundle(host: &Host) -> PathBuf {
+    let source = host.td.path().join("update");
+    fs::create_dir_all(&source).unwrap();
+    let manifest = fs::read_to_string(repo(FORMAT_0_1).join("manifest.json")).unwrap();
+    let (was, is) = ("\"version\": \"0.1.0\"", "\"version\": \"0.1.1\"");
+    assert!(manifest.contains(was));
+    fs::write(source.join("manifest.json"), manifest.replace(was, is)).unwrap();
+    let artifact = "x86-smoke.json";
+    fs::copy(repo(FORMAT_0_1).join(artifact), source.join(artifact)).unwrap();
+    source
+}
+
+#[test]
+fn one_start_after_a_format_0_1_update_of_the_serving_id_killed_once_staged_comes_up_not_serving() {
+    let original = repo(FORMAT_0_1);
+    let digest_of = |bundle: &Path| parse_bundle(bundle).unwrap().manifest_digest;
+    // The update's state writes up to `warmed`. The copy staged under the
+    // id is replaced after the third, before the candidate is recorded.
+    let phases = phases_before_the_commit(true, false);
+    let replaced_after = 3;
+    // `another`: the update is another bundle than the one serving.
+    // `again`: what is deployed through the agent that did not restore.
+    for (another, again) in [(true, "the update"), (true, "the original"), (false, "")] {
+        for landed in 1..=phases.len() {
+            let case = format!("another bundle: {another}, killed after write {landed}");
+            let host = host();
+            let (agent, _) = host.start(Worker::default());
+            agent.deploy("smoke", FORMAT_0_1).unwrap();
+            let update = if another {
+                another_format_0_1_bundle(&host)
+            } else {
+                original.clone()
+            };
+            agent.store.kill_after_writes(landed);
+            let coordinator = &agent.coordinator;
+            let updated = coordinator.deploy("smoke", &update, BTreeMap::new(), None, None);
+            assert!(matches!(updated, Err(AgentError::Io(_))), "{case}");
+            drop(agent);
+            let staged = host.td.path().join("staging").join("smoke");
+            let replaced = another && landed >= replaced_after;
+            let staged_is_another = digest_of(&staged) != digest_of(&original);
+            assert_eq!(staged_is_another, replaced, "{case}");
+
+            let (action, next) = host.one_start(Worker::default());
+
+            // The update is ended either way, and the record stays.
+            assert_eq!(action, RecoveryAction::RestoreActive, "{case}");
+            assert!(host.settled(), "{case}");
+            assert_eq!(host.ids(), ["smoke", "-"], "{case}");
+            let ended = format!("@{:?}", phases[landed - 1]);
+            let (quarantined, _) = host.quarantined();
+            let once = quarantined.ends_with(&ended) && !quarantined.contains(' ');
+            assert!(once, "{case}: {quarantined}");
+            if !replaced {
+                // The staged copy is the record's: it is started again.
+                let asked = next.asked().reference;
+                assert_eq!(asked.bundle_digest, digest_of(&original), "{case}");
+                assert_eq!(host.last_error(), None, "{case}");
+                continue;
+            }
+            // The staged copy is the update's: nothing is started.
+            assert!(next.never_asked(), "{case}");
+            let error = host.last_error().expect("the refusal is recorded");
+            assert_eq!(error.code, ErrorCode::LoadFailed, "{case}: {error:?}");
+            let says = "`smoke` is not started again: the bundle staged at";
+            let remedy = "names; `smoke` is not serving until it is deployed again";
+            let told = error.message.contains(says) && error.message.ends_with(remedy);
+            assert!(told, "{case}: {error:?}");
+
+            // A deploy of the id through that agent serves it, as either
+            // bundle, and the start after restores what was deployed.
+            let bundle = if again == "the update" {
+                &update
+            } else {
+                &original
+            };
+            let coordinator = &next.coordinator;
+            let deployed = coordinator.deploy("smoke", bundle, BTreeMap::new(), None, None);
+            deployed.unwrap_or_else(|e| panic!("{case}, {again}: {e}"));
+            assert_eq!(next.asked().reference.bundle_digest, digest_of(bundle));
+            assert_eq!(host.last_error(), None, "{case}, {again}");
+            assert_eq!(host.ids(), ["smoke", "smoke"], "{case}, {again}");
+            let (action, after) = host.one_start(Worker::default());
+            assert_eq!(action, RecoveryAction::RestoreActive, "{case}, {again}");
+            let restored = after.asked().reference.bundle_digest;
+            assert_eq!(restored, digest_of(bundle), "{case}, {again}");
+            assert_eq!(host.last_error(), None, "{case}, {again}");
+        }
+    }
+}
+
 #[test]
 fn one_start_settles_a_rollback_killed_after_any_of_its_durable_writes() {
     let cases = [

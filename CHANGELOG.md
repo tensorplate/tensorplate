@@ -32,7 +32,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   transaction stays in flight at `promoted` and later transactions are
   refused as busy until the agent is restarted, whose start clears it;
   before, the next transaction replaced it. A transaction in flight no
-  longer carries a `failure`. `recovery.action` in status reports `restore_active`,
+  longer carries a `failure`. A start now compares the bundle staged under
+  the id with the one the `active` record names for every record, one that
+  names no descriptor included, which is every format 0.1 deployment: after
+  an update under the serving id that staged its bundle and did not commit,
+  the start no longer starts the old record over the update's files and
+  reports ready. It starts nothing, records the `load_failed` refusal as
+  `last_error` and comes up, and the deployment is not serving until the id
+  is deployed again. A rollback to a record that names no descriptor is
+  still not compared. `recovery.action` in status reports `restore_active`,
   `quarantine_candidate`, `no_op` or `operator_required`; the `resume_*`
   values and `finalize_promotion` stay in the schema and are never
   reported. (V030-E03-F01-T04)

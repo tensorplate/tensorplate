@@ -548,7 +548,7 @@ start does when the restore cannot be made:
 | The restore finds | The start |
 | --- | --- |
 | an id that cannot name a member | comes up; `last_error` says why; the deployment is not serving |
-| another bundle staged under the id than the record names (see the [staged bundle check](#member-registry)) | the same |
+| another bundle staged under the id than the record names, whether or not the record names a descriptor (see the [staged bundle check](#member-registry)) | the same |
 | the staged directory gone, or a staged manifest that is missing, cannot be read, is incomplete or names no model artifact, or a staged artifact that is missing or altered | the same |
 | a descriptor document that is missing, is not a regular file, does not verify, is another identity's or describes another bundle | the same |
 | a re-stamp of the descriptor that is refused | the same |
@@ -584,6 +584,18 @@ reached and the error. `last_error` carries the same error only while
 nothing serves; it is cleared when the restore serves, so an agent that
 ended a deploy and came back serving the old deployment reports `ready`
 with one more entry in `quarantined`.
+
+It does not come back serving the old deployment when the deploy it ended
+was an update under the id that was serving and had staged its bundle.
+Staging is keyed by the id, so the staged copy is the update's from the
+moment it is staged, before the candidate is recorded. The start ends the
+update, finds another bundle staged than `active` names, starts nothing
+and comes up with that refusal as `last_error` beside the quarantine
+entry: the deployment is not serving until the id is deployed again. This
+holds for a bundle of either format, in every phase from staging on. An
+update killed before it staged its bundle, and a redeploy of the bundle
+that is serving, leave the record's own bundle staged, and the start
+restores it.
 
 The agent records no process id of a worker. A worker that an earlier
 agent process started is ended by the packaged service, not by the pass:
@@ -765,8 +777,9 @@ before the first document is written.
 A record names a descriptor exactly when its bundle is format 0.2 and was
 deployed by an agent that derives one. For every other record (a format 0.1
 bundle, or a state file an earlier agent wrote) no document is read or
-written, and deploy, rollback, restore and restart behave as they did
-before descriptors.
+written, and deploy, rollback and restart behave as they did before
+descriptors. The restore does not: it compares the staged bundle with the
+record's for every record (see the [staged bundle check](#member-registry)).
 
 ## Worker runtime control transport
 
@@ -850,12 +863,13 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   once, without using a restart, with a `load_failed` error that names both
   digests. A staged manifest that cannot be read counts as a restart that
   could not be launched. The manifest's digest covers each artifact's digest;
-  artifact bytes are not hashed again. Startup recovery and a rollback start
-  a record that names no descriptor from the same root without this check,
-  whatever is staged there. For a record that names a
-  [descriptor](#deployment-descriptor-documents), which is every format 0.2
-  deployment this agent deploys, they compare the two digests as well, and
-  a staged bundle that is not the record's is `load_failed` for both. The
+  artifact bytes are not hashed again. Startup recovery compares the two
+  digests as well, for every record. A rollback compares them for a record
+  that names a [descriptor](#deployment-descriptor-documents), which is
+  every format 0.2 deployment this agent deploys; a record that names none
+  it still starts from the same root without this check, whatever is staged
+  there. A staged bundle that is not the record's is `load_failed` for
+  both. The
   restore compares them before it reads anything else of the staged copy,
   so the state of the staged artifacts does not change its answer. The
   rollback is refused. The restore starts nothing, and the agent still comes
@@ -865,11 +879,15 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   record with no `generation` and no `serving_url`. To recover, deploy the
   id again through that agent, as either bundle: the deploy serves it and
   clears the error, and the next start restores it. Staging is not yet kept
-  apart for each generation, so for a format 0.2 deployment a deploy of
-  another bundle under its id has two consequences. After one that
-  succeeded, a rollback to the earlier record is refused, and stays refused
-  until staging is kept for each generation. After one that did not
-  complete, the serving deployment is not restarted when its worker stops,
+  apart for each generation, so a deploy of another bundle under a
+  deployment's id has two consequences. After one that succeeded, a
+  rollback to the earlier record is refused when that record names a
+  descriptor, and stays refused until staging is kept for each generation.
+  A rollback to an earlier record that names none is not compared: it
+  starts the bundle that is staged, the update's, under the earlier record,
+  and the next start of the agent then refuses to restore that record.
+  After one that did not complete, for a bundle of either format, the
+  serving deployment is not restarted when its worker stops,
   and no later start of the agent restores it until the id is deployed
   again. A deploy refused or failed after staging leaves that, and no
   failed deploy is needed: one that a kill or a stop of the agent ended

@@ -299,7 +299,8 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
         return store.set_last_error(Some(err.to_record()));
     }
     // Another bundle is staged under the id than the record names, as a
-    // same-id update that did not complete leaves it.
+    // same-id update that did not complete leaves it. Compared for every
+    // record, one that names no descriptor included.
     if let Ok(Some(refusal)) = another_bundle_staged(&active) {
         return refuse(refusal.to_record());
     }

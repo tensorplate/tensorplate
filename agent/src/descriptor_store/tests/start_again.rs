@@ -441,19 +441,25 @@ fn a_restore_of_a_record_that_names_no_descriptor_writes_and_names_nothing() {
 }
 
 #[test]
-fn a_restore_of_a_record_that_names_no_descriptor_starts_whatever_is_staged_under_its_id() {
+fn a_restore_of_a_record_that_names_no_descriptor_is_refused_when_another_bundle_is_staged_under_its_id(
+) {
     let host = host();
-    let (agent, first) = host.restoring(Worker::default());
+    let (agent, _) = host.restoring(Worker::default());
     undescribe(&agent, |state| state.active.as_mut());
     let staged = host.restage();
 
-    apply_startup(&agent.coordinator).unwrap();
+    let summary = apply_startup(&agent.coordinator).unwrap();
 
-    // As before descriptors: the staged bundle is not compared with the record's.
-    let asked = agent.asked();
-    assert_ne!(asked.reference.bundle_digest, staged);
-    assert_eq!(asked.reference, naming(&reference(&first), [false; 3]));
-    assert_eq!(host.last_error(), None);
+    // Compared as for a record that names one: nothing is started.
+    assert_eq!(summary.action, RecoveryAction::RestoreActive);
+    let error = host.last_error().expect("the refusal is recorded");
+    assert_eq!(error.code, ErrorCode::LoadFailed, "{error:?}");
+    let says = format!("is `{staged}`, not the `");
+    let remedy = "names; `stt` is not serving until it is deployed again";
+    let told = error.message.contains(&says) && error.message.ends_with(remedy);
+    assert!(told, "{error:?}");
+    assert!(agent.never_asked());
+    assert_eq!(host.view(), ["stt", "-", "-", "2"]);
 }
 
 #[test]
@@ -713,6 +719,34 @@ fn a_rollback_to_a_record_that_names_no_descriptor_writes_and_names_nothing() {
     assert_eq!(asked.view, ["tts@2", "stt", "stt", "3"]);
     assert_eq!(host.view(), ["stt", "tts@2", "-", "3"]);
     assert_eq!(host.documents(), "stt-1 tts-2");
+}
+
+#[test]
+fn a_rollback_to_a_record_that_names_no_descriptor_starts_whatever_is_staged_under_its_id() {
+    let host = host();
+    let (agent, first) = host.rolling_back(Worker::default());
+    undescribe(&agent, |state| state.previous_active.as_mut());
+    let staged = host.restage();
+
+    agent.coordinator.rollback(None).unwrap();
+
+    // As before descriptors: the staged bundle is not compared with the
+    // record's.
+    let asked = agent.asked();
+    assert_ne!(asked.reference.bundle_digest, staged);
+    assert_eq!(asked.reference, naming(&reference(&first), [false; 3]));
+    assert_eq!(host.view(), ["stt", "tts@2", "-", "3"]);
+    assert_eq!(host.last_error(), None);
+
+    // The restore compares for such a record: the next start does not
+    // start the record over the other bundle.
+    let (next, _) = host.start(Worker::default());
+    apply_startup(&next.coordinator).unwrap();
+    let refusal = host.last_error().expect("the refusal is recorded");
+    let remedy = "names; `stt` is not serving until it is deployed again";
+    assert!(refusal.message.ends_with(remedy), "{refusal:?}");
+    assert!(next.never_asked());
+    assert_eq!(host.view(), ["stt", "tts@2", "-", "3"]);
 }
 
 #[test]
