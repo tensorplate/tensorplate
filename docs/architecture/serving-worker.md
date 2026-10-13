@@ -1485,6 +1485,15 @@ abort asks for or, when its thread has not reached that, at its stop. Its
 job is ended by the unload. The dispatch itself gives no session
 `worker_shutdown`.
 
+**Known, not changed here: a stop past the drain window sends no
+`SessionClosed`.** The client of such a session reads the events already
+written and then the end of its call, with status `UNAVAILABLE` or
+`CANCELLED` and no terminal event, neither `worker_shutdown` nor any
+other. The stream schema says `SessionClosed` is always a session's last
+event; the listener cancels the call without writing one. The stop case
+asserts what the client reads today. Writing the terminal event before the
+cancel is the listener's change.
+
 **What the worker logs.** `stream listener bound` carries
 `serves_sessions`. Once the listener has stopped, `speech dispatch stopped`
 carries the dispatch's counters as of the last step of its thread:
@@ -1508,7 +1517,8 @@ client with an utterance open, in both orders described below; a job the
 backend takes and refuses, and a session of a mode the backend does not
 run; a drain that delivers the segment in flight, and a stop at the end of
 the drain window whose unload ends the job, with the job's audio still out
-while the unload waits behind the job and back when the stop returns; a
+while the unload waits behind the job and back when the stop returns, and
+whose client reads no `SessionClosed`; a
 start that could not bind and is not retried, and the same start of a
 worker without a dispatch, which is; a worker that is never started; the
 refused unary request; and each row of the table above. Where a session's

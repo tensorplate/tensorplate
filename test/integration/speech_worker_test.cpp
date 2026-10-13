@@ -935,8 +935,16 @@ TEST_F(SpeechWorkerScripted, AStopAtTheEndOfTheDrainWindowLeavesTheJobToTheUnloa
   EXPECT_EQ(played.buffers_at_unload, 1U) << "given back while the backend still ran the job";
   EXPECT_EQ(served.buffers(), 0U) << "the job's audio outlived the unload";
 
-  while (client.read().has_value()) {
+  // Of this session the client read Ready, its frame accepted and the status
+  // above. Nothing follows the stop but the end of the call.
+  ASSERT_FALSE(client.accepted.empty());
+  EXPECT_EQ(client.accepted.back().accepted_sequence(), 2U);
+  // The schema promises a terminal event; the listener does not write one here yet.
+  std::vector<std::string> read_after_the_stop;
+  while (const auto event = client.read()) {
+    read_after_the_stop.push_back(event->ShortDebugString());
   }
+  EXPECT_EQ(read_after_the_stop, std::vector<std::string>{});
   // The server cancels the call as it shuts down; the client reads that as
   // the server going away or as the cancellation itself.
   const auto code = client.call->Finish().error_code();
