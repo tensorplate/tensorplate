@@ -77,12 +77,21 @@ namespace tensorplate::testing {
       AudioChunkResult{kJobOutputAudioFormat, PcmWindow{*buffer, 0, speech.size()}, 0});
 }
 
-/// Passes every call to the bridge behind it and counts what the dispatch
-/// asked. It can answer one session release as the adapter does when its
-/// release record is full, and a job class as a backend that does not run it.
+/// Passes every call to the fixture bridge behind it and counts what the
+/// dispatch asked. It can answer one session release as the adapter does when
+/// its release record is full, and a job class as a backend that does not run
+/// it.
+///
+/// Told to (deliver_callbacks_first()), its submit() and release_session()
+/// return only once the fixture has settled: every callback the call caused
+/// has run by then, on the fixture's thread, as far as a held job allows. A
+/// bridge may deliver in that order, and it is the one a caller that records
+/// a job after submitting it gets wrong. It is not the default: a job nobody
+/// holds has then ended before its submit returns, so no cancel and no
+/// release would find one running.
 class CountingJobBridge final : public BoundedJobBridge {
  public:
-  explicit CountingJobBridge(std::shared_ptr<BoundedJobBridge> inner) : inner_(std::move(inner)) {}
+  explicit CountingJobBridge(std::shared_ptr<FixtureJobBridge> inner) : inner_(std::move(inner)) {}
 
   [[nodiscard]] Result<void> set_event_sink(std::shared_ptr<JobEventSink> sink) override {
     return inner_->set_event_sink(std::move(sink));
@@ -96,7 +105,9 @@ class CountingJobBridge final : public BoundedJobBridge {
                                       "job_class_unsupported"));
       }
     }
-    return inner_->submit(std::move(request));
+    auto submitted = inner_->submit(std::move(request));
+    settle_if_told();
+    return submitted;
   }
   [[nodiscard]] Result<void> cancel(std::uint64_t job_id) override {
     return inner_->cancel(job_id);
@@ -113,13 +124,16 @@ class CountingJobBridge final : public BoundedJobBridge {
                                       "session_release_capacity_exhausted"));
       }
     }
-    return inner_->release_session(session_key, generation);
+    auto released = inner_->release_session(session_key, generation);
+    settle_if_told();
+    return released;
   }
   [[nodiscard]] Result<void> health() override {
     ++health_calls_;
     return inner_->health();
   }
 
+  void deliver_callbacks_first() { callbacks_first_.store(true); }
   void refuse_next_release() {
     const std::lock_guard guard(mu_);
     refuse_next_release_ = true;
@@ -142,13 +156,20 @@ class CountingJobBridge final : public BoundedJobBridge {
   [[nodiscard]] std::uint64_t health_calls() const { return health_calls_.load(); }
 
  private:
-  const std::shared_ptr<BoundedJobBridge> inner_;
+  void settle_if_told() {
+    if (callbacks_first_.load()) {
+      (void)inner_->settled(ReferenceBinding::kPatience);
+    }
+  }
+
+  const std::shared_ptr<FixtureJobBridge> inner_;
   mutable std::mutex mu_;
   std::map<std::uint64_t, std::uint64_t> releases_;
   std::vector<JobRequest> submitted_;
   bool refuse_next_release_ = false;
   std::optional<JobClass> refused_class_;
   std::atomic<std::uint64_t> health_calls_{0};
+  std::atomic<bool> callbacks_first_{false};
 };
 
 class SpeechUnderTest final : public DispatchUnderTest {
@@ -255,6 +276,13 @@ class SpeechUnderTest final : public DispatchUnderTest {
 [[nodiscard]] inline std::unique_ptr<DispatchUnderTest> speech_dispatch_with_late_cancels(
     const SchedulerClock& clock) {
   return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{false, true});
+}
+/// The callbacks a submit or a session release causes run before it returns.
+[[nodiscard]] inline std::unique_ptr<DispatchUnderTest> speech_dispatch_with_callbacks_first(
+    const SchedulerClock& clock) {
+  auto speech = std::make_unique<SpeechUnderTest>(clock);
+  speech->bridge->deliver_callbacks_first();
+  return speech;
 }
 /// The fixture backend's own results: `hello`, and silence for speech.
 [[nodiscard]] inline std::unique_ptr<DispatchUnderTest> speech_dispatch_with_fixture_results(

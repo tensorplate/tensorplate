@@ -127,6 +127,20 @@ TEST(SpeechJobDispatch, AnUtteranceIsOneDecodeAndASegmentOneSynthesis) {
   EXPECT_EQ(stats.jobs_discarded, 0U);
 }
 
+// A bridge may run a job's callbacks before its submit returns. The job's
+// input is held by then, so the `released` that overtakes the return finds it.
+TEST(SpeechJobDispatch, AJobWhoseEventsOvertakeItsSubmitHasItsInputReleased) {
+  Binding binding(&speech_dispatch_with_callbacks_first);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  one_utterance(binding, key);
+  ASSERT_TRUE(binding.read_as<EndpointDetectedOutput>(key).has_value());
+  ASSERT_TRUE(binding.read_as<FinalTranscriptOutput>(key).has_value());
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.buffers_in_use(), 0U);
+  EXPECT_EQ(speech.strategy->stats().jobs_completed, 1U);
+}
+
 TEST(SpeechJobDispatch, CreateRefusesWhatItCannotServeThrough) {
   const FakeSchedulerClock clock;
   const auto buffers = BufferManager::create({}).value();

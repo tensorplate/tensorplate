@@ -1045,13 +1045,16 @@ INSTANTIATE_TEST_SUITE_P(Synthetic, SessionDispatchContract,
                          SessionDispatchContract::name_of);
 
 // The dispatch that runs backend jobs, over the fixture backend in each of
-// the outcomes a backend may choose between.
+// the outcomes a backend may choose between, and once with the bridge's
+// callbacks run before the call that caused them returns.
 INSTANTIATE_TEST_SUITE_P(Speech, SessionDispatchContract,
                          ::testing::Values(DispatchCase{"speech", &speech_dispatch},
                                            DispatchCase{"speech_refusing_at_submit",
                                                         &speech_dispatch_refusing_at_submit},
                                            DispatchCase{"speech_with_late_cancels",
-                                                        &speech_dispatch_with_late_cancels}),
+                                                        &speech_dispatch_with_late_cancels},
+                                           DispatchCase{"speech_with_callbacks_first",
+                                                        &speech_dispatch_with_callbacks_first}),
                          SessionDispatchContract::name_of);
 
 TEST(SyntheticSessionDispatch, NegotiateGrantsTermsOrRefusesBeforeAdmission) {
