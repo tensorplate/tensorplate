@@ -787,14 +787,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   admission closes, a call that has not sent its `Open` is refused at once
   with `admission_closed`, and so is every call that arrives later, without
   its `Open` being read; such a call used to hold the gRPC server for the
-  whole drain window. A refused call lasts until its status is written,
+  whole drain window. A refused call lasts until gRPC reports it done,
   which a peer that does not read puts off, so two more bounds hold such
   calls: the server announces at most 64 concurrent streams on a
   connection (a client with more calls than that on one channel has the
-  surplus queued by its own channel), and the listener keeps at most 32
-  refused calls that are not done, over all connections; a call refused
-  beyond them is cancelled, so its client reads `CANCELLED` and no reason.
-  A refused call has no time limit and the number of connections is not
+  surplus queued by its own channel), and the listener keeps at most
+  4,096 refused calls that are not done, over all connections, each from
+  its refusal until it is done whether or not its peer reads: a bound on
+  memory, roughly 100 MB at about 23.6 KB measured for such a call. A
+  call refused beyond them is cancelled, so its client reads `CANCELLED`
+  and no reason; a client that reads its calls sees that only while 4,096
+  refused calls are outstanding at one time. A refused call has no time
+  limit, so a peer that does not read keeps its places while its
+  connection lasts, and the number of connections is not
   limited. The server enables no compression algorithm, so gRPC
   ends a call that announces one with `UNIMPLEMENTED`, where the listener
   answered a compressed `Open` with `Ready`. Its bandwidth probe is off, so

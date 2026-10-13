@@ -14,12 +14,14 @@
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "tensorplate/stream/v1/session.grpc.pb.h"
@@ -168,13 +170,13 @@ TEST(StreamBounds, OnTheSystemClockTheWatchThreadWakesByItselfWhenAHandshakeTime
   EXPECT_TRUE(eventually([&] { return served.listener().open_calls() == 0; }));
 }
 
-// A refused call holds one of the listener's thirty-two places until it is
-// done, and no longer: more calls than there are places are refused one after
-// another, and each reads its reason.
+// A refused call holds a place from its refusal until it is done, and no
+// longer: a listener with one place refuses calls one after another, and
+// each reads its reason.
 TEST(StreamBounds, ARefusedCallGivesItsPlaceBackWhenItIsDone) {
-  TimedListener timed;
+  TimedListener timed{1};
   timed.listener().stop_admission();
-  for (int call = 0; call < 33; ++call) {
+  for (int call = 0; call < 3; ++call) {
     SCOPED_TRACE(call);
     auto late = timed.served.connect();
     expect_refused(ended_unanswered(late), grpc::StatusCode::UNAVAILABLE,
@@ -185,11 +187,10 @@ TEST(StreamBounds, ARefusedCallGivesItsPlaceBackWhenItIsDone) {
 }
 
 // A call refused with no place left is cancelled: its client reads CANCELLED
-// and no reason. No test here has a peer that does not read, so real calls
-// never fill the thirty-two places; a listener given none runs the same
-// path from each place a bound refuses: the watch thread, the closing of
-// admission, and the method handler, where a call refused on arrival is
-// ended.
+// and no reason. No test here fills the listener's own 4,096 places with
+// real calls; a listener given none runs the same path from each place a
+// bound refuses: the watch thread, the closing of admission, and the method
+// handler, where a call refused on arrival is ended.
 TEST(StreamBounds, ACallRefusedWithNoPlaceLeftIsCancelledAndReadsNoReason) {
   TimedListener timed{0};
   auto silent = timed.silent_call();
@@ -214,6 +215,48 @@ TEST(StreamBounds, ACallRefusedWithNoPlaceLeftIsCancelledAndReadsNoReason) {
   EXPECT_TRUE(eventually([&] { return timed.listener().open_calls() == 0; }));
   EXPECT_EQ(timed.listener().refused_calls(), 0U);
   EXPECT_TRUE(timed.served.dispatch().seen.events().empty());
+}
+
+// One channel with as many calls open as a connection carries, against a
+// listener that refuses every Open, round after round without waiting for the
+// listener between them. A place is held from the refusal until gRPC reports
+// the call done, also for a peer that reads, so such a channel holds up to 64
+// places at one time. With the listener's own places no call is cancelled:
+// each reads a refusal with its reason, the one its Open is answered with or,
+// for a call that arrives while 32 are waited on, the one for that limit.
+TEST(StreamBounds, AChannelAtTheStreamLimitReadsARefusalWithItsReasonForEveryCall) {
+  constexpr std::size_t kCalls = 64;
+  constexpr int kRounds = 20;
+  Served served{false};
+  for (int round = 0; round < kRounds; ++round) {
+    SCOPED_TRACE(round);
+    std::vector<grpc::Status> statuses(kCalls);
+    std::atomic<bool> open{false};
+    std::vector<std::thread> callers;
+    for (auto& status : statuses) {
+      callers.emplace_back([&served, &open, &status] {
+        while (!open) {
+          std::this_thread::yield();
+        }
+        status = served.refused(open_event(wire::SESSION_MODE_STT_STREAMING));
+      });
+    }
+    open = true;
+    for (auto& caller : callers) {
+      caller.join();
+    }
+    for (const auto& status : statuses) {
+      const auto& message = status.error_message();
+      if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {
+        EXPECT_EQ(message, "open refused: FAILURE_REASON_SESSION_COUNT_LIMIT");
+      } else {
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION) << message;
+        EXPECT_EQ(message, "open refused: FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY");
+      }
+    }
+  }
+  EXPECT_TRUE(eventually([&] { return served.listener().open_calls() == 0; }));
+  EXPECT_EQ(served.listener().refused_calls(), 0U);
 }
 
 // The call's first message was read before admission closed, so no bound

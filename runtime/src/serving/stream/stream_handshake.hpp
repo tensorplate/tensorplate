@@ -22,9 +22,11 @@ namespace tensorplate::serving::stream {
 inline constexpr std::chrono::seconds kOpenHandshakeTimeout{5};
 /// Calls a listener waits on at one time for their first message.
 inline constexpr std::size_t kMaxOpenHandshakes = 32;
-/// Refused calls a listener keeps at one time, each until it is done. No
-/// fewer than it waits on: closing admission refuses all of those at once.
-inline constexpr std::size_t kMaxRefusedCalls = 32;
+/// Refused calls a listener keeps at one time over all its connections, each
+/// from its refusal until it is done. A bound on memory: a refused call that
+/// is not done was measured at about 23.6 KB, so 4,096 of them hold roughly
+/// 100 MB. What bounds one connection is its 64 concurrent streams.
+inline constexpr std::size_t kMaxRefusedCalls = 4'096;
 
 /// The calls of one listener whose first message has not been read: at most
 /// kMaxOpenHandshakes, each until kOpenHandshakeTimeout after it began, and
@@ -130,8 +132,9 @@ class OpenHandshakes {
 
 /// The places of one listener for calls it refused: a refused call lasts
 /// until the transport has sent its status, which a peer that does not read
-/// puts off for as long as it likes. A call keeps its place until it is done;
-/// CallOutput::refuse() cancels a call refused with none left.
+/// puts off for as long as it likes. A call keeps its place from its refusal
+/// until it is done, whether or not its peer reads; CallOutput::refuse()
+/// cancels a call refused with none left.
 ///
 /// Thread-safe.
 class RefusedCalls {

@@ -27,8 +27,8 @@ struct StreamListenerOptions {
   std::string deployment_id;
   /// Session timers and the session count; the worker serves one at a time.
   SessionLimits limits = SessionLimits::defaults();
-  /// Places for refused calls that are not done; the listener's own 32 when
-  /// unset, which the worker keeps.
+  /// Places for refused calls that are not done; the listener's own 4,096
+  /// when unset, which the worker keeps. Set by tests only.
   std::optional<std::size_t> max_refused_calls;
 };
 
@@ -78,8 +78,8 @@ class StreamListener {
   /// most the open handshake timeout.
   [[nodiscard]] std::size_t awaited_calls() const noexcept;
 
-  /// Refused calls that are not done and hold a place: at most 32. A call
-  /// refused beyond them is cancelled and holds none.
+  /// Refused calls that are not done and hold a place: at most 4,096 over
+  /// all connections. A call refused beyond them is cancelled and holds none.
   [[nodiscard]] std::size_t refused_calls() const noexcept;
 
   /// Says that the clock was moved by hand. The watch thread sleeps until an

@@ -277,21 +277,23 @@ std::vector<std::unique_ptr<UnreadCall>> refused_and_held(RefusedCalls& places, 
   return held;
 }
 
-TEST(RefusedCalls, TheThirtySecondCallKeepsItsStatusAndTheNextIsCancelled) {
+// The listener's own places, with none given: sized for the memory refused
+// calls may hold, far above the calls of one connection.
+TEST(RefusedCalls, TheLastOfThe4096PlacesKeepsItsStatusAndTheNextCallIsCancelled) {
   RefusedCalls places;
-  const auto held = refused_and_held(places, 32);
+  const auto held = refused_and_held(places, 4'096);
   for (const auto& call : held) {
     EXPECT_TRUE(call->kept_its_status());
   }
-  EXPECT_EQ(places.size(), 32U);
+  EXPECT_EQ(places.size(), 4'096U);
   UnreadCall next;
   next.refuse(places);
-  EXPECT_TRUE(next.was_cancelled()) << "a thirty-third refused call was kept";
-  EXPECT_EQ(places.size(), 32U);
+  EXPECT_TRUE(next.was_cancelled()) << "a refused call beyond the places was kept";
+  EXPECT_EQ(places.size(), 4'096U);
 }
 
 TEST(RefusedCalls, ACallThatEndsFreesItsPlaceAndACancelledCallHeldNone) {
-  RefusedCalls places;
+  RefusedCalls places{32};
   const auto held = refused_and_held(places, 32);
   UnreadCall cancelled;
   cancelled.refuse(places);
@@ -346,7 +348,7 @@ TEST(RefusedCalls, ARefusalAfterTheWriterIsGoneDoesNothing) {
 TEST(RefusedCalls, ExactlyThirtyTwoOfSixtyFourCallsRefusedAtOnceKeepTheirStatus) {
   constexpr int kThreads = 8;
   constexpr int kEach = 8;
-  RefusedCalls places;
+  RefusedCalls places{32};
   std::vector<std::unique_ptr<UnreadCall>> calls;
   for (int i = 0; i < kThreads * kEach; ++i) {
     calls.push_back(std::make_unique<UnreadCall>());

@@ -142,8 +142,9 @@ runs speech jobs is wired in.
   here started anything: see "Refusals" for what that means for a retry.
 - **Refused calls and the calls of a connection.** A refused call is not
   over when it is refused: it lasts, with its reactor and what gRPC keeps
-  of the call, until gRPC has written its status, and a peer that does not
-  read can put that off. Two bounds hold what such calls can add up to.
+  of the call, until gRPC reports it done, which follows the writing of
+  its status, and a peer that does not read can put that off. Two bounds
+  hold what such calls can add up to.
   The first is gRPC's, on a connection: the server announces at most 64
   concurrent streams (`grpc.max_concurrent_streams`; a test reads the
   value off the server's first SETTINGS frame), and gRPC refuses a stream
@@ -151,29 +152,44 @@ runs speech jobs is wired in.
   than 64 calls open on a channel sees nothing of it; with more, its own
   channel queues the surplus until a call ends. The value is above the 32
   calls waited on, so a connection that opens a 33rd silent call is still
-  told `session_count_limit`. The second is the listener's, over all
-  connections: it keeps at most 32 refused calls that are not done. A call
-  takes a place when it is refused, by a bound or for its `Open`, and
-  gives it back when gRPC reports the call done, however it ended. A call
-  refused while all 32 places are taken is cancelled instead of finished
-  with its status: it takes no place, and its client reads `CANCELLED`
-  and no reason. With peers that read, a refused call is done as soon as
-  its status is written, so the places fill only when peers do not read;
-  and 32 is no fewer than the calls waited on, so closing admission has a
-  place for each of them. What the two bounds leave open: the number of
+  told `session_count_limit`. This is the bound on one connection. The
+  second is the listener's, over all connections, and it is a bound on
+  memory: the listener keeps at most 4,096 refused calls that are not
+  done. A call takes a place when it is refused, by a bound or for its
+  `Open`, and gives it back when gRPC reports the call done, however it
+  ended. It holds the place for that whole time whether or not its peer
+  reads, so a channel with 64 calls open at once can hold 64 places at
+  one time. A refused call that is not done was measured at about 23.6 KB
+  (the review of this change, before either bound existed: one connection
+  that did not read held 180,822 refused calls and 4.26 GB), so the 4,096
+  places hold roughly 100 MB. A call refused while all 4,096 places are
+  taken is cancelled instead of finished with its status: it takes no
+  place, and its client reads `CANCELLED` and no reason, which is less
+  than "Refusals" promises a refused call. A client that reads its calls
+  sees that only while 4,096 refused calls are outstanding over the whole
+  listener at one time. The bound was 32 at first, below the 64 streams of
+  one connection, and a single channel with 64 calls open then read bare
+  cancels. What the two bounds leave open: the number of
   connections is not limited, so the 64 calls bound each connection and
-  not their sum (the 32 places do bound the refused calls of all of them
-  together); a refused call has no time limit, so a peer that does not
-  read keeps the places it took for as long as its connection lasts, and
-  every other refused call reads `CANCELLED` meanwhile; and what gRPC
-  itself keeps for a call that was cancelled, or for a stream it refused,
-  is gRPC's to bound. The tests: against a writer whose calls end when the
-  test says so, the 32nd refused call keeps its status, the 33rd is
-  cancelled, and the place of a call that ended is used again; with a real
-  client, 33 calls refused one after another each read their reason, and
-  a listener that is given no place cancels a call its watch thread
-  refuses, a call refused when admission closes and a call refused on
-  arrival. No test has a real peer that does not read.
+  not their sum (the 4,096 places do bound the refused calls of all of
+  them together); a refused call has no time limit, so a peer that does
+  not read keeps the places it took for as long as its connection lasts;
+  and what gRPC itself keeps for a call that was cancelled, or for a
+  stream it refused, is gRPC's to bound. What ends such a connection is
+  not the listener's: gRPC sets the TCP user timeout on a server's
+  listening socket, 20 s unless `grpc.keepalive_timeout_ms` says
+  otherwise, and the listener sets neither; by that option's description
+  the kernel ends a connection whose peer has acknowledged or taken no
+  bytes for that long. That is read from the source of the gRPC this tree
+  builds (1.81.1), not shown by a run here. The tests: against a writer
+  whose calls end when the test says so, the 4,096th refused call keeps
+  its status, the next is cancelled, and the place of a call that ended is
+  used again; with a real client, 64 calls opened at once on one channel,
+  twenty rounds without a pause, each read a refusal with its reason; a
+  listener that is given one place refuses calls one after another and
+  each reads its reason; and a listener that is given no place cancels a
+  call its watch thread refuses, a call refused when admission closes and
+  a call refused on arrival. No test has a real peer that does not read.
 - **Compression.** The server enables no compression algorithm. A call
   whose client announces one for its messages (gzip or deflate) is ended
   by gRPC itself, with status `UNIMPLEMENTED` and no event: the listener
@@ -355,8 +371,8 @@ runs speech jobs is wired in.
   session ended through the cancel path (a client `Cancel`, a timeout, a
   slow consumer) is also `SESSION_STATE_CLOSED`.
 - **Not enforced yet.** A refused call is counted (see "Refused calls and
-  the calls of a connection") but not timed: it keeps its place until the
-  transport has sent its status or its connection ends, and at shutdown
+  the calls of a connection") but not timed: it keeps its place until
+  gRPC reports it done or its connection ends, and at shutdown
   such a call still holds the gRPC server until the drain window ends. A
   connection that opens no call
   is neither counted nor expired, and the number of connections is not
