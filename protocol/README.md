@@ -64,7 +64,7 @@ is frozen. The JSON contracts under `schemas/` are unchanged by it.
   emitted in lowercase hex, and the message in protobuf text format. Two
   files are whole sessions in the order their events are sent, one
   speech-to-text and one text-to-speech. One holds the remaining bodies,
-  five ends with a cause, an `Open` with a selector and nine refusals. One
+  five ends with a cause, an `Open` with a selector and ten refusals. One
   holds frames of `extension.proto`, a fixture-only schema with fields, a
   body, a mode and a capability stream/v1 does not have. Every value in
   them is synthetic. After a schema change, record the
@@ -152,7 +152,10 @@ What the draft now fixes:
   audio bounds for the session's mode beside the timers, none of them zero,
   so a client reads them from the session and not from a descriptor. Its
   `Open` still names a language, a format and a voice the deployment
-  declares.
+  declares. One limit runs out before `Ready` and so is announced by no
+  event: the open handshake timeout, the time a call has to send its
+  `Open`. The serving worker's listener gives it 5 s and refuses a call
+  that has sent nothing by then with `idle_timeout`.
 - **Capabilities.** `Open` declares the client's capabilities and `Ready`
   returns those in force. None is defined yet.
 - **End causes.** A cause is a `FailureReason`, always set, with the code
@@ -163,7 +166,9 @@ What the draft now fixes:
   whose detail is an `OpenRefused`, and every terminal outcome states
   whether a session slot was ever reserved. The schema lists the reasons
   that precede admission; the admission value, not that list, is the proof
-  that a call was not admitted.
+  that a call was not admitted. A call that was not admitted started
+  nothing, so its `Open` is safe to send again on a new call, whatever the
+  taxonomy's retry hint says of the reason it was refused with.
 - **Target.** `Open` names a resolved target (deployment id, generation,
   descriptor digest) or a model selector, and is the only client event that
   names a generation. The server refuses a selector as unresolved, and a

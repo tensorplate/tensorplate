@@ -63,6 +63,17 @@ producer in the session layer; the stream listener is what refuses a
 malformed event, an unresolved model selector, and a deployment or
 descriptor digest the worker does not serve.
 
+The `Retryable` column describes a reason as the end of a session. A
+refused `Open` is another matter: the stream envelope marks the call as
+never admitted (`OpenRefused`, admission `NOT_ADMITTED`), nothing was
+started for it, and sending the same `Open` again on a new call is always
+safe, whatever the column says of the reason. The stream listener refuses
+with three reasons before it has read an `Open` at all:
+`session_count_limit` (too many calls have yet to send theirs),
+`idle_timeout` (no `Open` within the open handshake timeout; "no" in the
+column holds for a session that idled out, not for this refusal) and
+`admission_closed`.
+
 ## Categories
 
 | Category      | Groups failures of                                              |

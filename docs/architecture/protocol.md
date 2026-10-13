@@ -35,7 +35,10 @@ the IPC headers across two encodings.
 The external stream session envelope is the one protobuf contract. It is
 a draft and changes none of the JSON contracts. The serving worker's
 stream listener implements it, and no worker serves a session with it
-yet.
+yet. One of its limits is announced by no event, because it runs out
+before the first one: a call has 5 s to send its `Open` (the open
+handshake timeout, under "Limits" in
+[`protocol/README.md`](../../protocol/README.md#streaming-session-envelope)).
 
 ## Versioning
 
