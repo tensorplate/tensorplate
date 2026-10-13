@@ -7,6 +7,7 @@
 use super::*;
 use tensorplate_protocol::agent_control::AgentRunState;
 use tensorplate_protocol::agent_state::DeploymentRecord;
+use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::ErrorCode;
 
 use crate::coordinator::Coordinator;
@@ -16,6 +17,7 @@ use crate::recovery::apply_startup;
 
 const STT: &str = "v0_2/speech_stt_streaming";
 const TTS: &str = "v0_2/speech_tts_streaming";
+const FORMAT_0_1: &str = "v0_1/x86_fixture_smoke";
 
 /// Where the agent's loop runs a supervision step during a transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -360,4 +362,66 @@ fn status_after_a_start_that_did_not_restore_shows_the_error_and_no_serving_gene
         (AgentRunState::Ready, None)
     );
     assert_eq!(next.named(), ["stt@3", "stt@1", "4"]);
+}
+
+#[test]
+fn a_format_0_1_transaction_killed_after_the_registry_took_its_generation_is_ended_by_the_next_start(
+) {
+    // A format 0.1 bundle names no descriptor, so the registry takes the
+    // generation inside `prepare`, in a state write of its own: the seventh
+    // of a deploy and the fifth of a rollback, each after `capacity_checked`.
+    for (rollback, landed) in [(false, 7), (true, 5)] {
+        let w = wired();
+        w.f.health(ACTIVE_PORT, "first");
+        w.f.health(CANDIDATE_PORT, "second");
+        w.deploy("first", FORMAT_0_1).unwrap();
+        if rollback {
+            w.deploy("second", FORMAT_0_1).unwrap();
+        }
+        let before = w.store.snapshot().unwrap();
+        let launched = w.launched();
+        w.store.kill_after_writes(landed);
+
+        let ended = if rollback {
+            w.coordinator.rollback(None).map(|_| ())
+        } else {
+            w.deploy("second", FORMAT_0_1)
+        };
+
+        assert!(matches!(ended, Err(AgentError::Io(_))), "{rollback}");
+        // The generation is taken and its worker launched; the phase is the
+        // one before.
+        let found = w.store.snapshot().unwrap();
+        let taken = before.next_generation.unwrap();
+        assert_eq!(found.next_generation, Some(taken + 1), "{rollback}");
+        assert_eq!(w.launched(), [launched, vec![taken]].concat(), "{rollback}");
+        let tx = found.in_flight_transaction.expect("in flight");
+        assert_eq!(tx.phase, DeployState::CapacityChecked, "{rollback}");
+        assert_eq!(found.active, before.active, "{rollback}");
+
+        // The next start's registry holds no worker. It ends the transaction
+        // and starts the active record as the generation after.
+        let next = w.started_again();
+        let serving = found.active.unwrap().deployment_id;
+        next.f.health(ACTIVE_PORT, &serving);
+        apply_startup(&next.coordinator).unwrap();
+
+        let settled = next.store.snapshot().unwrap();
+        assert!(settled.in_flight_transaction.is_none() && settled.candidate.is_none());
+        let ended: Vec<_> = settled.quarantined.iter().collect();
+        assert_eq!(ended.len(), 1, "{rollback}");
+        let reached = (ended[0].transaction_id.as_str(), ended[0].phase);
+        let expected = (tx.transaction_id.as_str(), DeployState::CapacityChecked);
+        assert_eq!(reached, expected, "{rollback}");
+        assert_eq!(
+            (&settled.active, &settled.previous_active),
+            (&before.active, &before.previous_active),
+            "{rollback}"
+        );
+        assert_eq!(next.launched(), [taken + 1], "{rollback}");
+        let member = next.f.registry.serving_member().unwrap().unwrap().member;
+        assert_eq!(member, MemberRef::new(&serving, taken + 1), "{rollback}");
+        assert_eq!(settled.next_generation, Some(taken + 2), "{rollback}");
+        assert_eq!(settled.last_error, None, "{rollback}");
+    }
 }
