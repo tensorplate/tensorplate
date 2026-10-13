@@ -110,6 +110,10 @@ class CountingJobBridge final : public BoundedJobBridge {
     return submitted;
   }
   [[nodiscard]] Result<void> cancel(std::uint64_t job_id) override {
+    {
+      const std::lock_guard guard(mu_);
+      cancelled_.push_back(job_id);
+    }
     return inner_->cancel(job_id);
   }
   [[nodiscard]] Result<void> release_session(std::uint64_t session_key,
@@ -153,6 +157,11 @@ class CountingJobBridge final : public BoundedJobBridge {
     const std::lock_guard guard(mu_);
     return submitted_;
   }
+  /// Every job id cancel() was called with, in order.
+  [[nodiscard]] std::vector<std::uint64_t> cancelled() const {
+    const std::lock_guard guard(mu_);
+    return cancelled_;
+  }
   [[nodiscard]] std::uint64_t health_calls() const { return health_calls_.load(); }
 
  private:
@@ -166,6 +175,7 @@ class CountingJobBridge final : public BoundedJobBridge {
   mutable std::mutex mu_;
   std::map<std::uint64_t, std::uint64_t> releases_;
   std::vector<JobRequest> submitted_;
+  std::vector<std::uint64_t> cancelled_;
   bool refuse_next_release_ = false;
   std::optional<JobClass> refused_class_;
   std::atomic<std::uint64_t> health_calls_{0};

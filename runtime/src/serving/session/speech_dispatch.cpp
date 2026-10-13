@@ -290,6 +290,13 @@ void SpeechJobDispatch::stop() noexcept {
         (void)bridge_->release_session(key, options_.generation);
       }
     }
+    // A release the bridge refused cancelled nothing either.
+    if (in_flight_) {
+      const auto owner = sessions_.find(in_flight_->session_key);
+      if (owner != sessions_.end() && owner->second.release_refused) {
+        (void)bridge_->cancel(in_flight_->job_id);
+      }
+    }
     sessions_.clear();
     lane_.clear();
   });
@@ -493,6 +500,7 @@ void SpeechJobDispatch::release(SessionManager& manager, std::uint64_t key, Sess
     acknowledge(manager, key);
     return;
   }
+  session.release_refused = true;
   ++stats_.releases_refused;
 }
 

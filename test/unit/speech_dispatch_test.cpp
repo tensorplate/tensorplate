@@ -801,11 +801,38 @@ TEST(SpeechJobDispatch, AJobsInputIsReleasedWhenTheBackendReportsItAlsoAfterStop
   // Released at its cancel, so not again at the stop; the idle one there.
   EXPECT_EQ(speech.bridge->releases(decoding), 1U);
   EXPECT_EQ(speech.bridge->releases(idle), 1U);
+  // The release cancelled the job: the stop asks for no cancel of its own.
+  EXPECT_TRUE(speech.bridge->cancelled().empty());
   speech.release_jobs();
   ASSERT_TRUE(speech.fixture->settled(Binding::kPatience));
   EXPECT_EQ(speech.buffers_in_use(), 0U);
   // Nothing is reported after the stop: both slots end with the manager.
   EXPECT_EQ(binding.manager->held_slots(), 2U);
+}
+
+// A release the bridge refused cancelled nothing, so the session's job would
+// run on under the unload that follows a stop.
+TEST(SpeechJobDispatch, StopCancelsTheJobOfASessionWhoseReleaseTheBridgeRefused) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  speech.hold_jobs();
+  one_utterance(binding, key);
+  ASSERT_TRUE(binding.settle());
+  speech.bridge->refuse_next_release();
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  EXPECT_TRUE(speech.bridge->cancelled().empty());
+
+  binding.dispatch().stop();
+  const auto submitted = speech.bridge->submitted();
+  ASSERT_EQ(submitted.size(), 1U);
+  EXPECT_EQ(speech.bridge->cancelled(), std::vector{submitted.front().identity().job_id});
+  // The refused release is not asked again.
+  EXPECT_EQ(speech.bridge->releases(key), 1U);
+  speech.release_jobs();
+  ASSERT_TRUE(speech.fixture->settled(Binding::kPatience));
+  EXPECT_EQ(speech.buffers_in_use(), 0U);
 }
 
 TEST(SpeechJobDispatch, SpeechThatArrivesAfterStopIsReleased) {
@@ -817,6 +844,7 @@ TEST(SpeechJobDispatch, SpeechThatArrivesAfterStopIsReleased) {
   ASSERT_TRUE(binding.settle());
   binding.dispatch().stop();
   EXPECT_EQ(speech.bridge->releases(key), 1U);
+  EXPECT_TRUE(speech.bridge->cancelled().empty());
   // The backend lets the job complete: its audio reaches a stopped dispatch.
   speech.release_jobs();
   ASSERT_TRUE(speech.fixture->settled(Binding::kPatience));

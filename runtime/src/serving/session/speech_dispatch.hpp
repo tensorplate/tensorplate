@@ -79,11 +79,11 @@ struct SpeechDispatchStats {
 /// class it refuses fails the session at its first job.
 ///
 /// One thread of its own makes every report, every offer and every bridge
-/// call but two: create() registers the sink, and stop() releases the
-/// sessions still open on its caller's thread, once that thread has ended.
-/// The bridge's callbacks only queue for it, so they never wait on the
-/// manager, a queue or the backend. A session failure carries the stream's
-/// reason:
+/// call but those of two members: create() registers the sink, and stop()
+/// releases the sessions still open, and cancels the job of one whose release
+/// was refused, on its caller's thread, once that thread has ended. The
+/// bridge's callbacks only queue for it, so they never wait on the manager, a
+/// queue or the backend. A session failure carries the stream's reason:
 /// `backend_reset` for a job the backend's loss ended (applied as the
 /// `backend_reset` event), `backend_unavailable` for a backend that is gone or
 /// unloaded, `backend_unsupported_capability` for a job class or an option
@@ -119,8 +119,9 @@ class SpeechJobDispatch final : public SessionDispatch {
   [[nodiscard]] bool wait_idle(std::chrono::milliseconds patience);
 
   void attach(SessionManager& manager) override;
-  /// Also releases, through the bridge, every session still open here, so
-  /// that an unload after it has no job of theirs to wait for.
+  /// Also releases, through the bridge, every session still open here, and
+  /// cancels the job of a session whose release the bridge refused, so that
+  /// an unload after it has no job of theirs to wait for.
   void stop() noexcept override;
   [[nodiscard]] Result<SessionTerms> negotiate(const SessionRequest& request) const override;
   [[nodiscard]] Result<void> open_session(std::uint64_t session_key,
@@ -208,6 +209,8 @@ class SpeechJobDispatch final : public SessionDispatch {
     bool ended = false;
     /// Released through the bridge; acknowledged when the backend confirms.
     bool releasing = false;
+    /// The bridge refused that release, so nothing cancelled the session's job.
+    bool release_refused = false;
     SchedulerClock::TimePoint release_asked{};
     JobState job = JobState::None;
 
