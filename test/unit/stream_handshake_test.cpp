@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The stream listener's wait for a call's first message: no transport, no
-// clock.
+// The stream listener's wait for a call's first message and its places for
+// refused calls: no transport, no clock.
 
 #include "serving/stream/stream_handshake.hpp"
 
@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -24,6 +25,7 @@ using tensorplate::SystemSchedulerClock;
 using tensorplate::serving::stream::CallOutput;
 using tensorplate::serving::stream::CallWriter;
 using tensorplate::serving::stream::OpenHandshakes;
+using tensorplate::serving::stream::RefusedCalls;
 using tensorplate::stream::v1::ServerEvent;
 
 class IdleWriter final : public CallWriter {
@@ -218,6 +220,161 @@ TEST(OpenHandshakes, EachCallIsAnsweredOnceWhenReadersAndBoundsRace) {
   answered += static_cast<int>(handshakes.close().size());
   EXPECT_EQ(answered, waited);
   EXPECT_GT(waited, 0);
+}
+
+/// The transport's side of a refused call, with gRPC's rules for a reactor:
+/// it is finished once, and nothing reaches it once the call is done.
+class EndRecorder final : public CallWriter {
+ public:
+  void start_write(const ServerEvent& /*event*/) override {
+    ADD_FAILURE() << "a call that was never admitted is sent no event";
+  }
+  void finish(const grpc::Status& status) override {
+    EXPECT_FALSE(done) << "finished after the call was done";
+    EXPECT_FALSE(finished.has_value()) << "finished twice";
+    finished = status.error_code();
+  }
+  void cancel() override {
+    EXPECT_FALSE(done) << "cancelled after the call was done";
+    ++cancels;
+  }
+
+  std::optional<grpc::StatusCode> finished;
+  int cancels = 0;
+  bool done = false;
+};
+
+/// One call whose peer does not read: it is done when the test says so, and
+/// gRPC ends no call that its reactor has not finished.
+struct UnreadCall {
+  void refuse(RefusedCalls& places) {
+    out->refuse(places, {grpc::StatusCode::UNAVAILABLE, "open refused"});
+  }
+  void end() {
+    ASSERT_TRUE(writer.finished.has_value()) << "a call is done only once it was finished";
+    writer.done = true;
+    out->detach();
+  }
+  [[nodiscard]] bool kept_its_status() const {
+    return writer.finished == grpc::StatusCode::UNAVAILABLE && writer.cancels == 0;
+  }
+  [[nodiscard]] bool was_cancelled() const {
+    return writer.finished == grpc::StatusCode::CANCELLED && writer.cancels == 1;
+  }
+
+  SystemSchedulerClock clock;
+  EndRecorder writer;
+  std::shared_ptr<CallOutput> out = std::make_shared<CallOutput>(writer, clock);
+};
+
+/// `count` calls, each refused and none done.
+std::vector<std::unique_ptr<UnreadCall>> refused_and_held(RefusedCalls& places, int count) {
+  std::vector<std::unique_ptr<UnreadCall>> held;
+  for (int i = 0; i < count; ++i) {
+    held.push_back(std::make_unique<UnreadCall>());
+    held.back()->refuse(places);
+  }
+  return held;
+}
+
+TEST(RefusedCalls, TheThirtySecondCallKeepsItsStatusAndTheNextIsCancelled) {
+  RefusedCalls places;
+  const auto held = refused_and_held(places, 32);
+  for (const auto& call : held) {
+    EXPECT_TRUE(call->kept_its_status());
+  }
+  EXPECT_EQ(places.size(), 32U);
+  UnreadCall next;
+  next.refuse(places);
+  EXPECT_TRUE(next.was_cancelled()) << "a thirty-third refused call was kept";
+  EXPECT_EQ(places.size(), 32U);
+}
+
+TEST(RefusedCalls, ACallThatEndsFreesItsPlaceAndACancelledCallHeldNone) {
+  RefusedCalls places;
+  const auto held = refused_and_held(places, 32);
+  UnreadCall cancelled;
+  cancelled.refuse(places);
+  ASSERT_TRUE(cancelled.was_cancelled());
+  cancelled.end();
+  EXPECT_EQ(places.size(), 32U) << "a call that held no place gave one back";
+  UnreadCall still_none;
+  still_none.refuse(places);
+  EXPECT_TRUE(still_none.was_cancelled());
+
+  held.front()->end();
+  EXPECT_EQ(places.size(), 31U);
+  UnreadCall next;
+  next.refuse(places);
+  EXPECT_TRUE(next.kept_its_status()) << "the place of a call that ended was not free";
+  EXPECT_EQ(places.size(), 32U);
+  // Once only: the place went with the call.
+  held.front()->out->detach();
+  EXPECT_EQ(places.size(), 32U);
+}
+
+// A call its client cancelled while a bound was about to refuse it: it has
+// ended, so the refusal neither takes a place nor cancels.
+TEST(RefusedCalls, ARefusalOfACallThatIsEndingAlreadyTakesNoPlaceAndCancelsNothing) {
+  RefusedCalls places;
+  UnreadCall ending;
+  ending.out->finish(grpc::Status::CANCELLED);
+  ending.refuse(places);
+  EXPECT_EQ(places.size(), 0U);
+  EXPECT_EQ(ending.writer.finished, grpc::StatusCode::CANCELLED);
+
+  RefusedCalls none{0};
+  UnreadCall refused;
+  refused.refuse(places);
+  refused.refuse(none);
+  EXPECT_TRUE(refused.kept_its_status()) << "a second refusal cancelled a call that had a place";
+  EXPECT_EQ(places.size(), 1U);
+}
+
+TEST(RefusedCalls, ARefusalAfterTheWriterIsGoneDoesNothing) {
+  RefusedCalls places;
+  UnreadCall gone;
+  gone.out->detach();
+  gone.refuse(places);
+  EXPECT_EQ(places.size(), 0U) << "a place was taken that no end gives back";
+  EXPECT_FALSE(gone.writer.finished.has_value());
+  EXPECT_EQ(gone.writer.cancels, 0);
+}
+
+// Refusals from the reactions, the watch thread and a closing admission run
+// together: the places are never exceeded and none is lost.
+TEST(RefusedCalls, ExactlyThirtyTwoOfSixtyFourCallsRefusedAtOnceKeepTheirStatus) {
+  constexpr int kThreads = 8;
+  constexpr int kEach = 8;
+  RefusedCalls places;
+  std::vector<std::unique_ptr<UnreadCall>> calls;
+  for (int i = 0; i < kThreads * kEach; ++i) {
+    calls.push_back(std::make_unique<UnreadCall>());
+  }
+  std::vector<std::thread> refusers;
+  for (int thread = 0; thread < kThreads; ++thread) {
+    refusers.emplace_back([&, thread] {
+      for (int i = 0; i < kEach; ++i) {
+        calls[static_cast<std::size_t>(thread * kEach + i)]->refuse(places);
+      }
+    });
+  }
+  for (auto& refuser : refusers) {
+    refuser.join();
+  }
+  int kept = 0;
+  int cancelled = 0;
+  for (const auto& call : calls) {
+    kept += call->kept_its_status() ? 1 : 0;
+    cancelled += call->was_cancelled() ? 1 : 0;
+  }
+  EXPECT_EQ(kept, 32);
+  EXPECT_EQ(cancelled, 32);
+  EXPECT_EQ(places.size(), 32U);
+  for (const auto& call : calls) {
+    call->end();
+  }
+  EXPECT_EQ(places.size(), 0U);
 }
 
 }  // namespace

@@ -2,8 +2,10 @@
 #pragma once
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "tensorplate/core/result.hpp"
@@ -25,6 +27,9 @@ struct StreamListenerOptions {
   std::string deployment_id;
   /// Session timers and the session count; the worker serves one at a time.
   SessionLimits limits = SessionLimits::defaults();
+  /// Places for refused calls that are not done; the listener's own 32 when
+  /// unset, which the worker keeps.
+  std::optional<std::size_t> max_refused_calls;
 };
 
 /// The gRPC SessionService of one worker: one call per logical session, each
@@ -34,7 +39,8 @@ struct StreamListenerOptions {
 /// reactions, which never wait on a job. One thread of its own refuses a call
 /// whose Open is overdue and cancels a call that outruns the no-progress limit
 /// after its session has ended. Without a dispatch every Open is refused with
-/// `backend_unsupported_capability`.
+/// `backend_unsupported_capability`. A connection carries at most 64 calls at
+/// one time: gRPC refuses a stream beyond them before the listener sees it.
 class StreamListener {
  public:
   /// Binds and starts serving. `dispatch`, when given, is attached here, is
@@ -71,6 +77,10 @@ class StreamListener {
   /// Calls whose first message has not been read: at most 32, each for at
   /// most the open handshake timeout.
   [[nodiscard]] std::size_t awaited_calls() const noexcept;
+
+  /// Refused calls that are not done and hold a place: at most 32. A call
+  /// refused beyond them is cancelled and holds none.
+  [[nodiscard]] std::size_t refused_calls() const noexcept;
 
   struct Impl;
 

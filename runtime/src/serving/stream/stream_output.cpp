@@ -2,7 +2,9 @@
 #include "serving/stream/stream_output.hpp"
 
 #include <algorithm>
+#include <utility>
 
+#include "serving/stream/stream_handshake.hpp"
 #include "serving/stream/stream_mapping.hpp"
 
 namespace tensorplate::serving::stream {
@@ -120,10 +122,40 @@ void CallOutput::finish(grpc::Status status) {
   run(step);
 }
 
+void CallOutput::refuse(RefusedCalls& refused, grpc::Status status) {
+  Step step;
+  {
+    const std::lock_guard cancelling(cancel_mu_);
+    CallWriter* without_place = nullptr;
+    {
+      const std::lock_guard guard(mu_);
+      if (finish_wanted_ || writer_ == nullptr) {
+        return;
+      }
+      if (refused.enter()) {
+        refused_ = &refused;
+        finish_wanted_ = std::move(status);
+      } else {
+        finish_wanted_ = grpc::Status::CANCELLED;
+        without_place = writer_;
+      }
+      step = next_locked();
+    }
+    // A cancel ends the call with no write of its own to wait for.
+    if (without_place != nullptr) {
+      without_place->cancel();
+    }
+  }
+  run(step);
+}
+
 void CallOutput::detach() {
   const std::lock_guard cancelling(cancel_mu_);
   const std::lock_guard guard(mu_);
   writer_ = nullptr;
+  if (auto* refused = std::exchange(refused_, nullptr)) {
+    refused->leave();
+  }
 }
 
 void CallOutput::session_ended(SchedulerClock::TimePoint now) {

@@ -22,6 +22,9 @@ namespace tensorplate::serving::stream {
 inline constexpr std::chrono::seconds kOpenHandshakeTimeout{5};
 /// Calls a listener waits on at one time for their first message.
 inline constexpr std::size_t kMaxOpenHandshakes = 32;
+/// Refused calls a listener keeps at one time, each until it is done. No
+/// fewer than it waits on: closing admission refuses all of those at once.
+inline constexpr std::size_t kMaxRefusedCalls = 32;
 
 /// The calls of one listener whose first message has not been read: at most
 /// kMaxOpenHandshakes, each until kOpenHandshakeTimeout after it began, and
@@ -123,6 +126,43 @@ class OpenHandshakes {
   mutable std::mutex mu_;
   std::vector<Waiting> waiting_;
   bool closed_ = false;
+};
+
+/// The places of one listener for calls it refused: a refused call lasts
+/// until the transport has sent its status, which a peer that does not read
+/// puts off for as long as it likes. A call keeps its place until it is done;
+/// CallOutput::refuse() cancels a call refused with none left.
+///
+/// Thread-safe.
+class RefusedCalls {
+ public:
+  explicit RefusedCalls(std::size_t places = kMaxRefusedCalls) noexcept : places_(places) {}
+
+  /// Takes a place. False when none is left.
+  [[nodiscard]] bool enter() {
+    const std::lock_guard guard(mu_);
+    if (held_ >= places_) {
+      return false;
+    }
+    ++held_;
+    return true;
+  }
+
+  /// Gives back a place enter() took.
+  void leave() {
+    const std::lock_guard guard(mu_);
+    --held_;
+  }
+
+  [[nodiscard]] std::size_t size() const {
+    const std::lock_guard guard(mu_);
+    return held_;
+  }
+
+ private:
+  mutable std::mutex mu_;
+  std::size_t places_;
+  std::size_t held_ = 0;
 };
 
 }  // namespace tensorplate::serving::stream

@@ -40,6 +40,9 @@ namespace wire = stream::wire;
 /// It never reaches the wire: an Open names generation 0 and Ready omits it.
 constexpr std::uint64_t kUnversionedBinding = 1;
 constexpr int kMaxReceiveMessageBytes = 64 * 1024;
+/// Above kMaxOpenHandshakes, so that one connection can still be told that
+/// too many of its calls have yet to send their Open.
+constexpr int kMaxConcurrentStreams = 64;
 
 using stream::CallOutput;
 
@@ -135,13 +138,18 @@ struct StreamListener::Impl final
     : wire::SessionService::WithRawCallbackMethod_Session<wire::SessionService::Service> {
   Impl(StreamListenerOptions options_in, SessionDispatch* dispatch_in,
        const SchedulerClock& clock_in)
-      : options(std::move(options_in)), dispatch(dispatch_in), clock(clock_in) {}
+      : options(std::move(options_in)),
+        dispatch(dispatch_in),
+        clock(clock_in),
+        refused(options.max_refused_calls.value_or(stream::kMaxRefusedCalls)) {}
 
   grpc::ServerBidiReactor<grpc::ByteBuffer, grpc::ByteBuffer>* Session(
       grpc::CallbackServerContext* context) override;
 
   void on_transition(const ManagedSessionTransition& transition);
   void close_admission() noexcept;
+  /// Ends a call that was never admitted, for `cause`.
+  void refuse(CallOutput& call, const Error& cause) { call.refuse(refused, refusal(cause)); }
   /// Waits for the call's first message, with `start_read` run once the wait
   /// has begun, or says why the call is refused with no read started.
   template <typename StartRead>
@@ -166,6 +174,8 @@ struct StreamListener::Impl final
 
   /// Calls whose first message has not been read.
   stream::OpenHandshakes handshakes;
+  /// Refused calls that are not done.
+  stream::RefusedCalls refused;
 
   /// Calls whose session has ended, each until its reactor is done.
   std::mutex ended_mu;
@@ -525,7 +535,7 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
     (void)listener_.manager->apply(key, LogicalSessionEvent::Fail, std::move(cause));
   }
 
-  void refuse(const Error& cause) { state_->out->finish(refusal(cause)); }
+  void refuse(const Error& cause) { listener_.refuse(*state_->out, cause); }
 
   [[nodiscard]] std::string session_id() const {
     const std::lock_guard guard(state_->mu);
@@ -684,7 +694,7 @@ void StreamListener::Impl::close_admission() noexcept {
   try {
     // A call that has not sent its Open can no longer be admitted.
     for (const auto& call : handshakes.close()) {
-      call->finish(refusal(admission_closed()));
+      refuse(*call, admission_closed());
     }
   } catch (...) {  // NOLINT(bugprone-empty-catch): the stop cancels the calls left open.
   }
@@ -733,8 +743,8 @@ void StreamListener::Impl::watch_calls() {
     // this lock.
     const auto now = clock.now();
     for (const auto& call : handshakes.take_overdue(now)) {
-      call->finish(refusal(Error::make(
-          Error::Code::Timeout, "no Open within the open handshake timeout", "idle_timeout")));
+      refuse(*call, Error::make(Error::Code::Timeout, "no Open within the open handshake timeout",
+                                "idle_timeout"));
     }
     auto next = handshakes.next_due();
     std::erase_if(watched, [&](const std::shared_ptr<CallOutput>& call) {
@@ -827,6 +837,8 @@ Result<std::unique_ptr<StreamListener>> StreamListener::start(StreamListenerOpti
   // a call can leave the HTTP/2 default of 65,535 bytes unread in the
   // transport, and so can a connection.
   builder.AddChannelArgument(GRPC_ARG_HTTP2_BDP_PROBE, 0);
+  // gRPC refuses a stream beyond these before a call exists for it.
+  builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, kMaxConcurrentStreams);
   raw->server = builder.BuildAndStart();
   if (!raw->server || selected <= 0) {
     if (dispatch != nullptr) {
@@ -881,6 +893,10 @@ std::size_t StreamListener::open_calls() const noexcept {
 
 std::size_t StreamListener::awaited_calls() const noexcept {
   return impl_->handshakes.size();
+}
+
+std::size_t StreamListener::refused_calls() const noexcept {
+  return impl_->refused.size();
 }
 
 std::size_t StreamListener::live_sessions() const noexcept {

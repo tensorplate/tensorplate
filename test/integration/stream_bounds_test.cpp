@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // What the stream listener bounds before a call has a session: the wait for
-// its Open, how many calls it waits on, compression, and the window its
-// transport announces. Every timeout runs on an injected clock.
+// its Open, how many calls it waits on, how many refused calls it keeps,
+// compression, and what its transport announces. Every timeout runs on an
+// injected clock.
 
 #include <arpa/inet.h>
 #include <grpcpp/grpcpp.h>
@@ -49,6 +50,9 @@ void expect_refused(const grpc::Status& status, grpc::StatusCode code, std::stri
 
 /// A listener whose clock only the test moves.
 struct TimedListener {
+  explicit TimedListener(std::optional<std::size_t> max_refused_calls = std::nullopt)
+      : served(true, "127.0.0.1", &clock, max_refused_calls) {}
+
   [[nodiscard]] tensorplate::serving::StreamListener& listener() { return served.listener(); }
   /// A call the listener waits on for its Open.
   [[nodiscard]] Client silent_call() {
@@ -59,7 +63,7 @@ struct TimedListener {
   }
 
   FakeSchedulerClock clock;
-  Served served{true, "127.0.0.1", &clock};
+  Served served;
 };
 
 TEST(StreamBounds, ACallThatSendsNoOpenIsRefusedWhenTheHandshakeTimeoutPasses) {
@@ -147,6 +151,47 @@ TEST(StreamBounds, ClosingAdmissionRefusesTheCallsWaitedOnAndEveryCallThatArrive
   EXPECT_TRUE(timed.served.dispatch().seen.events().empty());
 }
 
+// A refused call holds one of the listener's thirty-two places until it is
+// done, and no longer: more calls than there are places are refused one after
+// another, and each reads its reason.
+TEST(StreamBounds, ARefusedCallGivesItsPlaceBackWhenItIsDone) {
+  TimedListener timed;
+  timed.listener().stop_admission();
+  for (int call = 0; call < 33; ++call) {
+    SCOPED_TRACE(call);
+    auto late = timed.served.connect();
+    expect_refused(ended_unanswered(late), grpc::StatusCode::UNAVAILABLE,
+                   "open refused: FAILURE_REASON_ADMISSION_CLOSED");
+    ASSERT_TRUE(eventually([&] { return timed.listener().open_calls() == 0; }));
+  }
+  EXPECT_EQ(timed.listener().refused_calls(), 0U);
+}
+
+// A call refused with no place left is cancelled: its client reads CANCELLED
+// and no reason. No test here has a peer that does not read, so real calls
+// never fill the thirty-two places; a listener given none runs the same
+// path, once from the watch thread and once from inside the method handler,
+// where a call refused on arrival is ended.
+TEST(StreamBounds, ACallRefusedWithNoPlaceLeftIsCancelledAndReadsNoReason) {
+  TimedListener timed{0};
+  auto silent = timed.silent_call();
+  timed.clock.advance(5s);
+  const auto overdue = ended_unanswered(silent);
+  EXPECT_EQ(overdue.error_code(), grpc::StatusCode::CANCELLED) << overdue.error_message();
+  EXPECT_EQ(overdue.error_message().find("open refused"), std::string::npos)
+      << overdue.error_message();
+
+  timed.listener().stop_admission();
+  auto late = timed.served.connect();
+  const auto on_arrival = ended_unanswered(late);
+  EXPECT_EQ(on_arrival.error_code(), grpc::StatusCode::CANCELLED) << on_arrival.error_message();
+  EXPECT_EQ(on_arrival.error_message().find("open refused"), std::string::npos)
+      << on_arrival.error_message();
+  EXPECT_TRUE(eventually([&] { return timed.listener().open_calls() == 0; }));
+  EXPECT_EQ(timed.listener().refused_calls(), 0U);
+  EXPECT_TRUE(timed.served.dispatch().seen.events().empty());
+}
+
 // The call's first message was read before admission closed, so no bound
 // answers it: the manager refuses the Open it was deciding on.
 TEST(StreamBounds, AnOpenBeingAnsweredWhenAdmissionClosesIsRefusedByTheManager) {
@@ -180,10 +225,13 @@ TEST(StreamBounds, ACallThatAnnouncesCompressionIsEndedByTheTransportUnanswered)
   EXPECT_FALSE(plain.session_id.empty());
 }
 
-/// What a server's HTTP/2 connection preface announces about its windows.
+/// What a server's HTTP/2 connection preface announces about its windows and
+/// its streams.
 struct AnnouncedWindows {
   /// SETTINGS_INITIAL_WINDOW_SIZE, when the server's SETTINGS frame sets it.
   std::optional<std::uint32_t> stream_window;
+  /// SETTINGS_MAX_CONCURRENT_STREAMS, when the frame sets it.
+  std::optional<std::uint32_t> max_concurrent_streams;
   /// The sum of the WINDOW_UPDATE increments for the connection.
   std::uint64_t connection_window_added = 0;
   bool complete = false;
@@ -196,6 +244,7 @@ AnnouncedWindows announced_windows(std::uint16_t port) {
   constexpr std::array<char, 9> kEmptySettings{0, 0, 0, 4, 0, 0, 0, 0, 0};
   constexpr std::uint8_t kSettings = 4;
   constexpr std::uint8_t kWindowUpdate = 8;
+  constexpr std::uint16_t kMaxConcurrentStreams = 3;
   constexpr std::uint16_t kInitialWindowSize = 4;
   AnnouncedWindows announced;
   const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -251,8 +300,12 @@ AnnouncedWindows announced_windows(std::uint16_t port) {
         announced.complete = true;
       } else if (type == kSettings) {
         for (std::size_t at = 0; at + 6 <= body.size(); at += 6) {
-          if (big_endian(body.substr(at, 2)) == kInitialWindowSize) {
-            announced.stream_window = big_endian(body.substr(at + 2, 4));
+          const auto setting = big_endian(body.substr(at, 2));
+          const auto value = big_endian(body.substr(at + 2, 4));
+          if (setting == kInitialWindowSize) {
+            announced.stream_window = value;
+          } else if (setting == kMaxConcurrentStreams) {
+            announced.max_concurrent_streams = value;
           }
         }
       } else if (type == kWindowUpdate && for_connection && body.size() == 4) {
@@ -274,6 +327,17 @@ TEST(StreamBounds, TheServersPrefaceAnnouncesTheDefaultWindowForAStreamAndTheCon
   ASSERT_TRUE(announced.complete) << "the server's preface was not read to its end";
   EXPECT_EQ(announced.stream_window.value_or(65'535), 65'535U);
   EXPECT_EQ(announced.connection_window_added, 0U);
+}
+
+// gRPC's own bound on a connection: it refuses a stream beyond these before
+// the listener has a call for it. Sixty-four leaves room for the thirty-two
+// calls waited on and for a call that is told it came on top of them.
+TEST(StreamBounds, TheServersPrefaceLimitsAConnectionToSixtyFourConcurrentStreams) {
+  Served served;
+  const auto announced = announced_windows(served.listener().bound_port());
+  ASSERT_TRUE(announced.complete) << "the server's preface was not read to its end";
+  ASSERT_TRUE(announced.max_concurrent_streams.has_value()) << "the server announced no limit";
+  EXPECT_EQ(*announced.max_concurrent_streams, 64U);
 }
 
 }  // namespace
