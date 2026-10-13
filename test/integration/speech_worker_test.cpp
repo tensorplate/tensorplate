@@ -28,6 +28,9 @@ TEST(SpeechWorker, FeatureFlagDisabled) {
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -168,6 +171,7 @@ struct Serving {
       client.call->Write(open_event(mode));
       const auto first = client.read();
       if (first.has_value() && first->has_ready()) {
+        EXPECT_EQ(first->sequence(), 1U) << "Ready is the session's first event";
         client.took(first->ready());
         if (ready_out != nullptr) {
           *ready_out = first->ready();
@@ -241,15 +245,132 @@ struct TakenPort {
   std::uint16_t port = 0;
 };
 
-/// Reads to the session's SessionClosed, past whatever precedes it.
-wire::SessionClosed closed_of(Client& client) {
-  while (auto event = client.next()) {
-    if (event->has_session_closed()) {
-      return event->session_closed();
+/// The SessionClosed that `event` must be: the next event of a session whose
+/// output has all been read. Any other event there is a failure, not skipped.
+wire::SessionClosed closed_of(const std::optional<wire::ServerEvent>& event) {
+  if (!event.has_value()) {
+    ADD_FAILURE() << "the stream ended without SessionClosed";
+    return {};
+  }
+  if (!event->has_session_closed()) {
+    ADD_FAILURE() << "an event the session did not owe precedes SessionClosed: "
+                  << event->ShortDebugString();
+    return {};
+  }
+  return event->session_closed();
+}
+
+/// One session's events after Ready, as its client reads them, each held to
+/// the schema's rules for every event: `sequence` is one more than the event
+/// before, and an Accepted names an input the client sent, never an earlier
+/// one than the Accepted before it, with credit inside what Ready granted and
+/// no more of it used than the inputs it covers hold.
+class Reader {
+ public:
+  /// `inputs` Audio or TextSegment events of `input_bytes` each were sent,
+  /// with the client sequences from 2 on.
+  Reader(Client& client, const wire::Ready& ready, std::uint64_t inputs, std::uint64_t input_bytes)
+      : client_(client),
+        granted_(ready.status().input_credit()),
+        last_input_(1 + inputs),
+        input_bytes_(input_bytes) {}
+
+  /// The next event that is not an Accepted; none at the end of the stream.
+  std::optional<wire::ServerEvent> next() {
+    for (;;) {
+      auto event = client_.read();
+      if (!event.has_value()) {
+        return event;
+      }
+      EXPECT_EQ(event->sequence(), ++sequence_) << event->ShortDebugString();
+      if (!event->has_accepted()) {
+        return event;
+      }
+      check(event->accepted());
+      accepted_ = event->accepted();
     }
   }
-  ADD_FAILURE() << "the stream ended without SessionClosed";
-  return {};
+
+  /// Holds that every input was accepted and that the server had consumed
+  /// all of it when the last event was read.
+  void expect_all_input_taken() const {
+    ASSERT_TRUE(accepted_.has_value()) << "no Accepted was read";
+    EXPECT_EQ(accepted_->accepted_sequence(), last_input_);
+    EXPECT_EQ(accepted_->input_credit().bytes().used(), 0U);
+    EXPECT_EQ(accepted_->input_credit().waiting_segments().used(), 0U);
+  }
+
+  /// The sequence of the last input sent.
+  [[nodiscard]] std::uint64_t last_input() const { return last_input_; }
+
+ private:
+  void check(const wire::Accepted& accepted) const {
+    SCOPED_TRACE(accepted.ShortDebugString());
+    const std::uint64_t covered = accepted.accepted_sequence();
+    ASSERT_GE(covered, accepted_.has_value() ? accepted_->accepted_sequence() : 2U);
+    ASSERT_LE(covered, last_input_);
+    const auto& credit = accepted.input_credit();
+    EXPECT_EQ(credit.bytes().limit(), granted_.bytes().limit());
+    EXPECT_LE(credit.bytes().used(), (covered - 1) * input_bytes_);
+    EXPECT_EQ(credit.waiting_segments().limit(), granted_.waiting_segments().limit());
+    EXPECT_LE(credit.waiting_segments().used(), credit.waiting_segments().limit());
+  }
+
+  Client& client_;
+  wire::InputCredit granted_;
+  std::uint64_t last_input_;
+  std::uint64_t input_bytes_;
+  /// Of the last event read: Ready's to begin with.
+  std::uint64_t sequence_ = 1;
+  std::optional<wire::Accepted> accepted_;
+};
+
+/// What a test can know of the Ready that answers `open_event(mode)`.
+void expect_ready(const wire::Ready& ready, wire::SessionMode mode) {
+  SCOPED_TRACE(ready.ShortDebugString());
+  EXPECT_FALSE(ready.session_id().empty());
+  EXPECT_LE(ready.session_id().size(), 64U);
+  // The worker serves no generation.
+  EXPECT_EQ(ready.generation(), 0U);
+  EXPECT_TRUE(ready.descriptor_digest().empty());
+  const auto& limits = ready.limits();
+  EXPECT_NE(limits.idle_timeout_ms(), 0U);
+  EXPECT_NE(limits.heartbeat_interval_ms(), 0U);
+  EXPECT_NE(limits.liveness_timeout_ms(), 0U);
+  EXPECT_NE(limits.max_duration_ms(), 0U);
+  EXPECT_NE(limits.finalize_deadline_ms(), 0U);
+  EXPECT_NE(limits.output_stall_timeout_ms(), 0U);
+  EXPECT_NE(ready.remaining_duration_ms(), 0U);
+  EXPECT_LE(ready.remaining_duration_ms(), limits.max_duration_ms());
+  const bool audio_in = mode == wire::SESSION_MODE_STT_STREAMING;
+  EXPECT_EQ(limits.has_speech_to_text(), audio_in);
+  EXPECT_EQ(limits.has_text_to_speech(), !audio_in);
+  EXPECT_EQ(ready.has_input_format(), audio_in);
+  EXPECT_EQ(ready.has_output_format(), !audio_in);
+  const auto& credit = ready.status().input_credit();
+  if (audio_in) {
+    EXPECT_NE(limits.speech_to_text().min_frame_ms(), 0U);
+    EXPECT_NE(limits.speech_to_text().max_frame_ms(), 0U);
+    EXPECT_NE(limits.speech_to_text().max_utterance_ms(), 0U);
+    EXPECT_EQ(ready.input_format().SerializeAsString(),
+              open_event(mode).open().input_format().SerializeAsString());
+    EXPECT_EQ(credit.waiting_segments().limit(), 0U);
+  } else {
+    EXPECT_NE(limits.text_to_speech().max_segment_text_bytes(), 0U);
+    EXPECT_NE(limits.text_to_speech().max_segment_audio_ms(), 0U);
+    EXPECT_NE(limits.text_to_speech().max_synthesis_text_bytes(), 0U);
+    EXPECT_NE(limits.text_to_speech().max_synthesis_audio_ms(), 0U);
+    // The fixture's speech.
+    EXPECT_EQ(ready.output_format().encoding(), wire::AUDIO_ENCODING_PCM_S16LE);
+    EXPECT_EQ(ready.output_format().sample_rate_hz(), 24'000U);
+    EXPECT_EQ(ready.output_format().channels(), 1U);
+    EXPECT_NE(credit.waiting_segments().limit(), 0U);
+  }
+  EXPECT_EQ(ready.status().state(), wire::SESSION_STATE_ACTIVE);
+  EXPECT_NE(credit.bytes().limit(), 0U);
+  EXPECT_EQ(credit.bytes().used(), 0U);
+  EXPECT_EQ(credit.waiting_segments().used(), 0U);
+  EXPECT_EQ(ready.capabilities_size(), 0);
 }
 
 /// The session's state, as the answer to a StatusRequest gives it.
@@ -267,8 +388,9 @@ wire::SessionState state_of(Client& client) {
 
 /// Reads a whole segment of the fixture's speech, which is silence of
 /// kFixtureSpeechBytesPerTextByte bytes for each byte of text: 20 ms chunks
-/// in order, then the segment's completion.
-void expect_segment(Client& client, std::uint64_t segment_id, std::size_t text_bytes,
+/// in order, then the segment's completion. `client` is a Client or a Reader.
+template <typename Events>
+void expect_segment(Events& client, std::uint64_t segment_id, std::size_t text_bytes,
                     const wire::AudioFormat& format) {
   ASSERT_EQ(format.sample_rate_hz(), 24'000U);
   const std::uint64_t total = text_bytes * tensorplate::testing::kFixtureSpeechBytesPerTextByte / 2;
@@ -301,18 +423,22 @@ void expect_segment(Client& client, std::uint64_t segment_id, std::size_t text_b
 /// One speech-to-text exchange: Open, audio, a Finalize, the utterance's
 /// endpoint and its final transcript, a half-close and the session closed.
 void transcribes_one_utterance(const Serving& served) {
-  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
-  ASSERT_FALSE(client.session_id.empty());
+  wire::Ready ready;
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING, &ready);
+  ASSERT_NO_FATAL_FAILURE(expect_ready(ready, wire::SESSION_MODE_STT_STREAMING));
   ASSERT_TRUE(client.send_audio(3 * kFrame, kFrame));
   const auto asked = client.finalize();
+  Reader events{client, ready, 3, 2 * std::uint64_t{kFrame}};
 
-  const auto endpoint = client.next();
+  const auto endpoint = events.next();
   ASSERT_TRUE(endpoint.has_value());
+  // The dispatch takes each frame before it ends the utterance.
+  ASSERT_NO_FATAL_FAILURE(events.expect_all_input_taken());
   ASSERT_TRUE(endpoint->has_endpoint_detected()) << endpoint->ShortDebugString();
   EXPECT_EQ(endpoint->endpoint_detected().reason(), wire::ENDPOINT_REASON_CLIENT_FINALIZE);
   EXPECT_EQ(endpoint->endpoint_detected().utterance_id(), 1U);
   EXPECT_EQ(endpoint->endpoint_detected().end_sample_offset(), 3U * kFrame);
-  const auto transcript = client.next();
+  const auto transcript = events.next();
   ASSERT_TRUE(transcript.has_value());
   ASSERT_TRUE(transcript->has_final_transcript()) << transcript->ShortDebugString();
   const auto& final = transcript->final_transcript();
@@ -325,11 +451,14 @@ void transcribes_one_utterance(const Serving& served) {
   EXPECT_EQ(final.segments(0).end_us(), 300'000U);
 
   ASSERT_TRUE(client.call->WritesDone());
-  const auto closed = closed_of(client);
+  const auto closed = closed_of(events.next());
   EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
   EXPECT_FALSE(closed.has_cause()) << closed.ShortDebugString();
+  EXPECT_EQ(closed.admission(), wire::ADMISSION_ADMITTED);
+  EXPECT_EQ(closed.last_accepted_sequence(), events.last_input());
   EXPECT_EQ(closed.totals().input_audio_samples(), 3U * kFrame);
   EXPECT_EQ(closed.totals().utterances_completed(), 1U);
+  ASSERT_NO_FATAL_FAILURE(events.expect_all_input_taken());
   EXPECT_TRUE(end_of(client).ok());
 }
 
@@ -338,16 +467,21 @@ void transcribes_one_utterance(const Serving& served) {
 void synthesizes_one_segment(const Serving& served) {
   wire::Ready ready;
   auto client = served.ready(wire::SESSION_MODE_TTS_STREAMING, &ready);
-  ASSERT_FALSE(client.session_id.empty());
+  ASSERT_NO_FATAL_FAILURE(expect_ready(ready, wire::SESSION_MODE_TTS_STREAMING));
   // 1,200 samples: two whole chunks and one of 240.
   const std::string text = "fifteen bytes!!";
   ASSERT_TRUE(client.send_text(1, text));
-  ASSERT_NO_FATAL_FAILURE(expect_segment(client, 1, text.size(), ready.output_format()));
+  Reader events{client, ready, 1, text.size()};
+  ASSERT_NO_FATAL_FAILURE(expect_segment(events, 1, text.size(), ready.output_format()));
+  // The dispatch starts the segment before it has any of its audio.
+  ASSERT_NO_FATAL_FAILURE(events.expect_all_input_taken());
 
   ASSERT_TRUE(client.call->WritesDone());
-  const auto closed = closed_of(client);
+  const auto closed = closed_of(events.next());
   EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
   EXPECT_FALSE(closed.has_cause()) << closed.ShortDebugString();
+  EXPECT_EQ(closed.admission(), wire::ADMISSION_ADMITTED);
+  EXPECT_EQ(closed.last_accepted_sequence(), events.last_input());
   EXPECT_EQ(closed.totals().input_text_bytes(), text.size());
   EXPECT_EQ(closed.totals().segments_completed(), 1U);
   EXPECT_EQ(closed.totals().output_audio_samples(), 1'200U);
@@ -454,6 +588,24 @@ class SpeechWorkerScripted : public ::testing::Test {
     return Json{{"job_id", 0}, {"session_key", 0}};
   }
 
+  /// The `job_cancel` frames the worker sent. A session's release is what
+  /// cancels its job at the sidecar, so the worker sends none. Read after the
+  /// stop, as cancel_requests() is: every frame sent ahead of the unload has
+  /// been acted on and recorded by then.
+  std::size_t job_cancels() { return sidecar.sent("job_cancel", 0).size(); }
+
+  /// Holds that the worker submitted one job, which ran to its end and was
+  /// never asked to be cancelled.
+  void expect_one_job_that_ran_uncancelled() {
+    const auto submits = sidecar.sent("job_submit", 0);
+    ASSERT_EQ(submits.size(), 1U);
+    const auto job_id = submits.front().value("job_id", std::uint64_t{0});
+    EXPECT_EQ(kinds_of(sidecar.written(), job_id),
+              (std::vector<std::string>{"job_accepted", "job_completed", "job_released"}));
+    EXPECT_EQ(sidecar.cancel_requests(job_id), 0U);
+    EXPECT_EQ(job_cancels(), 0U);
+  }
+
   ScriptedSidecar sidecar;
   /// Reset by a case that plays the backend itself.
   std::optional<ScriptedBackend> backend{std::in_place, sidecar};
@@ -520,6 +672,7 @@ TEST_F(SpeechWorkerScripted, OneUtteranceIsTranscribed) {
   EXPECT_EQ(stopped.front().value("releases_refused", -1), 0);
   EXPECT_TRUE(stopped.front().contains("longest_release_wait_ms"));
   EXPECT_EQ(sidecar.sent("unload", 1).size(), 1U);
+  expect_one_job_that_ran_uncancelled();
 }
 
 TEST_F(SpeechWorkerScripted, OneSegmentIsSynthesized) {
@@ -531,6 +684,7 @@ TEST_F(SpeechWorkerScripted, OneSegmentIsSynthesized) {
   ASSERT_NO_FATAL_FAILURE(synthesizes_one_segment(served));
   EXPECT_TRUE(eventually([&] { return served.buffers() == 0; }));
   (void)served.stop();
+  expect_one_job_that_ran_uncancelled();
 }
 
 // The backend holds the segment's job, so the cancel finds it running.
@@ -558,7 +712,7 @@ TEST_F(SpeechWorkerScripted, ACancelMidSynthesisEndsTheSessionAndReleasesItsJobO
   EXPECT_EQ(sidecar.lane().running, job_id);
 
   backend->release();
-  const auto closed = closed_of(client);
+  const auto closed = closed_of(client.next());
   EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
   EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_CLIENT_CANCELLED);
   EXPECT_EQ(closed.totals().segments_completed(), 0U);
@@ -573,6 +727,12 @@ TEST_F(SpeechWorkerScripted, ACancelMidSynthesisEndsTheSessionAndReleasesItsJobO
   EXPECT_EQ(stopped.front().value("jobs_failed", -1), 0);
   EXPECT_EQ(stopped.front().value("jobs_discarded", 0), 1) << "the cancelled session's job";
   EXPECT_EQ(count_of(sidecar.sent("session_release", 0), "session_release", session_key), 1U);
+  // Asked once, by that release; the next session's job was never asked.
+  const auto submits = sidecar.sent("job_submit", 0);
+  ASSERT_EQ(submits.size(), 2U);
+  EXPECT_EQ(sidecar.cancel_requests(job_id), 1U);
+  EXPECT_EQ(sidecar.cancel_requests(submits.back().value("job_id", std::uint64_t{0})), 0U);
+  EXPECT_EQ(job_cancels(), 0U);
   const auto written = sidecar.written();
   EXPECT_EQ(kinds_of(written, job_id),
             (std::vector<std::string>{"job_accepted", "job_cancel_acknowledged", "job_failed",
@@ -600,19 +760,44 @@ TEST_F(SpeechWorkerScripted, AClientThatGoesAwayMidUtteranceEndsItsSession) {
     client.context->TryCancel();
     (void)client.call->Finish();
   }
-  ASSERT_EQ(sidecar.sent("session_release", 1).size(), 1U);
+  const auto first_release = sidecar.sent("session_release", 1);
+  ASSERT_EQ(first_release.size(), 1U);
+  const auto lost = first_release.front().value("session_key", std::uint64_t{0});
+  // Read while the worker is up and before the next session: a decode the
+  // lost session submitted has given its audio back.
+  EXPECT_TRUE(eventually([&] { return served.buffers() == 0; }));
+  // A submit of the lost session precedes its release, so none follows.
+  const auto submitted_by_the_lost_session =
+      count_of(sidecar.sent("job_submit", 0), "job_submit", lost);
+  EXPECT_LE(submitted_by_the_lost_session, 1U) << "the open utterance, in the order that ends it";
 
   // Its place is free: the next session is served.
   ASSERT_NO_FATAL_FAILURE(transcribes_one_utterance(served));
-  (void)served.stop();
-  EXPECT_EQ(sidecar.sent("session_release", 0).size(), 2U) << "one release for each session";
+  const auto stopped = logged(served.stop(), "speech dispatch stopped");
+  ASSERT_EQ(stopped.size(), 1U);
+  EXPECT_EQ(stopped.front().value("releases_refused", -1), 0);
+  const auto releases = sidecar.sent("session_release", 0);
+  ASSERT_EQ(releases.size(), 2U) << "one release for each session";
+  const auto next = releases.back().value("session_key", std::uint64_t{0});
+  EXPECT_NE(next, lost);
+  EXPECT_EQ(count_of(releases, "session_release", lost), 1U);
+  EXPECT_EQ(count_of(releases, "session_release", next), 1U);
   const auto written = sidecar.written();
   const auto submits = sidecar.sent("job_submit", 0);
-  EXPECT_GE(submits.size(), 1U);
+  EXPECT_EQ(count_of(submits, "job_submit", lost), submitted_by_the_lost_session);
+  EXPECT_EQ(count_of(submits, "job_submit", next), 1U);
+  EXPECT_EQ(submits.size(), submitted_by_the_lost_session + 1) << "a job of neither session";
   for (const Json& submit : submits) {
-    const auto kinds = kinds_of(written, submit.at("job_id").get<std::uint64_t>());
+    const auto job_id = submit.at("job_id").get<std::uint64_t>();
+    const auto kinds = kinds_of(written, job_id);
     EXPECT_EQ(std::count(kinds.begin(), kinds.end(), "job_released"), 1) << submit.dump();
+    // The lost session's decode may have ended before the release found it.
+    const bool of_the_lost_session = submit.value("session_key", std::uint64_t{0}) == lost;
+    EXPECT_LE(sidecar.cancel_requests(job_id), of_the_lost_session ? 1U : 0U) << submit.dump();
   }
+  EXPECT_EQ(count_of(written, "session_released", lost), 1U);
+  EXPECT_EQ(count_of(written, "session_released", next), 1U);
+  EXPECT_EQ(job_cancels(), 0U);
   EXPECT_EQ(served.buffers(), 0U);
 }
 
@@ -646,6 +831,8 @@ TEST_F(SpeechWorkerScripted, AClientThatGoesAwayWhileItsUtteranceIsDecodedLeaves
   ASSERT_NO_FATAL_FAILURE(transcribes_one_utterance(served));
   (void)served.stop();
   EXPECT_EQ(count_of(sidecar.sent("session_release", 0), "session_release", session_key), 1U);
+  EXPECT_EQ(sidecar.cancel_requests(job_id), 1U) << "asked once, by that release";
+  EXPECT_EQ(job_cancels(), 0U);
   const auto written = sidecar.written();
   EXPECT_EQ(kinds_of(written, job_id),
             (std::vector<std::string>{"job_accepted", "job_cancel_acknowledged", "job_failed",
@@ -670,12 +857,13 @@ TEST_F(SpeechWorkerScripted, AShutdownDrainsTheOpenSessionAndDeliversTheSegmentI
   EXPECT_EQ(state_of(client), wire::SESSION_STATE_DRAINING);
   backend->release();
   ASSERT_NO_FATAL_FAILURE(expect_segment(client, 1, text.size(), ready.output_format()));
-  const auto closed = closed_of(client);
+  const auto closed = closed_of(client.next());
   EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
   EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_WORKER_SHUTDOWN);
   EXPECT_EQ(closed.totals().segments_completed(), 1U);
   EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::UNAVAILABLE);
   (void)served.stop();
+  expect_one_job_that_ran_uncancelled();
   EXPECT_EQ(served.buffers(), 0U);
 }
 
@@ -696,6 +884,7 @@ TEST_F(SpeechWorkerScripted, AStopAtTheEndOfTheDrainWindowLeavesTheJobToTheUnloa
   // behind it, and reads the worker's buffers at that moment.
   struct Played {
     std::atomic<bool> abandoned{false};
+    std::atomic<bool> ended_its_job{false};
     std::atomic<std::size_t> buffers_at_unload{0};
     std::thread thread;
     void finish() {
@@ -716,8 +905,9 @@ TEST_F(SpeechWorkerScripted, AStopAtTheEndOfTheDrainWindowLeavesTheJobToTheUnloa
     while (!played.abandoned && !sidecar.lane().unload_waits) {
       std::this_thread::sleep_for(1ms);
     }
-    if (taken.job_id != 0) {
+    if (taken.job_id != 0 && !played.abandoned) {
       played.buffers_at_unload = served.buffers();
+      played.ended_its_job = true;
       sidecar.complete(taken.job_id, Json{{"type", "transcript"},
                                           {"text", "hello"},
                                           {"tokens", {1}},
@@ -737,6 +927,10 @@ TEST_F(SpeechWorkerScripted, AStopAtTheEndOfTheDrainWindowLeavesTheJobToTheUnloa
   EXPECT_EQ(state_of(client), wire::SESSION_STATE_DRAINING);
   EXPECT_EQ(served.buffers(), 1U) << "the job's audio";
   const auto stopped = logged(served.stop(), "speech dispatch stopped");
+  // Said before the join: the backend ends its job only behind an unload, so
+  // without one the join would wait for good.
+  EXPECT_TRUE(played.ended_its_job) << "the stop returned without an unload behind the job";
+  played.abandoned = true;
   played.finish();
   EXPECT_EQ(played.buffers_at_unload, 1U) << "given back while the backend still ran the job";
   EXPECT_EQ(served.buffers(), 0U) << "the job's audio outlived the unload";
@@ -750,6 +944,8 @@ TEST_F(SpeechWorkerScripted, AStopAtTheEndOfTheDrainWindowLeavesTheJobToTheUnloa
 
   const auto written = sidecar.written();
   EXPECT_EQ(count_of(sidecar.sent("session_release", 0), "session_release", session_key), 1U);
+  EXPECT_EQ(sidecar.cancel_requests(job_id), 1U) << "asked once, by that release";
+  EXPECT_EQ(job_cancels(), 0U);
   // Cancelled by the release, ended only once the unload waited behind it.
   EXPECT_EQ(kinds_of(written, job_id),
             (std::vector<std::string>{"job_accepted", "job_cancel_acknowledged", "job_failed",
@@ -771,7 +967,7 @@ TEST_F(SpeechWorkerScripted, AJobTheBackendRefusesFailsItsSession) {
   const Serving served{std::move(built)};
   auto client = served.ready(wire::SESSION_MODE_TTS_STREAMING);
   ASSERT_TRUE(client.send_text(1, "refused"));
-  const auto closed = closed_of(client);
+  const auto closed = closed_of(client.next());
   EXPECT_EQ(closed.state(), wire::SESSION_STATE_FAILED);
   EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY);
   EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
@@ -836,7 +1032,7 @@ TEST_F(SpeechWorkerDecodeOnly, ASessionOfAModeTheBackendDoesNotRunFailsAtItsFirs
   {
     auto client = served.ready(wire::SESSION_MODE_TTS_STREAMING);
     ASSERT_TRUE(client.send_text(1, "no synthesis here"));
-    const auto closed = closed_of(client);
+    const auto closed = closed_of(client.next());
     EXPECT_EQ(closed.state(), wire::SESSION_STATE_FAILED);
     EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY);
     EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
@@ -1027,26 +1223,74 @@ class SpeechWorkerRunner : public ::testing::Test {
     EXPECT_TRUE(created.has_value()) << (created.has_value() ? "" : created.error().message);
     return created.has_value() ? std::move(created).value() : nullptr;
   }
+
+  /// The pids of this process's children that run the runner's package and
+  /// have not exited, read from /proc. Nothing but the adapter's launcher
+  /// starts one, and a scripted sidecar is no process.
+  static std::vector<long> runners() {
+    std::vector<long> found;
+    std::error_code failed;
+    for (std::filesystem::directory_iterator entry("/proc", failed), end; !failed && entry != end;
+         entry.increment(failed)) {
+      const std::string name = entry->path().filename().string();
+      if (name.find_first_not_of("0123456789") != std::string::npos) {
+        continue;
+      }
+      // "<pid> (<name>) <state> <parent> ...", and the name may hold a ")".
+      std::string stat;
+      std::getline(std::ifstream(entry->path() / "stat"), stat);
+      const auto name_end = stat.rfind(')');
+      if (name_end == std::string::npos) {
+        continue;
+      }
+      std::istringstream fields(stat.substr(name_end + 1));
+      char state = 'Z';
+      long parent = 0;
+      fields >> state >> parent;
+      if (parent != static_cast<long>(::getpid()) || state == 'Z') {
+        continue;
+      }
+      std::ifstream arguments(entry->path() / "cmdline", std::ios::binary);
+      const std::string command{std::istreambuf_iterator<char>(arguments), {}};
+      if (command.find("tensorplate_pytorch_backend") != std::string::npos) {
+        found.push_back(std::stol(name));
+      }
+    }
+    return found;
+  }
 };
 
+// The results are the scripted backend's, so what tells this worker from one
+// that never started a runner is the runner itself: one child process from
+// the load on, the same one once the job was served, and none after the stop.
 TEST_F(SpeechWorkerRunner, OneUtteranceIsTranscribed) {
+  ASSERT_TRUE(runners().empty());
   auto built = worker();
   ASSERT_NE(built, nullptr);
+  const auto loaded = runners();
+  ASSERT_EQ(loaded.size(), 1U) << "the load started no runner process";
   const Serving served{std::move(built)};
   ASSERT_TRUE(served.serves_sessions);
   ASSERT_NO_FATAL_FAILURE(transcribes_one_utterance(served));
   EXPECT_TRUE(eventually([&] { return served.buffers() == 0; }));
+  EXPECT_EQ(runners(), loaded) << "the runner that was loaded did not live through the job";
   (void)served.stop();
+  EXPECT_TRUE(runners().empty()) << "the stop left the runner process";
 }
 
 TEST_F(SpeechWorkerRunner, OneSegmentIsSynthesized) {
+  ASSERT_TRUE(runners().empty());
   auto built = worker();
   ASSERT_NE(built, nullptr);
+  const auto loaded = runners();
+  ASSERT_EQ(loaded.size(), 1U) << "the load started no runner process";
   const Serving served{std::move(built)};
   ASSERT_TRUE(served.serves_sessions);
   ASSERT_NO_FATAL_FAILURE(synthesizes_one_segment(served));
   EXPECT_TRUE(eventually([&] { return served.buffers() == 0; }));
+  EXPECT_EQ(runners(), loaded) << "the runner that was loaded did not live through the job";
   (void)served.stop();
+  EXPECT_TRUE(runners().empty()) << "the stop left the runner process";
 }
 
 }  // namespace

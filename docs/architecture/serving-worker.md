@@ -1496,17 +1496,24 @@ is in none at all. No metric is exported for them.
 **Tests.** `test/integration/speech_worker_test.cpp` drives a worker over
 gRPC in process: one transcription and one synthesis segment, each against
 a scripted sidecar and against the in-tree sidecar runner with its fixture
-backend; a client cancel while the backend holds the segment's job (the
+backend, where every event the client reads is held to its place in the
+stream (the `sequence`, what `Ready` grants, each `Accepted` and its
+credit, nothing ahead of `SessionClosed` that the session did not owe) and
+the runner cases hold that one runner process lives from the load to the
+stop and not past it; a client cancel while the backend holds the segment's job (the
 session is released once, the next session is served); a lost client while
 its utterance is decoded behind a held backend (released once, the job's
-audio given back only when the backend lets go of the job); a job the
+audio given back only when the backend lets go of the job), and a lost
+client with an utterance open, in both orders described below; a job the
 backend takes and refuses, and a session of a mode the backend does not
 run; a drain that delivers the segment in flight, and a stop at the end of
 the drain window whose unload ends the job, with the job's audio still out
 while the unload waits behind the job and back when the stop returns; a
 start that could not bind and is not retried, and the same start of a
 worker without a dispatch, which is; a worker that is never started; the
-refused unary request; and each row of the table above.
+refused unary request; and each row of the table above. Where a session's
+release is what cancels its job, the scripted sidecar counts how often
+that job was asked to be cancelled: once, and by no `job_cancel` frame.
 The file is part of the listener's test binary, so the release and the
 address-sanitizer legs run it and the thread-sanitizer leg, which cannot
 run a gRPC call, does not. The worker's lines for the dispatch compile only
