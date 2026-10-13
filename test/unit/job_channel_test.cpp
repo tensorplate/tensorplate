@@ -19,9 +19,11 @@ TEST(JobChannel, FeatureFlagDisabled) {
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -47,6 +49,7 @@ namespace {
 
 using testing::failure_of;
 using testing::JobChannelHarness;
+using testing::ParkedCallback;
 using testing::ScriptedSidecar;
 using testing::speech_golden::golden;
 using testing::speech_golden::golden_files;
@@ -376,9 +379,12 @@ TEST_F(JobChannelTest, AClassNoLaneRunsIsRefusedAndNothingIsWritten) {
 }
 
 TEST(JobChannelClasses, OnlyTheClassesTheLoadDeclaredAreTaken) {
-  ScriptedSidecar peer(ScriptedSidecar::Options{.job_classes = {"stt_decode", "vad_frames"}});
+  ScriptedSidecar peer(ScriptedSidecar::Options{.job_classes = {"stt_decode", "vad_frames"},
+                                                .declares_any_job_class = true});
   JobChannelHarness h;
-  ASSERT_TRUE(h.connect(peer.launcher()).has_value());
+  const auto loaded = h.connect(peer.launcher());
+  ASSERT_TRUE(loaded.has_value());
+  ASSERT_EQ(loaded.value().at("job_classes"), Json::array({"stt_decode", "vad_frames"}));
   ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
   h.channel.admit_jobs();
   expect_refused(h.channel.submit(JobChannelHarness::tts(1, 1)), Error::Code::Unsupported,
@@ -392,13 +398,31 @@ TEST(JobChannelClasses, OnlyTheClassesTheLoadDeclaredAreTaken) {
 
 TEST(JobChannelClasses, ALoadThatDeclaresNoClassALaneRunsDoesNotStartTheChannel) {
   // The runner refuses such a load itself; a sidecar that did not is not served.
-  ScriptedSidecar peer(ScriptedSidecar::Options{.job_classes = {"vad_frames"}});
+  ScriptedSidecar peer(
+      ScriptedSidecar::Options{.job_classes = {"vad_frames"}, .declares_any_job_class = true});
   JobChannelHarness h;
   const auto loaded = h.connect(peer.launcher());
   ASSERT_FALSE(loaded.has_value());
   EXPECT_EQ(loaded.error().code, Error::Code::Unsupported);
   EXPECT_EQ(loaded.error().context.value_or(""), "job_class_unsupported");
   EXPECT_EQ(h.unary("health_check").error().code, Error::Code::NotReady);
+}
+
+// The scripted sidecar's own rule, which the two tests above switch off.
+TEST(JobChannelClasses, TheScriptedSidecarDeclaresOnlyLaneClassesAndRefusesALoadWithNone) {
+  ScriptedSidecar peer(ScriptedSidecar::Options{.job_classes = {"stt_decode", "vad_frames"}});
+  JobChannelHarness h;
+  const auto loaded = h.connect(peer.launcher());
+  ASSERT_TRUE(loaded.has_value());
+  EXPECT_EQ(loaded.value().at("job_classes"), Json::array({"stt_decode"}));
+
+  ScriptedSidecar without(ScriptedSidecar::Options{.job_classes = {"vad_frames"}});
+  JobChannelHarness other;
+  const auto refused = other.connect(without.launcher());
+  ASSERT_FALSE(refused.has_value());
+  // The sidecar's refusal of the load, not the channel's of its answer.
+  EXPECT_EQ(refused.error().code, Error::Code::LoadFailed);
+  EXPECT_EQ(Json::parse(refused.error().message).at("error").at("code"), "unsupported");
 }
 
 // -- Admission. ------------------------------------------------------------------
@@ -807,7 +831,10 @@ TEST_F(JobChannelTest, AHealthProbeThatIsAnsweredLeavesTheWaitingExchangesQueued
   EXPECT_EQ(prime.outcome().value().value("kind", ""), "prime_response");
 }
 
-// The number, not the constant: nothing else in the tree states it.
+// The number, not the constant: nothing else in the tree states it. With the
+// table full the last three entries of submit's list all apply, so their
+// order shows: a duplicate id is refused as one, and an id the wire cannot
+// carry for capacity.
 TEST_F(JobChannelTest, TheSeventeenthUnreleasedJobIsRefused) {
   ASSERT_NO_FATAL_FAILURE(up());
   peer.stop_reading();
@@ -816,6 +843,10 @@ TEST_F(JobChannelTest, TheSeventeenthUnreleasedJobIsRefused) {
   }
   expect_refused(h.channel.submit(JobChannelHarness::tts(17, 1)), Error::Code::ResourceExhausted,
                  "job_capacity_exhausted");
+  expect_refused(h.channel.submit(JobChannelHarness::tts(16, 1)), Error::Code::ConfigInvalid,
+                 "duplicate_job_id");
+  expect_refused(h.channel.submit(JobChannelHarness::tts(kMaxWireInteger + 1, 1)),
+                 Error::Code::ResourceExhausted, "job_capacity_exhausted");
 }
 
 // -- Cancel and session release. -------------------------------------------------
@@ -1708,6 +1739,265 @@ TEST_F(JobChannelTest, TheReaderKeepsReadingWhileASinkCallbackSubmits) {
   const std::vector<JobEvent> events = h.sink->events();
   const auto& chunk = std::get<AudioChunkResult>(events.at(1).result()->payload());
   EXPECT_EQ(chunk.pcm.byte_size, kLargestChunk);
+}
+
+// -- A job the sidecar fails for an unload. --------------------------------------
+
+// The `error` of a `job_failed`.
+Json failure(const std::string& code, const std::string& context) {
+  return Json{
+      {"error",
+       {{"schema_version", "0.1"}, {"code", code}, {"message", "m"}, {"context", context}}}};
+}
+
+TEST_F(JobChannelTest, AJobFailedAsUnavailableOnceAdmissionClosedEndsAsSessionUnloaded) {
+  up();
+  for (const std::uint64_t job_id : {1U, 2U, 3U}) {
+    ASSERT_TRUE(h.submit(h.stt(job_id, 1)).has_value());
+  }
+  ASSERT_TRUE(h.wait_kinds(3, {Accepted}));
+  h.channel.close_admission();
+  peer.emit("job_failed", 1, failure("unavailable", "backend_unavailable"));
+  // Another reason, and another code with the same reason, are the sidecar's own.
+  peer.emit("job_failed", 2, failure("unavailable", "lane_closed"));
+  peer.emit("job_failed", 3, failure("not_ready", "backend_unavailable"));
+  ASSERT_TRUE(h.wait_kinds(3, {Accepted, Failed}));
+  EXPECT_EQ(failure_of(h, 1), Error::make(Error::Code::Unavailable, "m", "session_unloaded"));
+  EXPECT_EQ(failure_of(h, 2), Error::make(Error::Code::Unavailable, "m", "lane_closed"));
+  EXPECT_EQ(failure_of(h, 3), Error::make(Error::Code::NotReady, "m", "backend_unavailable"));
+}
+
+TEST_F(JobChannelTest, AJobFailedAsUnavailableWhileTheChannelAdmitsKeepsTheSidecarsReason) {
+  up();
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
+  peer.emit("job_failed", 1, failure("unavailable", "backend_unavailable"));
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted, Failed}));
+  EXPECT_EQ(failure_of(h, 1), Error::make(Error::Code::Unavailable, "m", "backend_unavailable"));
+}
+
+// -- A channel whose session is gone. --------------------------------------------
+
+TEST(JobChannelAdmission, ARetiredChannelThatNeverStartedIsUnavailableAndStartsNoMore) {
+  ScriptedSidecar peer;
+  JobChannelHarness h;
+  ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
+  expect_refused(h.channel.probe_health(patient()), Error::Code::NotReady, "backend_not_ready");
+  for (int times = 0; times < 2; ++times) {
+    h.channel.retire();
+    expect_refused(h.channel.submit(h.stt(1, 1)), Error::Code::Unavailable, "backend_unavailable");
+    expect_refused(h.channel.probe_health(patient()), Error::Code::Unavailable,
+                   "backend_unavailable");
+    expect_refused(h.release(1), Error::Code::Unavailable, "backend_unavailable");
+  }
+  const auto started = h.connect(peer.launcher());
+  ASSERT_FALSE(started.has_value());
+  EXPECT_EQ(started.error().context.value_or(""), "job_channel_retired");
+  EXPECT_TRUE(h.sink->events().empty());
+  EXPECT_TRUE(h.sink->session_releases().empty());
+}
+
+// Stopped and without a buffer manager it answered "backend_not_ready".
+TEST(JobChannelAdmission, ARetiredChannelIsUnavailableAlsoWithoutABufferManager) {
+  ScriptedSidecar peer;
+  JobChannelHarness h(std::chrono::seconds{5}, /*with_manager=*/false);
+  ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
+  ASSERT_TRUE(h.connect(peer.launcher()).has_value());
+  h.stop(kSessionUnloaded);
+  expect_refused(h.channel.submit(h.stt(1, 1)), Error::Code::NotReady, "backend_not_ready");
+  expect_refused(h.channel.probe_health(patient()), Error::Code::NotReady, "backend_not_ready");
+  h.channel.retire();
+  expect_refused(h.channel.submit(h.stt(1, 1)), Error::Code::Unavailable, "backend_unavailable");
+  expect_refused(h.channel.probe_health(patient()), Error::Code::Unavailable,
+                 "backend_unavailable");
+}
+
+// Retired while it runs, which no session does: unavailable at once, its open
+// job still ends, and the stop that follows is its last.
+TEST_F(JobChannelTest, AChannelRetiredWhileItRunsIsUnavailableEndsItsJobAndStartsNoMore) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_EQ(peer.take_job(), 1U);
+  h.channel.retire();
+  expect_refused(h.channel.submit(h.stt(2, 1)), Error::Code::Unavailable, "backend_unavailable");
+  expect_refused(h.channel.probe_health(patient()), Error::Code::Unavailable,
+                 "backend_unavailable");
+  expect_refused(h.release(1), Error::Code::Unavailable, "backend_unavailable");
+  peer.complete(1, transcript());
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted, Completed, Released}));
+  EXPECT_TRUE(peer.sent("session_release", 0).empty());
+
+  h.stop(kSessionUnloaded);
+  ScriptedSidecar next;
+  const auto started = h.connect(next.launcher());
+  // Reaps the process of the refused start while its sidecar stands.
+  h.stop(kSessionUnloaded);
+  ASSERT_FALSE(started.has_value());
+  EXPECT_EQ(started.error().context.value_or(""), "job_channel_retired");
+}
+
+// The record itself: the refusal's return value is the same either way.
+TEST_F(JobChannelTest, ARetiredChannelRecordsNoReleaseItRefuses) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  h.stop(kSessionUnloaded);
+  // Stopped and not retired: the caller takes session 5 as released, and so
+  // does the channel.
+  expect_refused(h.release(5), Error::Code::Unavailable, "backend_unavailable");
+  ASSERT_EQ(h.channel.released_session_runs(), 1U);
+  h.channel.retire();
+  // Not next to 5: recorded, it would be a run of its own.
+  expect_refused(h.release(8), Error::Code::Unavailable, "backend_unavailable");
+  EXPECT_EQ(h.channel.released_session_runs(), 1U);
+}
+
+TEST_F(JobChannelTest, RetiringAChannelEndsAHealthCallThatWaits) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  peer.hold_health();
+  WaitingHealth health(h.channel, passed() + 10 * JobChannelHarness::kPatience);
+  ASSERT_TRUE(h.wait([&] { return h.channel.health_waiters() == 1; }));
+  h.channel.retire();
+  EXPECT_TRUE(h.wait([&] { return h.channel.health_waiters() == 0; }));
+  // A caller the retire had not woken ends here, as a stop ends it.
+  h.stop(kSessionUnloaded);
+  expect_refused(health.outcome(), Error::Code::Unavailable, "backend_unavailable");
+}
+
+// -- A channel whose sink was detached. ------------------------------------------
+
+// The job side is its bridge's, and the bridge is gone: each call is refused
+// and none reaches the sidecar, also for the job that is still open.
+TEST_F(JobChannelTest, OnceItsSinkIsDetachedTheJobSideIsRefusedAndSendsNothing) {
+  ASSERT_NO_FATAL_FAILURE(up());
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_EQ(peer.take_job(), 1U);
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted}));
+  for (int times = 0; times < 2; ++times) {
+    h.channel.detach_event_sink();
+    EXPECT_EQ(h.sink.use_count(), 1) << "the channel holds the sink no more";
+    expect_refused(h.channel.submit(h.stt(2, 1)), Error::Code::NotReady, "event_sink_missing");
+    expect_refused(h.channel.cancel(1), Error::Code::NotReady, "unknown_job");
+    expect_refused(h.channel.release_session(1, 1), Error::Code::NotReady, "event_sink_missing");
+    expect_refused(h.channel.set_event_sink(h.sink), Error::Code::ConfigInvalid,
+                   "event_sink_already_set");
+  }
+  EXPECT_FALSE(h.channel.in_sink_callback());
+  EXPECT_EQ(h.channel.backlog(), (JobChannelBacklog{1, 0, 0}));
+  // Health does not go through the sink, and is answered behind whatever the
+  // calls above had queued.
+  settle();
+  EXPECT_TRUE(peer.sent("job_cancel", 0).empty());
+  EXPECT_TRUE(peer.sent("session_release", 0).empty());
+  EXPECT_EQ(peer.sent("job_submit", 1).size(), 1U);
+}
+
+// The detach holds the last reference, and the deleter stands where the
+// sink's destructor runs: a thread that reads the channel meanwhile is
+// answered, so the channel's mutex was let go first.
+TEST(JobChannelDetach, TheLastReferenceToTheSinkIsLetGoOutsideTheChannelsMutex) {
+  JobChannel channel(nullptr, std::chrono::seconds{5});
+  testing::RecordingJobEventSink recording;
+  std::promise<void> read;
+  std::thread reader;
+  std::optional<bool> answered;
+  bool detached = false;
+  std::shared_ptr<JobEventSink> sink(&recording, [&](JobEventSink*) {
+    if (detached) {
+      return;  // Kept past the detach, which the test reports below.
+    }
+    reader = std::thread([&] {
+      (void)channel.backlog();
+      read.set_value();
+    });
+    answered =
+        read.get_future().wait_for(JobChannelHarness::kPatience) == std::future_status::ready;
+  });
+  const auto set = channel.set_event_sink(std::move(sink));
+  channel.detach_event_sink();
+  detached = true;
+  if (reader.joinable()) {
+    reader.join();
+  }
+  ASSERT_TRUE(set.has_value());
+  ASSERT_TRUE(answered.has_value()) << "the channel kept the sink";
+  EXPECT_TRUE(*answered) << "the sink was let go under the channel's mutex";
+}
+
+// -- The backlog. ----------------------------------------------------------------
+
+class JobChannelBacklogTest : public JobChannelTest {
+ protected:
+  // The first callback of `kind` parks.
+  void park_at(JobEventKind kind) {
+    h.on_event = [this, kind](const JobEvent& event) {
+      if (event.kind() == kind && !parked.entered()) {
+        parked.park();
+      }
+    };
+  }
+
+  [[nodiscard]] bool backlog_is(const JobChannelBacklog& expected) {
+    return h.wait([&] { return h.channel.backlog() == expected; });
+  }
+
+  // Declared after the harness's sidecar and before nothing that a callback
+  // uses: it lets a parked callback go before the harness stops the channel.
+  ParkedCallback parked;
+};
+
+TEST_F(JobChannelBacklogTest, ItIsEmptyOnlyOnceNoJobNoReleaseAndNoSinkCallIsOwed) {
+  park_at(Accepted);
+  up();
+  EXPECT_EQ(h.channel.backlog(), JobChannelBacklog{});
+  peer.stop_reading();
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  EXPECT_EQ(h.channel.backlog(), (JobChannelBacklog{1, 0, 0}));
+  ASSERT_TRUE(h.release(9).has_value());
+  EXPECT_EQ(h.channel.backlog(), (JobChannelBacklog{1, 1, 0}));
+
+  peer.resume_reading();
+  ASSERT_TRUE(h.wait([&] { return parked.entered(); }));
+  // The acknowledgement of session 9 waits behind the callback that is parked.
+  EXPECT_EQ(h.channel.backlog(), (JobChannelBacklog{1, 1, 1}));
+  parked.let_go();
+  EXPECT_TRUE(backlog_is({1, 0, 0}));
+
+  ASSERT_EQ(peer.take_job(), 1U);
+  peer.complete(1, transcript());
+  EXPECT_TRUE(backlog_is({0, 0, 0}));
+  EXPECT_EQ(h.sink->kinds_for(1), (Kinds{Accepted, Completed, Released}));
+}
+
+TEST_F(JobChannelBacklogTest, TheFailuresOfAConnectionsEndAreOwedUntilTheirCallbacksReturn) {
+  park_at(Failed);
+  up();
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  ASSERT_TRUE(h.submit(h.stt(2, 1)).has_value());
+  ASSERT_TRUE(h.wait_kinds(2, {Accepted}));
+  peer.close();
+  ASSERT_TRUE(h.wait([&] { return parked.entered(); }));
+  EXPECT_EQ(h.channel.backlog(), (JobChannelBacklog{2, 0, 2}));
+  parked.let_go();
+  EXPECT_TRUE(backlog_is({2, 0, 0})) << "failed, and unreleased until the stop";
+}
+
+TEST_F(JobChannelBacklogTest, WhatAStopDeliversIsOwedUntilItsCallbacksReturn) {
+  park_at(Released);
+  up();
+  ASSERT_TRUE(h.submit(h.stt(1, 1)).has_value());
+  // Running, so its session's release ends nothing before the stop.
+  ASSERT_EQ(peer.take_job(), 1U);
+  ASSERT_TRUE(h.release(1).has_value());
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted, CancelAcknowledged}));
+  std::thread stopping([this] { h.stop(kSessionUnloaded); });
+  const bool entered = h.wait([&] { return parked.entered(); });
+  // The job's `released` and its session's acknowledgement; the job's failure
+  // was the reader's, made before the stop's batch.
+  const JobChannelBacklog during = h.channel.backlog();
+  parked.let_go();
+  stopping.join();
+  ASSERT_TRUE(entered);
+  EXPECT_EQ(during, (JobChannelBacklog{0, 0, 2}));
+  EXPECT_EQ(h.channel.backlog(), JobChannelBacklog{});
 }
 
 }  // namespace

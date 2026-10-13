@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -182,6 +183,35 @@ class JobBench {
   adapters::python_pytorch::JobChannel* jobs_ = nullptr;
   std::mutex mutex_;
   std::condition_variable changed_;
+};
+
+/// A sink callback that waits for the test, which looks at the channel
+/// meanwhile.
+class ParkedCallback {
+ public:
+  /// Parks the calling callback until let_go(); it gives up after kPatience.
+  void park() {
+    entered_ = true;
+    (void)released_.get_future().wait_for(JobBench::kPatience);
+  }
+  [[nodiscard]] bool entered() const { return entered_; }
+  void let_go() {
+    if (!std::exchange(let_go_, true)) {
+      released_.set_value();
+    }
+  }
+  ~ParkedCallback() { let_go(); }
+
+  ParkedCallback() = default;
+  ParkedCallback(const ParkedCallback&) = delete;
+  ParkedCallback& operator=(const ParkedCallback&) = delete;
+  ParkedCallback(ParkedCallback&&) = delete;
+  ParkedCallback& operator=(ParkedCallback&&) = delete;
+
+ private:
+  std::atomic<bool> entered_{false};
+  bool let_go_ = false;
+  std::promise<void> released_;
 };
 
 /// The error of the job's `failed` event, when it has one.

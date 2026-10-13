@@ -12,6 +12,8 @@ add_executable(tp_test_integration
   job_channel_runner_test.cpp
   # The session and its job channel against the in-tree sidecar runner.
   python_pytorch_job_session_test.cpp
+  # The bridge conformance cases against the in-tree sidecar runner.
+  python_pytorch_job_bridge_runner_test.cpp
   scheduler_smolvla_test.cpp
   # V01-E07-F08: full serving worker end-to-end coverage.
   serving_e2e_test.cpp
@@ -36,12 +38,14 @@ add_executable(tp_test_integration
 target_include_directories(tp_test_integration
   PRIVATE
     ${CMAKE_SOURCE_DIR}/test/mocks
+    ${CMAKE_SOURCE_DIR}/test/contract
     ${CMAKE_SOURCE_DIR}/runtime/src
 )
 
 target_link_libraries(tp_test_integration
   PRIVATE
     tp::runtime
+    tp::fixture_job_bridge
     GTest::gtest_main
 )
 

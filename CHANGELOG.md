@@ -152,6 +152,32 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   member registry with a descriptor is now also refused while a worker
   that carries it is still draining. (V030-E03-F01-T03)
 
+- A job bridge for the Python/PyTorch adapter. `create_session_with_bridge`
+  now builds, for the `python_pytorch` backend, a session whose load enables
+  speech jobs together with the `BoundedJobBridge` bound to it;
+  `create_session` is unchanged, and nothing in the serving worker calls the
+  new factory yet. The bridge submits, cancels and releases through the
+  adapter's job channel, refuses a zero session key or generation ahead of
+  everything else, and answers `health()` from the channel's health probe
+  within the adapter's health timeout. The registered factory refuses hooks
+  without a buffer manager (`config_invalid`). An unload cancels no job: the
+  jobs that wait end `failed` with `session_unloaded` and the running one ends
+  as its backend ends it. The bridge conformance cases now run against this
+  bridge over a scripted sidecar and, for the cases that need no held job,
+  over the in-tree sidecar runner. `bounded_job_bridge.hpp` documents one more
+  refusal of `submit`, last in its order: `config_invalid` with a reason of
+  the backend's own naming for a request the backend cannot carry as given;
+  this bridge answers `wire_integer_out_of_range` and `pcm_buffer_invalid`.
+  The header also states that a sink callback never unloads or destroys the
+  backend session the bridge belongs to and never destroys the bridge. This
+  bridge's destructor detaches the sink: when it returns no sink callback is
+  running and none follows, and the events of jobs still open are dropped.
+  `registry.hpp` says what follows for the pair the registry returns:
+  destroyed as declared, the bridge goes first and the sink receives nothing
+  of what the session then ends. The adapter refuses a `prime` or an `unload`
+  made from a sink callback (`internal`, `lifecycle_call_in_sink_callback`)
+  before anything is sent or stopped. (V030-E04-F03-T03)
+
 - The serving worker's stream listener serves the remaining client events of
   the draft stream envelope, still behind a dispatch the worker does not
   build: a worker refuses every `Open` as before, and only tests give the
@@ -752,6 +778,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   count has its own message. (V030-E06-F02-T01)
 
 ### Changed
+
+- The Python/PyTorch adapter's job channel ends a job that waited when an
+  unload arrived with the reason `session_unloaded`, as the bridge's contract
+  names it; the sink received the sidecar's `backend_unavailable`. After a
+  session is destroyed its job channel answers `backend_unavailable` also when
+  the session was never loaded or has no buffer manager, where it answered
+  `backend_not_ready`, and it is not started again. (V030-E04-F03-T03)
 
 - The Python/PyTorch adapter's job channel records a session as released
   also when its release is refused because the connection has ended or the

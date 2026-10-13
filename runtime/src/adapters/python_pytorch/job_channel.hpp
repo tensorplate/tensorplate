@@ -7,7 +7,9 @@
 // probe that is answered beside it.
 //
 // Threads. The reader reads one frame at a time, routes it and calls the
-// event sink; while the connection lives nothing else calls the sink. The
+// event sink; while the connection lives nothing else calls the sink, and
+// stop() calls it only once it has joined the reader. So one thread delivers
+// at a time, and no lock is held for it. The
 // writer sends whole frames in the order they were queued, and is the only
 // thread that touches the socket's write side: not a caller's thread, and not
 // the reader. submit(), cancel(), release_session(), exchange() and
@@ -46,6 +48,13 @@
 // callback. submit() copies the request's PCM window twice while holding it,
 // out of the buffer manager and then into the encoded frame: the channel's
 // mutex, then the buffer manager's, which never calls back.
+//
+// A batch of sink calls is decided under the mutex and made after it is let
+// go. The decision marks the batch in flight on the deciding thread, and the
+// mark is cleared when its last callback has returned. detach_event_sink()
+// sets its flag under the same mutex and waits for that mark on a condition
+// variable, holding nothing: a batch decided before the flag is waited for,
+// and one decided after it is dropped where it is decided.
 //
 // Internal: nothing outside the adapter includes this header.
 
@@ -155,6 +164,20 @@ struct JobChannelCounters {
   friend bool operator==(const JobChannelCounters&, const JobChannelCounters&) noexcept = default;
 };
 
+/// What the channel still owes its sink, for tests and diagnostics: nothing
+/// in the adapter decides anything from it.
+struct JobChannelBacklog {
+  /// Jobs without `released`.
+  std::size_t open_jobs = 0;
+  /// Session releases without their acknowledgement.
+  std::size_t pending_releases = 0;
+  /// Sink calls decided whose batch has not returned: those of one frame, of
+  /// the connection's end, or of a stop.
+  std::size_t owed_callbacks = 0;
+
+  friend bool operator==(const JobChannelBacklog&, const JobChannelBacklog&) noexcept = default;
+};
+
 class JobChannel {
  public:
   using TimePoint = ipc::UnixSocket::TimePoint;
@@ -180,7 +203,8 @@ class JobChannel {
   /// stop(). Jobs are refused until admit_jobs().
   ///
   /// @return Error::Code::Internal when the channel is already started, with
-  ///   "socket_closed" when `socket` is not open, or with
+  ///   "job_channel_retired" after retire(), with "socket_closed" when
+  ///   `socket` is not open, or with
   ///   "job_channel_thread_unavailable" when a thread cannot be created;
   ///   Error::Code::Unsupported, "job_class_unsupported" when `job_classes`
   ///   holds neither class a lane runs (`stt_decode`, `tts_synthesis`).
@@ -192,7 +216,10 @@ class JobChannel {
 
   /// The backend is about to unload: submit() refuses from here on and a
   /// probe_health() that waits returns. cancel() and release_session() still
-  /// reach the sidecar, which acts on them while an unreleased job remains.
+  /// reach the sidecar, which acts on them while an unreleased job remains. A
+  /// job the sidecar fails as unavailable ("backend_unavailable") from here
+  /// on, which is how it ends a job that waits when the unload arrives,
+  /// reaches the sink with kSessionUnloaded.
   void close_admission() noexcept;
 
   /// Sends a unary request and waits for its response: the next frame that is
@@ -223,16 +250,50 @@ class JobChannel {
   /// joinable threads.
   void stop(std::string_view reason, const std::function<void()>& reap);
 
-  // -- The job side: any thread, a sink callback included. -------------------
+  /// The session is gone. One-way, whatever the channel's state: from here on
+  /// start() is refused, and submit(), release_session() and probe_health()
+  /// answer "backend_unavailable" ahead of every other check of that state,
+  /// the buffer manager's included; a probe_health() that waits returns. Ends
+  /// nothing: the session calls stop() first, and a channel retired while it
+  /// runs still delivers its jobs' events until stop().
+  void retire() noexcept;
+
+  // -- The job side: any thread, a sink callback included. Its one caller is
+  // the session's job bridge; the session calls none of it.
 
   /// @return success, or Error::Code::ConfigInvalid with reason
-  ///   "event_sink_null" or "event_sink_already_set".
+  ///   "event_sink_null" or "event_sink_already_set" (also after
+  ///   detach_event_sink(): a channel takes one sink for as long as it lives).
   [[nodiscard]] Result<void> set_event_sink(std::shared_ptr<JobEventSink> sink);
+
+  /// Lets go of the sink, for good. When it returns no sink callback is
+  /// running and none follows, whatever the channel does afterwards, and the
+  /// channel holds the sink no more. It waits for the batch of callbacks that
+  /// is in flight, without a time bound and holding no lock, so it is not
+  /// called from a sink callback (in_sink_callback(); the wait would be for
+  /// the caller's own return) nor while holding a lock a callback takes.
+  ///
+  /// The channel still takes every frame as before: the job table, the
+  /// releases, the send queue and the record of released sessions change as
+  /// they did. Only the sink calls are dropped, and a result chunk published
+  /// for an event that is dropped is released. From the moment it is called,
+  /// so also for a callback it waits for, submit() and release_session()
+  /// answer "event_sink_missing", cancel() "unknown_job", and none of them
+  /// queues a frame.
+  void detach_event_sink();
+
+  /// True on a thread that is inside a sink callback of this channel: the
+  /// reader, or the caller of a stop() that is delivering.
+  [[nodiscard]] bool in_sink_callback() const;
+
+  /// Callers that wait in detach_event_sink().
+  [[nodiscard]] std::size_t detach_waiters() const;
 
   /// Queues a `job_submit`. The job's events follow through the sink.
   ///
   /// @return success, or the first of these that applies:
   ///   Error::Code::NotReady, "event_sink_missing";
+  ///   Error::Code::Unavailable, "backend_unavailable" (after retire());
   ///   Error::Code::NotReady, "backend_not_ready" (before admit_jobs(), or
   ///   without a buffer manager);
   ///   Error::Code::Unavailable, "backend_unavailable" (admission closed, the
@@ -266,10 +327,11 @@ class JobChannel {
   /// Never refused for room in the queue: every pending release has a place.
   ///
   /// @return success, or Error::Code::NotReady, "event_sink_missing";
-  ///   Error::Code::Unavailable, "backend_unavailable" (not started, or the
-  ///   connection ended: the caller takes the session as released, and a
-  ///   channel that was ever started records it so, unless the key or the
-  ///   generation is one encode_session_release() refuses);
+  ///   Error::Code::Unavailable, "backend_unavailable" (retired, not
+  ///   started, or the connection ended: the caller takes the session as
+  ///   released, and a channel that was ever started and is not retired
+  ///   records it so, unless the key or the generation is one
+  ///   encode_session_release() refuses);
   ///   Error::Code::ResourceExhausted,
   ///   "session_release_capacity_exhausted" (kMaxPendingSessionReleases are
   ///   unacknowledged); or encode_session_release()'s refusal of a zero key
@@ -292,7 +354,9 @@ class JobChannel {
   ///   Error::Code::Unavailable, "backend_unavailable" (as submit() answers
   ///   it, also when that became true while the call waited; or the answer
   ///   cannot be read as one, or is an `error_event`);
-  ///   Error::Code::Timeout, "health_timeout" at `deadline`;
+  ///   Error::Code::Timeout, "health_timeout" when the call wakes at
+  ///   `deadline` and no answer has come: one that came by the time the
+  ///   caller runs again is returned, also after `deadline`;
   ///   ipc::encode_frame()'s refusal.
   [[nodiscard]] Result<void> probe_health(TimePoint deadline);
 
@@ -300,6 +364,9 @@ class JobChannel {
   [[nodiscard]] std::size_t health_waiters() const;
 
   [[nodiscard]] JobChannelCounters counters() const;
+
+  /// A reading under the channel's lock that changes nothing.
+  [[nodiscard]] JobChannelBacklog backlog() const;
 
   /// Runs of consecutive keys in the record of released sessions.
   [[nodiscard]] std::size_t released_session_runs() const;
@@ -365,10 +432,18 @@ class JobChannel {
   void end_probe_locked(Result<void> outcome);
   // As end_probe_locked(), for a frame that carried the probe's id.
   void answer_probe_locked(Result<void> outcome);
+  // The `failed` the sink gets in `event`'s place when the sidecar failed a job
+  // because an unload was closing its lane; none for any other event.
+  [[nodiscard]] std::optional<JobEvent> unloaded_locked(const JobEvent& event) const;
+  // Counts the batch a caller is about to hand to deliver() and marks it in
+  // flight on the calling thread. Once the sink is detached it empties the
+  // batch instead: nothing is owed and nothing delivered.
+  void owe_locked(std::vector<Delivery>& out) noexcept;
   // The `*_locked` members below need mutex_ held and append what the sink is
   // owed to `out`.
-  // True when `event` itself was appended.
-  bool admit_locked(const JobEvent& event, std::vector<Delivery>& out);
+  // True when the sink receives `received` itself: it was appended, not a
+  // failure in its place, and the sink is not detached.
+  bool admit_locked(const JobEvent& received, std::vector<Delivery>& out);
   static void fail_locked(Job& job, const Error& error, std::vector<Delivery>& out);
   void release_locked(std::map<std::uint64_t, Job>::iterator job, std::vector<Delivery>& out);
   // Drops a released job and what named it, and settles its session.
@@ -397,8 +472,10 @@ class JobChannel {
   std::condition_variable outbox_cv_;
   std::condition_variable unary_cv_;
   std::condition_variable probe_cv_;
+  std::condition_variable delivered_cv_;
 
   Phase phase_ = Phase::Idle;
+  bool retired_ = false;
   /// The reader left its loop; set until stop() has finished.
   bool ended_ = false;
   /// stop() is ending the connection: its reason is the jobs' failure.
@@ -411,7 +488,14 @@ class JobChannel {
 
   ipc::UnixSocket* socket_ = nullptr;
   std::vector<JobClass> job_classes_;
+  /// Null before set_event_sink() and once detach_event_sink() has returned.
   std::shared_ptr<JobEventSink> sink_;
+  /// Set when detach_event_sink() begins: the job side is closed from then on.
+  bool sink_detached_ = false;
+  /// The thread whose batch of sink calls has not returned; no thread when
+  /// none is in flight.
+  std::thread::id delivering_;
+  std::size_t detach_waiters_ = 0;
 
   std::map<std::uint64_t, Job> jobs_;
   /// The adapter's `message_id` of each unreleased job's submit and cancel.
@@ -426,6 +510,7 @@ class JobChannel {
   std::shared_ptr<HealthProbe> probe_;
 
   JobChannelCounters counters_;
+  std::size_t owed_callbacks_ = 0;
 
   std::thread reader_;
   std::thread writer_;

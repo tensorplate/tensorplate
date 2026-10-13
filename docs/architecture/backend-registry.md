@@ -180,7 +180,7 @@ delivery and end the job with the refusal instead of delivering it.
 | Method            | Error code / context |
 | ----------------- | -------------------- |
 | `set_event_sink`  | `config_invalid` / `event_sink_null`, `event_sink_already_set` |
-| `submit`          | `not_ready` / `event_sink_missing`, `backend_not_ready`, `session_releasing`; `unavailable` / `backend_unavailable`; `unsupported` / `job_class_unsupported`, `job_not_permitted`; `config_invalid` / `duplicate_job_id`; `resource_exhausted` / `job_capacity_exhausted` |
+| `submit`          | `not_ready` / `event_sink_missing`, `backend_not_ready`, `session_releasing`; `unavailable` / `backend_unavailable`; `unsupported` / `job_class_unsupported`, `job_not_permitted`; `config_invalid` / `duplicate_job_id`; `resource_exhausted` / `job_capacity_exhausted`; `config_invalid` / a reason of the backend's own naming, for a request it cannot carry as given |
 | `cancel`          | `not_ready` / `unknown_job` |
 | `release_session` | `config_invalid` / `session_key_zero`, `generation_zero`; `not_ready` / `event_sink_missing`; `unavailable` / `backend_unavailable` |
 | `health`          | `not_ready` / `backend_not_ready`; `unavailable` / `backend_unavailable`; `timeout` / `health_timeout` |
@@ -230,13 +230,14 @@ not as buffer handles.
 
 `test/contract/bounded_job_bridge_conformance.hpp` holds what the bridge
 header promises the caller of a bridge whose backend runs `stt_decode` and
-`tts_synthesis`, as one parameterised suite: thirty-seven cases, each under
+`tts_synthesis`, as one parameterised suite: thirty-eight cases, each under
 the header text it holds. A binding (`BridgeUnderTest`) supplies the bridge
 with its backend, the session's side of it (prime, unload, a backend that
 is lost) and a hold on started jobs; the cases force every order they need
 with that hold and never wait on the clock. A test binary includes the
 header in one source file and instantiates the suite with the bridges it
-builds.
+builds. A binding whose backend the environment may lack says why it cannot
+be built (`BridgeCase::unavailable`), and its cases are then skipped.
 
 Where the header leaves a backend a choice, the binding states what its
 backend does (`BridgeUnderTest::Choices`), and the comment above a case
@@ -250,6 +251,7 @@ names each choice the case relies on:
 | `ends_a_waiting_job_at_its_cancel`: a job that has not started ends as soon as it is cancelled | the job may end only once the held one was released |
 | `fails_a_held_job_that_was_cancelled`: a job cancelled while it is held ends `failed` with `cancelled` | the job may end `completed` |
 | `open_jobs`: how many jobs the held backend has open at once | the two cases at the backend's bound are skipped |
+| `largest_job_id`: the largest job id the backend carries | the case for a request the backend cannot carry is skipped |
 
 The binding's unload returns with nothing owed and its lost backend
 releases nothing before the unload; either ends a held job. Where the
@@ -273,15 +275,19 @@ unavailable, ahead of a class it does not run; that class ahead of a
 releasing session; a releasing session ahead of a duplicate job id; a
 duplicate job id ahead of exhausted capacity.
 
-Not held here, because a binding has no hook for them, and left to the
-adapter's binding and its own tests: `job_not_permitted` and its place in
-that order, `health_timeout`, the `failed` that replaces a backend event a
-job's order refuses, a late or foreign event being dropped, bridge calls
-beside a running lifecycle call, and calls from several threads at once.
-The destruction of the session is for a binding's own tests.
+Not held here, because a binding has no hook for them, and left to a
+binding's own tests: `job_not_permitted` and its place in that order,
+`health_timeout`, the `failed` that replaces a backend event a job's order
+refuses, a late or foreign event being dropped, bridge calls beside a
+running lifecycle call, and calls from several threads at once. The
+destruction of the session is for a binding's own tests. The C++ adapter's
+tests hold all of them for its bridge but the place of `job_not_permitted`
+in the order ("The job bridge in the C++ adapter", below).
 
+Three bindings run the cases: the fixture bridge, and the C++ adapter's
+bridge over a scripted sidecar and over the in-tree runner (below).
 `FixtureJobBridge` (`test/mocks/fixture_job_bridge.hpp`, the test library
-`tp::fixture_job_bridge`) is the one binding today: a bridge with a
+`tp::fixture_job_bridge`) is a bridge with a
 backend in the test's own process, for tests of what sits above a bridge.
 No production binary contains it. It keeps the refusals and each job's
 event order through `FakeBoundedJobBridge`, which it wraps, and plays the
@@ -336,8 +342,9 @@ session. And `release_session` on a lost or unloaded backend answers
 
 The fixture's results are held to the golden frames of the sidecar's job
 messages and its other rules by its own tests, both in
-`test/unit/bounded_job_bridge_conformance_test.cpp`; no test runs the same
-cases against the runner yet.
+`test/unit/bounded_job_bridge_conformance_test.cpp`, and to the runner
+itself by the cases that run against it
+(`test/integration/python_pytorch_job_bridge_runner_test.cpp`).
 
 ### Job messages in the C++ adapter
 
@@ -441,6 +448,27 @@ declared neither class a lane runs (`unsupported`,
   written whole whatever becomes of its record.
   The `message_id` of a job's submit and cancel is kept until the job is
   released, because the sidecar's `error_event` names only that id.
+- **A job the unload ends.** The sidecar fails a job that waits when an unload
+  arrives as `unavailable` with the reason `backend_unavailable`. The channel
+  hands that failure to the sink with the reason `session_unloaded` when it
+  arrives after the session closed admission for its unload, decided under the
+  channel's lock from its state at the moment the frame is routed. Another
+  code or reason, and the same failure while the channel admits, are passed on
+  as they came.
+- **A channel whose session is gone.** The session's destructor stops the
+  channel and then retires it, which is one-way. A retired channel refuses a
+  start (`job_channel_retired`) and answers `backend_unavailable` to `submit`,
+  `release_session` and `probe_health` ahead of every other check of its
+  state, the buffer manager's included: one that never started, or that has
+  no buffer manager, answered `backend_not_ready` until then. A health call
+  that waits returns. It records no release it refuses, because no job is
+  taken on it again. A stop alone does none of this: a session that was
+  unloaded, or whose load failed, loads again and its channel starts again.
+- **What the channel still owes.** `backlog()` reads, under the channel's
+  lock, the jobs without `released`, the session releases without their
+  acknowledgement and the sink calls decided whose batch has not returned. It
+  is an observer for tests and diagnostics: nothing in the adapter decides
+  anything from it.
 - **Who can find the pending releases full.** 2,048 is the protocol's
   ceiling on logical sessions. A session keeps its slot in the session
   manager until its release is acknowledged, and the session manager admits
@@ -516,8 +544,11 @@ declared neither class a lane runs (`unsupported`,
   channel, not
   to a caller: while the channel admits, a call made beside a probe that
   stands sends nothing and waits for its answer, each caller with its own
-  deadline, and a caller whose deadline
-  passes gets `health_timeout` and leaves the probe standing. An answer
+  deadline, and a caller that wakes at its deadline with no answer gets
+  `health_timeout` and leaves the probe standing. The deadline bounds the
+  wait, not the answer: one that arrived by the time the caller runs again
+  is returned, also when the deadline has passed meanwhile, and
+  `health_timeout` is returned only when none has. An answer
   that comes after every caller gave up is dropped by its id and counted,
   and only then does the next call send a new probe. So against a sidecar
   that never answers, every later call ends `health_timeout` until the
@@ -549,9 +580,10 @@ stall). Of a submit's input it checks the type and that `payload_length` is
 the payload's length, and it keeps the payload, so a test reads the bytes
 the channel sent; it does not bound the unary requests that wait, it
 writes a unary answer under its job lock where the runner writes it
-outside, and it declares the job classes a test gives it, where the runner
-declares only those a lane runs (four tests rest on that; the head of the
-file names them). It holds every frame of the adapter's to the runner's
+outside. As the runner does, it declares only the job classes a lane runs
+and refuses a load that leaves none, unless a test asks for a declaration
+no runner writes (`Options::declares_any_job_class`; four tests do). It
+holds every frame of the adapter's to the runner's
 envelope rules (`schema_version` "0.1", a `message_id`, a `kind`) and
 refuses one that breaks them as the runner does. It reports a frame of the
 adapter's as seen only once it has acted
@@ -580,7 +612,9 @@ every test.
 `python_pytorch_session.{hpp,cpp}` owns the channel's lifecycle. Whether a
 session runs speech jobs is a field of the adapter's internal configuration
 (`PythonPytorchConfig::speech_jobs`, off by default); the serving
-configuration has no key for it, and the registered backend does not set it.
+configuration has no key for it. The registered backend's `create_session`
+does not set it; a session built with its job bridge always has it (next
+section).
 `make_python_pytorch_session_with_channel` returns the session together with
 its channel: the holder of the channel sets the sink and submits, cancels
 and releases, and never starts or stops.
@@ -629,7 +663,21 @@ assume:
 - `prime`, `unload` and the destructor can stop the channel, and a stop
   waits for a sink callback that is running and delivers `released` on the
   calling thread, without a time bound. None of them is called from a sink
-  callback, nor while holding a lock a callback takes.
+  callback, nor while holding a lock a callback takes. A `prime` or an
+  `unload` that is made from a sink callback all the same is refused
+  (`internal`, `lifecycle_call_in_sink_callback`) before anything is sent,
+  closed or joined, on the channel's reader and on the thread of a stop
+  that is delivering. The sidecar, the channel and the open jobs are as
+  they were; the session's state reads `failed`, as after any failed
+  lifecycle call, until an `unload` from another thread. The refusal of a
+  `prime` is the adapter's for a session that is `loaded`: one that is
+  already `ready` is refused by the core before the adapter is asked
+  (`not_ready`), and its state stays as it was. Whichever refuses, the core
+  records it (the last error, and after the adapter's refusal the state) and
+  emits its session events on the thread that made the call: the delivering
+  thread. The destructor has no answer to give: called from a sink callback
+  it joins or waits for its own thread, so for it the rule stays a
+  precondition.
 - A job's `released` after a stop means the session's reap call has
   returned. Today that call blocks until the sidecar process has been
   waited for; it reports no result, and the channel releases whatever the
@@ -676,6 +724,199 @@ a buffer manager, and a session not built for jobs on an answer that
 carries another request's id.
 `test/integration/python_pytorch_job_session_test.cpp` runs both speech
 classes on a channel the session started against the in-tree runner.
+
+### The job bridge in the C++ adapter
+
+`job_bridge.{hpp,cpp}` is the adapter's `BoundedJobBridge`: the job side of
+the session's channel behind the public interface.
+`make_python_pytorch_session_with_bridge` builds the session, the bridge and
+the channel under both, and sets `speech_jobs` whatever the configuration it
+was given says: a bridge whose channel can never start would refuse every job
+for good. For the same reason the registered backend's
+`session_with_bridge_factory` refuses hooks without a buffer manager
+(`config_invalid`, the refusal a load with jobs and tensor inference give):
+every load of such a session would be refused. With one, it calls the factory
+with the interpreter and the timeouts the environment names and hands out the
+session and the bridge. `create_session` still builds a session without jobs,
+with or without a buffer manager. The factory itself does not look at the
+hooks, so a test can build a pair whose session never loads. The `infer` of a
+session built with a bridge is refused.
+
+The bridge is thin. What it adds to the channel:
+
+- A zero session key or generation is refused first (`session_key_zero`,
+  `generation_zero`), ahead of a missing sink and of a backend that is
+  unavailable.
+- `health()` is the channel's probe with the configured health timeout
+  (`PythonPytorchConfig::health_timeout`;
+  `TP_PYTHON_PYTORCH_HEALTH_TIMEOUT_MS` for the registered backend; two
+  seconds unless set) as its deadline. Its answers are the probe's: the
+  channel's state first, in the order `submit` refuses, then the sidecar's
+  answer when one has arrived by the time the caller runs, also after the
+  deadline, and `health_timeout` only when none has.
+  `JobBridge::health_timeout()` reads the value the bridge was built with.
+
+Every other call is the channel's (above). What a caller of this bridge can
+rely on beyond the public header, and what it must not assume:
+
+- **`job_not_permitted` comes after admission.** The channel does not know the
+  loaded profile, so `submit` never answers it: the sidecar ends the job with
+  `failed` carrying that code and reason, without `accepted`. It has no place
+  in the order of `submit`'s refusals here.
+- **Requests this backend cannot carry.** `submit` refuses them last in its
+  order, with `config_invalid`: `wire_integer_out_of_range` for a job id,
+  session key, generation or input field above 2^53 - 1, the largest integer
+  the sidecar's JSON carries exactly, and `pcm_buffer_invalid` for a window
+  the buffer manager does not hold. Behind them stands the frame encoder's
+  refusal of a frame beyond the transport's limits (a 1 MiB header, a 256 MiB
+  payload), which has a message and no reason; no request the job value
+  objects accept is that large. `release_session` refuses a key or a
+  generation above 2^53 - 1 in the same way (`wire_integer_out_of_range`),
+  which the public header's list for that method does not name; no job was
+  ever taken for such a key.
+- **Capacity.** `submit` refuses the seventeenth unreleased job
+  (`job_capacity_exhausted`); the sidecar ends a job beyond the one it runs
+  and the eight that wait with `failed` carrying the same reason. `cancel` of
+  a known job and `release_session` with valid arguments are never refused for
+  room in the send queue. `release_session` answers `resource_exhausted`,
+  `session_release_capacity_exhausted`, only to a caller with more than 2,048
+  releases unacknowledged, which a session manager cannot be (above). The
+  public header's list does not name it, and it is not `backend_unavailable`:
+  the session is not released, and the caller repeats the call.
+- **An unload cancels nothing.** The bridge is not told of an unload. The
+  sidecar fails the jobs that wait when the unload arrives, and they reach the
+  sink as `failed` (`unavailable`, `session_unloaded`). The job it is running
+  ends as its backend ends it, and the unload waits behind it for up to the
+  startup timeout. A job that outlasts that bound fails with `backend_reset`,
+  a reason the public header's sentence on an unload does not name: the unload
+  itself failed and the sidecar was ended. A caller that does not want to wait
+  cancels its jobs before it unloads.
+- **After the connection ended.** Open jobs fail with `backend_reset` and are
+  released only when the session unloads or is destroyed, once the process is
+  reaped. With no job open nothing is delivered, and the bridge reports the
+  loss when it is asked: `submit`, `release_session` and `health` answer
+  `backend_unavailable`, `cancel` answers `unknown_job`. For a backend lost
+  before the session was primed, `submit` and `health` answer
+  `backend_not_ready`, the state the session is in, until the unload.
+- **A release the backend could not take.** `release_session` answering
+  `backend_unavailable` counts the session as released: the channel records
+  the key, and a job for it is refused (`session_releasing`) on every later
+  load of the same session. The exception is a channel that was never
+  started: a release made before the session's first load, or after a first
+  load that failed before the channel started, is not recorded.
+- **After the session is destroyed** the bridge answers `backend_unavailable`
+  to `submit`, `release_session` and `health`, whether or not the session was
+  ever loaded and with or without a buffer manager, and `unknown_job` to
+  `cancel`; nothing is delivered any more. A missing sink and a zero key or
+  generation are still refused first, as the public header orders them.
+- **The bridge's destructor detaches the sink.** When it returns, no sink
+  callback is running and none follows, whatever the session and the channel
+  do afterwards, and the channel holds the sink no more. Jobs still open are
+  not cancelled. The channel takes their events as before (the job table, the
+  releases, the send queue and the record of released sessions change as they
+  did), delivers none of them, and releases the chunk of a result nobody
+  receives. Nothing can call `submit`, `cancel` or `release_session` any more:
+  they are the bridge's methods, and the bridge is the only caller of the
+  channel's job side, which from the detach on refuses a call and queues
+  nothing; the session calls the channel's lifecycle side only. The job side
+  closes when the detach begins, not when its wait ends: a callback the
+  destructor waits for is refused as well (`event_sink_missing` from `submit`
+  and `release_session`, `unknown_job` from `cancel`).
+- **How the detach waits.** Sink calls are serialized by which thread makes
+  them (the channel's reader, or the caller of a stop once it has joined the
+  reader), not by a lock. A batch of calls is decided under the channel's one
+  mutex and made after it is let go, and the decision marks the batch in
+  flight. The detach sets its flag under the same mutex and waits on a
+  condition variable, holding no lock, until no batch is in flight: a batch
+  decided before the flag is waited for, and one decided after it is emptied
+  where it is decided. So the destructor is not called while holding a lock a
+  callback takes. Called from a sink callback, which the public header
+  forbids, it would wait for its own caller: it writes one line to stderr and
+  ends the process (`std::terminate`) instead.
+- **Destroyed before its session**, as the pair the registry returns destroys
+  it, the bridge receives nothing of what the session's unload or destructor
+  then ends. A holder that wants those events unloads first.
+- **Lifecycle calls and callbacks.** A stop waits for a running sink callback
+  and delivers on the calling thread, and `prime`, `unload` and the destructor
+  can all stop: none of them is called from a sink callback, or while holding
+  a lock a callback takes. The session refuses a `prime` or an `unload` made
+  from a sink callback (`internal`, `lifecycle_call_in_sink_callback`; "The
+  session and its job channel", above); its destructor cannot.
+
+`test/unit/bounded_job_bridge_conformance_test.cpp` runs all thirty-eight
+conformance cases against this bridge over the scripted sidecar, with every
+choice stated: one job runs and eight wait, so nine are open at once and the
+tenth is ended by `failed`. A thread plays the sidecar's backend with the
+fixture's results and holds a started job when a case says so. It lets a held
+job go when it sees an `unload` waiting behind that job in the sidecar's
+queue: by then the sidecar has failed the jobs that waited, so none of them
+starts when the held one ends. The binding is settled when two health round
+trips through the channel's exchange slot in a row, each begun with that
+thread idle, find that the sidecar wrote nothing but their answers; one is not
+enough, because a callback that was running when it was queued may have queued
+a frame behind it. Once the connection has ended it waits for the channel's
+last batch of sink calls to return, and a round trip that timed out or found
+another exchange in the slot is not settled.
+`test/unit/job_bridge_harness_test.cpp` holds these rules of the harness. No
+case was loosened for this bridge.
+
+Two things that binding does not show. The case for a duplicate job id ahead
+of exhausted capacity is trivially true over it: the case fills the backend to
+the nine jobs the sidecar has open, and `submit`'s own capacity refusal is at
+sixteen, so only the duplicate's entry applies. The channel's test at sixteen
+unreleased jobs (`TheSeventeenthUnreleasedJobIsRefused`) holds the order of
+the last three entries of `submit`'s list. And the case for a backend lost
+before the prime passes whether or not the bridge has noticed the loss, since
+this bridge answers `backend_not_ready` either way; the bridge's own test
+waits for the loss to be noticed first.
+
+Where the scripted sidecar and the thread that plays its backend are more
+lenient than the in-tree runner: the backend always completes a job with the
+fixture's result (it never raises, reports no progress, and refuses a submit
+only when a test arms it); of a submit only the input's type and the payload's
+length are checked; a held job is let go once an unload waits behind it, which
+is one of a runner's two traces (the other, a job that outlasts the unload's
+bound, is reached by no conformance case; the session's test of an unload that
+times out holds it); and nothing bounds the unary requests that wait.
+
+`test/unit/python_pytorch_job_bridge_test.cpp` holds what the cases leave to a
+binding: `job_not_permitted`; `health_timeout`, with a timeout of zero against
+a sidecar that holds its health answers; the health timeout's value, read from
+the bridge the factory builds and from the one the registered entry builds
+with the environment's value; a health call that still waits when a held
+answer is let go; the `failed` that replaces an event a
+job's order refuses, and a late and a foreign event dropped; bridge calls
+answered while an unload waits behind a running job; calls from several
+threads at once; and the session's destruction, loaded, never loaded and
+built without a buffer manager. It also holds the points above: the four calls
+after a connection ended with no job open, a backend lost before the prime, an
+unload with jobs open, the zero arguments ahead of everything the channel
+checks, the requests this backend cannot carry, a release the backend could
+not take, the factory enabling jobs, and the registered entry with and without
+a buffer manager. For the destructor: a result held while the bridge is
+destroyed reaches no sink and its chunk is released; what the session's
+destructor ends afterwards reaches no sink; a destructor called while a
+callback is parked is seen waiting and returns only once the callback has,
+and what that callback submits, releases and cancels meanwhile is refused and
+queues nothing; and a bridge destroyed inside a callback ends the process with
+its message (a death test). For lifecycle calls from a callback: an `unload`
+and a `prime` made on the channel's reader are refused, nothing is sent, and
+the sidecar and the jobs live on; and an `unload` made from a callback that
+another unload's stop is delivering is refused on that thread.
+`test/unit/job_channel_test.cpp` holds the detached channel's job side, and
+that the detach lets the last reference to the sink go outside the channel's
+mutex.
+
+`test/integration/python_pytorch_job_bridge_runner_test.cpp` runs the same
+suite over the in-tree runner and its fixture backend. Nothing can hold the
+runner's jobs, so the binding states no hold and the cases that need one are
+skipped: twenty-four run, the two that compare a decode's and a synthesis's
+result with the fixture bridge's among them. The fourteen skipped include
+every case that keeps a job open across an unload or across a lost backend,
+so over the runner no conformance case shows either with a job open; the
+cases over the scripted sidecar do. That binding is settled once the
+channel owes nothing (no unreleased job, no unacknowledged release, no sink
+call still to return), and its lost backend is the runner's process, killed.
 
 ### Job messages in the Python sidecar
 

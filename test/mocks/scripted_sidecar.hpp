@@ -13,7 +13,8 @@
 //     of this sidecar's own, both in arrival order behind what waits;
 //   - a frame whose header is not a JSON object ends the connection;
 //   - a load is refused as the runner refuses it (an empty `capabilities`
-//     list, a capability it did not list, a runner with no job class);
+//     list, a capability it did not list, a runner with no job class a lane
+//     runs), and one it takes declares the classes a lane runs and no other;
 //   - `health_check` is answered at once; any other unary request and every
 //     admitted job wait in one FIFO, and a load or an unload fails the jobs
 //     still waiting when it arrives;
@@ -31,14 +32,15 @@
 //
 //   - of a submit's input it checks the type and the payload's length only,
 //     and keeps the payload for the test to read;
+//   - it has no backend: a job ends as the test says. The thread that plays
+//     one (job_bridge_harness.hpp) always completes a job with the fixture
+//     bridge's result. It never raises and reports no progress, and a submit
+//     is refused as not permitted only when a test arms it;
+//   - that thread lets a job it holds go once an unload waits behind it. A
+//     runner's job may end so; it may also outlast the unload's bound, which
+//     that thread never plays and no conformance case reaches;
 //   - it has no bound on the unary requests that wait, and it writes a unary
 //     answer under the job lock, where the runner writes it outside;
-//   - it declares the job classes it is given, where the runner declares
-//     only those a lane runs and refuses a load that leaves none. Four tests
-//     rest on that: the session's replay of the recorded negotiation, whose
-//     answer declares a pair no runner writes (`stt_decode`, `vad_frames`),
-//     the channel's "only the classes the load declared", and the "no class
-//     a lane runs" test of the channel and of the session;
 //   - an id of its own for a frame without one is the next `s<n>`, where the
 //     runner draws a random one, and a `message_id` that is not a string
 //     counts as none, where the runner echoes it;
@@ -59,9 +61,9 @@
 //     writes no more and drops what waits.
 //
 // The test is the backend: it takes the job at the head of the FIFO and says
-// how it ends. emit(), refuse(), stop_reading(), stop_reading_after(),
-// hold_health() and the overrides in Options step outside the runner's
-// behaviour for what the adapter has to survive.
+// how it ends (job_bridge_harness.hpp has a thread that does). emit(), refuse(), stop_reading(),
+// stop_reading_after(), hold_health(), Options::declares_any_job_class and the overrides in Options
+// step outside the runner's behaviour for what the adapter has to survive.
 
 #pragma once
 
@@ -110,8 +112,13 @@ class ScriptedSidecar {
     /// False plays a runner older than the list: its `ready_event` has no
     /// `capabilities` key, and it lists nothing a load could enable.
     bool lists_capabilities = true;
-    /// The job classes of the loaded "runner"; none refuses a load with jobs.
+    /// The job classes of the loaded "runner". A load with jobs declares those
+    /// of them a lane runs (`stt_decode`, `tts_synthesis`) and is refused when
+    /// that leaves none.
     std::vector<std::string> job_classes{"stt_decode", "tts_synthesis"};
+    /// True declares `job_classes` as given, whether a lane runs them or not,
+    /// which no runner does.
+    bool declares_any_job_class = false;
     std::chrono::milliseconds write_stall{std::chrono::seconds{5}};
     /// The texts of the error a load this sidecar refuses is answered with.
     std::string load_refusal_message = "m";
@@ -175,20 +182,46 @@ class ScriptedSidecar {
 
   // -- The backend. --------------------------------------------------------------
 
-  /// Waits for a job at the head of the FIFO with none running and starts it.
-  /// @return its job id; zero when none came.
-  [[nodiscard]] std::uint64_t take_job() {
+  /// A job the backend took, with the header and the payload size of its
+  /// submit; `job_id` is zero when none came.
+  struct TakenJob {
+    std::uint64_t job_id = 0;
+    Json submit = Json::object();
+    std::size_t payload_bytes = 0;
+  };
+
+  /// Waits up to `patience` for a job at the head of the FIFO with none
+  /// running and starts it.
+  [[nodiscard]] TakenJob take(std::chrono::milliseconds patience) {
     std::unique_lock<std::mutex> lock(table_mutex_);
-    const bool due = work_.wait_for(lock, kPatience, [this] {
-      return running_ == 0 && !lane_.empty() &&
-             std::holds_alternative<std::uint64_t>(lane_.front());
-    });
-    if (!due) {
-      return 0;
+    if (!work_.wait_for(lock, patience, [this] { return job_due_locked(); })) {
+      return {};
     }
     running_ = std::get<std::uint64_t>(lane_.front());
     lane_.pop_front();
-    return running_;
+    const Job& job = jobs_.at(running_);
+    return TakenJob{running_, job.submit, job.payload_bytes};
+  }
+
+  /// take() with this sidecar's patience.
+  /// @return the job's id; zero when none came.
+  [[nodiscard]] std::uint64_t take_job() { return take(kPatience).job_id; }
+
+  /// What the backend sees of the FIFO: the job it runs, zero for none,
+  /// whether take() would return one now, and whether an `unload` waits in
+  /// it, which it does only behind the running job.
+  struct Lane {
+    std::uint64_t running = 0;
+    bool job_due = false;
+    bool unload_waits = false;
+  };
+  [[nodiscard]] Lane lane() {
+    std::lock_guard<std::mutex> lock(table_mutex_);
+    const bool unload_waits = std::any_of(lane_.begin(), lane_.end(), [](const Work& work) {
+      const Json* request = std::get_if<Json>(&work);
+      return request != nullptr && text_of(*request, "kind") == "unload";
+    });
+    return Lane{running_, job_due_locked(), unload_waits};
   }
 
   /// Ends the running job as the runner does when its backend call returns:
@@ -252,6 +285,12 @@ class ScriptedSidecar {
   [[nodiscard]] std::vector<Json> written() const {
     std::lock_guard<std::mutex> lock(log_mutex_);
     return written_;
+  }
+
+  /// How many frames this sidecar wrote.
+  [[nodiscard]] std::size_t written_count() const {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    return written_.size();
   }
 
   /// Waits until this sidecar holds its job lock to write a `kind` message.
@@ -391,6 +430,8 @@ class ScriptedSidecar {
     std::uint64_t session_key = 0;
     std::uint64_t generation = 0;
     bool cancelled = false;
+    Json submit = Json::object();
+    std::size_t payload_bytes = 0;
   };
 
   static constexpr std::size_t kLaneDepth = 8;
@@ -617,6 +658,10 @@ class ScriptedSidecar {
     return waiting;
   }
 
+  bool job_due_locked() const {
+    return running_ == 0 && !lane_.empty() && std::holds_alternative<std::uint64_t>(lane_.front());
+  }
+
   // Answers the unary requests at the head of the FIFO while no job runs.
   void pump_locked() {
     while (running_ == 0 && !lane_.empty() && std::holds_alternative<Json>(lane_.front())) {
@@ -680,17 +725,34 @@ class ScriptedSidecar {
     }
     const bool with_jobs =
         std::find(enabled.begin(), enabled.end(), "speech_jobs_v1") != enabled.end();
-    if (with_jobs && options_.job_classes.empty()) {
+    const std::vector<std::string> declared = declared_classes();
+    if (with_jobs && declared.empty()) {
       return refused("unsupported");
     }
     loaded_ = true;
     Json response = answer(request, "load_model_response");
     if (with_jobs) {
       jobs_open_ = true;
-      response["job_classes"] = options_.job_classes;
+      response["job_classes"] = declared;
     }
     response.update(options_.load_response_overrides);
     return response;
+  }
+
+  // The classes a load with jobs declares: as the runner does, those of its
+  // classes that have a lane, in lane order and once each.
+  std::vector<std::string> declared_classes() const {
+    if (options_.declares_any_job_class) {
+      return options_.job_classes;
+    }
+    std::vector<std::string> declared;
+    for (const char* with_a_lane : {"stt_decode", "tts_synthesis"}) {
+      if (std::find(options_.job_classes.begin(), options_.job_classes.end(), with_a_lane) !=
+          options_.job_classes.end()) {
+        declared.emplace_back(with_a_lane);
+      }
+    }
+    return declared;
   }
 
   // True when a submit's input is of a known type and its `payload_length`
@@ -741,10 +803,10 @@ class ScriptedSidecar {
       // Not job messages: they would land in the live job's stream.
       write_frame(refusal(header, "error_event", "config_invalid", "duplicate_job_id"), 0);
     } else {
-      jobs_.emplace(job_id, named);
-      const std::string job_class = header.value("job_class", "");
-      const bool runs = std::find(options_.job_classes.begin(), options_.job_classes.end(),
-                                  job_class) != options_.job_classes.end();
+      jobs_.emplace(job_id, Job{named.session_key, named.generation, false, header, payload_bytes});
+      const std::vector<std::string> declared = declared_classes();
+      const bool runs = std::find(declared.begin(), declared.end(),
+                                  header.value("job_class", "")) != declared.end();
       if (!runs) {
         end_locked(job_id, "unsupported", "job_class_unsupported");
       } else if (std::exchange(refuse_next_, false)) {

@@ -97,8 +97,10 @@ void expect_refused(const Result<void>& result, Error::Code code, std::string_vi
 
 TEST(JobSessionNegotiation, ALoadWithJobsWritesAndReadsTheRecordedNegotiation) {
   const std::vector<Json> recorded = golden("negotiation");
+  // The recorded answer declares a pair no runner writes.
   ScriptedSidecar peer(ScriptedSidecar::Options{
-      .job_classes = recorded.at(2).at("job_classes").get<std::vector<std::string>>()});
+      .job_classes = recorded.at(2).at("job_classes").get<std::vector<std::string>>(),
+      .declares_any_job_class = true});
   JobSessionHarness h(with_jobs(), peer.launcher());
   ASSERT_TRUE(h.session->load(recorded_spec()).has_value());
 
@@ -237,7 +239,8 @@ TEST(JobSessionNegotiation, ALoadAnswerWithoutReadableJobClassesFailsTheLoad) {
 
 TEST(JobSessionNegotiation, ALoadThatDeclaresNoClassALaneRunsFailsAndTheSidecarIsReaped) {
   // The runner refuses such a load itself; a sidecar that did not is not served.
-  ScriptedSidecar peer(ScriptedSidecar::Options{.job_classes = {"vad_frames"}});
+  ScriptedSidecar peer(
+      ScriptedSidecar::Options{.job_classes = {"vad_frames"}, .declares_any_job_class = true});
   JobSessionHarness h(with_jobs(), peer.launcher());
   expect_refused(h.session->load(recorded_spec()), Error::Code::Unsupported,
                  "job_class_unsupported");
@@ -506,6 +509,40 @@ TEST(JobSessionFailure, AnUnloadARunningJobOutlastsTimesOutAndResetsTheBackend) 
   EXPECT_EQ(failure_of(h, 1)->context.value_or(""), kBackendReset) << "not the unload's reason";
   expect_refused(h.channel->submit(JobSessionHarness::tts(2, 1)), Error::Code::Unavailable,
                  "backend_unavailable");
+}
+
+// -- A session that is gone, and one that never loaded. ---------------------------
+
+TEST(JobSessionEnd, ASessionDestroyedBeforeItsFirstLoadLeavesAChannelThatIsUnavailable) {
+  ScriptedSidecar peer;
+  JobSessionHarness h(with_jobs(), peer.launcher());
+  expect_refused(h.channel->submit(JobSessionHarness::tts(1, 1)), Error::Code::NotReady,
+                 "backend_not_ready");
+  h.session.reset();
+  expect_refused(h.channel->submit(JobSessionHarness::tts(1, 1)), Error::Code::Unavailable,
+                 "backend_unavailable");
+  expect_refused(h.channel->probe_health(JobChannel::TimePoint::clock::now()),
+                 Error::Code::Unavailable, "backend_unavailable");
+  expect_refused(h.release(1), Error::Code::Unavailable, "backend_unavailable");
+  EXPECT_TRUE(h.sink->session_releases().empty());
+}
+
+TEST(JobSessionEnd, ASessionWhoseLoadFailedBeforeTheChannelStartedLoadsAgain) {
+  ScriptedSidecar refusing(ScriptedSidecar::Options{.job_classes = {}});
+  ScriptedSidecar taking;
+  int launches = 0;
+  JobSessionHarness h(with_jobs(), [&](const SidecarLaunchRequest& request) {
+    return (launches++ == 0 ? refusing : taking).launcher()(request);
+  });
+  ASSERT_FALSE(h.session->load(recorded_spec()).has_value());
+  // The stop of a channel that never started leaves it able to start.
+  expect_refused(h.channel->submit(JobSessionHarness::tts(1, 1)), Error::Code::NotReady,
+                 "backend_not_ready");
+  ASSERT_TRUE(h.session->unload().has_value());
+  ASSERT_TRUE(h.session->load(recorded_spec()).has_value());
+  ASSERT_TRUE(h.session->prime().has_value());
+  ASSERT_TRUE(h.submit(JobSessionHarness::tts(1, 1)).has_value());
+  EXPECT_TRUE(h.wait_kinds(1, {Accepted}));
 }
 
 }  // namespace

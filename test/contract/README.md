@@ -37,9 +37,14 @@ not state is skipped or holds only what the header says of every backend;
 where the header allows two outcomes a case accepts both, and the
 binding's own tests hold which one its backend produces. The T1 binary
 runs the suite against the in-process `FixtureJobBridge`, with each of its
-options and once without its hold
+options and once without its hold, and against the Python/PyTorch adapter's
+bridge over a scripted sidecar
 (`test/unit/bounded_job_bridge_conformance_test.cpp`); it needs no backend
-SDK, process or hardware.
+SDK, process or hardware. The T2 binary runs it against that adapter's
+bridge over the in-tree sidecar runner
+(`test/integration/python_pytorch_job_bridge_runner_test.cpp`): a binding
+names why its backend cannot be built where the test runs
+(`BridgeCase::unavailable`), and its cases are then skipped.
 
 ## V01-E04 ExecutionSession conformance suite
 

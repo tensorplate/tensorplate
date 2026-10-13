@@ -89,6 +89,7 @@ endif()
 
 if(TP_ENABLE_PYTHON_PYTORCH_SIDECAR)
   list(APPEND _tp_runtime_sources
+    src/adapters/python_pytorch/job_bridge.cpp
     src/adapters/python_pytorch/job_channel.cpp
     src/adapters/python_pytorch/job_wire.cpp
     src/adapters/python_pytorch/runner_profile.cpp
