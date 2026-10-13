@@ -1440,6 +1440,16 @@ admit sessions that nothing serves. The worker does not tell a failure
 before the attach apart; any failed start of the listener with the dispatch
 is final. A worker without a dispatch starts again as before.
 
+**A worker is not restarted.** `stop()` unloads the session and stops the
+dispatch, and nothing brings either back: a worker that was stopped is
+destroyed, and a new one is built to serve again. Today `start()` after a
+`stop()` returns success and opens no listener, because the flag a start
+sets is not cleared by a stop (older than the dispatch). By reading, not
+run: a `start()` that failed at the HTTP listener, then a `stop()`, then
+another `start()` would open the stream listener over the unloaded
+session. Refusing a start once the worker was stopped is a change of its
+own.
+
 It is **provisional**, as the dispatch is. The worker serves one stream
 session at a time. It grants both input kinds whatever the model runs: its
 configuration does not say which job classes a deployment has, so a session
