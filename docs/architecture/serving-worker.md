@@ -123,9 +123,10 @@ runs speech jobs is wired in.
   until the instant the earliest wait ends, which it takes from the
   listener's clock as an instant of the steady clock; nothing is polled.
   A clock that is moved by hand, as a test's is, tells the listener that
-  it has moved (`notify_clock_advanced()`), and one test runs on the system
-  clock and waits the five seconds, so that the thread waking by itself is
-  held too. At any instant at most 32 calls are waited on, and none for
+  it has moved (`notify_clock_advanced()`). Two tests run on the system
+  clock and wait out the five seconds, one for a call waiting to open and
+  one for a call whose session has ended (see "Calls that end"), so that
+  the thread waking by itself is held too. At any instant at most 32 calls are waited on, and none for
   longer than the timeout, so clients that send nothing whole hold at most
   32 such calls however many they open, and a call beyond them is refused
   on arrival. Each call waited on costs a reactor, no session, and what
@@ -171,8 +172,8 @@ runs speech jobs is wired in.
   cancelled, and the place of a call that ended is used again; with a real
   client, 33 calls refused one after another each read their reason, and
   a listener that is given no place cancels a call its watch thread
-  refuses and a call refused on arrival. No test has a real peer that
-  does not read.
+  refuses, a call refused when admission closes and a call refused on
+  arrival. No test has a real peer that does not read.
 - **Compression.** The server enables no compression algorithm. A call
   whose client announces one for its messages (gzip or deflate) is ended
   by gRPC itself, with status `UNIMPLEMENTED` and no event: the listener
