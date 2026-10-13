@@ -683,6 +683,8 @@ std::optional<std::chrono::steady_clock::time_point> logged_drain_end(const std:
 
 // A stop ends the stream listener before it waits for a unary request in
 // flight, which therefore cannot use up the window stream sessions drain in.
+// The HTTP port still answers once shutdown is asked; after the stream port
+// it closes too, before the request in flight has been waited for.
 // Both drains end with the one window that began when shutdown was asked.
 // The worker gives its listener no dispatch, so no session exists here: what
 // a listener's stop does to its sessions is shown on the listener itself.
@@ -757,6 +759,10 @@ TEST(StreamListener, TheWorkersStopEndsItsStreamListenerWhileAUnaryRequestIsStil
   // The request is still held at its gate, which only this test opens.
   ASSERT_TRUE(eventually([&] { return !accepts(AF_INET, served.port); }))
       << "the stop waited for the unary request before it reached the stream listener";
+  // The HTTP listener's stop comes next. It closes the port first and then
+  // waits for the request, so nothing answers on it for the rest of the stop.
+  ASSERT_TRUE(eventually([&] { return !accepts(AF_INET, http_port); }))
+      << "the HTTP port stayed open after the stream listener had stopped";
   EXPECT_FALSE(stop_returned) << "the stop did not wait for the request in flight";
   gate->release();
   stopper.join();
