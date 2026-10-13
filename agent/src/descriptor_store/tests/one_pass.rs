@@ -8,11 +8,14 @@ use super::deploy::{killed_after, FORMAT_0_1, STT, TTS};
 use super::start_again::{host, Agent, Host, Worker};
 use super::*;
 
-use tensorplate_protocol::agent_control::RecoveryAction;
+use tensorplate_protocol::agent_control::{
+    ControlRequest, DeployRequest, RecoveryAction, ResponseStatus, RollbackRequest,
+};
 use tensorplate_protocol::agent_state::TransactionKind;
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::MemberRef;
 
+use crate::control::dispatch;
 use crate::recovery::apply_startup;
 use crate::registry::{durable_generations, Restamp};
 use crate::worker::ServingMember;
@@ -414,12 +417,28 @@ fn a_committed_transaction_whose_end_write_failed_is_busy_until_a_start_clears_i
             ("stt", "tts")
         };
         assert_eq!(host.ids(), [serving, retained], "{case}");
-        let busy = |refused: AgentResult<()>| match refused {
-            Err(AgentError::Busy(id)) => id == in_flight.transaction_id,
-            _ => false,
+        // What a client is answered: `busy`, and no transaction id.
+        let deploy = DeployRequest {
+            bundle_path: repo(FORMAT_0_1).display().to_string(),
+            deployment_id: "smoke".into(),
+            ..DeployRequest::default()
         };
-        assert!(busy(agent.deploy("smoke", FORMAT_0_1)), "{case}");
-        assert!(busy(agent.coordinator.rollback(None).map(|_| ())), "{case}");
+        let requests = [
+            ControlRequest::deploy(None, deploy),
+            ControlRequest::rollback(None, RollbackRequest::default()),
+        ];
+        for request in requests {
+            let op = request.op;
+            let answered = dispatch(&agent.coordinator, request).unwrap();
+            assert_eq!(answered.status, ResponseStatus::Busy, "{case} {op}");
+            assert_eq!(answered.transaction_id, None, "{case} {op}");
+            let error = answered.error.expect("a busy response carries an error");
+            let told = (error.code, error.message.as_str());
+            assert_eq!(told, (ErrorCode::NotReady, "agent_busy"), "{case} {op}");
+            assert_eq!(answered.agent_status, None, "{case} {op}");
+        }
+        let still = agent.store.snapshot().unwrap().in_flight_transaction;
+        assert_eq!(still, Some(in_flight), "{case}");
         assert_eq!(host.ids(), [serving, retained], "{case}");
 
         host.settles_in_one_start(Some(serving), Some(retained), None, case);

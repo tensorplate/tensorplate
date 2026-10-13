@@ -223,7 +223,7 @@ impl WorkerControl for Worker {
 pub(super) struct Agent {
     pub(super) store: Arc<StateStore>,
     pub(super) worker: Arc<Worker>,
-    pub(super) coordinator: Coordinator,
+    pub(super) coordinator: Arc<Coordinator>,
 }
 
 impl Agent {
@@ -330,7 +330,7 @@ impl Host {
             ..worker
         });
         let coordinator = Coordinator::new(config, store.clone(), worker.clone());
-        let coordinator = coordinator.with_backend_probes(probes);
+        let coordinator = Arc::new(coordinator.with_backend_probes(probes));
         let agent = Agent {
             store,
             worker,
