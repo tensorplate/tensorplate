@@ -1417,7 +1417,8 @@ model that runs none.
 | `speech` model, backend registered with a bridge factory | with its bridge, loaded with speech jobs | served |
 | the same, on a runner that offers no speech jobs | the load with speech jobs is refused | none: `create()` fails with the load's error (`unsupported`; `speech_jobs_not_offered` when the runner lists no such capability) |
 | `speech` model, backend without one (`job_bridge_unsupported`) | `create_session`, loaded without jobs | every `Open` refused (`backend_unsupported_capability`) |
-| another model class, or the mock session | `create_session`; the bridge factory is not called | every `Open` refused; unary requests served as before |
+| another model class | `create_session`; the bridge factory is not called | every `Open` refused; unary requests served as before |
+| the mock session (`deployment.use_mock_session`) | built in process; no factory of the registry is called | every `Open` refused; unary requests served as before |
 | `streaming.enabled` false | `create_session`, loaded without jobs | no listener |
 
 Any other failure to build the pair fails `create()` with the factory's

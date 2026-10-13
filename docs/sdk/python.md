@@ -76,8 +76,10 @@ failure mode, and the wheel carries the
 [stream schema's modules](#stream-schema-modules). On the server side, a
 feature-ON serving worker with `streaming.enabled` opens a loopback gRPC
 stream listener. With a speech model on a backend that runs speech jobs it
-serves stream sessions; with a deployment of another model class it refuses
-every `Open` (see
+serves stream sessions. With a deployment of another model class, or a
+speech model on a backend registered without a job bridge factory, it
+refuses every `Open`. With a speech model whose runner offers no speech
+jobs the worker is not built at all (see
 [serving-worker.md](../architecture/serving-worker.md#the-speech-dispatch-in-the-worker)).
 `import tensorplate`
 never imports `tensorplate.speech`, `tensorplate.stream`, grpc or protobuf,
