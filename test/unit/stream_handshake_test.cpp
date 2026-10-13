@@ -379,4 +379,48 @@ TEST(RefusedCalls, ExactlyThirtyTwoOfSixtyFourCallsRefusedAtOnceKeepTheirStatus)
   EXPECT_EQ(places.size(), 0U);
 }
 
+// gRPC reports a call done on one thread while another refuses a call: the
+// two meet at the places' lock and nowhere else. Both threads leave one
+// gate together, so nothing but that lock orders the return of a place and
+// the taking of one, and ThreadSanitizer reports the pair if either goes
+// without it. The call refused finds the one place still held or just given
+// back; the count is exact either way.
+TEST(RefusedCalls, ACallEndsWhileAnotherIsBeingRefusedAndNoPlaceIsLost) {
+  constexpr int kRounds = 200;
+  for (int round = 0; round < kRounds; ++round) {
+    SCOPED_TRACE(round);
+    RefusedCalls places{1};
+    UnreadCall ending;
+    ending.refuse(places);
+    ASSERT_TRUE(ending.kept_its_status());
+    UnreadCall refused;
+    std::atomic<int> at_the_gate{0};
+    std::atomic<bool> open{false};
+    const auto pass_the_gate = [&] {
+      ++at_the_gate;
+      while (!open) {
+        std::this_thread::yield();
+      }
+    };
+    std::thread ender([&] {
+      pass_the_gate();
+      ending.end();
+    });
+    std::thread refuser([&] {
+      pass_the_gate();
+      refused.refuse(places);
+    });
+    while (at_the_gate != 2) {
+      std::this_thread::yield();
+    }
+    open = true;
+    ender.join();
+    refuser.join();
+    ASSERT_TRUE(refused.kept_its_status() || refused.was_cancelled());
+    EXPECT_EQ(places.size(), refused.kept_its_status() ? 1U : 0U);
+    refused.end();
+    EXPECT_EQ(places.size(), 0U);
+  }
+}
+
 }  // namespace

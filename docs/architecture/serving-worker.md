@@ -184,12 +184,14 @@ runs speech jobs is wired in.
   builds (1.81.1), not shown by a run here. The tests: against a writer
   whose calls end when the test says so, the 4,096th refused call keeps
   its status, the next is cancelled, and the place of a call that ended is
-  used again; with a real client, 64 calls opened at once on one channel,
-  twenty rounds without a pause, each read a refusal with its reason; a
-  listener that is given one place refuses calls one after another and
-  each reads its reason; and a listener that is given no place cancels a
-  call its watch thread refuses, a call refused when admission closes and
-  a call refused on arrival. No test has a real peer that does not read.
+  used again; one thread ends a refused call while another refuses one,
+  which the thread sanitizer leg holds to the places' lock; with a real
+  client, 64 calls opened at once on one channel, twenty rounds without a
+  pause, each read a refusal with its reason; a listener that is given one
+  place refuses calls one after another and each reads its reason; and a
+  listener that is given no place cancels a call its watch thread refuses,
+  a call refused when admission closes and a call refused on arrival. No
+  test has a real peer that does not read.
 - **Compression.** The server enables no compression algorithm. A call
   whose client announces one for its messages (gzip or deflate) is ended
   by gRPC itself, with status `UNIMPLEMENTED` and no event: the listener
