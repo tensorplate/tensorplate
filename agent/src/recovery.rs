@@ -260,6 +260,10 @@ pub fn apply_startup(coordinator: &Coordinator) -> AgentResult<RecoverySummary> 
                 store.fail_transaction(tx.failure.clone().unwrap_or_else(unrecorded))?;
             }
         }
+    } else if state.candidate.is_some() {
+        // A candidate record without its deploy, as an earlier build could
+        // leave: nothing is settled, so it is cleared in a write of its own.
+        store.clear_candidate()?;
     }
     if pass.restore {
         restore_active(coordinator)?;

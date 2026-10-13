@@ -424,7 +424,8 @@ impl StateStore {
     }
 
     /// End the in-flight transaction after its commit: it and `last_error`
-    /// are cleared in one write.
+    /// are cleared in one write, with a candidate record that has no deploy
+    /// (see [`Self::clear_candidate`]).
     ///
     /// # Errors
     ///
@@ -432,13 +433,15 @@ impl StateStore {
     pub fn end_transaction(&self) -> AgentResult<()> {
         self.update(|s| {
             s.in_flight_transaction = None;
+            s.candidate = None;
             s.last_error = None;
             Ok(())
         })
     }
 
     /// End the in-flight transaction as failed without a quarantine
-    /// record: `error` becomes `last_error` in the write that clears it.
+    /// record: `error` becomes `last_error` in the write that clears it,
+    /// with a candidate record that has no deploy.
     ///
     /// # Errors
     ///
@@ -446,6 +449,7 @@ impl StateStore {
     pub fn fail_transaction(&self, error: ErrorRecord) -> AgentResult<()> {
         self.update(|s| {
             s.in_flight_transaction = None;
+            s.candidate = None;
             s.last_error = Some(error);
             Ok(())
         })
@@ -459,6 +463,20 @@ impl StateStore {
     pub fn record_candidate(&self, candidate: DeploymentRecord) -> AgentResult<()> {
         self.update(|s| {
             s.candidate = Some(candidate);
+            Ok(())
+        })
+    }
+
+    /// Clear a candidate record that no transaction in flight is the deploy
+    /// of. This agent leaves none: the commit takes a deploy's candidate and
+    /// its failure clears it. An earlier build could.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::update`].
+    pub fn clear_candidate(&self) -> AgentResult<()> {
+        self.update(|s| {
+            s.candidate = None;
             Ok(())
         })
     }

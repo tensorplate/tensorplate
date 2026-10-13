@@ -926,3 +926,78 @@ fn a_swap_is_not_read_from_a_deployment_id_both_records_share() {
     assert!(active.starts_with("stt@") && active != "stt@1" && active != "stt@3");
     assert_eq!((previous.as_str(), transaction.as_str()), ("stt@1", "-"));
 }
+
+#[test]
+fn a_candidate_record_left_without_its_deploy_is_cleared_by_the_start_that_finds_it() {
+    // What the start finds beside the candidate record, which only a file
+    // of an earlier build holds without a deploy in flight; whether the
+    // pass has a settling write to clear it in; the record it restores.
+    let cases = [
+        ("nothing", false, None),
+        ("an active record", false, Some("tts")),
+        ("a committed rollback", true, Some("stt")),
+        ("a rollback recorded failed", true, Some("tts")),
+    ];
+    for (case, settles, restored) in cases {
+        let host = host();
+        let agent = match case {
+            "nothing" => host.start(Worker::default()).0,
+            "an active record" => {
+                let (agent, _) = host.start(Worker::default());
+                let staged = host.staged("tts").display().to_string();
+                deploy(&agent.store, &host.descriptors, "tts", &staged).unwrap();
+                agent
+            }
+            _ => {
+                let (agent, _) = host.rolling_back(Worker::default());
+                if case == "a committed rollback" {
+                    agent.rollback_up_to(DeployState::Warmed);
+                    agent.store.swap_active_with_previous(2).unwrap();
+                } else {
+                    agent.rollback_up_to(DeployState::Failed);
+                }
+                agent
+            }
+        };
+        let staged = host.staged("left").display().to_string();
+        let left = DeploymentRecord {
+            generation: None,
+            descriptor_digest: None,
+            configuration_digest: None,
+            promoted_monotonic_ns: None,
+            ..record(&derive("left", 1, &staged))
+        };
+        let leave = |state: &mut AgentState| {
+            state.candidate = Some(left);
+            Ok(())
+        };
+        agent.store.update(leave).unwrap();
+        let version = |host: &Host| {
+            let state = StateStore::open(host.state_dir()).unwrap();
+            state.snapshot().unwrap().store_version
+        };
+        let found = version(&host);
+        // The settling write when the pass has one, or one of its own; a
+        // restore then names its generation and clears the error.
+        let writes = 1 + if restored.is_some() { 2 } else { 0 };
+        drop(agent);
+
+        let (_, first) = host.one_start(Worker::default());
+
+        assert!(host.settled(), "{case}");
+        assert_eq!(version(&host), found + writes, "{case}: settles {settles}");
+        match restored {
+            Some(id) => assert_eq!(first.asked().reference.deployment_id, id, "{case}"),
+            None => assert!(first.never_asked(), "{case}"),
+        }
+        assert!(host.quarantined().0.is_empty(), "{case}");
+
+        // The second start finds no candidate record: it writes only what
+        // a restore writes.
+        let settled = version(&host);
+        let (_, second) = host.one_start(Worker::default());
+        assert_eq!(version(&host), settled + writes - 1, "{case}");
+        assert_eq!(second.never_asked(), restored.is_none(), "{case}");
+        assert!(host.settled(), "{case}");
+    }
+}
