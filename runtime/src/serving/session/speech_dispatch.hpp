@@ -61,8 +61,9 @@ struct SpeechDispatchStats {
 ///   Finalize, a half-close or the 30 s limit ends the utterance, whose audio
 ///   is one `stt_decode`. Its result is the final's one segment, over the
 ///   whole utterance; no audio, or no text, yields a final without segments.
-///   Three utterances may have ended without their final; a fourth fails the
-///   session (`utterance_backlog_exceeded`).
+///   Three utterances may have ended without their final; a fourth, ended by
+///   the limit or by a Finalize, fails the session
+///   (`utterance_backlog_exceeded`).
 /// - Text: a segment is one `tts_synthesis`, whose one audio result is cut
 ///   into chunks of kAudioChunkDuration. A chunk is cut only when the one
 ///   before it was queued, so backpressure holds one chunk and nothing grows.
@@ -274,6 +275,10 @@ class SpeechJobDispatch final : public SessionDispatch {
                                         Session& session);
   /// Reports `drain_completed` once nothing is owed or undelivered.
   static void complete_drain(SessionManager& manager, std::uint64_t key, Session& session);
+  /// Asked before an utterance is ended. False, and the session failed, when
+  /// it already holds every ended utterance it may.
+  [[nodiscard]] static bool may_end_utterance(SessionManager& manager, std::uint64_t key,
+                                              Session& session);
   static void end_utterance(Session& session, EndpointReason reason,
                             std::uint64_t finalize_sequence);
   static void fail(SessionManager& manager, std::uint64_t key, Session& session, Error cause);

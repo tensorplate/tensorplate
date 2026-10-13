@@ -419,10 +419,10 @@ void SpeechJobDispatch::hand_over(SessionManager& manager, std::uint64_t key, Se
     }
   } else if (const auto* asked = std::get_if<Command::FinalizeIn>(&command.body)) {
     session.owed_finalize -= std::min(session.owed_finalize, 1U);
-    if (takes_audio) {
-      end_utterance(session, EndpointReason::ClientFinalize, asked->client_sequence);
-    } else {
+    if (!takes_audio) {
       session.finalize_sequence = asked->client_sequence;
+    } else if (may_end_utterance(manager, key, session)) {
+      end_utterance(session, EndpointReason::ClientFinalize, asked->client_sequence);
     }
   } else if (const auto* delivered = std::get_if<Command::Delivered>(&command.body)) {
     // Any delivery can make room for a held item; only task output counts.
@@ -642,11 +642,7 @@ void SpeechJobDispatch::take_audio(SessionManager& manager, std::uint64_t key, S
     if (session.samples_accepted - session.utterance_start < longest) {
       continue;
     }
-    if (session.ended_utterances.size() >= kEndedUtterances) {
-      fail(manager, key, session,
-           Error::make(Error::Code::ResourceExhausted,
-                       "audio arrived faster than its utterances were decoded",
-                       "utterance_backlog_exceeded"));
+    if (!may_end_utterance(manager, key, session)) {
       return;
     }
     // The sink shows the finalization this starts before the utterance's job
@@ -657,6 +653,18 @@ void SpeechJobDispatch::take_audio(SessionManager& manager, std::uint64_t key, S
     }
     end_utterance(session, EndpointReason::DurationLimit, 0);
   }
+}
+
+bool SpeechJobDispatch::may_end_utterance(SessionManager& manager, std::uint64_t key,
+                                          Session& session) {
+  if (session.ended_utterances.size() >= kEndedUtterances) {
+    fail(manager, key, session,
+         Error::make(Error::Code::ResourceExhausted,
+                     "audio arrived faster than its utterances were decoded",
+                     "utterance_backlog_exceeded"));
+    return false;
+  }
+  return true;
 }
 
 void SpeechJobDispatch::end_utterance(Session& session, EndpointReason reason,

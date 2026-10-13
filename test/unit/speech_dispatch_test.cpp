@@ -52,6 +52,14 @@ void one_utterance(Binding& binding, std::uint64_t key) {
   binding.finalize(key, 1);
 }
 
+/// The audio of the longest utterance granted: the dispatch ends it itself.
+Bytes utterance_at_the_limit(Binding& binding, std::uint64_t key, unsigned seed) {
+  const auto terms = binding.terms(key);
+  return patterned_bytes(static_cast<std::size_t>(terms.max_utterance.count()) *
+                             terms.audio_format.bytes_per_second() / 1000,
+                         seed);
+}
+
 std::string refusal(const SessionDispatch& dispatch, const SessionRequest& request) {
   const auto refused = dispatch.negotiate(request);
   if (refused.has_value()) {
@@ -835,6 +843,30 @@ TEST(SpeechJobDispatch, UtterancesThatEndFasterThanTheyAreDecodedFailTheSession)
   (void)binding.audio_in_long_frames(key, utterance);
   ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Failed; }));
   // Its release waits behind the job the backend still holds.
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->code, Error::Code::ResourceExhausted);
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "utterance_backlog_exceeded");
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
+  EXPECT_EQ(speech.buffers_in_use(), 0U);
+}
+
+// The bound is the same when a client's Finalize ends the fourth.
+TEST(SpeechJobDispatch, AFourthUtteranceEndedByAFinalizeFailsTheSession) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes utterance = utterance_at_the_limit(binding, key, 3);
+  speech.hold_jobs();
+  for (int ended = 0; ended < 3; ++ended) {
+    ASSERT_TRUE(binding.audio_in_long_frames(key, utterance));
+  }
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Finalizing);
+
+  one_utterance(binding, key);
+  ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Failed; }));
   speech.release_jobs();
   ASSERT_TRUE(binding.ends_as(key, State::Failed));
   EXPECT_EQ(binding.manager->tombstone(key)->code, Error::Code::ResourceExhausted);
