@@ -293,6 +293,15 @@ class ScriptedSidecar {
     return written_.size();
   }
 
+  /// How many times the adapter asked for `job_id` to be cancelled while this
+  /// sidecar held it: by a `job_cancel` that named it or by the release of its
+  /// session. Only the first is acted on, so the frames written do not tell.
+  [[nodiscard]] std::size_t cancel_requests(std::uint64_t job_id) {
+    std::lock_guard<std::mutex> lock(table_mutex_);
+    const auto asked = cancel_requests_.find(job_id);
+    return asked == cancel_requests_.end() ? 0 : asked->second;
+  }
+
   /// Waits until this sidecar holds its job lock to write a `kind` message.
   [[nodiscard]] bool wait_until_writing(const std::string& kind) {
     std::unique_lock<std::mutex> lock(log_mutex_);
@@ -824,6 +833,7 @@ class ScriptedSidecar {
 
   void cancel_locked(std::uint64_t job_id) {
     Job& job = jobs_.at(job_id);
+    ++cancel_requests_[job_id];
     if (job.cancelled) {
       return;
     }
@@ -904,6 +914,7 @@ class ScriptedSidecar {
   std::deque<Work> lane_;
   std::uint64_t running_ = 0;
   std::set<std::pair<std::uint64_t, std::uint64_t>> releasing_;
+  std::map<std::uint64_t, std::size_t> cancel_requests_;
   bool jobs_open_ = false;
   bool refuse_next_ = false;
 

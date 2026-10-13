@@ -159,8 +159,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   as `internal`, when a fourth utterance ends, by the limit or by a
   Finalize, before the first of three has its final, or when its
   segments since the last Finalize yield more audio than it was granted.
-  The serving worker does not construct it yet, so a worker still refuses
-  every stream session. (V030-E04-F03-T02)
+  The serving worker constructs it for a speech deployment (see
+  "Changed"). (V030-E04-F03-T02)
 
 - A health probe in the Python/PyTorch adapter's job channel, for the job
   bridge that will sit on it; nothing calls it yet. It answers from the
@@ -829,6 +829,31 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   count has its own message. (V030-E06-F02-T01)
 
 ### Changed
+
+- A serving worker built with the streaming feature now serves stream
+  sessions for a speech deployment. With `streaming.enabled` and a
+  `deployment.model` of the model class `speech`, the worker builds its
+  session together with its job bridge, constructs the speech dispatch over
+  it and gives it to the stream listener, so an `Open` is admitted and
+  served: an utterance is transcribed, a text segment is synthesized, one
+  session at a time (provisional, as the dispatch is). On stop the worker
+  unloads the session before the dispatch and the bridge are destroyed, so
+  the last events of the jobs the unload ends still give their buffers
+  back; the page states the order. A speech deployment on a backend
+  without a bridge factory, a deployment of another model class and a
+  worker without `streaming.enabled` load and serve as before, and the
+  feature-OFF build is unchanged. Three things differ for a worker that
+  takes the new path: a speech deployment with `streaming.enabled` whose
+  runner offers no speech jobs is no longer built (`unsupported`), where it
+  loaded and refused every `Open`; a unary `/infer` is answered with a
+  failure (`tensor_inference_unsupported`), since a session that runs
+  speech jobs takes no tensor request; and after a `start()` that could not
+  start the stream listener every later `start()` returns that error. The
+  `stream listener bound` log line's `serves_sessions` is true for a worker
+  that serves sessions, and a new line, `speech dispatch stopped`, carries
+  the dispatch's job counters when the listener has stopped. Earlier
+  entries of this section that say a worker refuses every `Open` describe
+  the worker before this change. (V030-E04-F03-T02)
 
 - The serving worker's stream listener bounds a call before it has a
   session. It waits on at most 32 calls for their `Open`, and on each for

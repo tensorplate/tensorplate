@@ -86,7 +86,9 @@ if(TP_ENABLE_STREAMING_GRPC AND NOT TP_ENABLE_TSAN)
   # its own because it links the generated protobuf bindings.
   add_executable(tp_test_stream_listener
     stream_listener_test.cpp stream_events_test.cpp stream_mapping_test.cpp
-    stream_bounds_test.cpp)
+    stream_bounds_test.cpp
+    # A worker with a speech deployment serving stream sessions as backend jobs.
+    speech_worker_test.cpp)
   target_include_directories(tp_test_stream_listener
     PRIVATE ${CMAKE_SOURCE_DIR}/test/mocks ${CMAKE_SOURCE_DIR}/runtime/src)
   target_link_libraries(tp_test_stream_listener
