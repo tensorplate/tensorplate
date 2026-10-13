@@ -13,7 +13,7 @@ use tensorplate_protocol::deploy_transaction::DeployState;
 
 use crate::coordinator::Coordinator;
 use crate::recovery::apply_startup;
-use crate::worker::{WorkerControl, WorkerReadiness};
+use crate::worker::{ServingMember, WorkerControl, WorkerReadiness};
 
 /// Puts a directory where a state write makes its first temporary file, so
 /// no later write lands, or takes it away again.
@@ -99,6 +99,8 @@ pub(super) struct Worker {
     fails_in: Option<&'static str>,
     stopping: AtomicBool,
     active: Option<String>,
+    /// The serving member it reports, as a control that owns a process does.
+    member: Option<ServingMember>,
     /// The view at each hold that has not been released.
     holds: Mutex<Vec<[String; 4]>>,
     /// Releases of a hold that was never taken.
@@ -145,6 +147,12 @@ impl Worker {
     pub(super) fn serving(deployment_id: &str) -> Self {
         Self {
             active: Some(deployment_id.into()),
+            ..Self::default()
+        }
+    }
+    pub(super) fn holding(member: ServingMember) -> Self {
+        Self {
+            member: Some(member),
             ..Self::default()
         }
     }
@@ -202,6 +210,9 @@ impl WorkerControl for Worker {
     fn unload(&self, _: &str) {}
     fn active_deployment_id(&self) -> AgentResult<Option<String>> {
         Ok(self.active.clone())
+    }
+    fn serving_member(&self) -> AgentResult<Option<ServingMember>> {
+        Ok(self.member.clone())
     }
     fn stopping(&self) -> bool {
         self.stopping.load(Ordering::SeqCst)
@@ -567,6 +578,29 @@ fn a_refusal_whose_record_did_not_land_ends_the_start_and_is_recorded_by_the_nex
     assert!(refusal.message.ends_with(remedy), "{refusal:?}");
     assert!(next.never_asked());
     assert_eq!(host.view(), ["stt@1?", "-", "-", "2"]);
+}
+
+#[test]
+fn a_restore_whose_document_cannot_be_written_ends_the_start_with_the_error_recorded() {
+    let host = host();
+    let (agent, first) = host.restoring(Worker::default());
+    let unfinished = host.state_dir().join("descriptor-stt-2.json.tmp");
+    fs::create_dir(&unfinished).unwrap();
+
+    let error = apply_startup(&agent.coordinator).unwrap_err();
+
+    // The agent's own error and no refusal: the state store still writes,
+    // and records it as it is.
+    assert!(matches!(error, AgentError::Io(_)), "{error}");
+    assert_eq!(host.last_error(), Some(error.to_record()));
+    assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
+    assert!(agent.never_asked());
+
+    fs::remove_dir(unfinished).unwrap();
+    let (next, _) = host.start(Worker::default());
+    apply_startup(&next.coordinator).unwrap();
+    assert_eq!(next.asked().resolved, Some(first.restamp(2).unwrap()));
+    assert_eq!(host.last_error(), None);
 }
 
 #[test]

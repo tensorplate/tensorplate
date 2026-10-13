@@ -11,9 +11,11 @@ use super::*;
 use tensorplate_protocol::agent_control::RecoveryAction;
 use tensorplate_protocol::agent_state::TransactionKind;
 use tensorplate_protocol::deploy_transaction::DeployState;
+use tensorplate_protocol::MemberRef;
 
 use crate::recovery::apply_startup;
 use crate::registry::{durable_generations, Restamp};
+use crate::worker::ServingMember;
 
 impl Host {
     /// A started agent whose `active` is `tts` at generation 1, described,
@@ -577,6 +579,41 @@ fn one_start_restores_what_a_rollback_swapped_before_it_was_killed() {
         (host.quarantined().0.as_str(), host.last_error()),
         ("", None)
     );
+}
+
+#[test]
+fn a_start_restores_the_active_record_unless_the_serving_member_was_started_from_it() {
+    for case in ["its own", "another bundle", "another deployment"] {
+        let host = host();
+        let (agent, _) = host.restoring(Worker::default());
+        let active = agent.store.snapshot().unwrap().active.unwrap();
+        drop(agent);
+        let mut serving = ServingMember {
+            member: MemberRef::new("stt", 1),
+            bundle_digest: active.bundle_digest,
+            descriptor_digest: active.descriptor_digest,
+            configuration_digest: active.configuration_digest,
+            serving_url: "http://127.0.0.1:18080".into(),
+        };
+        match case {
+            // As an update of `stt` under its own id leaves a worker.
+            "another bundle" => serving.bundle_digest = format!("sha256:{}", "0".repeat(64)),
+            "another deployment" => serving.member = MemberRef::new("tts", 1),
+            _ => {}
+        }
+
+        let (action, next) = host.one_start(Worker::holding(serving));
+
+        if case == "its own" {
+            assert_eq!(action, RecoveryAction::NoOp, "{case}");
+            assert!(next.never_asked(), "{case}");
+            assert_eq!(host.view(), ["stt@1", "-", "-", "2"], "{case}");
+        } else {
+            assert_eq!(action, RecoveryAction::RestoreActive, "{case}");
+            assert_eq!(next.asked().reference.deployment_id, "stt", "{case}");
+            assert_eq!(host.view(), ["stt@2", "-", "-", "3"], "{case}");
+        }
+    }
 }
 
 #[test]

@@ -364,7 +364,7 @@ mod tests {
     use tempfile::TempDir;
     use tensorplate_protocol::agent_control::RecoveryAction;
     use tensorplate_protocol::agent_state::{
-        DeploymentRecord, ErrorRecord, TransactionKind, TransactionRecord,
+        AgentState, DeploymentRecord, ErrorRecord, TransactionKind, TransactionRecord,
     };
     use tensorplate_protocol::deploy_transaction::DeployState;
     use tensorplate_protocol::ErrorCode;
@@ -618,6 +618,25 @@ mod tests {
             rollback(promoted)
         ));
         assert!(ends(swapped, None, rollback(DeployState::Warmed)));
+    }
+
+    #[test]
+    fn a_rollback_whose_transaction_names_part_of_an_identity_is_read_as_not_committed() {
+        // The store refuses such a record; the reading does not lean on that.
+        let state = AgentState {
+            active: Some(described("d", 3, "sha256:c1")),
+            in_flight_transaction: Some(TransactionRecord {
+                kind: TransactionKind::Rollback,
+                generation: Some(3),
+                configuration_digest: Some("sha256:c1".into()),
+                ..tx("tx", DeployState::Promoted)
+            }),
+            ..Default::default()
+        };
+
+        let summary = super::pass(&state, &mock(Some("d"))).summary;
+
+        assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
     }
 
     #[test]
