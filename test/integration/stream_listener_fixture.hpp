@@ -386,9 +386,11 @@ struct Client {
 /// A listener with the synthetic dispatch behind it, or none.
 class Served {
  public:
-  /// `clock`, when given, is the listener's and its manager's.
+  /// `clock`, when given, is the listener's and its manager's;
+  /// `max_refused_calls`, the listener's places for refused calls.
   explicit Served(bool with_dispatch = true, const std::string& host = "127.0.0.1",
-                  const SchedulerClock* clock = nullptr)
+                  const SchedulerClock* clock = nullptr,
+                  std::optional<std::size_t> max_refused_calls = std::nullopt)
       : clock_(clock != nullptr ? *clock : system_clock_) {
     if (with_dispatch) {
       dispatch_ = std::make_unique<SteeredDispatch>(clock_);
@@ -396,6 +398,7 @@ class Served {
     serving::StreamListenerOptions options;
     options.host = host;
     options.deployment_id = kDeployment;
+    options.max_refused_calls = max_refused_calls;
     options.limits =
         serving::SessionLimits::create(std::chrono::seconds{60}, std::chrono::seconds{10},
                                        std::chrono::seconds{30}, std::chrono::minutes{60}, 1)
@@ -414,9 +417,15 @@ class Served {
     stub_ = wire::SessionService::NewStub(channel_);
   }
 
-  Client connect(std::chrono::milliseconds deadline = std::chrono::seconds{20}) {
+  /// A call that has sent nothing; `compression` is what it announces for its
+  /// messages.
+  Client connect(std::chrono::milliseconds deadline = std::chrono::seconds{20},
+                 grpc_compression_algorithm compression = GRPC_COMPRESS_NONE) {
     Client client;
     client.context->set_deadline(std::chrono::system_clock::now() + deadline);
+    if (compression != GRPC_COMPRESS_NONE) {
+      client.context->set_compression_algorithm(compression);
+    }
     client.call = stub_->Session(client.context.get());
     return client;
   }

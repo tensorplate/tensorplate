@@ -952,10 +952,11 @@ std::uint64_t longest_chunk_on_the_wire() {
   return event.ByteSizeLong() + 5;
 }
 
-/// A text session on a listener with an injected clock, whose client reads
-/// nothing after Ready.
+/// A text session on a listener with an injected clock, or the system
+/// clock, whose client reads nothing after Ready.
 struct UnreadSession {
-  explicit UnreadSession(const grpc::ChannelArguments& arguments) {
+  explicit UnreadSession(const grpc::ChannelArguments& arguments, bool on_the_system_clock = false)
+      : served(true, "127.0.0.1", on_the_system_clock ? nullptr : &clock) {
     served.use_channel(arguments);
     client = served.ready(wire::SESSION_MODE_TTS_STREAMING, nullptr, 300s);
   }
@@ -1003,7 +1004,7 @@ struct UnreadSession {
       ASSERT_TRUE(eventually([&] { return (output = seen().output()) != nullptr; }));
       const auto completed = seen().deliveries();
       const auto stalled = output->stalled_since();
-      clock.advance(kNoProgressLimit + 1ms);
+      advance(kNoProgressLimit + 1ms);
       ASSERT_TRUE(eventually([&] {
         return seen().aborts() == 1 || seen().deliveries() > completed ||
                output->stalled_since() != stalled;
@@ -1018,8 +1019,15 @@ struct UnreadSession {
     return served.dispatch().seen;
   }
 
+  /// Moves the clock and says so: the listener's watch thread sleeps until
+  /// an instant it knows of, and this clock's lie an hour ahead.
+  void advance(tensorplate::SchedulerClock::Duration by) {
+    clock.advance(by);
+    served.listener().notify_clock_advanced();
+  }
+
   FakeSchedulerClock clock;
-  Served served{true, "127.0.0.1", &clock};
+  Served served;
   Client client;
 };
 
@@ -1109,7 +1117,7 @@ TEST(StreamEvents, ACallWhoseReaderNeverResumesIsCancelledAfterItsSessionEnded) 
   ASSERT_TRUE(eventually([&] { return listener.live_sessions() == 0; }));
   // The clock has not moved since the end: the call still has its limit.
   EXPECT_EQ(listener.open_calls(), 1U);
-  session.clock.advance(kNoProgressLimit + 1ms);
+  session.advance(kNoProgressLimit + 1ms);
   ASSERT_TRUE(eventually([&] { return listener.open_calls() == 0; }))
       << "the call outlived the limit: its reactor was never done";
 
@@ -1141,12 +1149,52 @@ TEST(StreamEvents, ACallIsCancelledWhenItsSessionFailedBehindAWriteThatNeverComp
   EXPECT_EQ(seen.cause(), "invalid_event");
   ASSERT_TRUE(eventually([&] { return listener.live_sessions() == 0; }));
   EXPECT_EQ(listener.open_calls(), 1U);
-  session.clock.advance(kNoProgressLimit + 1ms);
+  session.advance(kNoProgressLimit + 1ms);
   ASSERT_TRUE(eventually([&] { return listener.open_calls() == 0; }));
   EXPECT_EQ(seen.aborts(), 0) << "the no-progress limit of a live session ended it";
   // The slot was free all along, and is served.
   auto next = session.served.ready(wire::SESSION_MODE_TTS_STREAMING);
   EXPECT_FALSE(next.session_id.empty());
+}
+
+// On the system clock nothing tells the watch thread that time has passed:
+// the end of the session wakes it, and at the limit it wakes by itself. The
+// thread must be asleep with no end when the session ends, or the sleep it
+// began for the call's own Open would end in time and look for it: a silent
+// call is refused first, which takes the thread past that instant and leaves
+// it nothing to wait for. The test waits out two limits; it checks what
+// happened to each call, not when.
+TEST(StreamEvents, OnTheSystemClockTheWatchThreadCancelsACallWhoseReaderNeverResumes) {
+  UnreadSession session{with_no_room_for_a_chunk(), true};
+  auto& listener = session.served.listener();
+  auto silent = session.served.connect();
+  EXPECT_FALSE(silent.read().has_value());
+  const auto refused = silent.call->Finish();
+  ASSERT_NE(refused.error_message().find("FAILURE_REASON_IDLE_TIMEOUT"), std::string::npos)
+      << refused.error_message();
+  session.block();
+  if (HasFatalFailure()) {
+    return;
+  }
+  // Out of sequence: the session fails at once, behind the write in flight.
+  wire::ClientEvent stray;
+  stray.set_sequence(99);
+  stray.set_session_id(session.client.session_id);
+  stray.mutable_ping();
+  ASSERT_TRUE(session.client.call->Write(stray));
+  ASSERT_TRUE(eventually([&] { return listener.live_sessions() == 0; }));
+  // A patience of its own: the wait is the limit itself, and the client must
+  // not read meanwhile, which would let the write complete.
+  const auto patience = std::chrono::steady_clock::now() + 60s;
+  while (listener.open_calls() != 0 && std::chrono::steady_clock::now() < patience) {
+    std::this_thread::sleep_for(20ms);
+  }
+  ASSERT_EQ(listener.open_calls(), 0U) << "nothing woke the watch thread at the limit";
+  auto& client = session.client;
+  while (const auto event = client.read()) {
+    EXPECT_FALSE(event->has_session_closed()) << "SessionClosed was never written";
+  }
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
 }
 
 // A session with work in progress cannot drain behind its finished call: the

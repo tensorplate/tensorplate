@@ -248,7 +248,10 @@ message EndCause {
 // `invalid_event` (a malformed Open), `backend_unsupported_capability` (a
 // mode, language, format or voice the deployment does not declare),
 // `target_unresolved`, `target_mismatch`, `stale_generation`,
-// `admission_closed`, `session_count_limit`, `config_invalid` and `internal`
+// `admission_closed`, `session_count_limit` (also for a call the server
+// does not wait on because too many have yet to send their Open),
+// `idle_timeout` (no Open within the server's open handshake timeout),
+// `config_invalid` and `internal`
 // (a fault before a slot was reserved, such as an exhausted session key
 // space). A reason added later says here whether it precedes admission. The
 // proof that a call was not admitted is `admission`, not membership of this

@@ -81,7 +81,8 @@ runs speech jobs is wired in.
 - **API and threads.** The listener uses gRPC's callback API: no thread per
   call. gRPC's own threads run each call's reactions, which apply one client
   event to the manager and never wait on a job, plus the manager's timer
-  thread and one thread of the listener's own, which cancels calls that
+  thread and one thread of the listener's own, which refuses calls whose
+  `Open` is overdue (see "Calls waiting to open") and cancels calls that
   outlive their session (see "Calls that outlive their session"). gRPC
   sizes its pool by the machine's cores. The method is registered raw:
   gRPC hands the listener each message as bytes, and the listener parses
@@ -104,6 +105,99 @@ runs speech jobs is wired in.
   any generation as `stale_generation`. Internally the manager binds sessions
   to a fixed non-zero generation that never reaches the wire, because the
   session layer refuses generation zero.
+- **Calls waiting to open.** The listener waits on a call from the moment
+  gRPC hands it over until the call's first message has been read: on at
+  most 32 calls at one time, and on each for at most the open handshake
+  timeout, 5 s on the listener's clock. A call that arrives while 32 are
+  waited on is refused when it arrives with `session_count_limit`, and
+  nothing of it is read; the reason covers both limits, the sessions a
+  worker serves and the calls it waits on. A call whose first message has
+  not been read when the timeout passes is refused with `idle_timeout`:
+  before `Open`, the handshake timeout is the bound on a client's silence.
+  Both are refusals of a call that was never admitted (see "Refusals").
+  Once a call's first message has been read it is no longer waited on and
+  the timeout no longer applies: the answer, `Ready` or a refusal, is made
+  in the reaction that read it, which waits on nothing. The limit therefore
+  counts calls whose first message has not arrived, not an `Open` that is
+  being answered. The listener's own thread checks the timeout. It sleeps
+  until the instant the earliest wait ends, which it takes from the
+  listener's clock as an instant of the steady clock; nothing is polled.
+  A clock that is moved by hand, as a test's is, tells the listener that
+  it has moved (`notify_clock_advanced()`). Two tests run on the system
+  clock and wait out the five seconds, one for a call waiting to open and
+  one for a call whose session has ended (see "Calls that end"), so that
+  the thread waking by itself is held too. At any instant at most 32 calls are waited on, and none for
+  longer than the timeout, so clients that send nothing whole hold at most
+  32 such calls however many they open, and a call beyond them is refused
+  on arrival. Each call waited on costs a reactor, no session, and what
+  the transport holds of a first message that is still arriving, up to
+  the 64 KiB receive limit (see "The server's window"). A
+  call is waited on only once its first read has started, and a call
+  refused on arrival starts none, so gRPC widens no window for it. When
+  admission closes, every call waited on
+  is refused at once with `admission_closed`, and so is every call that
+  arrives later, without its first message being read; a malformed `Open`
+  that arrives at a worker that is shutting down is therefore answered
+  `admission_closed`, not `invalid_event`. None of the three refusals
+  here started anything: see "Refusals" for what that means for a retry.
+- **Refused calls and the calls of a connection.** A refused call is not
+  over when it is refused: it lasts, with its reactor and what gRPC keeps
+  of the call, until gRPC reports it done, which follows the writing of
+  its status, and a peer that does not read can put that off. Two bounds
+  hold what such calls can add up to.
+  The first is gRPC's, on a connection: the server announces at most 64
+  concurrent streams (`grpc.max_concurrent_streams`; a test reads the
+  value off the server's first SETTINGS frame), and gRPC refuses a stream
+  beyond them before the listener has a call for it. A client with fewer
+  than 64 calls open on a channel sees nothing of it; with more, its own
+  channel queues the surplus until a call ends. The value is above the 32
+  calls waited on, so a connection that opens a 33rd silent call is still
+  told `session_count_limit`. This is the bound on one connection. The
+  second is the listener's, over all connections, and it is a bound on
+  memory: the listener keeps at most 4,096 refused calls that are not
+  done. A call takes a place when it is refused, by a bound or for its
+  `Open`, and gives it back when gRPC reports the call done, however it
+  ended. It holds the place for that whole time whether or not its peer
+  reads, so a channel with 64 calls open at once can hold 64 places at
+  one time. A refused call that is not done was measured at about 23.6 KB
+  (the review of this change, before either bound existed: one connection
+  that did not read held 180,822 refused calls and 4.26 GB), so the 4,096
+  places hold roughly 100 MB. A call refused while all 4,096 places are
+  taken is cancelled instead of finished with its status: it takes no
+  place, and its client reads `CANCELLED` and no reason, which is less
+  than "Refusals" promises a refused call. A client that reads its calls
+  sees that only while 4,096 refused calls are outstanding over the whole
+  listener at one time. The bound was 32 at first, below the 64 streams of
+  one connection, and a single channel with 64 calls open then read bare
+  cancels. What the two bounds leave open: the number of
+  connections is not limited, so the 64 calls bound each connection and
+  not their sum (the 4,096 places do bound the refused calls of all of
+  them together); a refused call has no time limit, so a peer that does
+  not read keeps the places it took for as long as its connection lasts;
+  and what gRPC itself keeps for a call that was cancelled, or for a
+  stream it refused, is gRPC's to bound. What ends such a connection is
+  not the listener's: gRPC sets the TCP user timeout on a server's
+  listening socket, 20 s unless `grpc.keepalive_timeout_ms` says
+  otherwise, and the listener sets neither; by that option's description
+  the kernel ends a connection whose peer has acknowledged or taken no
+  bytes for that long. That is read from the source of the gRPC this tree
+  builds (1.81.1), not shown by a run here. The tests: against a writer
+  whose calls end when the test says so, the 4,096th refused call keeps
+  its status, the next is cancelled, and the place of a call that ended is
+  used again; one thread ends a refused call while another refuses one,
+  which the thread sanitizer leg holds to the places' lock; with a real
+  client, 64 calls opened at once on one channel, twenty rounds without a
+  pause, each read a refusal with its reason; a listener that is given one
+  place refuses calls one after another and each reads its reason; and a
+  listener that is given no place cancels a call its watch thread refuses,
+  a call refused when admission closes and a call refused on arrival. No
+  test has a real peer that does not read.
+- **Compression.** The server enables no compression algorithm. A call
+  whose client announces one for its messages (gzip or deflate) is ended
+  by gRPC itself, with status `UNIMPLEMENTED` and no event: the listener
+  is handed no message of it, so its `Open` opens no session. The status
+  is the transport's and names no failure reason, and gRPC writes one
+  error line of its own to the worker's stderr for each such call.
 - **What it serves.** From the client: `Open` (answered by `Ready`),
   `Audio`, `TextSegment`, `Finalize`, `Cancel`, `Ping` (answered by `Pong`),
   `StatusRequest` (answered by `SessionStatus`) and a half-close, which
@@ -172,7 +266,9 @@ runs speech jobs is wired in.
   Output stops at once, and `SessionClosed` follows with
   `client_cancelled` and status `CANCELLED` when the dispatch has released
   the session.
-- **Calls that end.** A read that fails is applied as a half-close. A read
+- **Calls that end.** A read that fails is applied as a half-close, except
+  the first read of a call that a bound has refused meanwhile, which is
+  dropped (see "Calls waiting to open"). A read
   also fails when the call was cancelled or its transport lost, and gRPC
   reports that cancellation in a reaction of its own, before or after the
   failed read: a vanished client's session may have begun to drain when
@@ -196,6 +292,26 @@ runs speech jobs is wired in.
   the default window passes unread; how much is the client's choice and is
   not asserted. A client that wants the limit to follow its reading turns
   the probe off.
+- **The server's window.** The listener turns gRPC's bandwidth probe off
+  on its own side (`grpc.http2.bdp_probe=0`). With the probe, the pinned
+  gRPC announced a window of 4 MiB for each stream and for the connection
+  in the first frames of a connection; without it a connection starts
+  with the HTTP/2 default of 65,535 bytes for both, and a test reads that
+  off the first frames of a raw connection. Those are the windows of a
+  call the listener is not reading. They are not a bound on a connection:
+  while a read is outstanding, gRPC widens the stream's window and the
+  connection's by the length of the message it is receiving, so each call
+  with a read outstanding can hold one unfinished message of up to the
+  64 KiB receive limit in the transport, on top of its window. Two
+  measurements made by hand, which no test holds, show both halves. With
+  a call's reader held, a gRPC client completed 16 writes of 8,000-byte
+  messages (128,224 bytes: one window in the server's transport, the rest
+  in the client's own write buffer), against 523 (4,191,719 bytes) with
+  the probe on. And 32 calls on one connection, each waited on and each
+  sent 60,000 bytes of a 65,000-byte message by a raw HTTP/2 client, were
+  all taken (1,920,000 bytes), the server widening each stream by 65,005
+  bytes and the connection by the sum; for a 33rd, refused on arrival,
+  it widened neither. The number of connections is not bounded.
 - **Calls that outlive their session.** A write in flight completes only
   when the peer takes it, the session's `SessionClosed` waits behind it,
   and the call is finished only after that event is written. A reader that
@@ -216,8 +332,8 @@ runs speech jobs is wired in.
   a session that failed behind a write that never completes is covered
   too. A finished call is watched until its reactor is done, since the
   transport may be unable to send the status either. The listener's thread
-  sleeps until the earliest such limit, and at most a second, the way the
-  manager's timer does. A cancel is sent at most once per call, and never
+  sleeps until the earliest such limit, as it does for the calls waiting
+  to open. A cancel is sent at most once per call, and never
   after the reactor is done: the write path holds a lock through the
   cancel that the reactor's last reaction takes before the reactor is
   destroyed.
@@ -225,8 +341,20 @@ runs speech jobs is wired in.
   event and a status whose code follows the reason (`invalid_event` is
   `INVALID_ARGUMENT`; unsupported, target and generation reasons are
   `FAILED_PRECONDITION`; `session_count_limit` is `RESOURCE_EXHAUSTED`;
-  `admission_closed` is `UNAVAILABLE`) and whose message names the reason.
-  A first message that does not parse is refused as `invalid_event`.
+  `admission_closed` is `UNAVAILABLE`; `idle_timeout` is
+  `DEADLINE_EXCEEDED`) and whose message names the reason.
+  A first message that does not parse is refused as `invalid_event`. A
+  call refused by one of the bounds under "Calls waiting to open" ends the
+  same way, unless no place is left for it, when it reads `CANCELLED` (see
+  "Refused calls and the calls of a connection"). A refused call starts no
+  read: one refused on arrival never
+  had one, and one that a bound refuses later has only its first read
+  outstanding, whose answer the reader drops. A refusal is of a call that
+  was never admitted (`OpenRefused` with admission `NOT_ADMITTED` in the
+  schema): nothing was started for it, so the same `Open` is safe to send
+  again on a new call, whatever the failure-reason taxonomy's `Retryable`
+  column says of the reason. That column describes a reason as the end of
+  a session, which is why it lists `idle_timeout` as not retryable.
   How the status will carry the `OpenRefused` detail is not decided; one
   function builds the status, and it attaches no detail yet.
 - **Final status.** A session's typed outcome is its `SessionClosed`. The
@@ -244,15 +372,14 @@ runs speech jobs is wired in.
   `UNAVAILABLE`. The status follows the cause and not the state because a
   session ended through the cancel path (a client `Cancel`, a timeout, a
   slow consumer) is also `SESSION_STATE_CLOSED`.
-- **Not enforced yet.** A call that never sends `Open` is not bounded: it
-  stays open until the client ends it, and at shutdown it holds the gRPC
-  server for the whole drain window. The open handshake timeout, the limit on
-  calls that have not been admitted, and the refusal of compressed messages
-  are not enforced by this listener, and neither is the server's own
-  receive window, which bounds what a client can leave in the server's
-  transport beyond its input credit; a following change adds them. A call
-  whose `Open` was refused is not watched after its status is handed to
-  the transport. A client event larger than the 64 KiB the listener
+- **Not enforced yet.** A refused call is counted (see "Refused calls and
+  the calls of a connection") but not timed: it keeps its place until
+  gRPC reports it done or its connection ends, and at shutdown
+  such a call still holds the gRPC server until the drain window ends. A
+  connection that opens no call
+  is neither counted nor expired, and the number of connections is not
+  limited: nothing here bounds transport state that has no call yet. A
+  client event larger than the 64 KiB the listener
   receives is rejected by the transport's own limit, below the listener's
   parse: the call ends with a transport status and no `SessionClosed`, and
   its session ends as a cancelled call's does, not failed with a typed
@@ -268,16 +395,20 @@ runs speech jobs is wired in.
   warnings; the address and undefined-behaviour sanitizer leg, which runs
   the listener's tests with manual memory poisoning off because the
   dependency tree's gRPC and abseil are not instrumented; and the thread
-  sanitizer leg for the write path alone, since that leg cannot run a gRPC
-  call.
+  sanitizer leg for the write path and the wait for a call's first message
+  alone, since that leg cannot run a gRPC call.
 - **Shutdown order.** `shutdown()` stops admission and drains every live
   session with `worker_shutdown`, so later `Open`s are refused with
-  `admission_closed`, also by a worker that has no dispatch. `stop()` stops
-  the HTTP listener, then waits for the
+  `admission_closed`, also by a worker that has no dispatch, and a call
+  that has not sent its `Open` is refused at once, so it does not hold the
+  gRPC server through the drain unless the transport cannot deliver its
+  status. `stop()` stops the stream listener first:
+  it waits for the
   stream sessions to close until `shutdown.drain_deadline` after the
   shutdown was asked, then shuts the gRPC server down with what is left of
   that window (a call still open is cancelled, which aborts its session),
-  stops the dispatch and destroys the manager, and then runs the HTTP drain
+  stops the dispatch and destroys the manager. Only then does it stop the
+  HTTP listener and run the HTTP drain
   below, which waits only for what is left of the same window. One value
   holds that window (`runtime/src/serving/drain_window.hpp`): whichever
   drain is asked first begins it, and each later one is given the same
@@ -285,10 +416,33 @@ runs speech jobs is wired in.
   lines' `ts_ns`, when it stops the stream listener (`stream listener
   stopping`) and when it starts the HTTP drain (`draining requests`); a
   test reads both and holds them to the instant shutdown was asked.
-  Stopping the HTTP listener waits for its request handlers and has
-  no deadline of its own, so a unary request in flight holds the stop
-  before the stream listener is reached, and can use up the window the
-  stream sessions were to drain in. The stopped
+  The HTTP port stays open until the stream listener has stopped:
+  `/health` answers 503 from the moment shutdown was asked, and the router
+  refuses new inference requests with `not_ready`. The HTTP listener's
+  stop then closes the port at once and waits for its request handlers,
+  with no deadline of its own, so a unary request in flight still holds
+  the stop, now after the stream sessions have had their window, and
+  nothing answers on the HTTP port while it does. The two waits add up.
+  In the worst case a stop takes the whole drain window, which stream
+  sessions that drain slowly use up, and then the HTTP listener's wait for
+  its handlers, for as long as a unary request in flight runs; the HTTP
+  drain after that has nothing left of the window to wait in. Queued unary
+  requests are cancelled (step 3 of the shutdown flow below) only after
+  the stream listener and then the HTTP listener have stopped. A test
+  holds the order of the two ports, with a unary request held at one gate
+  and the stream listener's stop held at another: `/health` answers 503
+  once shutdown is asked; the stream listener's port closes while the
+  request is still in flight; with that port closed and the stream
+  listener still stopping, the HTTP port accepts and `/health` still
+  answers 503; the HTTP port closes next, with the request still held.
+  The second gate is a connection that opens no call and does not answer
+  the ping gRPC sends a connection it is shutting down: gRPC's shutdown
+  closes the port first and then waits for its connections to end, such a
+  one for up to 20 s (gRPC's limit on that ping, inside the drain window),
+  and the test ends the connection itself. A stop whose HTTP port closes
+  first fails the test. No test holds the HTTP port open during a stream
+  drain: a worker gives its listener no dispatch yet, so none of its
+  sessions lives long enough to hold one. The stopped
   listener stays in place until the worker is destroyed, so a `shutdown()`
   on another thread never finds it gone. The control channel and the signal
   pipe are unchanged and still end with the worker.
@@ -505,10 +659,11 @@ Draining → Stopped):
 1. Composition root flips the controller to `Stopping`. The router
    and pipeline refuse new admission with `not_ready` / 503; the
    HTTP server keeps serving in-flight responses.
-2. The composition root stops the HTTP listener, then the stream listener
+2. The composition root stops the stream listener, then the HTTP listener,
    as described under [Stream listener](#stream-listener).
 3. If `shutdown.cancel_queued_immediately` is true, `InferScheduler::shutdown`
-   cancels every queued request and releases their input buffers.
+   cancels every queued request and releases their input buffers. This
+   follows step 2: the stream drain and the HTTP listener's stop come first.
 4. The composition root waits up to `shutdown.drain_deadline` for
    the scheduler's queue depth and logical in-flight count to reach zero.
 5. `InferScheduler::shutdown` is called again to clear anything left.

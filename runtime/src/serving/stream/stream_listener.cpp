@@ -25,6 +25,7 @@
 #include "serving/session/dispatch.hpp"
 #include "serving/session/session_manager.hpp"
 #include "serving/session/timers.hpp"
+#include "serving/stream/stream_handshake.hpp"
 #include "serving/stream/stream_mapping.hpp"
 #include "serving/stream/stream_output.hpp"
 
@@ -39,6 +40,9 @@ namespace wire = stream::wire;
 /// It never reaches the wire: an Open names generation 0 and Ready omits it.
 constexpr std::uint64_t kUnversionedBinding = 1;
 constexpr int kMaxReceiveMessageBytes = 64 * 1024;
+/// Above kMaxOpenHandshakes, so that one connection can still be told that
+/// too many of its calls have yet to send their Open.
+constexpr int kMaxConcurrentStreams = 64;
 
 using stream::CallOutput;
 
@@ -85,6 +89,18 @@ ServerEvent ready_event(const SessionLimits& session_limits, const std::string& 
   return event;
 }
 
+/// The status of a call refused for `cause`: it was never admitted.
+grpc::Status refusal(const Error& cause) {
+  wire::OpenRefused refused;
+  *refused.mutable_cause() = stream::end_cause(cause);
+  refused.set_admission(wire::ADMISSION_NOT_ADMITTED);
+  return stream::refused_open_status(refused);
+}
+
+Error admission_closed() {
+  return Error::make(Error::Code::NotReady, "session admission is closed", "admission_closed");
+}
+
 CallOutput::Delivered delivered_to(SessionDispatch* dispatch, std::uint64_t key) {
   if (dispatch == nullptr) {
     return {};
@@ -122,16 +138,26 @@ struct StreamListener::Impl final
     : wire::SessionService::WithRawCallbackMethod_Session<wire::SessionService::Service> {
   Impl(StreamListenerOptions options_in, SessionDispatch* dispatch_in,
        const SchedulerClock& clock_in)
-      : options(std::move(options_in)), dispatch(dispatch_in), clock(clock_in) {}
+      : options(std::move(options_in)),
+        dispatch(dispatch_in),
+        clock(clock_in),
+        refused(options.max_refused_calls.value_or(stream::kMaxRefusedCalls)) {}
 
   grpc::ServerBidiReactor<grpc::ByteBuffer, grpc::ByteBuffer>* Session(
       grpc::CallbackServerContext* context) override;
 
   void on_transition(const ManagedSessionTransition& transition);
   void close_admission() noexcept;
-  [[nodiscard]] bool admitting() const;
+  /// Ends a call that was never admitted, for `cause`.
+  void refuse(CallOutput& call, const Error& cause) { call.refuse(refused, refusal(cause)); }
+  /// Waits for the call's first message, with `start_read` run once the wait
+  /// has begun, or says why the call is refused with no read started.
+  template <typename StartRead>
+  [[nodiscard]] std::optional<Error> await_open(const std::shared_ptr<CallOutput>& call,
+                                                StartRead&& start_read);
   void watch(std::shared_ptr<CallOutput> ended_call);
-  void watch_ended_calls();
+  void wake_watcher();
+  void watch_calls();
   void stop_watching() noexcept;
 
   StreamListenerOptions options;
@@ -146,11 +172,17 @@ struct StreamListener::Impl final
   /// Reactors not done yet.
   std::atomic<std::size_t> open_calls{0};
 
+  /// Calls whose first message has not been read.
+  stream::OpenHandshakes handshakes;
+  /// Refused calls that are not done.
+  stream::RefusedCalls refused;
+
   /// Calls whose session has ended, each until its reactor is done.
   std::mutex ended_mu;
   std::condition_variable ended_cv;
   std::vector<std::shared_ptr<CallOutput>> ended;
-  bool ended_added = false;
+  /// A call was added to `ended` or to `handshakes`, or the clock was moved.
+  bool watch_changed = false;
   bool watch_stopped = false;
   std::thread watcher;
 
@@ -174,10 +206,18 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
       : listener_(listener), context_(context), state_(std::make_shared<CallState>()) {
     ++listener_.open_calls;
     state_->out = std::make_shared<CallOutput>(*this, listener.clock);
-    StartRead(&in_);
+    // A call the listener does not wait on is refused with no read started.
+    if (const auto refused = listener_.await_open(state_->out, [this] { StartRead(&in_); })) {
+      refuse(*refused);
+    }
   }
 
   void OnReadDone(bool ok) override {
+    // The first read ends the wait for Open. A call that a bound refused
+    // meanwhile is answered already: nothing of it is handled or read.
+    if (std::exchange(awaiting_open_, false) && !listener_.handshakes.end(*state_->out)) {
+      return;
+    }
     if (!ok) {
       half_closed();
       return;
@@ -394,10 +434,6 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
       refuse(request.error());
       return false;
     }
-    if (!listener_.admitting()) {
-      refuse(Error::make(Error::Code::NotReady, "session admission is closed", "admission_closed"));
-      return false;
-    }
     SessionDispatch* dispatch = listener_.dispatch;
     if (dispatch == nullptr) {
       refuse(Error::make(Error::Code::Unsupported, "the deployment declares no stream mode",
@@ -499,12 +535,7 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
     (void)listener_.manager->apply(key, LogicalSessionEvent::Fail, std::move(cause));
   }
 
-  void refuse(const Error& cause) {
-    wire::OpenRefused refused;
-    *refused.mutable_cause() = stream::end_cause(cause);
-    refused.set_admission(wire::ADMISSION_NOT_ADMITTED);
-    state_->out->finish(stream::refused_open_status(refused));
-  }
+  void refuse(const Error& cause) { listener_.refuse(*state_->out, cause); }
 
   [[nodiscard]] std::string session_id() const {
     const std::lock_guard guard(state_->mu);
@@ -520,6 +551,7 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
   grpc::ByteBuffer out_;
   std::uint64_t expected_sequence_ = 1;
   /// The reader's own: gRPC runs one read reaction of a call at a time.
+  bool awaiting_open_ = true;
   SessionTerms terms_;
   stream::InputHistory history_;
   bool input_not_taken_ = false;
@@ -647,41 +679,74 @@ void StreamListener::Impl::on_transition(const ManagedSessionTransition& transit
 }
 
 void StreamListener::Impl::close_admission() noexcept {
-  const std::lock_guard guard(manager_mu);
-  if (admission_stopped || !manager) {
-    return;
+  {
+    const std::lock_guard guard(manager_mu);
+    if (admission_stopped || !manager) {
+      return;
+    }
+    admission_stopped = true;
+    try {
+      (void)manager->stop_admission_and_drain(
+          Error::make(Error::Code::Unavailable, "the worker is shutting down", "worker_shutdown"));
+    } catch (...) {  // NOLINT(bugprone-empty-catch): shutdown continues without the drain.
+    }
   }
-  admission_stopped = true;
   try {
-    (void)manager->stop_admission_and_drain(
-        Error::make(Error::Code::Unavailable, "the worker is shutting down", "worker_shutdown"));
-  } catch (...) {  // NOLINT(bugprone-empty-catch): shutdown continues without the drain.
+    // A call that has not sent its Open can no longer be admitted.
+    for (const auto& call : handshakes.close()) {
+      refuse(*call, admission_closed());
+    }
+  } catch (...) {  // NOLINT(bugprone-empty-catch): the stop cancels the calls left open.
   }
 }
 
-bool StreamListener::Impl::admitting() const {
-  const std::lock_guard guard(manager_mu);
-  return !admission_stopped;
+template <typename StartRead>
+std::optional<Error> StreamListener::Impl::await_open(const std::shared_ptr<CallOutput>& call,
+                                                      StartRead&& start_read) {
+  switch (handshakes.begin(call, clock.now(), std::forward<StartRead>(start_read))) {
+    case stream::OpenHandshakes::Begun::Closed:
+      return admission_closed();
+    case stream::OpenHandshakes::Begun::Full:
+      return Error::make(Error::Code::ResourceExhausted, "too many calls have not sent their Open",
+                         "session_count_limit");
+    case stream::OpenHandshakes::Begun::Yes:
+      break;
+  }
+  // The watch thread sleeps until the earliest wait it knows of is over.
+  wake_watcher();
+  return std::nullopt;
 }
 
 void StreamListener::Impl::watch(std::shared_ptr<CallOutput> ended_call) {
   {
     const std::lock_guard guard(ended_mu);
     ended.push_back(std::move(ended_call));
-    ended_added = true;
+  }
+  wake_watcher();
+}
+
+void StreamListener::Impl::wake_watcher() {
+  {
+    const std::lock_guard guard(ended_mu);
+    watch_changed = true;
   }
   ended_cv.notify_one();
 }
 
-void StreamListener::Impl::watch_ended_calls() {
+void StreamListener::Impl::watch_calls() {
   std::unique_lock lock(ended_mu);
   while (!watch_stopped) {
-    ended_added = false;
+    watch_changed = false;
     auto watched = ended;
     lock.unlock();
-    // Unlocked: a cancel calls into gRPC, and the sink adds under this lock.
+    // Unlocked: a refusal and a cancel call into gRPC, and the sink adds under
+    // this lock.
     const auto now = clock.now();
-    std::optional<SchedulerClock::TimePoint> next;
+    for (const auto& call : handshakes.take_overdue(now)) {
+      refuse(*call, Error::make(Error::Code::Timeout, "no Open within the open handshake timeout",
+                                "idle_timeout"));
+    }
+    auto next = handshakes.next_due();
     std::erase_if(watched, [&](const std::shared_ptr<CallOutput>& call) {
       const auto due = call->cancel_if_stalled(now);
       if (due && (!next || *due < *next)) {
@@ -694,16 +759,13 @@ void StreamListener::Impl::watch_ended_calls() {
     std::erase_if(ended, [&](const std::shared_ptr<CallOutput>& call) {
       return std::find(watched.begin(), watched.end(), call) != watched.end();
     });
-    const auto woken = [&] { return watch_stopped || ended_added; };
+    const auto woken = [&] { return watch_stopped || watch_changed; };
     if (!next) {
       ended_cv.wait(lock, woken);
     } else {
-      // At most a second: an injected clock moves without telling.
-      const auto until_due = std::chrono::duration_cast<std::chrono::milliseconds>(*next - now);
-      ended_cv.wait_for(
-          lock,
-          std::clamp(until_due, std::chrono::milliseconds{1}, std::chrono::milliseconds{1000}),
-          woken);
+      // An instant of the listener's clock is one of the steady clock; a
+      // clock moved by hand says so through notify_clock_advanced().
+      ended_cv.wait_until(lock, *next, woken);
     }
   }
 }
@@ -744,7 +806,7 @@ Result<std::unique_ptr<StreamListener>> StreamListener::start(StreamListenerOpti
   raw->manager = std::move(manager).value();
   // First, while a failure leaves nothing started to undo.
   try {
-    raw->watcher = std::thread([raw] { raw->watch_ended_calls(); });
+    raw->watcher = std::thread([raw] { raw->watch_calls(); });
   } catch (const std::system_error&) {
     return unexpected(Error::make(Error::Code::Internal,
                                   "stream listener's watch thread could not start",
@@ -761,6 +823,19 @@ Result<std::unique_ptr<StreamListener>> StreamListener::start(StreamListenerOpti
   builder.SetMaxReceiveMessageSize(kMaxReceiveMessageBytes);
   // A second process must not share the port.
   builder.AddChannelArgument(GRPC_ARG_ALLOW_REUSEPORT, 0);
+  // Identity only: gRPC ends a call that announces a compression with
+  // UNIMPLEMENTED when its headers arrive, before it inflates a message.
+  for (int algorithm = GRPC_COMPRESS_NONE + 1; algorithm < GRPC_COMPRESS_ALGORITHMS_COUNT;
+       ++algorithm) {
+    builder.SetCompressionAlgorithmSupportStatus(static_cast<grpc_compression_algorithm>(algorithm),
+                                                 false);
+  }
+  // With its bandwidth probe gRPC announces a 4 MiB window at once. Without,
+  // a call can leave the HTTP/2 default of 65,535 bytes unread in the
+  // transport, and so can a connection.
+  builder.AddChannelArgument(GRPC_ARG_HTTP2_BDP_PROBE, 0);
+  // gRPC refuses a stream beyond these before a call exists for it.
+  builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, kMaxConcurrentStreams);
   raw->server = builder.BuildAndStart();
   if (!raw->server || selected <= 0) {
     if (dispatch != nullptr) {
@@ -811,6 +886,18 @@ void StreamListener::stop(std::chrono::steady_clock::time_point deadline) noexce
 
 std::size_t StreamListener::open_calls() const noexcept {
   return impl_->open_calls.load();
+}
+
+std::size_t StreamListener::awaited_calls() const noexcept {
+  return impl_->handshakes.size();
+}
+
+std::size_t StreamListener::refused_calls() const noexcept {
+  return impl_->refused.size();
+}
+
+void StreamListener::notify_clock_advanced() noexcept {
+  impl_->wake_watcher();
 }
 
 std::size_t StreamListener::live_sessions() const noexcept {

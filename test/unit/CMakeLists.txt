@@ -100,10 +100,11 @@ gtest_discover_tests(tp_test_unit
 )
 
 if(TP_ENABLE_STREAMING_GRPC)
-  # The stream listener's write path against a recording writer. It runs no
-  # gRPC call, so every sanitizer leg builds it; a binary of its own because
-  # it links the generated protobuf bindings.
-  add_executable(tp_test_stream_output stream_output_test.cpp)
+  # The stream listener's write path against a recording writer, and its wait
+  # for a call's first message. It runs no gRPC call, so every sanitizer leg
+  # builds it; a binary of its own because it links the generated protobuf
+  # bindings.
+  add_executable(tp_test_stream_output stream_output_test.cpp stream_handshake_test.cpp)
   target_include_directories(tp_test_stream_output PRIVATE ${CMAKE_SOURCE_DIR}/runtime/src)
   target_link_libraries(tp_test_stream_output
     PRIVATE tp::runtime tp::stream_proto gRPC::grpc++ GTest::gtest_main)

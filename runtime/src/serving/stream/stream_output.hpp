@@ -18,6 +18,8 @@
 
 namespace tensorplate::serving::stream {
 
+class RefusedCalls;
+
 /// A server event queued without its sequence, which the stream assigns.
 struct WireEvent final : OutputBody {
   explicit WireEvent(::tensorplate::stream::v1::ServerEvent event_in)
@@ -95,6 +97,13 @@ class CallOutput {
   /// first status wins.
   void finish(grpc::Status status);
 
+  /// Ends a call that was never admitted. With a place among `refused` it
+  /// ends with `status` and keeps the place until its writer is gone; with
+  /// none it is cancelled, so its peer reads no status of this server's
+  /// choosing. Nothing for a call that is ending already. `refused` outlives
+  /// the writer.
+  void refuse(RefusedCalls& refused, grpc::Status status);
+
   /// The writer is gone; nothing is written, finished or cancelled from now
   /// on. Waits for a cancel in progress.
   void detach();
@@ -147,6 +156,8 @@ class CallOutput {
   /// Since the session ended: when it did, or when a later write completed.
   std::optional<SchedulerClock::TimePoint> ended_progress_at_;
   bool cancelled_ = false;
+  /// Where this call holds a place as a refused call, until detach().
+  RefusedCalls* refused_ = nullptr;
 };
 
 }  // namespace tensorplate::serving::stream
