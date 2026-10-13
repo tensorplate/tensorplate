@@ -440,6 +440,7 @@ mod tests {
         let store = StateStore::open(td.path()).expect("open");
         let p = plan_with_worker(&store, &mock(None)).expect("plan");
         assert!(matches!(p.action, RecoveryAction::NoOp));
+        assert_eq!(p.reason.as_deref(), Some("no deployment recorded"));
     }
 
     #[test]
@@ -805,6 +806,41 @@ mod tests {
             .expect("update");
         let p = plan_with_worker(&store, &mock(None)).expect("plan");
         assert_eq!(p.action, RecoveryAction::RestoreActive);
+    }
+
+    #[test]
+    fn the_reason_says_what_a_start_does_about_the_transaction_and_about_the_record() {
+        let td = TempDir::new().expect("td");
+        let store = StateStore::open(td.path()).expect("open");
+        let found = |phase: DeployState, kind: TransactionKind, candidate: bool| {
+            let transaction = TransactionRecord {
+                kind,
+                ..tx("tx", phase)
+            };
+            store
+                .update(|s| {
+                    s.active = Some(record("d-active"));
+                    s.candidate = candidate.then(|| record("d"));
+                    s.in_flight_transaction = Some(transaction);
+                    Ok(())
+                })
+                .expect("update");
+            let plan = plan_with_worker(&store, &mock(None)).expect("plan");
+            plan.reason.expect("reason")
+        };
+        let restored = "desired active deployment recorded; worker unreachable or empty";
+        assert_eq!(
+            found(DeployState::Warmed, TransactionKind::Deploy, true),
+            format!("deploy transaction `tx` of `d` is at `warmed`, before its commit: a start ends it as failed; {restored}")
+        );
+        assert_eq!(
+            found(DeployState::Promoted, TransactionKind::Deploy, false),
+            format!("deploy transaction `tx` of `d` has committed: a start clears it; {restored}")
+        );
+        assert_eq!(
+            found(DeployState::Failed, TransactionKind::Rollback, false),
+            format!("rollback transaction `tx` of `d` is recorded failed: a start clears it; {restored}")
+        );
     }
 
     #[test]

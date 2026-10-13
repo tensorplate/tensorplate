@@ -516,7 +516,10 @@ the deployment a worker control reports serving is never read as a commit.
    - At or after its commit: it is cleared, and the records it wrote
      stand.
    - Recorded `failed` and not cleared (a state an earlier release could
-     leave): it is cleared, and its failure becomes `last_error`.
+     leave): a rollback is cleared, and its failure becomes `last_error`.
+     A deploy still holds its candidate record, so it is ended like one
+     interrupted before its commit, with its own failure in the quarantine
+     entry.
 
    A deploy has committed when its phase is `promoted` or later and its
    candidate record is gone. A rollback has committed when its phase is
