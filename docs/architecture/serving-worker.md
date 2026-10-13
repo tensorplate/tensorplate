@@ -1505,7 +1505,11 @@ keeps this order:
    unloads the session, with the stopped dispatch and the bridge still in
    place: the last events of the jobs the unload ends reach the sink, and
    each job's input buffer is given back. An unload cancels nothing and
-   waits behind a job the backend is running, up to the adapter's bound.
+   waits behind a job the backend is running, up to the adapter's startup
+   timeout (`TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS`, 15 seconds by default),
+   which bounds each of its load, prime and unload exchanges. That wait
+   comes after the drain window, not inside it, and raising the timeout
+   for a slow load raises this wait with it.
 3. Destruction, after `stop()`: the listener, the dispatch, the bridge,
    the unary components, the session, the buffer manager.
 
