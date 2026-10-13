@@ -527,7 +527,7 @@ the deployment a worker control reports serving is never read as a commit.
    generation the rollback named or a later one of the same configuration
    (a restart of the member names a later one), or, for a record that
    names no descriptor, when `active` is the transaction's deployment and
-   bundle and `previous_active` is not.
+   bundle.
 2. **Start the `active` record again**, in the same pass, unless the
    worker control already serves it (no start of the agent finds that: a
    new agent process holds no worker). `last_error` is cleared once it

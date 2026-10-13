@@ -72,23 +72,24 @@ fn committed(state: &AgentState, tx: &TransactionRecord) -> bool {
             let Some(active) = state.active.as_ref() else {
                 return false;
             };
-            let is_its = |record: &DeploymentRecord| {
-                let digest = tx.bundle_digest.as_deref();
-                record.deployment_id == tx.deployment_id
-                    && digest.is_some_and(|d| bundle_digests_equal(d, &record.bundle_digest))
-            };
             match tx.descriptor_identity() {
                 // The swap copies the generation a rollback named; a restart
                 // of the member then names a later one of that configuration.
+                // A record the rollback did not swap is re-stamped only with
+                // a generation taken before the rollback's hold: an earlier one.
                 Ok(Some(named)) => {
                     active.deployment_id == tx.deployment_id
                         && matches!(active.descriptor_identity(), Ok(Some(now))
                             if now.generation >= named.generation
                                 && now.configuration_digest == named.configuration_digest)
                 }
-                // Two records of one id and one bundle read as not swapped:
-                // either reading starts the same bundle.
-                Ok(None) => is_its(active) && !state.previous_active.as_ref().is_some_and(is_its),
+                // Two records of one id and one bundle cannot be told apart:
+                // the phase decides, and either reading starts that bundle.
+                Ok(None) => {
+                    let digest = tx.bundle_digest.as_deref();
+                    active.deployment_id == tx.deployment_id
+                        && digest.is_some_and(|d| bundle_digests_equal(d, &active.bundle_digest))
+                }
                 Err(_) => false,
             }
         }
@@ -654,11 +655,13 @@ mod tests {
             bundle_digest: "sha256:beef".into(),
             ..record("d")
         };
-        // Swapped: `active` is the rollback's and the retained record is not.
+        // Swapped: `active` is the rollback's, whatever the retained record.
         assert!(!ends(record("d"), Some(record("e")), rollback(promoted)));
         assert!(!ends(record("d"), Some(other_bundle()), rollback(promoted)));
-        // Two records of one id and one bundle read as not swapped.
-        assert!(ends(record("d"), Some(record("d")), rollback(promoted)));
+        assert!(!ends(record("d"), Some(record("d")), rollback(promoted)));
+        assert!(!ends(record("d"), None, rollback(promoted)));
+        // Not swapped: another bundle, another deployment, or a phase before
+        // the commit.
         assert!(ends(other_bundle(), Some(record("d")), rollback(promoted)));
         assert!(ends(record("e"), Some(record("d")), rollback(promoted)));
         assert!(ends(
