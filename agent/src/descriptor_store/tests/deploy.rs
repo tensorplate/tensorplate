@@ -10,12 +10,12 @@ use tensorplate_protocol::deploy_transaction::DeployState;
 
 use crate::recovery::apply_startup;
 
-const STT: &str = "test/models/bundles/v0_2/speech_stt_streaming";
-const TTS: &str = "test/models/bundles/v0_2/speech_tts_streaming";
-const FORMAT_0_1: &str = "test/models/bundles/v0_1/x86_fixture_smoke";
+pub(super) const STT: &str = "test/models/bundles/v0_2/speech_stt_streaming";
+pub(super) const TTS: &str = "test/models/bundles/v0_2/speech_tts_streaming";
+pub(super) const FORMAT_0_1: &str = "test/models/bundles/v0_1/x86_fixture_smoke";
 
 impl Agent {
-    fn deploy(&self, id: &str, bundle: &str) -> AgentResult<()> {
+    pub(super) fn deploy(&self, id: &str, bundle: &str) -> AgentResult<()> {
         let labels = BTreeMap::new();
         let deployed = self
             .coordinator
@@ -262,72 +262,41 @@ fn a_deploy_of_the_id_through_an_agent_that_did_not_restore_it_succeeds_and_the_
 }
 
 #[test]
-fn a_same_id_update_killed_after_prepared_is_quarantined_by_the_first_start_and_later_starts_come_up_with_the_error_recorded(
-) {
-    let host = host();
-    let (agent, _) = host.start(Worker::killed_in("warm", 2));
-    agent.deploy("stt", STT).unwrap();
-    drop(agent.asked());
+fn a_same_id_update_killed_before_its_commit_is_ended_by_one_start_that_comes_up_with_the_error() {
+    for (call, reached) in [("prepare", "@CapacityChecked"), ("warm", "@Prepared")] {
+        let host = host();
+        let (agent, _) = host.start(Worker::killed_in(call, 2));
+        agent.deploy("stt", STT).unwrap();
+        drop(agent.asked());
+        // The update is deployed from a copy that is gone by the next start.
+        let source = host.td.path().join("update");
+        fs::create_dir_all(source.join("warmup")).unwrap();
+        for file in ["manifest.json", "entry.json", "warmup/segment.txt"] {
+            fs::copy(repo(TTS).join(file), source.join(file)).unwrap();
+        }
+        let labels = BTreeMap::new();
+        let update = agent.coordinator.deploy("stt", &source, labels, None, None);
+        assert!(matches!(update, Err(AgentError::Stopping)), "{update:?}");
+        refuse_state_writes(&host.state_dir(), false);
+        drop(agent.asked());
+        assert_eq!(host.view(), ["stt@1", "-", "stt@2", "3"]);
+        fs::remove_dir_all(&source).unwrap();
 
-    let error = agent.deploy("stt", TTS).unwrap_err();
-
-    assert!(matches!(error, AgentError::Stopping), "{error}");
-    refuse_state_writes(&host.state_dir(), false);
-    drop(agent.asked());
-    assert_eq!(host.view(), ["stt@1", "-", "stt@2", "3"]);
-
-    // The first start quarantines the candidate and restores nothing.
-    let (first, pruned) = host.start(Worker::default());
-    assert_eq!(pruned, 0);
-    let summary = apply_startup(&first.coordinator).unwrap();
-    assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
-    let (quarantined, is_last_error) = host.quarantined();
-    assert!(quarantined.ends_with("@Prepared") && is_last_error);
-    assert!(first.never_asked() && host.view() == ["stt@1", "-", "-", "3"]);
-
-    // Each later start finds the candidate's bundle staged under the id.
-    for removed in [1, 0] {
-        let (later, pruned) = host.start(Worker::default());
-        assert_eq!(pruned, removed);
-        let summary = apply_startup(&later.coordinator).unwrap();
-        assert_eq!(summary.action, RecoveryAction::RestoreActive);
-        assert!(later.never_asked() && says_another_bundle_is_staged(&host));
-        assert_eq!(host.view(), ["stt@1", "-", "-", "3"]);
+        // One start ends the update without running any of it again, and
+        // finds the update's bundle staged under the id: it comes up.
+        for removed in [0, 1, 0] {
+            let (next, pruned) = host.start(Worker::default());
+            assert_eq!(pruned, removed, "{call}");
+            let summary = apply_startup(&next.coordinator).unwrap();
+            assert_eq!(summary.action, RecoveryAction::RestoreActive, "{call}");
+            assert!(next.never_asked() && says_another_bundle_is_staged(&host));
+            assert_eq!(host.view(), ["stt@1", "-", "-", "3"], "{call}");
+            assert_eq!(host.candidate(), "-");
+            let (quarantined, _) = host.quarantined();
+            assert!(quarantined.ends_with(reached) && !quarantined.contains(' '));
+        }
         assert_eq!(host.documents(), "stt-1");
     }
-}
-
-#[test]
-fn a_same_id_update_that_a_start_resumes_and_then_refuses_fails_that_start_and_the_next_comes_up() {
-    let host = host();
-    let (agent, _) = host.start(Worker::killed_in("prepare", 2));
-    agent.deploy("stt", STT).unwrap();
-    drop(agent.asked());
-    // The update is deployed from a copy that is gone by the next start.
-    let source = host.td.path().join("update");
-    fs::create_dir_all(source.join("warmup")).unwrap();
-    for file in ["manifest.json", "entry.json", "warmup/segment.txt"] {
-        fs::copy(repo(TTS).join(file), source.join(file)).unwrap();
-    }
-    let labels = BTreeMap::new();
-    let update = agent.coordinator.deploy("stt", &source, labels, None, None);
-    assert!(matches!(update, Err(AgentError::Stopping)), "{update:?}");
-    refuse_state_writes(&host.state_dir(), false);
-    drop(agent.asked());
-    assert_eq!(host.view(), ["stt@1", "-", "stt@2", "3"]);
-    fs::remove_dir_all(&source).unwrap();
-
-    // The resumed deploy is refused, which fails that start as before.
-    let (resuming, _) = host.start(Worker::default());
-    let error = apply_startup(&resuming.coordinator).unwrap_err();
-    assert!(matches!(error, AgentError::BundleMissing(_)), "{error}");
-    assert!(resuming.never_asked() && host.view() == ["stt@1", "-", "-", "3"]);
-
-    let (next, _) = host.start(Worker::default());
-    let summary = apply_startup(&next.coordinator).unwrap();
-    assert_eq!(summary.action, RecoveryAction::RestoreActive);
-    assert!(next.never_asked() && says_another_bundle_is_staged(&host));
-    assert_eq!(host.view(), ["stt@1", "-", "-", "3"]);
 }
 
 #[test]
@@ -423,7 +392,7 @@ fn about_to_prepare(host: &Host) -> (Agent, Handed) {
 }
 
 /// The state of a deploy of `stt` killed after it recorded `phase`.
-fn killed_after(host: &Host, phase: DeployState) {
+pub(super) fn killed_after(host: &Host, phase: DeployState) {
     let (agent, handed) = about_to_prepare(host);
     drop(handed.start(&agent).unwrap());
     agent.store.record_phase("tx", phase, 1).unwrap();
@@ -513,7 +482,7 @@ fn a_deploy_is_refused_unless_its_staged_copy_its_records_and_the_installation_a
 }
 
 #[test]
-fn a_deploy_killed_after_its_document_is_resumed_under_the_same_generation() {
+fn a_deploy_killed_after_its_document_is_ended_by_the_next_start_which_removes_the_document() {
     for serving in [None, Some("stt")] {
         let host = host();
         let (agent, _) = host.start(Worker::killed_at_its_hold());
@@ -529,14 +498,17 @@ fn a_deploy_killed_after_its_document_is_resumed_under_the_same_generation() {
         let (next, pruned) = host.start(reporting(serving));
         assert_eq!((pruned, host.documents().as_str()), (1, ""));
         let summary = apply_startup(&next.coordinator).unwrap();
-        assert_eq!(summary.action, RecoveryAction::ResumePrepare);
-        assert_eq!(next.asked().resolved, Some(host.derived(1)));
-        assert_eq!(host.view(), ["stt@1", "-", "-", "2"], "{serving:?}");
+        assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
+        assert!(next.never_asked(), "{serving:?}");
+        assert_eq!(host.view(), ["-", "-", "-", "-"], "{serving:?}");
+        assert_eq!(host.candidate(), "-");
+        let (quarantined, is_last_error) = host.quarantined();
+        assert!(quarantined.ends_with("@CapacityChecked") && is_last_error);
     }
 }
 
 #[test]
-fn a_deploy_killed_after_it_named_its_generation_is_resumed_under_a_new_one() {
+fn a_deploy_killed_after_it_named_its_generation_is_ended_and_its_generation_is_not_reused() {
     for serving in [None, Some("stt")] {
         let host = host();
         let (agent, _) = host.start(Worker::killed());
@@ -547,33 +519,37 @@ fn a_deploy_killed_after_it_named_its_generation_is_resumed_under_a_new_one() {
         assert_eq!(host.view(), ["-", "-", "stt@1", "2"]);
         assert_eq!(host.candidate(), "stt@1");
 
-        // Every document is named, so the next start removes none; the
-        // resumed deploy takes another generation.
+        // Every document is named, so the next start removes none; it asks
+        // for no worker of the deploy's.
         let (next, pruned) = host.start(reporting(serving));
         assert_eq!(pruned, 0);
         let summary = apply_startup(&next.coordinator).unwrap();
-        assert_eq!(summary.action, RecoveryAction::ResumePrepare);
-        assert_eq!(next.asked().resolved, Some(host.derived(2)));
-        assert_eq!(host.view(), ["stt@2", "-", "-", "3"], "{serving:?}");
-        assert_eq!(host.documents(), "stt-1 stt-2");
+        assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
+        assert!(next.never_asked(), "{serving:?}");
+        assert_eq!(host.view(), ["-", "-", "-", "2"], "{serving:?}");
+        // The document goes at the start after; a deploy takes generation 2.
         assert_eq!(host.start(Worker::default()).1, 1);
-        assert_eq!(host.documents(), "stt-2");
+        assert_eq!(host.documents(), "");
+        next.deploy("stt", STT).unwrap();
+        assert_eq!(host.view(), ["stt@2", "-", "-", "3"]);
     }
 }
 
 #[test]
-fn a_deploy_killed_before_its_promotion_is_recorded_is_quarantined_by_a_start_that_finds_nothing_serving(
-) {
+fn a_deploy_killed_before_its_commit_is_quarantined_whatever_the_worker_control_serves() {
     use DeployState::{Prepared, Promoted, Warmed};
-    for phase in [Prepared, Warmed, Promoted] {
+    for (phase, serving) in [Prepared, Warmed, Promoted]
+        .into_iter()
+        .flat_map(|phase| [(phase, None), (phase, Some("stt"))])
+    {
         let host = host();
         killed_after(&host, phase);
 
-        let (next, pruned) = host.start(Worker::default());
+        let (next, pruned) = host.start(reporting(serving));
         assert_eq!(pruned, 0, "{phase:?}");
         let summary = apply_startup(&next.coordinator).unwrap();
         assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
-        assert_eq!(host.view(), ["-", "-", "-", "2"]);
+        assert_eq!(host.view(), ["-", "-", "-", "2"], "{phase:?} {serving:?}");
         assert_eq!(host.candidate(), "-");
         assert_eq!(host.quarantined(), (format!("tx@{phase:?}"), true));
         assert!(next.never_asked() && host.documents() == "stt-1");
@@ -585,54 +561,24 @@ fn a_deploy_killed_before_its_promotion_is_recorded_is_quarantined_by_a_start_th
 }
 
 #[test]
-fn a_deploy_killed_before_its_promotion_is_recorded_is_finalized_when_its_deployment_is_serving() {
-    use DeployState::{Prepared, Promoted, Warmed};
-    for phase in [Prepared, Warmed, Promoted] {
-        let host = host();
-        killed_after(&host, phase);
+fn a_deploy_killed_after_its_commit_is_cleared_without_a_restart_when_its_record_is_served() {
+    let host = host();
+    killed_after(&host, DeployState::Promoted);
+    let store = StateStore::open(host.state_dir()).unwrap();
+    store.promote_candidate(2).unwrap();
+    assert_eq!(host.view(), ["stt@1", "-", "stt@1", "2"]);
 
-        let (next, pruned) = host.start(Worker::serving("stt"));
-        assert_eq!(pruned, 0, "{phase:?}");
-        let summary = apply_startup(&next.coordinator).unwrap();
-        assert_eq!(summary.action, RecoveryAction::FinalizePromotion);
-        assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
-        assert_eq!(host.candidate(), "-");
-        assert!(next.never_asked() && host.documents() == "stt-1");
-    }
-}
+    let (next, pruned) = host.start(Worker::serving("stt"));
+    assert_eq!(pruned, 0);
+    let summary = apply_startup(&next.coordinator).unwrap();
 
-#[test]
-fn a_deploy_killed_after_its_promotion_was_recorded_leaves_the_active_record_naming_its_descriptor()
-{
-    for serving in [None, Some("stt")] {
-        let host = host();
-        killed_after(&host, DeployState::Promoted);
-        let store = StateStore::open(host.state_dir()).unwrap();
-        store.promote_candidate(2).unwrap();
-        assert_eq!(host.view(), ["stt@1", "-", "stt@1", "2"]);
-
-        let (next, pruned) = host.start(reporting(serving));
-        assert_eq!(pruned, 0);
-        let summary = apply_startup(&next.coordinator).unwrap();
-        assert_eq!(host.view(), ["stt@1", "-", "-", "2"], "{serving:?}");
-        assert!(next.never_asked() && host.documents() == "stt-1");
-        if serving.is_some() {
-            assert_eq!(summary.action, RecoveryAction::FinalizePromotion);
-            assert_eq!(host.last_error(), None);
-            continue;
-        }
-        assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
-        assert_eq!(host.quarantined(), ("tx@Promoted".to_owned(), true));
-
-        // The start after it restores the record at the next generation.
-        let (after, pruned) = host.start(Worker::default());
-        assert_eq!(pruned, 0);
-        let summary = apply_startup(&after.coordinator).unwrap();
-        assert_eq!(summary.action, RecoveryAction::RestoreActive);
-        let second = host.derived(1).restamp(2).unwrap();
-        assert_eq!(after.asked().resolved, Some(second));
-        assert_eq!(host.view(), ["stt@2", "-", "-", "3"]);
-    }
+    assert_eq!(summary.action, RecoveryAction::NoOp);
+    assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
+    assert!(next.never_asked() && host.documents() == "stt-1");
+    assert_eq!(
+        (host.quarantined().0.as_str(), host.last_error()),
+        ("", None)
+    );
 }
 
 #[test]

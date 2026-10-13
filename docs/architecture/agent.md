@@ -333,18 +333,66 @@ received -> verified -> staged -> capacity_checked -> prepared
           -> warmed -> promoted -> active
 ```
 
-Terminal failure states: `failed`, `rolled_back`.
+The agent records the phases up to `promoted` on the transaction in
+flight. `promoted` is recorded by the commit: one state write moves the
+records (`active` to `previous_active` and the candidate to `active` for a
+deploy, the swap for a rollback) and sets the phase, so a start that finds
+`promoted` with the records moved reads a committed transaction. `active`,
+`failed` and `rolled_back` remain values of the phase and are no longer
+written to a transaction in flight: the write that ends a transaction
+clears it.
 
-Replayable phases (safe to retry from scratch on restart): `received`,
-`verified`, `staged`, `capacity_checked`. Worker-side phases
-(`prepared`, `warmed`, `promoted`) are not replayable; a candidate
-interrupted there is quarantined.
+A transaction ends in one state write:
+
+- after its commit, the write that clears it also clears `last_error`;
+- a deploy that fails is moved to the quarantine list, with the phase it
+  had recorded and the failure, in the write that clears it and its
+  candidate record;
+- a rollback that fails is cleared in the write that records the failure
+  as `last_error`; it makes no quarantine entry, because the record it
+  would have restored is still a valid deployment.
+
+No phase is run again at a start, whatever it is: see
+[Restart recovery](#restart-recovery-v01-e08-f07).
 
 The coordinator persists each phase to the durable state store
 **before** the next phase begins. A crash mid-transaction therefore
 either leaves the in-flight transaction at the last successfully
 persisted phase (which the recovery planner can read) or at the
 phase-just-before that one if the failing phase did not commit.
+
+Every state write inside a transaction can fail without a crash (a full
+disk): the write that begins it aside, these are the write of a phase, of
+the bundle digest, of the candidate record or of a generation, the write
+that ends a failed transaction, the commit, and the write that ends a
+committed one. A write that fails before its commit rename (see the
+[durable state store](#durable-state-store-v01-e08-f02)) changes nothing:
+the request is answered with an `internal` error and the transaction stays
+in flight at the phase it had recorded. Nothing clears it while the agent
+runs. Every later `deploy` and `rollback` is refused: the control response
+is `status: busy` with the error `not_ready`, "agent_busy". It carries no
+transaction id; status shows the transaction as `in_flight_transaction`.
+Restart the agent: its start settles the transaction (see
+[Restart recovery](#restart-recovery-v01-e08-f07)). What that start finds
+depends on the write that failed:
+
+- A write before the commit, the one that ends a failed transaction
+  included: the candidate, if one was prepared, is abandoned when the
+  request returns, and what served before goes on serving. The start ends
+  the transaction as failed, with a quarantine entry.
+- The commit write. The old member is still retired before it, so the
+  agent goes on serving the candidate while the state names the old
+  record. The start ends the transaction as failed and starts the old
+  record.
+- The write that ends a committed transaction. The deployment is committed
+  and serving, and status shows the new deployment as `active` beside
+  `in_flight: phase=promoted`. The start clears the transaction, makes no
+  quarantine entry and starts the committed deployment again.
+
+A transaction in flight never carries a `failure`: the write that records
+why a transaction failed is the one that clears it, so this agent never
+sets `in_flight_transaction.failure` in status. The failure is read from
+the quarantine entry or from `last_error`.
 
 A deploy of a format 0.2 bundle derives the bundle's
 [deployment descriptor](#deployment-descriptor-documents) after
@@ -449,8 +497,8 @@ Rollback is a transaction, not a file-pointer swap:
 2. Verify its staged files (`staged_path/` exists and contains
    `manifest.json`).
 3. Walk the same prepare / warm / promote sequence as deploy.
-4. On success, swap active <-> previous_active in durable state and
-   mark the transaction `rolled_back`.
+4. On success, swap active <-> previous_active in durable state, in the
+   write that records `promoted`, then clear the transaction.
 
 A failed rollback preserves the current active deployment — the
 previous-active record is left intact, and the operator can retry.
@@ -469,38 +517,114 @@ generation of the same configuration.
 
 ## Restart recovery (V01-E08-F07)
 
-The recovery planner reads durable state and (best-effort) the worker's
-actual active deployment, and returns one of:
+On process startup, before binding the local control socket, the agent
+makes one pass over the durable state. It decides from the records alone;
+the deployment a worker control reports serving is never read as a commit.
 
-- `no_op` — desired and actual agree.
-- `resume_verify` / `resume_stage` / `resume_prepare` — replayable
-  in-flight phase, safe to retry from scratch.
-- `quarantine_candidate` — in-flight transaction stopped at a
-  worker-side phase; agent moves it to the quarantine list and clears
-  the candidate slot.
-- `restore_active` — desired active recorded, worker reports no
-  active deployment (typical on a fresh device boot).
-- `operator_required` — desired and actual disagree in a way recovery
-  can't reason about (e.g., the worker is running a deployment that is
-  not the recorded active).
+1. **Settle the transaction in flight**, in at most one state write.
+   - Interrupted before its commit, in any phase: it is ended as failed.
+     It is moved to the quarantine list with the phase it had reached, its
+     candidate record is cleared, and the records stay as they were before
+     it. This holds for a deploy and for a rollback.
+   - At or after its commit: it is cleared, and the records it wrote
+     stand.
+   - Recorded `failed` and not cleared (a state an earlier release could
+     leave): a rollback is cleared, and its failure becomes `last_error`.
+     A deploy still holds its candidate record, so it is ended like one
+     interrupted before its commit, with its own failure in the quarantine
+     entry.
+   - A candidate record with no deploy in flight (the same: this agent
+     leaves none) is cleared, in the write that settles a rollback found
+     beside it, or in a write of its own when no transaction is in flight.
 
-On process startup, the agent applies the recovery action before binding
-the local control socket. Replayable transactions are resumed through the
-normal coordinator path, unsafe worker-side candidates are quarantined,
-and promoted-but-not-finalized transactions are finalized only when the
-worker-reported active deployment matches the transaction target.
-`restore_active` starts an active record that names a
+   A deploy has committed when its phase is `promoted` or later and its
+   candidate record is gone. A rollback has committed when its phase is
+   `promoted` or later and `active` is the transaction's deployment at the
+   generation the rollback named or a later one of the same configuration
+   (a restart of the member names a later one), or, for a record that
+   names no descriptor, when `active` is the transaction's deployment and
+   bundle.
+2. **Start the `active` record again**, in the same pass, unless the
+   worker control already serves it (no start of the agent finds that: a
+   new agent process holds no worker). `last_error` is cleared once it
+   serves.
+
+Nothing of a transaction is run again at a start: a deploy interrupted
+before its candidate was prepared is not deployed again from its bundle
+path, and a rollback is not rolled back again. No state the pass finds
+needs a second start: an agent killed inside the pass leaves either the
+state it found or a committed record with no transaction, and the next
+start finishes from there.
+
+The restore starts an active record that names a
 [deployment descriptor](#deployment-descriptor-documents) at a new
-generation, named on the record before a worker is asked for; a recorded
-document that is missing or is not the one named fails the restore, and
-with it the start, as a missing staged manifest does. Two records are not
-restored and do not fail the start: one whose id cannot name a member, and
-one that names a descriptor while another bundle is staged under its id
-(see the [staged bundle check](#member-registry)). The agent comes up with
-the reason in `last_error` and that deployment not serving.
+generation, named on the record before a worker is asked for. What a
+start does when the restore cannot be made:
 
-Recovery is **state-diff based**; the planner never replays commands
-just because they appeared in the original request order.
+| The restore finds | The start |
+| --- | --- |
+| an id that cannot name a member | comes up; `last_error` says why; the deployment is not serving |
+| another bundle staged under the id than the record names, whether or not the record names a descriptor (see the [staged bundle check](#member-registry)) | the same |
+| the staged directory gone, or a staged manifest that is missing, cannot be read, is incomplete or names no model artifact, or a staged artifact that is missing or altered | the same |
+| a descriptor document that is missing, is not a regular file, does not verify, is another identity's or describes another bundle | the same |
+| a re-stamp of the descriptor that is refused | the same |
+| a state write of its own that fails, or a descriptor document it cannot write | ends with exit code `5` |
+| a worker that cannot be started, exits while loading, is not ready within `worker.warm_timeout_ms` or exits before it is promoted | ends with exit code `5`, with the reason in `last_error` |
+
+The refusals in the first five rows are decided by the staged copy and
+the descriptor document, so the agent stays up for `deploy` and
+`rollback`, which both need its socket. A staged manifest that cannot be
+read for another reason (its permissions) is refused the same way. The
+start also prints each refusal on its standard error. Each refusal ends with "is not serving until
+it is deployed again", except the first, which names the id rule.
+
+Status reports what a start would do now as `recovery.action`:
+
+- `restore_active` — the `active` record would be started again. The
+  reason names a transaction the pass would settle first.
+- `quarantine_candidate` — a transaction would be ended as failed and
+  there is nothing to start.
+- `no_op` — nothing to settle and nothing to start, or a committed
+  transaction to clear beside a record that is serving.
+- `operator_required` — no transaction and no `active` record, while the
+  worker control serves a deployment. No start meets this, and the pass
+  changes nothing.
+
+`resume_verify`, `resume_stage`, `resume_prepare`, `resume_warm` and
+`finalize_promotion` remain values of the control schema and are never
+reported.
+
+What an operator reads after a start that ended a transaction is the
+quarantine entry: the transaction id, the deployment id, the phase it had
+reached and the error. `last_error` carries the same error only while
+nothing serves; it is cleared when the restore serves, so an agent that
+ended a deploy and came back serving the old deployment reports `ready`
+with one more entry in `quarantined`.
+
+It does not come back serving the old deployment when the deploy it ended
+was an update under the id that was serving and had staged its bundle.
+Staging is keyed by the id, so the staged copy is the update's from the
+moment it is staged, before the candidate is recorded. The start ends the
+update, finds another bundle staged than `active` names, starts nothing
+and comes up with that refusal as `last_error` beside the quarantine
+entry: the deployment is not serving until the id is deployed again. This
+holds for a bundle of either format, in every phase from staging on. An
+update killed before it staged its bundle, and a redeploy of the bundle
+that is serving, leave the record's own bundle staged, and the start
+restores it.
+
+The agent records no process id of a worker. A worker that an earlier
+agent process started is ended by the packaged service, not by the pass:
+the systemd unit keeps the default control-group kill, and the Homebrew
+launchd job does not set `AbandonProcessGroup`, so no worker outlives the
+agent under either. Where an agent is run by hand and killed, the pass
+does not end a worker it left behind: nothing records one. That worker
+still listens on its port, and the agent does not check that a port it
+leases is free (see [Ports](#member-registry)): the worker the restore
+starts exits when it cannot bind, and the start ends with exit code `5`.
+The error does not name the port: a worker writes no startup record for a
+listener it could not start, so `last_error` is `load_failed` with the
+worker's exit status and no reason.
 
 ## Versioning policy
 
@@ -588,11 +712,11 @@ before the first document is written.
   segment) is `config_invalid`, naming `staged_path`; a format 0.1 deploy
   is not held to that. A refusal names nothing and takes no generation. A
   kill after the document and before the state write leaves a document no
-  record names: the next start removes it, resumes the deploy and hands
-  out the same generation. A kill after
-  the state write and before `prepared` leaves the generation named on a
-  replayable transaction: the next start resumes the deploy under a new
-  generation, and the start after that removes the first document. A bundle
+  record names and the counter where it stood: the next start removes the
+  document and ends the deploy as failed. A kill after the state write
+  leaves the generation named on the transaction: the next start ends the
+  deploy as failed, the generation is not handed out again, and the start
+  after that removes its document. A bundle
   of another format gets the reference it got before; nothing is read,
   held or written for it.
 - **Read.** By deployment id and the identity a record or candidate
@@ -639,16 +763,16 @@ before the first document is written.
   `active`) and writes the new document. The reference carries that
   identity, so the registry starts the member as that generation. A refusal
   names nothing and spends no generation: the rollback's is a failed
-  rollback that leaves the previous record as it was, and the restore's a
-  failed start, except for a staged bundle that is not the record's, which
-  leaves the agent up and the deployment not serving (see the
-  [staged bundle check](#member-registry)). A kill after the document and
+  rollback that leaves the previous record as it was, and the restore's
+  leaves the agent up and the deployment not serving (see
+  [Restart recovery](#restart-recovery-v01-e08-f07)). A kill after the document and
   before the state write leaves a document no record names; the next start
   removes it and hands out the same generation again. A kill after the
   state write leaves the generation named: the next start restores `active`
-  from it, or decides the rollback as it decides any in-flight transaction,
-  the previous record still naming its own document (resumed, the rollback
-  takes another generation). The descriptor is re-stamped as recorded, as by
+  from it, or ends the rollback as it ends any transaction interrupted
+  before its commit, the previous record still naming its own document
+  (the generation the rollback named is not handed out again, and its
+  document goes at the start after). The descriptor is re-stamped as recorded, as by
   the restart stamp. The update runs under a hold on the worker control,
   which `prepare` ends, so no restart of the serving member takes a newer
   generation in between (see [the member registry](#member-registry)). A
@@ -669,8 +793,9 @@ before the first document is written.
 A record names a descriptor exactly when its bundle is format 0.2 and was
 deployed by an agent that derives one. For every other record (a format 0.1
 bundle, or a state file an earlier agent wrote) no document is read or
-written, and deploy, rollback, restore and restart behave as they did
-before descriptors.
+written, and deploy, rollback and restart behave as they did before
+descriptors. The restore does not: it compares the staged bundle with the
+record's for every record (see the [staged bundle check](#member-registry)).
 
 ## Worker runtime control transport
 
@@ -754,12 +879,13 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   once, without using a restart, with a `load_failed` error that names both
   digests. A staged manifest that cannot be read counts as a restart that
   could not be launched. The manifest's digest covers each artifact's digest;
-  artifact bytes are not hashed again. Startup recovery and a rollback start
-  a record that names no descriptor from the same root without this check,
-  whatever is staged there. For a record that names a
-  [descriptor](#deployment-descriptor-documents), which is every format 0.2
-  deployment this agent deploys, they compare the two digests as well, and
-  a staged bundle that is not the record's is `load_failed` for both. The
+  artifact bytes are not hashed again. Startup recovery compares the two
+  digests as well, for every record. A rollback compares them for a record
+  that names a [descriptor](#deployment-descriptor-documents), which is
+  every format 0.2 deployment this agent deploys; a record that names none
+  it still starts from the same root without this check, whatever is staged
+  there. A staged bundle that is not the record's is `load_failed` for
+  both. The
   restore compares them before it reads anything else of the staged copy,
   so the state of the staged artifacts does not change its answer. The
   rollback is refused. The restore starts nothing, and the agent still comes
@@ -769,17 +895,20 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   record with no `generation` and no `serving_url`. To recover, deploy the
   id again through that agent, as either bundle: the deploy serves it and
   clears the error, and the next start restores it. Staging is not yet kept
-  apart for each generation, so for a format 0.2 deployment a deploy of
-  another bundle under its id has two consequences. After one that
-  succeeded, a rollback to the earlier record is refused, and stays refused
-  until staging is kept for each generation. After one that did not
-  complete, the serving deployment is not restarted when its worker stops,
+  apart for each generation, so a deploy of another bundle under a
+  deployment's id has two consequences. After one that succeeded, a
+  rollback to the earlier record is refused when that record names a
+  descriptor, and stays refused until staging is kept for each generation.
+  A rollback to an earlier record that names none is not compared: it
+  starts the bundle that is staged, the update's, under the earlier record,
+  and the next start of the agent then refuses to restore that record.
+  After one that did not complete, for a bundle of either format, the
+  serving deployment is not restarted when its worker stops,
   and no later start of the agent restores it until the id is deployed
   again. A deploy refused or failed after staging leaves that, and no
   failed deploy is needed: one that a kill or a stop of the agent ended
-  after `prepared` leaves it too, its candidate quarantined by the next
-  start, and so does one that a start resumed and then refused, which fails
-  that start as a resumed transaction that fails always has.
+  after its bundle was staged leaves it too. The next start ends it with a
+  quarantine entry and comes up with the deployment not serving.
 - **Failure.** A member that stops with three restarts inside the last five
   minutes is failed: nothing is started for it until a deployment is
   promoted, by a deploy or a rollback. Status then reports
@@ -990,19 +1119,13 @@ error, and the CLI exits 3 with the code `unavailable`. The transaction stays in
 it wrote, exactly as an agent that was killed leaves it, and the next
 start's recovery treats it as it treats that:
 
-- Interrupted before its candidate was prepared, a deploy is run again
-  from its bundle path, and a rollback is run again. The caller that was
-  answered the `unavailable` error finds it completed.
-- Interrupted while its candidate was prepared or warming, the candidate
-  is quarantined and that start launches nothing: status is degraded with
-  the recovery's reason in `last_error`, and the deployment that was
-  serving comes back at the start after that. An agent killed during a
-  deploy behaved this way before it handled the signal. Nothing makes
-  that second start happen: the agent exited 0, which the packaged unit's
-  `Restart=on-failure` does not restart, so after
-  `systemctl restart tensorplate-agent` during a deploy's warm the node
-  serves nothing until the agent is started once more or a deployment is
-  deployed.
+- Interrupted before its commit, in any phase, the transaction is ended
+  as failed with a quarantine entry and none of it is run again: the
+  caller that was answered the `unavailable` error deploys or rolls back
+  again.
+- The deployment that was serving is started again in that same start, so
+  after `systemctl restart tensorplate-agent` during a deploy's warm the
+  node serves what it served before the deploy.
 
 A failure the deploy met just before the stop began is not recorded
 either. A deploy or rollback that arrives after the flag is refused with

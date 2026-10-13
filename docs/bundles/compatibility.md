@@ -178,8 +178,8 @@ See [variant lineage](manifest.md#variant-lineage).
 ### Rules judged against the target
 
 Some rules compare a manifest with facts only the target holds. The agent
-judges them in `verify_before_staging`, the one validation path of a deploy
-and of a deploy replayed at startup, before anything is staged. Each refusal
+judges them in `verify_before_staging`, the one validation path of a
+deploy, before anything is staged. Each refusal
 is non-recoverable and carries its code in `ErrorRecord.context`. The error
 code is `unsupported` where the installation lacks the means to run the
 bundle (a package, a runner profile, a compute type), and `config_invalid`

@@ -45,8 +45,9 @@ Architecture and on-the-wire details live in
 ## Rules
 
 - Deploy and rollback use desired-state reconciliation, not command replay.
-- Persistent state is durable across restarts; transactions resume from the
-  last persisted phase.
+- Persistent state is durable across restarts; a start settles the
+  transaction it finds from the last persisted phase and runs none of it
+  again.
 - The agent never mutates the serving worker's data plane directly; it
   stages a verified bundle and asks the worker to prepare/warm/promote
   through the typed `WorkerControl` trait. `worker.mode=mock` uses the
@@ -62,7 +63,9 @@ Architecture and on-the-wire details live in
 cargo run -p tensorplate-agent -- --config /etc/tensorplate/agent.json
 ```
 
-The agent applies startup recovery before opening the control socket, prints
+Before opening the control socket the agent settles the transaction an
+earlier run left in flight and starts the recorded active deployment again,
+in one pass that runs no transaction again. It then prints
 its bound address on stderr, and runs until killed. v0.1.0 relies on systemd
 / supervisor to deliver SIGTERM for shutdown (packaging ships the systemd unit).
 

@@ -101,6 +101,10 @@ pub struct StateStore {
     /// second).
     #[cfg(test)]
     fail_dir_sync_from: std::sync::atomic::AtomicUsize,
+    /// Test-only: how many more writes land. Every later one fails before
+    /// anything is written, as after a kill of the agent.
+    #[cfg(test)]
+    writes_left: std::sync::atomic::AtomicUsize,
 }
 
 /// One file of the pair, written as temp file + `fsync` + rename.
@@ -180,6 +184,8 @@ impl StateStore {
             fail_at_step: std::sync::atomic::AtomicUsize::new(usize::MAX),
             #[cfg(test)]
             fail_dir_sync_from: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            #[cfg(test)]
+            writes_left: std::sync::atomic::AtomicUsize::new(usize::MAX),
         })
     }
 
@@ -267,6 +273,8 @@ impl StateStore {
             .validate_successor(&next)
             .map_err(|e| AgentError::Internal(format!("state update refused: {e}")))?;
         let encoded = encode_checked(&next)?;
+        #[cfg(test)]
+        self.spend_write()?;
         self.write_state_files(&encoded, write_order(&next))?;
         self.primary_is_read.store(true, Ordering::SeqCst);
         *guard = next;
@@ -329,6 +337,24 @@ impl StateStore {
         #[cfg(not(test))]
         let _ = index;
         File::open(&self.state_dir).and_then(|d| d.sync_all())
+    }
+
+    /// Let `writes` more writes land and fail every one after them.
+    #[cfg(test)]
+    pub(crate) fn kill_after_writes(&self, writes: usize) {
+        self.writes_left.store(writes, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn spend_write(&self) -> AgentResult<()> {
+        let one_less = |left: usize| left.checked_sub(1);
+        let spent = self
+            .writes_left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, one_less);
+        spent.map(|_| ()).map_err(|_| {
+            let killed = "injected: no write lands after the kill";
+            AgentError::Io(std::io::Error::new(std::io::ErrorKind::Other, killed))
+        })
     }
 
     #[cfg(test)]
@@ -397,16 +423,34 @@ impl StateStore {
         })
     }
 
-    /// Convenience: clear the in-flight transaction (call after a
-    /// successful active deployment is fully recorded, or after a
-    /// terminal failure has been quarantined).
+    /// End the in-flight transaction after its commit: it and `last_error`
+    /// are cleared in one write, with a candidate record that has no deploy
+    /// (see [`Self::clear_candidate`]).
     ///
     /// # Errors
     ///
     /// Propagates errors from [`Self::update`].
-    pub fn clear_transaction(&self) -> AgentResult<()> {
+    pub fn end_transaction(&self) -> AgentResult<()> {
         self.update(|s| {
             s.in_flight_transaction = None;
+            s.candidate = None;
+            s.last_error = None;
+            Ok(())
+        })
+    }
+
+    /// End the in-flight transaction as failed without a quarantine
+    /// record: `error` becomes `last_error` in the write that clears it,
+    /// with a candidate record that has no deploy.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::update`].
+    pub fn fail_transaction(&self, error: ErrorRecord) -> AgentResult<()> {
+        self.update(|s| {
+            s.in_flight_transaction = None;
+            s.candidate = None;
+            s.last_error = Some(error);
             Ok(())
         })
     }
@@ -423,8 +467,23 @@ impl StateStore {
         })
     }
 
+    /// Clear a candidate record that no transaction in flight is the deploy
+    /// of. This agent leaves none: the commit takes a deploy's candidate and
+    /// its failure clears it. An earlier build could.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from [`Self::update`].
+    pub fn clear_candidate(&self) -> AgentResult<()> {
+        self.update(|s| {
+            s.candidate = None;
+            Ok(())
+        })
+    }
+
     /// Promote candidate to active. Atomic with previous-active rotation:
-    /// active -> previous_active, candidate -> active.
+    /// active -> previous_active, candidate -> active. This is a deploy's
+    /// commit: the same write records `promoted` on its transaction.
     ///
     /// # Errors
     ///
@@ -438,6 +497,7 @@ impl StateStore {
             })?;
             named_as_its_deploy(&cand, s.in_flight_transaction.as_ref())?;
             cand.promoted_monotonic_ns = Some(monotonic_ns);
+            record_commit(s.in_flight_transaction.as_mut(), monotonic_ns);
             let prev_active = s.active.take();
             s.previous_active = prev_active;
             s.active = Some(cand);
@@ -445,8 +505,9 @@ impl StateStore {
         })
     }
 
-    /// Move the active deployment back into the candidate slot and
-    /// promote previous_active back to active (used by rollback).
+    /// Put previous_active back as active and the active deployment in
+    /// its place. This is a rollback's commit: the same write records
+    /// `promoted` on its transaction.
     ///
     /// # Errors
     ///
@@ -459,6 +520,7 @@ impl StateStore {
                 .ok_or_else(|| AgentError::Unavailable("no previous active deployment".into()))?;
             take_rollback_identity(&mut prev, s.in_flight_transaction.as_ref())?;
             prev.promoted_monotonic_ns = Some(monotonic_ns);
+            record_commit(s.in_flight_transaction.as_mut(), monotonic_ns);
             let demoted = s.active.take();
             s.active = Some(prev);
             s.previous_active = demoted;
@@ -535,12 +597,23 @@ impl StateStore {
     }
 }
 
+/// Record `promoted` on the transaction in flight, in the update that moves
+/// its records: a start reads the phase as committed only together with
+/// them.
+fn record_commit(transaction: Option<&mut TransactionRecord>, monotonic_ns: u64) {
+    if let Some(tx) = transaction {
+        tx.phase = DeployState::Promoted;
+        tx.last_transition_monotonic_ns = Some(monotonic_ns);
+    }
+}
+
 /// Require `candidate`, which a promotion makes active, to name the
 /// descriptor identity the deploy transaction of its deployment names, and
 /// none when no such transaction names one. The refusal is not reached: a
-/// deploy names both in one update. It would leave the worker serving the
-/// candidate and the transaction in flight at `Promoted`, and every later
-/// transaction refused as busy until the agent restarts.
+/// deploy names both in one update. It writes nothing, so it would leave
+/// the worker serving the candidate and the transaction in flight at
+/// `warmed`: later transactions are refused as busy, and the next start
+/// ends it as failed and starts the old record.
 fn named_as_its_deploy(
     candidate: &DeploymentRecord,
     transaction: Option<&TransactionRecord>,
@@ -576,9 +649,10 @@ fn named_as_its_deploy(
 /// identity its transaction names: a later generation of the configuration
 /// the record names. Under its old one it would name a generation that is
 /// not serving. A rollback's transaction is named only by `start_again`,
-/// always with such a generation, so nothing reaches the refusal; it would
-/// leave the transaction in flight at `Promoted` while the worker serves
-/// the previous record.
+/// always with such a generation, so nothing reaches the refusal. It
+/// writes nothing, so it would leave the transaction in flight at `warmed`
+/// while the worker serves the previous record: the next start ends it as
+/// failed and starts the record that is still `active`.
 fn take_rollback_identity(
     previous: &mut DeploymentRecord,
     transaction: Option<&TransactionRecord>,
@@ -765,7 +839,7 @@ mod tests {
         assert!(s.previous_active.is_none());
 
         // Second deploy
-        store.clear_transaction().expect("clear");
+        store.end_transaction().expect("clear");
         store
             .begin_transaction(sample_tx("tx-2", "d2"))
             .expect("begin");
@@ -783,6 +857,85 @@ mod tests {
         let s = store.snapshot().expect("snap");
         assert_eq!(s.active.as_ref().expect("a").deployment_id, "d1");
         assert_eq!(s.previous_active.as_ref().expect("p").deployment_id, "d2");
+    }
+
+    /// The state a start would read.
+    fn on_disk(dir: &Path) -> AgentState {
+        StateStore::open(dir)
+            .expect("reopen")
+            .snapshot()
+            .expect("s")
+    }
+
+    #[test]
+    fn a_commit_records_promoted_in_the_one_write_that_moves_its_records() {
+        let td = TempDir::new().expect("td");
+        let store = StateStore::open(td.path()).expect("open");
+        store.begin_transaction(sample_tx("tx", "d1")).expect("tx");
+        store.record_candidate(sample_record("d1")).expect("cand");
+        let before = on_disk(td.path());
+
+        // A commit that does not land moves neither the records nor the phase.
+        store.kill_after_writes(0);
+        store.promote_candidate(100).expect_err("no write lands");
+        assert_eq!(on_disk(td.path()), before);
+        store.kill_after_writes(1);
+        store.promote_candidate(100).expect("the commit");
+
+        let committed = on_disk(td.path());
+        assert_eq!(committed.store_version, before.store_version + 1);
+        let tx = committed.in_flight_transaction.as_ref().expect("in flight");
+        let recorded = (tx.phase, tx.last_transition_monotonic_ns);
+        assert_eq!(recorded, (DeployState::Promoted, Some(100)));
+        assert!(committed.candidate.is_none() && committed.active.is_some());
+
+        // The same for a rollback's swap.
+        let mut rollback = sample_tx("tx-2", "d1");
+        rollback.kind = TransactionKind::Rollback;
+        store.kill_after_writes(usize::MAX);
+        let begun = |s: &mut AgentState| {
+            s.previous_active = s.active.take();
+            s.in_flight_transaction = Some(rollback);
+            Ok(())
+        };
+        store.update(begun).expect("a rollback in flight");
+        let before = on_disk(td.path());
+        store.swap_active_with_previous(200).expect("the swap");
+        let swapped = on_disk(td.path());
+        assert_eq!(swapped.store_version, before.store_version + 1);
+        let tx = swapped.in_flight_transaction.as_ref().expect("in flight");
+        let recorded = (tx.phase, tx.last_transition_monotonic_ns);
+        assert_eq!(recorded, (DeployState::Promoted, Some(200)));
+        assert!(swapped.active.is_some() && swapped.previous_active.is_none());
+    }
+
+    #[test]
+    fn a_transaction_ends_in_one_write_that_also_settles_the_last_error() {
+        let failure = ErrorRecord::new(ErrorCode::LoadFailed, "why");
+        for failed in [None, Some(failure)] {
+            let td = TempDir::new().expect("td");
+            let store = StateStore::open(td.path()).expect("open");
+            store.begin_transaction(sample_tx("tx", "d1")).expect("tx");
+            let earlier = ErrorRecord::new(ErrorCode::Internal, "earlier");
+            store.set_last_error(Some(earlier)).expect("an error");
+            let before = on_disk(td.path());
+            let end = || match failed.clone() {
+                Some(failure) => store.fail_transaction(failure),
+                None => store.end_transaction(),
+            };
+
+            store.kill_after_writes(0);
+            end().expect_err("no write lands");
+            assert_eq!(on_disk(td.path()), before);
+            store.kill_after_writes(1);
+            end().expect("the end");
+
+            let ended = on_disk(td.path());
+            assert_eq!(ended.store_version, before.store_version + 1);
+            assert!(ended.in_flight_transaction.is_none());
+            assert!(ended.quarantined.is_empty());
+            assert_eq!(ended.last_error, failed);
+        }
     }
 
     #[test]
@@ -809,7 +962,7 @@ mod tests {
             .expect("begin");
         store.record_candidate(sample_record("d1")).expect("cand");
         store.promote_candidate(10).expect("promote");
-        store.clear_transaction().expect("clear");
+        store.end_transaction().expect("clear");
 
         // Try a second deploy and fail it.
         store

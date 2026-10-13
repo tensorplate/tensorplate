@@ -17,6 +17,7 @@ use crate::config::AgentConfig;
 use crate::state::StateStore;
 
 mod deploy;
+mod one_pass;
 mod start_again;
 
 const STAGED: &str = "/var/lib/tensorplate/bundles/staging/stt";

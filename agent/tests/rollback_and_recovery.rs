@@ -139,7 +139,7 @@ fn restart_during_worker_side_phase_recommends_quarantine() {
 }
 
 #[test]
-fn restart_during_replayable_phase_recommends_resume() {
+fn restart_during_a_phase_before_prepare_ends_the_transaction_and_replays_nothing() {
     let h = Harness::new();
     h.store
         .update(|s| {
@@ -163,7 +163,7 @@ fn restart_during_replayable_phase_recommends_resume() {
         .expect("update");
 
     let plan = recovery::plan_with_worker(&h.store, h.worker.as_ref()).expect("plan");
-    assert_eq!(plan.action, RecoveryAction::ResumeStage);
+    assert_eq!(plan.action, RecoveryAction::QuarantineCandidate);
 }
 
 /// A release before deployment ids were restricted could record this id.

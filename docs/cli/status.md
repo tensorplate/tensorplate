@@ -34,6 +34,17 @@ tensorplate status [--observability-snapshot <path>] [--no-quarantine] [--output
   path (schema: [`protocol/schemas/observability_status.json`](../../protocol/schemas/observability_status.json))
   and folds heartbeat, deadline, and queue-depth fields into the output.
 
+A transaction that a start of the agent ended is read from its quarantine
+entry: the transaction id, the deployment id, the phase it had reached
+and the error. `last_error` carries the same error only until a
+deployment serves; an agent that ended an interrupted deploy and started
+the deployment that was serving again reports `ready`, no `last_error`
+and one more quarantine entry (see [restart
+recovery](../architecture/agent.md#restart-recovery-v01-e08-f07)).
+`in_flight_transaction` never carries a `failure` from this agent.
+`recovery.reason` says what a start of the agent would do now, so during
+a deploy it names that deploy as one a start would end.
+
 If the snapshot file is missing or malformed, the CLI renders the
 observability block as `available: false` with a reason — it does **not**
 fail the status command. Operators see a complete picture even when one

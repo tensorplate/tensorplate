@@ -13,7 +13,7 @@ use tensorplate_protocol::deploy_transaction::DeployState;
 
 use crate::coordinator::Coordinator;
 use crate::recovery::apply_startup;
-use crate::worker::{WorkerControl, WorkerReadiness};
+use crate::worker::{ServingMember, WorkerControl, WorkerReadiness};
 
 /// Puts a directory where a state write makes its first temporary file, so
 /// no later write lands, or takes it away again.
@@ -94,8 +94,13 @@ pub(super) struct Worker {
     killed_at_hold: bool,
     /// The same, in this call (`prepare` or `warm`) for this generation.
     killed_in: Option<(&'static str, u64)>,
+    /// This call fails and the agent lives on: `prepare`, `warm`, `promote`,
+    /// or `ready` for a worker that warms and is not ready.
+    fails_in: Option<&'static str>,
     stopping: AtomicBool,
     active: Option<String>,
+    /// The serving member it reports, as a control that owns a process does.
+    member: Option<ServingMember>,
     /// The view at each hold that has not been released.
     holds: Mutex<Vec<[String; 4]>>,
     /// Releases of a hold that was never taken.
@@ -121,6 +126,18 @@ impl Worker {
             ..Self::default()
         }
     }
+    pub(super) fn failing_in(call: &'static str) -> Self {
+        Self {
+            fails_in: Some(call),
+            ..Self::default()
+        }
+    }
+    fn fails(&self, call: &str) -> AgentResult<()> {
+        if self.fails_in == Some(call) {
+            return Err(AgentError::WorkerControl(format!("no worker: {call}")));
+        }
+        Ok(())
+    }
     /// End the agent as a kill would: no later state write lands.
     fn kill(&self) -> AgentError {
         refuse_state_writes(&self.state_dir, true);
@@ -130,6 +147,12 @@ impl Worker {
     pub(super) fn serving(deployment_id: &str) -> Self {
         Self {
             active: Some(deployment_id.into()),
+            ..Self::default()
+        }
+    }
+    pub(super) fn holding(member: ServingMember) -> Self {
+        Self {
+            member: Some(member),
             ..Self::default()
         }
     }
@@ -166,26 +189,30 @@ impl WorkerControl for Worker {
         if self.killed_at_prepare || self.killed_in == Some(("prepare", generation)) {
             return Err(self.kill());
         }
-        Ok(())
+        self.fails("prepare")
     }
     fn warm(&self, _: &str, candidate: &CandidateRef, _: Duration) -> AgentResult<WorkerReadiness> {
         let generation = candidate.generation.unwrap_or(0);
         if self.killed_in == Some(("warm", generation)) {
             return Err(self.kill());
         }
+        self.fails("warm")?;
         let deployment_id = candidate.deployment_id.clone();
-        let ready = true;
+        let ready = self.fails_in != Some("ready");
         Ok(WorkerReadiness {
             deployment_id,
             ready,
         })
     }
     fn promote(&self, _: &str, _: &CandidateRef) -> AgentResult<()> {
-        Ok(())
+        self.fails("promote")
     }
     fn unload(&self, _: &str) {}
     fn active_deployment_id(&self) -> AgentResult<Option<String>> {
         Ok(self.active.clone())
+    }
+    fn serving_member(&self) -> AgentResult<Option<ServingMember>> {
+        Ok(self.member.clone())
     }
     fn stopping(&self) -> bool {
         self.stopping.load(Ordering::SeqCst)
@@ -196,7 +223,7 @@ impl WorkerControl for Worker {
 pub(super) struct Agent {
     pub(super) store: Arc<StateStore>,
     pub(super) worker: Arc<Worker>,
-    pub(super) coordinator: Coordinator,
+    pub(super) coordinator: Arc<Coordinator>,
 }
 
 impl Agent {
@@ -237,7 +264,7 @@ impl Agent {
     }
     /// The state writes of a rollback to the previous record, `stt`, up to
     /// the one that records `phase`, and none after.
-    fn rollback_up_to(&self, phase: DeployState) {
+    pub(super) fn rollback_up_to(&self, phase: DeployState) {
         let [_, previous] = self.records();
         self.in_flight(TransactionKind::Rollback, "tx", "stt");
         self.again(&previous, Start::Rollback("tx")).unwrap();
@@ -303,7 +330,7 @@ impl Host {
             ..worker
         });
         let coordinator = Coordinator::new(config, store.clone(), worker.clone());
-        let coordinator = coordinator.with_backend_probes(probes);
+        let coordinator = Arc::new(coordinator.with_backend_probes(probes));
         let agent = Agent {
             store,
             worker,
@@ -312,7 +339,7 @@ impl Host {
         (agent, pruned)
     }
     /// A started agent whose `active` is `stt` at generation 1, described.
-    fn restoring(&self, worker: Worker) -> (Agent, DeploymentDescriptor) {
+    pub(super) fn restoring(&self, worker: Worker) -> (Agent, DeploymentDescriptor) {
         let (agent, _) = self.start(worker);
         let staged = self.staged("stt").display().to_string();
         let first = deploy(&agent.store, &self.descriptors, "stt", &staged).unwrap();
@@ -320,7 +347,7 @@ impl Host {
     }
     /// A started agent whose `previous_active` is `stt` at generation 1 and
     /// whose `active` is `tts` at generation 2, both described.
-    fn rolling_back(&self, worker: Worker) -> (Agent, DeploymentDescriptor) {
+    pub(super) fn rolling_back(&self, worker: Worker) -> (Agent, DeploymentDescriptor) {
         let (agent, first) = self.restoring(worker);
         let retire = |state: &mut AgentState| {
             state.previous_active = state.active.take();
@@ -414,23 +441,29 @@ fn a_restore_of_a_record_that_names_no_descriptor_writes_and_names_nothing() {
 }
 
 #[test]
-fn a_restore_of_a_record_that_names_no_descriptor_starts_whatever_is_staged_under_its_id() {
+fn a_restore_of_a_record_that_names_no_descriptor_is_refused_when_another_bundle_is_staged_under_its_id(
+) {
     let host = host();
-    let (agent, first) = host.restoring(Worker::default());
+    let (agent, _) = host.restoring(Worker::default());
     undescribe(&agent, |state| state.active.as_mut());
     let staged = host.restage();
 
-    apply_startup(&agent.coordinator).unwrap();
+    let summary = apply_startup(&agent.coordinator).unwrap();
 
-    // As before descriptors: the staged bundle is not compared with the record's.
-    let asked = agent.asked();
-    assert_ne!(asked.reference.bundle_digest, staged);
-    assert_eq!(asked.reference, naming(&reference(&first), [false; 3]));
-    assert_eq!(host.last_error(), None);
+    // Compared as for a record that names one: nothing is started.
+    assert_eq!(summary.action, RecoveryAction::RestoreActive);
+    let error = host.last_error().expect("the refusal is recorded");
+    assert_eq!(error.code, ErrorCode::LoadFailed, "{error:?}");
+    let says = format!("is `{staged}`, not the `");
+    let remedy = "names; `stt` is not serving until it is deployed again";
+    let told = error.message.contains(&says) && error.message.ends_with(remedy);
+    assert!(told, "{error:?}");
+    assert!(agent.never_asked());
+    assert_eq!(host.view(), ["stt", "-", "-", "2"]);
 }
 
 #[test]
-fn a_restore_fails_the_start_unless_the_staged_copy_reads_and_the_document_is_the_records() {
+fn a_restore_refused_by_what_is_on_disk_leaves_the_agent_up_with_the_refusal_recorded() {
     type Broken = (fn(&Host, &Agent), &'static str, ErrorCode);
     let load_failed = ErrorCode::LoadFailed;
     let missing: Broken = (
@@ -453,6 +486,22 @@ fn a_restore_fails_the_start_unless_the_staged_copy_reads_and_the_document_is_th
         "bundle manifest is invalid",
         ErrorCode::ConfigInvalid,
     );
+    let half_written: Broken = (
+        |host, _| {
+            let manifest = host.staged("stt").join("manifest.json");
+            let whole = fs::read(&manifest).unwrap();
+            fs::write(&manifest, &whole[..whole.len() / 2]).unwrap();
+        },
+        "bundle manifest is invalid",
+        ErrorCode::ConfigInvalid,
+    );
+    // An I/O error, as a state write that fails is: this one is the staged
+    // copy's, so it does not end the start.
+    let not_text: Broken = (
+        |host, _| fs::write(host.staged("stt").join("manifest.json"), b"\xff").unwrap(),
+        "stream did not contain valid UTF-8",
+        ErrorCode::Internal,
+    );
     // The record and the staged bundle agree; the document describes another.
     let renamed: Broken = (
         |host, agent| {
@@ -467,7 +516,7 @@ fn a_restore_fails_the_start_unless_the_staged_copy_reads_and_the_document_is_th
         load_failed,
     );
     // The staged manifest is the record's, so its digest compares equal; the
-    // restore fails on the artifact the manifest names.
+    // restore is refused on the artifact the manifest names.
     let gone: Broken = (
         |host, _| fs::remove_file(host.staged("stt").join("entry.json")).unwrap(),
         "artifact `entry.json` failed integrity check: missing on disk",
@@ -483,29 +532,114 @@ fn a_restore_fails_the_start_unless_the_staged_copy_reads_and_the_document_is_th
         "does not exist or is not a directory",
         ErrorCode::ConfigInvalid,
     );
-    for (broken, says, code) in [
+    for (case, (broken, says, code)) in [
         missing,
         another,
         unreadable,
+        half_written,
+        not_text,
         renamed,
         gone,
         altered,
         no_directory,
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let host = host();
         let (agent, _) = host.restoring(Worker::default());
         broken(&host, &agent);
         let before = (host.view(), host.documents());
 
-        let error = apply_startup(&agent.coordinator)
-            .expect_err(says)
-            .to_record();
+        let started = apply_startup(&agent.coordinator);
 
-        let refused = error.code == code && !error.recoverable;
-        assert!(refused && error.message.contains(says), "{error:?}");
-        assert_eq!(host.last_error(), Some(error));
-        assert_eq!((host.view(), host.documents()), before, "{says}");
-        assert!(agent.never_asked() && before.0[3] == "2", "{says}");
+        let summary = started.unwrap_or_else(|e| panic!("case {case} ended the start: {e}"));
+        assert_eq!(summary.action, RecoveryAction::RestoreActive, "case {case}");
+        let error = host.last_error().expect("the refusal is recorded");
+        assert_eq!(error.code, code, "case {case}: {error:?}");
+        let remedy = "; `stt` is not serving until it is deployed again";
+        let told = error.message.contains(says) && error.message.ends_with(remedy);
+        assert!(told, "case {case}: {error:?}");
+        // No generation is taken and nothing is written or asked for.
+        assert_eq!((host.view(), host.documents()), before, "case {case}");
+        assert!(agent.never_asked() && before.0[3] == "2", "case {case}");
+    }
+}
+
+#[test]
+fn a_refusal_whose_record_did_not_land_ends_the_start_and_is_recorded_by_the_next() {
+    let host = host();
+    let (agent, _) = host.restoring(Worker::default());
+    fs::remove_file(host.document()).unwrap();
+    agent.store.kill_after_writes(0);
+
+    let error = apply_startup(&agent.coordinator).unwrap_err();
+
+    assert!(matches!(error, AgentError::Io(_)), "{error}");
+    assert_eq!(host.last_error(), None);
+    let (next, _) = host.start(Worker::default());
+    apply_startup(&next.coordinator).unwrap();
+    let refusal = host.last_error().expect("the refusal is recorded");
+    let remedy = "; `stt` is not serving until it is deployed again";
+    assert!(refusal.message.ends_with(remedy), "{refusal:?}");
+    assert!(next.never_asked());
+    assert_eq!(host.view(), ["stt@1?", "-", "-", "2"]);
+}
+
+#[test]
+fn a_restore_whose_document_cannot_be_written_ends_the_start_with_the_error_recorded() {
+    let host = host();
+    let (agent, first) = host.restoring(Worker::default());
+    let unfinished = host.state_dir().join("descriptor-stt-2.json.tmp");
+    fs::create_dir(&unfinished).unwrap();
+
+    let error = apply_startup(&agent.coordinator).unwrap_err();
+
+    // The agent's own error and no refusal: the state store still writes,
+    // and records it as it is.
+    assert!(matches!(error, AgentError::Io(_)), "{error}");
+    assert_eq!(host.last_error(), Some(error.to_record()));
+    assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
+    assert!(agent.never_asked());
+
+    fs::remove_dir(unfinished).unwrap();
+    let (next, _) = host.start(Worker::default());
+    apply_startup(&next.coordinator).unwrap();
+    assert_eq!(next.asked().resolved, Some(first.restamp(2).unwrap()));
+    assert_eq!(host.last_error(), None);
+}
+
+#[test]
+fn a_restore_whose_worker_does_not_come_up_ends_the_start_and_the_next_start_restores() {
+    // `recorded`: whether the write that records why lands.
+    let calls = ["prepare", "warm", "ready", "promote"];
+    for (call, recorded) in calls
+        .map(|call| (call, true))
+        .into_iter()
+        .chain([("warm", false)])
+    {
+        let host = host();
+        let (agent, first) = host.restoring(Worker::failing_in(call));
+        // The write that names the generation, then the one that records why.
+        agent.store.kill_after_writes(if recorded { 2 } else { 1 });
+
+        let error = apply_startup(&agent.coordinator).unwrap_err();
+
+        let why = recorded.then(|| error.to_record());
+        assert_eq!(
+            matches!(error, AgentError::Io(_)),
+            !recorded,
+            "{call}: {error}"
+        );
+        assert_eq!(host.last_error(), why, "{call}");
+        assert_eq!(host.view(), ["stt@2", "-", "-", "3"], "{call}");
+
+        let (next, _) = host.start(Worker::default());
+        apply_startup(&next.coordinator).unwrap();
+        let restored = Some(first.restamp(3).unwrap());
+        assert_eq!(next.asked().resolved, restored, "{call}");
+        assert_eq!(host.view(), ["stt@3", "-", "-", "4"], "{call}");
+        assert_eq!(host.last_error(), None, "{call}");
     }
 }
 
@@ -588,6 +722,34 @@ fn a_rollback_to_a_record_that_names_no_descriptor_writes_and_names_nothing() {
 }
 
 #[test]
+fn a_rollback_to_a_record_that_names_no_descriptor_starts_whatever_is_staged_under_its_id() {
+    let host = host();
+    let (agent, first) = host.rolling_back(Worker::default());
+    undescribe(&agent, |state| state.previous_active.as_mut());
+    let staged = host.restage();
+
+    agent.coordinator.rollback(None).unwrap();
+
+    // As before descriptors: the staged bundle is not compared with the
+    // record's.
+    let asked = agent.asked();
+    assert_ne!(asked.reference.bundle_digest, staged);
+    assert_eq!(asked.reference, naming(&reference(&first), [false; 3]));
+    assert_eq!(host.view(), ["stt", "tts@2", "-", "3"]);
+    assert_eq!(host.last_error(), None);
+
+    // The restore compares for such a record: the next start does not
+    // start the record over the other bundle.
+    let (next, _) = host.start(Worker::default());
+    apply_startup(&next.coordinator).unwrap();
+    let refusal = host.last_error().expect("the refusal is recorded");
+    let remedy = "names; `stt` is not serving until it is deployed again";
+    assert!(refusal.message.ends_with(remedy), "{refusal:?}");
+    assert!(next.never_asked());
+    assert_eq!(host.view(), ["stt", "tts@2", "-", "3"]);
+}
+
+#[test]
 fn a_rollback_is_refused_when_the_recorded_document_is_missing() {
     let host = host();
     let (agent, _) = host.rolling_back(Worker::default());
@@ -606,7 +768,7 @@ fn a_rollback_is_refused_when_the_recorded_document_is_missing() {
 #[test]
 fn a_rollback_killed_after_its_document_leaves_it_unnamed_for_the_next_start_to_remove() {
     let host = host();
-    let (agent, first) = host.rolling_back(Worker::default());
+    let (agent, _) = host.rolling_back(Worker::default());
     let [_, previous] = agent.records();
     agent.in_flight(TransactionKind::Rollback, "tx", "stt");
     refuse_state_writes(&host.state_dir(), true);
@@ -618,20 +780,20 @@ fn a_rollback_killed_after_its_document_leaves_it_unnamed_for_the_next_start_to_
     assert_eq!(host.view(), ["tts@2", "stt@1", "stt", "3"]);
     assert_eq!(host.documents(), "stt-1 stt-3 tts-2");
 
-    // The next start removes it and resumes the rollback from the old
+    // The next start removes it, ends the rollback and restores the active
     // record, which is handed the same generation.
     let (next, pruned) = host.start(Worker::default());
     assert_eq!((pruned, host.documents().as_str()), (1, "stt-1 tts-2"));
     let summary = apply_startup(&next.coordinator).unwrap();
-    assert_eq!(summary.action, RecoveryAction::ResumePrepare);
-    assert_eq!(next.asked().resolved, Some(first.restamp(3).unwrap()));
-    assert_eq!(host.view(), ["stt@3", "tts@2", "-", "4"]);
+    assert_eq!(summary.action, RecoveryAction::RestoreActive);
+    assert_eq!(next.asked().reference.deployment_id, "tts");
+    assert_eq!(host.view(), ["tts@3", "stt@1", "-", "4"]);
 }
 
 #[test]
-fn a_rollback_killed_after_it_named_the_generation_starts_over_from_the_previous_record() {
+fn a_rollback_killed_after_it_named_the_generation_is_ended_and_the_active_record_restored() {
     let host = host();
-    let (agent, first) = host.rolling_back(Worker::killed());
+    let (agent, _) = host.rolling_back(Worker::killed());
 
     let error = agent.coordinator.rollback(None).unwrap_err();
 
@@ -640,19 +802,20 @@ fn a_rollback_killed_after_it_named_the_generation_starts_over_from_the_previous
     assert_eq!(host.view(), ["tts@2", "stt@1", "stt@3", "4"]);
     assert_eq!(host.last_error(), None);
 
-    // Every document is named, so the next start removes none; its
-    // rollback starts from the previous record's own document.
+    // Every document is named, so the next start removes none. It asks for
+    // no worker of the rollback's: the active record is the one restored.
     let (next, pruned) = host.start(Worker::default());
     assert_eq!(pruned, 0);
     apply_startup(&next.coordinator).unwrap();
-    assert_eq!(next.asked().resolved, Some(first.restamp(4).unwrap()));
-    assert_eq!(host.view(), ["stt@4", "tts@2", "-", "5"]);
+    assert_eq!(next.asked().reference.deployment_id, "tts");
+    assert_eq!(host.view(), ["tts@4", "stt@1", "-", "5"]);
+    assert!(host.quarantined().0.ends_with("@CapacityChecked"));
     assert_eq!(host.start(Worker::default()).1, 2);
-    assert_eq!(host.documents(), "stt-4 tts-2");
+    assert_eq!(host.documents(), "stt-1 tts-4");
 }
 
 #[test]
-fn a_rollback_killed_after_its_swap_is_finalized_with_the_identity_the_swap_recorded() {
+fn a_rollback_killed_after_its_swap_is_cleared_without_a_restart_when_its_record_is_served() {
     let host = host();
     let (agent, _) = host.rolling_back(Worker::default());
     agent.rollback_up_to(DeployState::Promoted);
@@ -664,43 +827,14 @@ fn a_rollback_killed_after_its_swap_is_finalized_with_the_identity_the_swap_reco
     let (next, pruned) = host.start(Worker::serving("stt"));
     assert_eq!((pruned, host.documents().as_str()), (1, "stt-3 tts-2"));
     let summary = apply_startup(&next.coordinator).unwrap();
-    assert_eq!(summary.action, RecoveryAction::FinalizePromotion);
+    assert_eq!(summary.action, RecoveryAction::NoOp);
     assert_eq!(host.view(), ["stt@3", "tts@2", "-", "4"]);
-    assert!(next.never_asked());
-}
-
-#[test]
-fn a_rollback_killed_after_its_swap_is_quarantined_by_a_start_that_finds_nothing_serving() {
-    let host = host();
-    let (agent, first) = host.rolling_back(Worker::default());
-    agent.rollback_up_to(DeployState::Promoted);
-    agent.store.swap_active_with_previous(2).unwrap();
-    assert_eq!(host.view(), ["stt@3", "tts@2", "stt@3", "4"]);
-
-    // A worker control reports nothing active when the agent starts. The
-    // start removes the document the rollback replaced, quarantines the
-    // transaction and restores nothing.
-    let (next, pruned) = host.start(Worker::default());
-    assert_eq!((pruned, host.documents().as_str()), (1, "stt-3 tts-2"));
-    let summary = apply_startup(&next.coordinator).unwrap();
-    assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
-    assert_eq!(host.view(), ["stt@3", "tts@2", "-", "4"]);
-    assert_eq!(host.quarantined(), ("tx@Promoted".to_owned(), true));
-    assert!(next.never_asked() && host.documents() == "stt-3 tts-2");
-
-    // The start after it restores the swapped record at the next generation.
-    let (after, pruned) = host.start(Worker::default());
-    assert_eq!((pruned, host.documents().as_str()), (0, "stt-3 tts-2"));
-    let summary = apply_startup(&after.coordinator).unwrap();
-    assert_eq!(summary.action, RecoveryAction::RestoreActive);
-    assert_eq!(after.asked().resolved, Some(first.restamp(4).unwrap()));
-    assert_eq!(host.view(), ["stt@4", "tts@2", "-", "5"]);
+    assert!(next.never_asked() && host.quarantined().0.is_empty());
     assert_eq!(host.last_error(), None);
-    assert_eq!(host.documents(), "stt-3 stt-4 tts-2");
 }
 
 #[test]
-fn a_rollback_killed_before_its_swap_keeps_its_document_until_the_start_after_its_quarantine() {
+fn a_rollback_ended_by_a_start_keeps_its_document_until_the_start_after() {
     use DeployState::{Prepared, Promoted, Warmed};
     for phase in [Prepared, Warmed, Promoted] {
         let host = host();
@@ -708,23 +842,20 @@ fn a_rollback_killed_before_its_swap_keeps_its_document_until_the_start_after_it
         agent.rollback_up_to(phase);
         assert_eq!(host.view(), ["tts@2", "stt@1", "stt@3", "4"]);
 
-        // Every document is named, so the next start removes none. It
-        // quarantines the transaction, and the document it named stays.
+        // Every document is named, so the next start removes none. It ends
+        // the transaction, and the document it named stays.
         let (next, pruned) = host.start(Worker::default());
         assert_eq!(pruned, 0, "{phase:?}");
         let summary = apply_startup(&next.coordinator).unwrap();
-        assert_eq!(summary.action, RecoveryAction::QuarantineCandidate);
-        assert_eq!(host.view(), ["tts@2", "stt@1", "-", "4"]);
-        assert_eq!(host.quarantined(), (format!("tx@{phase:?}"), true));
-        assert!(next.never_asked() && host.documents() == "stt-1 stt-3 tts-2");
-
-        // No record names it now: the start after that removes it, and
-        // restores the active record.
-        let (after, pruned) = host.start(Worker::default());
-        assert_eq!((pruned, host.documents().as_str()), (1, "stt-1 tts-2"));
-        apply_startup(&after.coordinator).unwrap();
+        assert_eq!(summary.action, RecoveryAction::RestoreActive);
         assert_eq!(host.view(), ["tts@4", "stt@1", "-", "5"]);
-        assert_eq!(host.documents(), "stt-1 tts-2 tts-4");
+        assert_eq!(host.quarantined(), (format!("tx@{phase:?}"), false));
+        assert_eq!(host.documents(), "stt-1 stt-3 tts-2 tts-4");
+
+        // No record names it now: the start after that removes it, with
+        // the document the restore replaced.
+        let (_, pruned) = host.start(Worker::default());
+        assert_eq!((pruned, host.documents().as_str()), (2, "stt-1 tts-4"));
     }
 }
 

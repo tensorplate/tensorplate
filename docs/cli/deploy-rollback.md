@@ -38,9 +38,11 @@ Behavior:
    path.
 4. The CLI sends a `ControlOp::Deploy` request and reports the
    `transaction_id` it gets back.
-5. In wait mode the CLI polls `ControlOp::Status` until the in-flight
-   transaction reaches a terminal phase (`active`, `failed`, `rolled_back`)
-   or the wait timeout expires.
+5. In wait mode the CLI polls `ControlOp::Status` until no transaction is
+   in flight and a deployment is recorded active, or the wait timeout
+   expires. The agent clears a transaction in the write that ends it, so
+   the poll does not see a terminal phase (`active`, `failed`,
+   `rolled_back`) from this agent; the CLI still accepts one.
 
 The agent answers a `deploy` or `rollback` request only once the candidate
 has warmed or failed, which can take as long as its `worker.warm_timeout_ms`

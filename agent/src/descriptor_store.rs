@@ -436,16 +436,13 @@ pub(crate) enum Start<'a> {
 /// The refusal to start `record` again when the bundle staged at its path is
 /// not the one it names: staging is keyed by the deployment id, so a later
 /// deploy under the id replaced it. None when the staged bundle is the
-/// record's, and for a record that does not name a descriptor, which is
-/// started from whatever is staged.
+/// record's. Whether the record names a descriptor is the caller's to read:
+/// the restore compares for every record, a rollback only for one that does.
 ///
 /// # Errors
 ///
 /// The staged manifest's own error when it cannot be read.
 pub(crate) fn another_bundle_staged(record: &DeploymentRecord) -> AgentResult<Option<AgentError>> {
-    if !matches!(record.descriptor_identity(), Ok(Some(_))) {
-        return Ok(None);
-    }
     let (id, digest) = (&record.deployment_id, &*record.bundle_digest);
     let staged_path = &*record.staged_path;
     let staged = crate::bundle::staged_manifest(Path::new(staged_path))?.bundle_digest;
@@ -464,7 +461,7 @@ pub(crate) fn another_bundle_staged(record: &DeploymentRecord) -> AgentResult<Op
 /// descriptor, one state update takes the next generation, re-stamps the
 /// descriptor for it, names it where `start` says and writes its document;
 /// the reference names it, in hand under a hold on `worker`. A record that
-/// names none is referenced as it is.
+/// names none is referenced as it is, whatever is staged under its id.
 ///
 /// # Errors
 ///

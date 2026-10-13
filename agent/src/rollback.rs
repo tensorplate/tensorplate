@@ -110,7 +110,7 @@ mod tests {
             .record_candidate(record("d", td.path().join("missing").display().to_string()))
             .expect("cand");
         store.promote_candidate(10).expect("promote");
-        store.clear_transaction().expect("clear");
+        store.end_transaction().expect("clear");
         // Set up a previous_active by performing a second promote.
         store.begin_transaction(tx("tx2", "d2")).expect("begin");
         store
@@ -139,7 +139,7 @@ mod tests {
             .record_candidate(record("d", staged_dir.display().to_string()))
             .expect("cand");
         store.promote_candidate(10).expect("promote");
-        store.clear_transaction().expect("clear");
+        store.end_transaction().expect("clear");
         store.begin_transaction(tx("tx2", "d2")).expect("begin");
         store
             .record_candidate(record(
@@ -170,7 +170,7 @@ mod tests {
             .record_candidate(record("d", staged_dir.display().to_string()))
             .expect("cand");
         store.promote_candidate(10).expect("promote");
-        store.clear_transaction().expect("clear");
+        store.end_transaction().expect("clear");
 
         let staged_dir2 = td.path().join("staged-d2");
         fs::create_dir_all(&staged_dir2).expect("mkdir");
