@@ -181,7 +181,7 @@ struct StreamListener::Impl final
   std::mutex ended_mu;
   std::condition_variable ended_cv;
   std::vector<std::shared_ptr<CallOutput>> ended;
-  /// A call was added to `ended` or to `handshakes`.
+  /// A call was added to `ended` or to `handshakes`, or the clock was moved.
   bool watch_changed = false;
   bool watch_stopped = false;
   std::thread watcher;
@@ -763,12 +763,9 @@ void StreamListener::Impl::watch_calls() {
     if (!next) {
       ended_cv.wait(lock, woken);
     } else {
-      // At most a second: an injected clock moves without telling.
-      const auto until_due = std::chrono::duration_cast<std::chrono::milliseconds>(*next - now);
-      ended_cv.wait_for(
-          lock,
-          std::clamp(until_due, std::chrono::milliseconds{1}, std::chrono::milliseconds{1000}),
-          woken);
+      // An instant of the listener's clock is one of the steady clock; a
+      // clock moved by hand says so through notify_clock_advanced().
+      ended_cv.wait_until(lock, *next, woken);
     }
   }
 }
@@ -897,6 +894,10 @@ std::size_t StreamListener::awaited_calls() const noexcept {
 
 std::size_t StreamListener::refused_calls() const noexcept {
   return impl_->refused.size();
+}
+
+void StreamListener::notify_clock_advanced() noexcept {
+  impl_->wake_watcher();
 }
 
 std::size_t StreamListener::live_sessions() const noexcept {

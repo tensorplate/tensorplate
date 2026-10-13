@@ -2,8 +2,8 @@
 //
 // What the stream listener bounds before a call has a session: the wait for
 // its Open, how many calls it waits on, how many refused calls it keeps,
-// compression, and what its transport announces. Every timeout runs on an
-// injected clock.
+// compression, and what its transport announces. Every timeout but one runs
+// on an injected clock.
 
 #include <arpa/inet.h>
 #include <grpcpp/grpcpp.h>
@@ -48,12 +48,18 @@ void expect_refused(const grpc::Status& status, grpc::StatusCode code, std::stri
   EXPECT_NE(status.error_message().find(reason), std::string::npos) << status.error_message();
 }
 
-/// A listener whose clock only the test moves.
+/// A listener whose clock only the test moves. The clock's instants lie an
+/// hour ahead of the steady clock, so no wait of the listener ends by itself
+/// during a test: it looks at the clock when it is told the clock has moved.
 struct TimedListener {
   explicit TimedListener(std::optional<std::size_t> max_refused_calls = std::nullopt)
       : served(true, "127.0.0.1", &clock, max_refused_calls) {}
 
   [[nodiscard]] tensorplate::serving::StreamListener& listener() { return served.listener(); }
+  void advance(tensorplate::SchedulerClock::Duration by) {
+    clock.advance(by);
+    listener().notify_clock_advanced();
+  }
   /// A call the listener waits on for its Open.
   [[nodiscard]] Client silent_call() {
     const auto waited_on = listener().awaited_calls();
@@ -69,7 +75,7 @@ struct TimedListener {
 TEST(StreamBounds, ACallThatSendsNoOpenIsRefusedWhenTheHandshakeTimeoutPasses) {
   TimedListener timed;
   auto silent = timed.silent_call();
-  timed.clock.advance(5s);
+  timed.advance(5s);
   expect_refused(ended_unanswered(silent), grpc::StatusCode::DEADLINE_EXCEEDED,
                  "open refused: FAILURE_REASON_IDLE_TIMEOUT");
   EXPECT_EQ(timed.listener().awaited_calls(), 0U);
@@ -83,9 +89,9 @@ TEST(StreamBounds, ACallThatSendsNoOpenIsRefusedWhenTheHandshakeTimeoutPasses) {
 TEST(StreamBounds, AnOpenInsideTheHandshakeTimeoutIsAnsweredAndItsCallNoLongerWaitedOn) {
   TimedListener timed;
   auto earlier = timed.silent_call();
-  timed.clock.advance(1ms);
+  timed.advance(1ms);
   auto first = timed.silent_call();
-  timed.clock.advance(4999ms);
+  timed.advance(4999ms);
   expect_refused(ended_unanswered(earlier), grpc::StatusCode::DEADLINE_EXCEEDED,
                  "FAILURE_REASON_IDLE_TIMEOUT");
   ASSERT_TRUE(first.call->Write(open_event(wire::SESSION_MODE_STT_STREAMING)));
@@ -97,7 +103,7 @@ TEST(StreamBounds, AnOpenInsideTheHandshakeTimeoutIsAnsweredAndItsCallNoLongerWa
   // A later call, refused in the pass that would have refused the first had
   // its wait not ended: the first began before it and is taken before it.
   auto second = timed.silent_call();
-  timed.clock.advance(5s);
+  timed.advance(5s);
   expect_refused(ended_unanswered(second), grpc::StatusCode::DEADLINE_EXCEEDED,
                  "FAILURE_REASON_IDLE_TIMEOUT");
   wire::ClientEvent ping;
@@ -151,6 +157,17 @@ TEST(StreamBounds, ClosingAdmissionRefusesTheCallsWaitedOnAndEveryCallThatArrive
   EXPECT_TRUE(timed.served.dispatch().seen.events().empty());
 }
 
+// A clock moved by hand never asks the watch thread to wake by itself when a
+// wait ends, which is all it does on the system clock. This test waits the
+// five seconds; what it checks is the refusal, not how long it took.
+TEST(StreamBounds, OnTheSystemClockTheWatchThreadWakesByItselfWhenAHandshakeTimeoutPasses) {
+  Served served;
+  auto silent = served.connect();
+  expect_refused(ended_unanswered(silent), grpc::StatusCode::DEADLINE_EXCEEDED,
+                 "open refused: FAILURE_REASON_IDLE_TIMEOUT");
+  EXPECT_TRUE(eventually([&] { return served.listener().open_calls() == 0; }));
+}
+
 // A refused call holds one of the listener's thirty-two places until it is
 // done, and no longer: more calls than there are places are refused one after
 // another, and each reads its reason.
@@ -175,7 +192,7 @@ TEST(StreamBounds, ARefusedCallGivesItsPlaceBackWhenItIsDone) {
 TEST(StreamBounds, ACallRefusedWithNoPlaceLeftIsCancelledAndReadsNoReason) {
   TimedListener timed{0};
   auto silent = timed.silent_call();
-  timed.clock.advance(5s);
+  timed.advance(5s);
   const auto overdue = ended_unanswered(silent);
   EXPECT_EQ(overdue.error_code(), grpc::StatusCode::CANCELLED) << overdue.error_message();
   EXPECT_EQ(overdue.error_message().find("open refused"), std::string::npos)

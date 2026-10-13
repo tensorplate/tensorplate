@@ -82,6 +82,11 @@ class StreamListener {
   /// refused beyond them is cancelled and holds none.
   [[nodiscard]] std::size_t refused_calls() const noexcept;
 
+  /// Says that the clock was moved by hand. The watch thread sleeps until an
+  /// instant of the clock, which it takes as the steady clock's: a clock that
+  /// jumps says so here, and the system clock never has to.
+  void notify_clock_advanced() noexcept;
+
   struct Impl;
 
  private:

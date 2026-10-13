@@ -1003,7 +1003,7 @@ struct UnreadSession {
       ASSERT_TRUE(eventually([&] { return (output = seen().output()) != nullptr; }));
       const auto completed = seen().deliveries();
       const auto stalled = output->stalled_since();
-      clock.advance(kNoProgressLimit + 1ms);
+      advance(kNoProgressLimit + 1ms);
       ASSERT_TRUE(eventually([&] {
         return seen().aborts() == 1 || seen().deliveries() > completed ||
                output->stalled_since() != stalled;
@@ -1016,6 +1016,13 @@ struct UnreadSession {
 
   [[nodiscard]] tensorplate::testing::stream_listener::Seen& seen() {
     return served.dispatch().seen;
+  }
+
+  /// Moves the clock and says so: the listener's watch thread sleeps until
+  /// an instant it knows of, and this clock's lie an hour ahead.
+  void advance(tensorplate::SchedulerClock::Duration by) {
+    clock.advance(by);
+    served.listener().notify_clock_advanced();
   }
 
   FakeSchedulerClock clock;
@@ -1109,7 +1116,7 @@ TEST(StreamEvents, ACallWhoseReaderNeverResumesIsCancelledAfterItsSessionEnded) 
   ASSERT_TRUE(eventually([&] { return listener.live_sessions() == 0; }));
   // The clock has not moved since the end: the call still has its limit.
   EXPECT_EQ(listener.open_calls(), 1U);
-  session.clock.advance(kNoProgressLimit + 1ms);
+  session.advance(kNoProgressLimit + 1ms);
   ASSERT_TRUE(eventually([&] { return listener.open_calls() == 0; }))
       << "the call outlived the limit: its reactor was never done";
 
@@ -1141,7 +1148,7 @@ TEST(StreamEvents, ACallIsCancelledWhenItsSessionFailedBehindAWriteThatNeverComp
   EXPECT_EQ(seen.cause(), "invalid_event");
   ASSERT_TRUE(eventually([&] { return listener.live_sessions() == 0; }));
   EXPECT_EQ(listener.open_calls(), 1U);
-  session.clock.advance(kNoProgressLimit + 1ms);
+  session.advance(kNoProgressLimit + 1ms);
   ASSERT_TRUE(eventually([&] { return listener.open_calls() == 0; }));
   EXPECT_EQ(seen.aborts(), 0) << "the no-progress limit of a live session ended it";
   // The slot was free all along, and is served.
