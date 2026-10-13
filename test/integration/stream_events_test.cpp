@@ -1159,10 +1159,19 @@ TEST(StreamEvents, ACallIsCancelledWhenItsSessionFailedBehindAWriteThatNeverComp
 
 // On the system clock nothing tells the watch thread that time has passed:
 // the end of the session wakes it, and at the limit it wakes by itself. The
-// test waits out the limit; it checks that the call was cancelled, not when.
+// thread must be asleep with no end when the session ends, or the sleep it
+// began for the call's own Open would end in time and look for it: a silent
+// call is refused first, which takes the thread past that instant and leaves
+// it nothing to wait for. The test waits out two limits; it checks what
+// happened to each call, not when.
 TEST(StreamEvents, OnTheSystemClockTheWatchThreadCancelsACallWhoseReaderNeverResumes) {
   UnreadSession session{with_no_room_for_a_chunk(), true};
   auto& listener = session.served.listener();
+  auto silent = session.served.connect();
+  EXPECT_FALSE(silent.read().has_value());
+  const auto refused = silent.call->Finish();
+  ASSERT_NE(refused.error_message().find("FAILURE_REASON_IDLE_TIMEOUT"), std::string::npos)
+      << refused.error_message();
   session.block();
   if (HasFatalFailure()) {
     return;
