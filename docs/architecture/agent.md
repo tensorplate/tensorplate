@@ -533,6 +533,9 @@ the deployment a worker control reports serving is never read as a commit.
      A deploy still holds its candidate record, so it is ended like one
      interrupted before its commit, with its own failure in the quarantine
      entry.
+   - A candidate record with no deploy in flight (the same: this agent
+     leaves none) is cleared, in the write that settles a rollback found
+     beside it, or in a write of its own when no transaction is in flight.
 
    A deploy has committed when its phase is `promoted` or later and its
    candidate record is gone. A rollback has committed when its phase is

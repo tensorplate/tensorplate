@@ -40,7 +40,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   reports ready. It starts nothing, records the `load_failed` refusal as
   `last_error` and comes up, and the deployment is not serving until the id
   is deployed again. A rollback to a record that names no descriptor is
-  still not compared. `recovery.action` in status reports `restore_active`,
+  still not compared. A candidate record found with no deploy in flight,
+  which an earlier release could leave, is cleared by the start that finds
+  it. `recovery.action` in status reports `restore_active`,
   `quarantine_candidate`, `no_op` or `operator_required`; the `resume_*`
   values and `finalize_promotion` stay in the schema and are never
   reported. (V030-E03-F01-T04)
