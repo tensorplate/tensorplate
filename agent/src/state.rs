@@ -592,9 +592,10 @@ fn record_commit(transaction: Option<&mut TransactionRecord>, monotonic_ns: u64)
 /// Require `candidate`, which a promotion makes active, to name the
 /// descriptor identity the deploy transaction of its deployment names, and
 /// none when no such transaction names one. The refusal is not reached: a
-/// deploy names both in one update. It would leave the worker serving the
-/// candidate and the transaction in flight at `Promoted`, and every later
-/// transaction refused as busy until the agent restarts.
+/// deploy names both in one update. It writes nothing, so it would leave
+/// the worker serving the candidate and the transaction in flight at
+/// `warmed`: later transactions are refused as busy, and the next start
+/// ends it as failed and starts the old record.
 fn named_as_its_deploy(
     candidate: &DeploymentRecord,
     transaction: Option<&TransactionRecord>,
@@ -630,9 +631,10 @@ fn named_as_its_deploy(
 /// identity its transaction names: a later generation of the configuration
 /// the record names. Under its old one it would name a generation that is
 /// not serving. A rollback's transaction is named only by `start_again`,
-/// always with such a generation, so nothing reaches the refusal; it would
-/// leave the transaction in flight at `Promoted` while the worker serves
-/// the previous record.
+/// always with such a generation, so nothing reaches the refusal. It
+/// writes nothing, so it would leave the transaction in flight at `warmed`
+/// while the worker serves the previous record: the next start ends it as
+/// failed and starts the record that is still `active`.
 fn take_rollback_identity(
     previous: &mut DeploymentRecord,
     transaction: Option<&TransactionRecord>,
