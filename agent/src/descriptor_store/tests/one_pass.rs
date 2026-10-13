@@ -468,6 +468,35 @@ fn a_rollback_found_at_promoted_before_its_swap_is_ended_between_records_of_one_
 }
 
 #[test]
+fn a_rollback_found_before_its_swap_is_ended_whatever_generation_a_later_restart_named() {
+    // The rollback's warm fails and the write that ends it does not land:
+    // its hold on the member is over, the agent lives on, and the serving
+    // member is restarted as a later generation than the rollback named.
+    let host = host();
+    let (first, _) = host.start(Worker::default());
+    first.deploy("tts", TTS).unwrap();
+    first.deploy("tts", TTS).unwrap();
+    drop(first);
+    let (agent, _) = host.start(Worker::failing_in("warm"));
+    // Six writes land, up to `prepared`.
+    agent.store.kill_after_writes(6);
+    let ended = agent.coordinator.rollback(None);
+    assert!(matches!(ended, Err(AgentError::Io(_))), "{ended:?}");
+    agent.store.kill_after_writes(usize::MAX);
+    let later = agent.next_generation();
+    agent.restart_serving(&host, later).unwrap();
+    assert_eq!(host.view(), ["tts@4", "tts@1", "tts@3", "5"]);
+    drop(agent);
+
+    let (action, next) = host.one_start(Worker::default());
+
+    assert_eq!(action, RecoveryAction::RestoreActive);
+    assert_eq!(next.asked().reference.generation, Some(5));
+    assert_eq!(host.view(), ["tts@5", "tts@1", "-", "6"]);
+    assert!(host.quarantined().0.ends_with("@Prepared"));
+}
+
+#[test]
 fn a_failed_transaction_whose_one_ending_write_did_not_land_is_ended_by_the_next_start() {
     // A deploy refused when its descriptor is derived: six writes, then the
     // one that ends it. Killed before that one, the start ends it instead.

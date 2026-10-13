@@ -75,8 +75,10 @@ fn committed(state: &AgentState, tx: &TransactionRecord) -> bool {
             match tx.descriptor_identity() {
                 // The swap copies the generation a rollback named; a restart
                 // of the member then names a later one of that configuration.
-                // A record the rollback did not swap is re-stamped only with
-                // a generation taken before the rollback's hold: an earlier one.
+                // A rollback an earlier build left at `promoted` without its
+                // swap held the member until its promote, so the record it
+                // did not swap carries only a generation taken before that
+                // hold: an earlier one. Before `promoted` the phase decides.
                 Ok(Some(named)) => {
                     active.deployment_id == tx.deployment_id
                         && matches!(active.descriptor_identity(), Ok(Some(now))
@@ -841,6 +843,10 @@ mod tests {
         assert_eq!(
             found(DeployState::Promoted, TransactionKind::Deploy, false),
             format!("deploy transaction `tx` of `d` has committed: a start clears it; {restored}")
+        );
+        assert_eq!(
+            found(DeployState::Failed, TransactionKind::Deploy, true),
+            format!("deploy transaction `tx` of `d` is at `failed`, before its commit: a start ends it as failed; {restored}")
         );
         assert_eq!(
             found(DeployState::Failed, TransactionKind::Rollback, false),
