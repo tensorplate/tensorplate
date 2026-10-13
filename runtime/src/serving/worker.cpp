@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -35,6 +36,7 @@
 #include "serving/drain_window.hpp"
 #include "serving/mock_session.hpp"
 #if TP_ENABLE_STREAMING_GRPC
+#include "serving/session/speech_dispatch.hpp"
 #include "serving/stream/stream_listener.hpp"
 #endif
 
@@ -123,6 +125,17 @@ struct ServingWorker::Impl {
   std::mutex stop_mutex;
   ServingExitCode exit_code = ServingExitCode::Ok;
 #if TP_ENABLE_STREAMING_GRPC
+  /// The session's job bridge and the dispatch that runs stream sessions
+  /// through it; both null unless a speech deployment serves streams.
+  /// Destroying the bridge detaches the dispatch from the backend's events,
+  /// so stop() unloads the session before either goes, and the order here
+  /// destroys the listener, the dispatch, the bridge, then `session`.
+  std::shared_ptr<BoundedJobBridge> job_bridge;
+  std::unique_ptr<serving::SpeechJobDispatch> speech_dispatch;
+  /// Why a start of the listener with the dispatch failed. The listener
+  /// stops a dispatch it has attached and a dispatch is attached once, so
+  /// start() does not try again.
+  std::optional<Error> stream_start_failure;
   /// Guards `stream` against a shutdown() that runs while start() sets it.
   /// Once set it stays until the worker is destroyed.
   std::mutex stream_mutex;
@@ -136,6 +149,7 @@ struct ServingWorker::Impl {
   std::unique_ptr<serving::ControlChannel> control;
 
   Result<void> attach_control();
+  Result<void> create_session(const ModelSpec& model, const ExecutionSessionRuntimeHooks& hooks);
   Result<void> build();
   Result<void> start_listener();
   Result<void> start_stream_listener();
@@ -176,6 +190,34 @@ Result<void> ServingWorker::Impl::attach_control() {
     return unexpected(channel.error());
   }
   control = std::move(channel).value();
+  return Result<void>{};
+}
+
+/// Sets `session`, with its job bridge when stream sessions run as its jobs.
+Result<void> ServingWorker::Impl::create_session(const ModelSpec& model,
+                                                 const ExecutionSessionRuntimeHooks& hooks) {
+#if TP_ENABLE_STREAMING_GRPC
+  // A session built with its bridge loads with speech jobs, which a backend
+  // refuses for a model that runs none: only a speech deployment asks.
+  if (config.streaming.enabled && model.model_class() == ModelClass::Speech) {
+    auto pair = registry->create_session_with_bridge(model.backend_hint(), hooks);
+    if (pair) {
+      session = std::move(pair->session);
+      job_bridge = std::move(pair->bridge);
+      return Result<void>{};
+    }
+    if (pair.error().code != Error::Code::Unsupported ||
+        pair.error().context != "job_bridge_unsupported") {
+      return unexpected(pair.error());
+    }
+    // The backend runs no jobs: the listener refuses every Open.
+  }
+#endif
+  auto created = registry->create_session(model.backend_hint(), hooks);
+  if (!created) {
+    return unexpected(created.error());
+  }
+  session = std::move(created).value();
   return Result<void>{};
 }
 
@@ -251,14 +293,12 @@ Result<void> ServingWorker::Impl::build() {
     async_policy_supported = capability_r.value().supports_async();
     ExecutionSessionRuntimeHooks hooks;
     hooks.buffer_manager = buffer_manager.get();
-    auto s_r = registry->create_session(config.deployment.model->backend_hint(), hooks);
-    if (!s_r) {
+    if (auto s_r = create_session(*config.deployment.model, hooks); !s_r) {
       log_stderr(
           config, "error", "session construction failed",
           {{"code", std::string{to_string(s_r.error().code)}}, {"message", s_r.error().message}});
       return unexpected(s_r.error());
     }
-    session = std::move(s_r).value();
     if (auto lr = session->load(*config.deployment.model); !lr) {
       log_stderr(
           config, "error", "session load failed",
@@ -274,6 +314,18 @@ Result<void> ServingWorker::Impl::build() {
   }
   // Scheduler.
   clock = std::make_unique<SystemSchedulerClock>();
+#if TP_ENABLE_STREAMING_GRPC
+  if (job_bridge != nullptr) {
+    auto dispatch = serving::SpeechJobDispatch::create(job_bridge, *buffer_manager, *clock);
+    if (!dispatch) {
+      log_stderr(config, "error", "speech dispatch construction failed",
+                 {{"code", std::string{to_string(dispatch.error().code)}},
+                  {"message", dispatch.error().message}});
+      return unexpected(dispatch.error());
+    }
+    speech_dispatch = std::move(dispatch).value();
+  }
+#endif
   scheduler_sink = std::make_unique<SchedulerHealthSink>(health, metrics, scheduler_ptr);
   SchedulerRuntimeHooks sched_hooks;
   sched_hooks.event_sink = scheduler_sink.get();
@@ -436,12 +488,15 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
   options.allow_non_loopback = config.bind.allow_non_loopback;
   options.deployment_id = config.deployment.endpoint;
   options.limits = *limits;
-  // The worker constructs no speech dispatch yet, so the listener refuses every Open.
-  auto listener = serving::StreamListener::start(std::move(options), nullptr, *clock);
+  // Without a dispatch the listener refuses every Open.
+  auto listener = serving::StreamListener::start(std::move(options), speech_dispatch.get(), *clock);
   if (!listener) {
     log_stderr(config, "error", "stream listener start failed",
                {{"code", std::string{to_string(listener.error().code)}},
                 {"message", listener.error().message}});
+    if (speech_dispatch != nullptr) {
+      stream_start_failure = listener.error();
+    }
     return unexpected(listener.error());
   }
   const auto port = (*listener)->bound_port();
@@ -450,7 +505,9 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
     stream = std::move(listener).value();
   }
   log_stderr(config, "info", "stream listener bound",
-             {{"host", config.bind.host}, {"port", port}, {"serves_sessions", false}});
+             {{"host", config.bind.host},
+              {"port", port},
+              {"serves_sessions", speech_dispatch != nullptr}});
 #endif
   return Result<void>{};
 }
@@ -477,6 +534,22 @@ void ServingWorker::Impl::stop_stream_listener() noexcept {
     } catch (...) {  // NOLINT(bugprone-empty-catch): the stop continues without the line.
     }
     listener->stop(end);
+    if (speech_dispatch != nullptr) {
+      try {
+        const auto stats = speech_dispatch->stats();
+        log_stderr(
+            config, "info", "speech dispatch stopped",
+            {{"jobs_submitted", stats.jobs_submitted},
+             {"jobs_completed", stats.jobs_completed},
+             {"jobs_failed", stats.jobs_failed},
+             {"jobs_discarded", stats.jobs_discarded},
+             {"releases_refused", stats.releases_refused},
+             {"longest_release_wait_ms",
+              std::chrono::duration_cast<std::chrono::milliseconds>(stats.longest_release_wait)
+                  .count()}});
+      } catch (...) {  // NOLINT(bugprone-empty-catch): the stop continues without the line.
+      }
+    }
   }
 #endif
 }
@@ -597,6 +670,12 @@ Result<void> ServingWorker::start() {
                                   "the control channel ended before the worker could serve",
                                   "control_channel_closed"));
   }
+#if TP_ENABLE_STREAMING_GRPC
+  if (const auto failed = impl_->stream_start_failure; failed.has_value()) {
+    impl_->started.store(false);
+    return unexpected(*failed);
+  }
+#endif
   if (auto r = impl_->start_listener(); !r) {
     impl_->started.store(false);
     return r;
