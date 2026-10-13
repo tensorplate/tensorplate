@@ -62,6 +62,7 @@ add_executable(tp_test_unit
   session_finalize_test.cpp
   session_race_test.cpp
   session_dispatch_test.cpp
+  speech_dispatch_test.cpp
   control_channel_test.cpp
   drain_window_test.cpp
 )

@@ -436,7 +436,7 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
   options.allow_non_loopback = config.bind.allow_non_loopback;
   options.deployment_id = config.deployment.endpoint;
   options.limits = *limits;
-  // No speech dispatch is built yet, so the listener refuses every Open.
+  // The worker constructs no speech dispatch yet, so the listener refuses every Open.
   auto listener = serving::StreamListener::start(std::move(options), nullptr, *clock);
   if (!listener) {
     log_stderr(config, "error", "stream listener start failed",

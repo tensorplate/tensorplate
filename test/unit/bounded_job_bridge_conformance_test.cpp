@@ -346,6 +346,20 @@ TEST(FixtureJobBridge, AJobAllowedProgressDeliversNone) {
   EXPECT_EQ(bench.sink->kinds_for(2), (Kinds{Accepted, Completed, Released}));
 }
 
+// FixtureJobBridgeOptions::progress_when_allowed: one fragment, and only for
+// a job that allows it.
+TEST(FixtureJobBridge, AJobAllowedProgressDeliversOneFragmentWhenToldTo) {
+  Bench bench(make_buffers(), fixture_job_result, {.progress_when_allowed = true});
+  ASSERT_TRUE(bench.submit(decode(1, *bench.buffers, 4)).has_value());
+  ASSERT_TRUE(bench.submit(synthesis(2, "hello there.", 4)).has_value());
+  ASSERT_TRUE(bench.submit(synthesis(3, "hello there.")).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, Progress, Completed, Released}));
+  EXPECT_EQ(bench.sink->kinds_for(2), (Kinds{Accepted, Progress, Completed, Released}));
+  EXPECT_EQ(bench.sink->kinds_for(3), (Kinds{Accepted, Completed, Released}));
+  EXPECT_EQ(bench.event_of(2, Progress).progress_sequence(), 1U);
+}
+
 TEST(FixtureJobBridge, TheTenthJobIsFailedUnacceptedAndTheNineRunInSubmissionOrder) {
   // Declared before the bench: the result function writes it until the unload.
   std::vector<std::uint64_t> ran;
@@ -707,6 +721,7 @@ INSTANTIATE_TEST_SUITE_P(
                       fixture_case("fixture_refusing_at_capacity",
                                    {.submit_refuses_at_capacity = true}),
                       fixture_case("fixture_with_late_cancels", {.cancels_arrive_late = true}),
+                      fixture_case("fixture_with_progress", {.progress_when_allowed = true}),
                       fixture_case("fixture_without_a_hold", {}, /*holds=*/false)),
     [](const auto& bridge_case) { return bridge_case.param.name; });
 

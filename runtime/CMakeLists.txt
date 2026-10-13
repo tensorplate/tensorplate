@@ -73,6 +73,7 @@ set(_tp_runtime_sources
   src/serving/session/output_queue.cpp
   src/serving/session/session_manager.cpp
   src/serving/session/dispatch.cpp
+  src/serving/session/speech_dispatch.cpp
 )
 
 if(TP_ENABLE_TENSORRT)
