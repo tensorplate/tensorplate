@@ -618,6 +618,8 @@ mod tests {
             None,
             rollback(promoted)
         ));
+        // No identity on `active`: the swap would have given it the named one.
+        assert!(ends(record("d"), None, rollback(promoted)));
         assert!(ends(swapped, None, rollback(DeployState::Warmed)));
     }
 

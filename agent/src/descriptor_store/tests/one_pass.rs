@@ -17,6 +17,38 @@ use crate::recovery::apply_startup;
 use crate::registry::{durable_generations, Restamp};
 use crate::worker::ServingMember;
 
+impl Agent {
+    /// The registry's restart stamp for the member `active` names: it is
+    /// started again as `generation`.
+    fn restart_serving(&self, host: &Host, generation: u64) -> AgentResult<CandidateRef> {
+        let active = self.store.snapshot().unwrap().active.unwrap();
+        let recipe = CandidateRef {
+            deployment_id: active.deployment_id.clone(),
+            staged_path: active.staged_path.clone(),
+            bundle_digest: active.bundle_digest.clone(),
+            backend_hint: active.backend_hint.clone(),
+            model_class: active.model_class.clone(),
+            bundle_name: Some(active.bundle_name.clone()),
+            bundle_version: Some(active.bundle_version.clone()),
+            artifact_relative_path: Some("entry.json".into()),
+            generation: active.generation,
+            descriptor_digest: active.descriptor_digest.clone(),
+            configuration_digest: active.configuration_digest.clone(),
+        };
+        let descriptors = Arc::new(DescriptorStore::new(host.state_dir()));
+        let stamp = restart_stamp(self.store.clone(), descriptors);
+        stamp(&Restamp {
+            recipe: &recipe,
+            stopped_generation: active.generation.unwrap(),
+            generation,
+        })
+    }
+    /// The next generation, taken as the registry takes a restart's.
+    fn next_generation(&self) -> u64 {
+        durable_generations(self.store.clone())().unwrap()
+    }
+}
+
 impl Host {
     /// A started agent whose `active` is `tts` at generation 1, described,
     /// and whose deploy of `stt`, transaction `tx`, was killed after it
@@ -303,55 +335,136 @@ fn a_committed_transaction_whose_end_write_failed_is_busy_until_a_start_clears_i
 
 #[test]
 fn a_committed_rollback_whose_record_a_member_restart_named_again_is_cleared_by_the_next_start() {
-    let host = host();
-    let (agent, _) = host.start(Worker::default());
-    agent.deploy("tts", TTS).unwrap();
-    agent.deploy("stt", STT).unwrap();
-    // Nine writes; every one lands but the one that ends the transaction.
-    agent.store.kill_after_writes(8);
-    let ended = agent.coordinator.rollback(None);
-    assert!(matches!(ended, Err(AgentError::Io(_))), "{ended:?}");
-    agent.store.kill_after_writes(usize::MAX);
-    let state = agent.store.snapshot().unwrap();
-    let tx = state.in_flight_transaction.clone().unwrap();
-    assert_eq!(tx.phase, DeployState::Promoted);
-    let active = state.active.clone().unwrap();
-    assert_eq!(active.deployment_id, "tts");
-    assert_eq!(active.generation, tx.generation);
+    // The second case rolls back between two records of one id and one
+    // configuration.
+    for (second, bundle) in [("stt", STT), ("tts", TTS)] {
+        let host = host();
+        let (agent, _) = host.start(Worker::default());
+        agent.deploy("tts", TTS).unwrap();
+        agent.deploy(second, bundle).unwrap();
+        // Nine writes; every one lands but the one that ends the transaction.
+        agent.store.kill_after_writes(8);
+        let ended = agent.coordinator.rollback(None);
+        assert!(matches!(ended, Err(AgentError::Io(_))), "{ended:?}");
+        agent.store.kill_after_writes(usize::MAX);
+        let state = agent.store.snapshot().unwrap();
+        let tx = state.in_flight_transaction.unwrap();
+        assert_eq!(tx.phase, DeployState::Promoted);
+        let active = state.active.unwrap();
+        assert_eq!(active.deployment_id, "tts");
+        assert_eq!(active.generation, tx.generation);
+        let [_, retained, ..] = host.view();
 
-    // The serving member stops and is restarted: the registry's restart stamp.
-    let recipe = CandidateRef {
-        deployment_id: active.deployment_id.clone(),
-        staged_path: active.staged_path.clone(),
-        bundle_digest: active.bundle_digest.clone(),
-        backend_hint: active.backend_hint.clone(),
-        model_class: active.model_class.clone(),
-        bundle_name: Some(active.bundle_name.clone()),
-        bundle_version: Some(active.bundle_version.clone()),
-        artifact_relative_path: Some("entry.json".into()),
-        generation: active.generation,
-        descriptor_digest: active.descriptor_digest.clone(),
-        configuration_digest: active.configuration_digest.clone(),
-    };
-    let generation = durable_generations(agent.store.clone())().unwrap();
-    let descriptors = Arc::new(DescriptorStore::new(host.state_dir()));
-    let stamp = restart_stamp(agent.store.clone(), descriptors);
-    stamp(&Restamp {
-        recipe: &recipe,
-        stopped_generation: active.generation.unwrap(),
-        generation,
-    })
-    .unwrap();
-    drop(agent);
+        // The serving member stops and is restarted, twice; the stamp of a
+        // third restart does not land.
+        for _ in 0..2 {
+            let generation = agent.next_generation();
+            agent.restart_serving(&host, generation).unwrap();
+        }
+        let generation = agent.next_generation();
+        agent.store.kill_after_writes(0);
+        agent.restart_serving(&host, generation).unwrap_err();
+        drop(agent);
 
-    let (action, next) = host.one_start(Worker::default());
+        let (action, next) = host.one_start(Worker::default());
 
-    assert_eq!(action, RecoveryAction::RestoreActive);
-    assert_eq!(next.asked().reference.deployment_id, "tts");
-    assert_eq!(host.ids(), ["tts", "stt"]);
-    assert!(host.settled() && host.quarantined().0.is_empty());
-    assert_eq!(host.last_error(), None);
-    let _ = tx;
+        assert_eq!(action, RecoveryAction::RestoreActive, "{second}");
+        assert_eq!(next.asked().reference.deployment_id, "tts", "{second}");
+        let [_, previous, ..] = host.view();
+        assert_eq!(previous, retained, "{second}");
+        assert!(
+            host.settled() && host.quarantined().0.is_empty(),
+            "{second}"
+        );
+        assert_eq!(host.last_error(), None, "{second}");
+    }
+}
+
+#[test]
+fn a_committed_rollback_between_two_records_of_one_id_and_one_bundle_is_cleared_by_the_next_start()
+{
+    // Neither names a descriptor; then the record rolled back to names none,
+    // as an agent before descriptors left it, under a described record.
+    for (id, bundle, described) in [("smoke", FORMAT_0_1, false), ("tts", TTS, true)] {
+        let host = host();
+        let (agent, _) = host.start(Worker::default());
+        for revision in ["1", "2"] {
+            let labels = BTreeMap::from([("revision".to_owned(), revision.to_owned())]);
+            let deployed = agent
+                .coordinator
+                .deploy(id, &repo(bundle), labels, None, None);
+            deployed.unwrap();
+        }
+        if described {
+            let undescribe = |state: &mut AgentState| {
+                let record = state.previous_active.as_mut().unwrap();
+                record.generation = None;
+                record.descriptor_digest = None;
+                record.configuration_digest = None;
+                Ok(())
+            };
+            agent.store.update(undescribe).unwrap();
+        }
+        let revision = || {
+            let state = StateStore::open(host.state_dir()).unwrap();
+            let active = state.snapshot().unwrap().active.unwrap();
+            active.labels["revision"].clone()
+        };
+        // Every write lands but the one that ends the transaction.
+        let writes = phases_before_the_commit(false, false).len() + 2;
+        agent.store.kill_after_writes(writes - 1);
+        let ended = agent.coordinator.rollback(None);
+        assert!(matches!(ended, Err(AgentError::Io(_))), "{id}: {ended:?}");
+        assert_eq!(revision(), "1", "{id}");
+        drop(agent);
+
+        let (action, next) = host.one_start(Worker::default());
+
+        assert_eq!(action, RecoveryAction::RestoreActive, "{id}");
+        assert_eq!(next.asked().reference.deployment_id, id, "{id}");
+        assert_eq!(revision(), "1", "{id}");
+        assert!(host.settled() && host.quarantined().0.is_empty(), "{id}");
+        assert_eq!(host.last_error(), None, "{id}");
+    }
+}
+
+#[test]
+fn a_rollback_found_at_promoted_before_its_swap_is_ended_between_records_of_one_configuration() {
+    // Only an earlier build leaves this: it recorded `promoted` in a write
+    // of its own, before the swap. `restarted`: the serving member was
+    // restarted while the rollback ran, as a generation taken before the
+    // rollback named its own, the only order the registry's hold allows.
+    for restarted in [false, true] {
+        let host = host();
+        let (agent, _) = host.start(Worker::default());
+        agent.deploy("tts", TTS).unwrap();
+        agent.deploy("tts", TTS).unwrap();
+        let earlier = agent.next_generation();
+        // Every write lands up to `warmed`; the swap and the end do not.
+        let writes = phases_before_the_commit(false, true).len() + 2;
+        agent.store.kill_after_writes(writes - 2);
+        agent.coordinator.rollback(None).unwrap_err();
+        agent.store.kill_after_writes(usize::MAX);
+        if restarted {
+            agent.restart_serving(&host, earlier).unwrap();
+        }
+        let tx = agent.store.snapshot().unwrap().in_flight_transaction;
+        let tx = tx.unwrap().transaction_id;
+        agent
+            .store
+            .record_phase(&tx, DeployState::Promoted, 1)
+            .unwrap();
+        let serving = if restarted { "tts@3" } else { "tts@2" };
+        assert_eq!(host.view(), [serving, "tts@1", "tts@4", "5"], "{restarted}");
+        drop(agent);
+
+        let (action, next) = host.one_start(Worker::default());
+
+        assert_eq!(action, RecoveryAction::RestoreActive, "{restarted}");
+        assert_eq!(next.asked().reference.generation, Some(5), "{restarted}");
+        assert_eq!(host.view(), ["tts@5", "tts@1", "-", "6"], "{restarted}");
+        assert_eq!(host.quarantined().0, format!("{tx}@Promoted"));
+    }
 }
 
 #[test]
