@@ -1452,6 +1452,32 @@ carry, and one job is in flight. The dispatch's two bounds on a session
 reason of their own in the stream schema: the listener's mapping names such
 a failure `internal`, which no test drives through a worker.
 
+**What one client can hold.** With one session at a time, the client whose
+session is open holds the worker's only place, and every other `Open` is
+refused with `session_count_limit` until that place is free. What bounds
+it today, for three clients:
+
+- *One that opens and then only pings* holds the place until the maximum
+  session duration, 60 minutes by default: a ping restarts both the idle
+  limit and the liveness limit, and no other limit runs for a session that
+  owes nothing. Nothing keeps it from opening again when that session
+  ends.
+- *One that cancels, or goes away, while its job runs* holds the place
+  until the backend releases the job, and nothing bounds that. No deadline
+  covers the job in flight, and a session that was cancelled or has failed
+  has no timer left, the maximum duration included: it waits for the
+  release.
+- *One that reads a chunk every few seconds* never meets the 5-second
+  no-progress limit, whose clock restarts at every write that completes.
+  Once it has sent a Finalize or closed its sending half, the finalize
+  deadline ends its session (120 seconds for text input). Before that the
+  idle limit does, and for a reader that also pings only the maximum
+  duration. Until then it holds the place and the synthesis result of the
+  segment it is reading.
+
+A deadline for the job in flight and a bound on the wait for a release are
+changes of their own.
+
 **Order of construction and of destruction.** The bridge's destructor
 detaches its event sink: once it returns no callback runs or follows, and
 what the session's unload or destructor ends afterwards reaches nobody. The
