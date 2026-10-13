@@ -952,10 +952,11 @@ std::uint64_t longest_chunk_on_the_wire() {
   return event.ByteSizeLong() + 5;
 }
 
-/// A text session on a listener with an injected clock, whose client reads
-/// nothing after Ready.
+/// A text session on a listener with an injected clock, or the system
+/// clock, whose client reads nothing after Ready.
 struct UnreadSession {
-  explicit UnreadSession(const grpc::ChannelArguments& arguments) {
+  explicit UnreadSession(const grpc::ChannelArguments& arguments, bool on_the_system_clock = false)
+      : served(true, "127.0.0.1", on_the_system_clock ? nullptr : &clock) {
     served.use_channel(arguments);
     client = served.ready(wire::SESSION_MODE_TTS_STREAMING, nullptr, 300s);
   }
@@ -1026,7 +1027,7 @@ struct UnreadSession {
   }
 
   FakeSchedulerClock clock;
-  Served served{true, "127.0.0.1", &clock};
+  Served served;
   Client client;
 };
 
@@ -1154,6 +1155,37 @@ TEST(StreamEvents, ACallIsCancelledWhenItsSessionFailedBehindAWriteThatNeverComp
   // The slot was free all along, and is served.
   auto next = session.served.ready(wire::SESSION_MODE_TTS_STREAMING);
   EXPECT_FALSE(next.session_id.empty());
+}
+
+// On the system clock nothing tells the watch thread that time has passed:
+// the end of the session wakes it, and at the limit it wakes by itself. The
+// test waits out the limit; it checks that the call was cancelled, not when.
+TEST(StreamEvents, OnTheSystemClockTheWatchThreadCancelsACallWhoseReaderNeverResumes) {
+  UnreadSession session{with_no_room_for_a_chunk(), true};
+  auto& listener = session.served.listener();
+  session.block();
+  if (HasFatalFailure()) {
+    return;
+  }
+  // Out of sequence: the session fails at once, behind the write in flight.
+  wire::ClientEvent stray;
+  stray.set_sequence(99);
+  stray.set_session_id(session.client.session_id);
+  stray.mutable_ping();
+  ASSERT_TRUE(session.client.call->Write(stray));
+  ASSERT_TRUE(eventually([&] { return listener.live_sessions() == 0; }));
+  // A patience of its own: the wait is the limit itself, and the client must
+  // not read meanwhile, which would let the write complete.
+  const auto patience = std::chrono::steady_clock::now() + 60s;
+  while (listener.open_calls() != 0 && std::chrono::steady_clock::now() < patience) {
+    std::this_thread::sleep_for(20ms);
+  }
+  ASSERT_EQ(listener.open_calls(), 0U) << "nothing woke the watch thread at the limit";
+  auto& client = session.client;
+  while (const auto event = client.read()) {
+    EXPECT_FALSE(event->has_session_closed()) << "SessionClosed was never written";
+  }
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
 }
 
 // A session with work in progress cannot drain behind its finished call: the
