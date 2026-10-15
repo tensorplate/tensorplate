@@ -196,6 +196,12 @@ class SteeredDispatch final : public serving::SessionDispatch {
   }
   void audio(std::uint64_t key, std::span<const std::byte> frame) override {
     inner_.audio(key, frame);
+    std::unique_lock lock(mu_);
+    if (hold_audio_) {
+      handing_audio_ = true;
+      cv_.notify_all();
+      cv_.wait(lock, [&] { return !hold_audio_; });
+    }
   }
   void text_segment(std::uint64_t key, std::uint64_t id, std::string text) override {
     inner_.text_segment(key, id, std::move(text));
@@ -225,6 +231,25 @@ class SteeredDispatch final : public serving::SessionDispatch {
     cv_.notify_all();
   }
 
+  /// Holds the listener inside its next hand-over of an Audio, once the
+  /// frame is with the dispatch: nothing of its call is read meanwhile.
+  void hold_audio() {
+    const std::lock_guard guard(mu_);
+    hold_audio_ = true;
+  }
+  /// False if no hand-over is held within five seconds.
+  [[nodiscard]] bool wait_until_handing_audio() {
+    std::unique_lock lock(mu_);
+    return cv_.wait_for(lock, std::chrono::seconds{5}, [&] { return handing_audio_; });
+  }
+  void release_audio() {
+    {
+      const std::lock_guard guard(mu_);
+      hold_audio_ = false;
+    }
+    cv_.notify_all();
+  }
+
   /// The gates and the yield of the dispatch behind.
   [[nodiscard]] SyntheticSessionDispatch& synthetic() noexcept { return inner_; }
 
@@ -237,6 +262,8 @@ class SteeredDispatch final : public serving::SessionDispatch {
   mutable std::condition_variable cv_;
   mutable bool negotiating_ = false;
   bool hold_ = false;
+  bool hold_audio_ = false;
+  bool handing_audio_ = false;
 };
 
 /// One call, and the accounts a client keeps of its stream: its credit from
@@ -406,14 +433,25 @@ class Served {
     listener_ = serving::StreamListener::start(std::move(options), dispatch_.get(), clock_).value();
     use_channel({});
   }
-  ~Served() { listener_.reset(); }
+  // A test that failed while it held the listener lets it go: the stop
+  // waits for every reaction.
+  ~Served() {
+    if (dispatch_) {
+      dispatch_->release_audio();
+      dispatch_->release_negotiation();
+    }
+    listener_.reset();
+  }
   Served(const Served&) = delete;
   Served& operator=(const Served&) = delete;
 
-  /// Calls made from now on use a new channel with `arguments`.
-  void use_channel(const grpc::ChannelArguments& arguments) {
-    channel_ = grpc::CreateCustomChannel("127.0.0.1:" + std::to_string(listener_->bound_port()),
-                                         grpc::InsecureChannelCredentials(), arguments);
+  /// Calls made from now on use a new channel with `arguments`, to `port`
+  /// on loopback or else to the listener.
+  void use_channel(const grpc::ChannelArguments& arguments,
+                   std::optional<std::uint16_t> port = std::nullopt) {
+    channel_ = grpc::CreateCustomChannel(
+        "127.0.0.1:" + std::to_string(port.value_or(listener_->bound_port())),
+        grpc::InsecureChannelCredentials(), arguments);
     stub_ = wire::SessionService::NewStub(channel_);
   }
 

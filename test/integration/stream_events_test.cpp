@@ -5,18 +5,25 @@
 // the dispatch yields is a function of the bytes handed over, so each test
 // that reads output also checks that the right bytes were handed over.
 
+#include <arpa/inet.h>
 #include <grpcpp/generic/generic_stub.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/impl/proto_utils.h>
 #include <grpcpp/support/byte_buffer.h>
 #include <gtest/gtest.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -1228,32 +1235,203 @@ TEST(StreamEvents, OutputTheListenerCannotSendEndsTheCallAndFailsItsSession) {
   EXPECT_FALSE(next.session_id.empty());
 }
 
-// A cancelled call aborts its session, whether or not the half-close of its
-// failed read was applied first. The held job keeps the drain from completing.
-TEST(StreamEvents, ACancelledCallAbortsItsSessionAlsoBehindTheHalfCloseOfItsFailedRead) {
-  Served served;
-  auto& fake = served.dispatch().synthetic();
-  auto& seen = served.dispatch().seen;
-  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
-  fake.pause(Fake::Gate::InJob);
-  ASSERT_TRUE(client.send_audio(kFrame));
-  ASSERT_TRUE(eventually([&] { return seen.inputs() == 1; }));
-  client.context->TryCancel();
-  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
-  ASSERT_TRUE(eventually([&] { return seen.aborts() == 1; }));
-  fake.resume();
-  ASSERT_TRUE(eventually([&] { return served.listener().live_sessions() == 0; }));
-  EXPECT_EQ(seen.cause(), "client_cancelled");
-  std::vector<LogicalSessionEvent> ending;
-  for (const auto event : seen.events()) {
-    if (event == LogicalSessionEvent::HalfClose || event == LogicalSessionEvent::Abort) {
-      ending.push_back(event);
+/// A TCP relay on loopback between one client connection and the listener,
+/// which can drop both of its sockets at once: a client that is lost, as the
+/// listener sees it, under a real client.
+class Relay {
+ public:
+  explicit Relay(std::uint16_t target) : listening_(::socket(AF_INET, SOCK_STREAM, 0)) {
+    auto address = loopback(0);
+    socklen_t size = sizeof(address);
+    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast): POSIX socket addresses.
+    if (::bind(listening_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0 ||
+        ::listen(listening_, 1) != 0 ||
+        ::getsockname(listening_, reinterpret_cast<sockaddr*>(&address), &size) != 0) {
+      return;
+    }
+    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
+    port_ = ntohs(address.sin_port);
+    relaying_ = std::thread([this, target] { relay(target); });
+  }
+  ~Relay() {
+    drop();
+    if (relaying_.joinable()) {
+      relaying_.join();
+    }
+    for (const int fd : {listening_, client_, server_}) {
+      if (fd >= 0) {
+        ::close(fd);
+      }
     }
   }
-  const std::vector<LogicalSessionEvent> aborted{LogicalSessionEvent::Abort};
-  const std::vector<LogicalSessionEvent> drained_first{LogicalSessionEvent::HalfClose,
-                                                       LogicalSessionEvent::Abort};
-  EXPECT_TRUE(ending == aborted || ending == drained_first);
+  Relay(const Relay&) = delete;
+  Relay& operator=(const Relay&) = delete;
+
+  [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+
+  /// Ends both connections without a word to either peer's gRPC.
+  void drop() {
+    const std::lock_guard guard(mu_);
+    dropped_ = true;
+    for (const int fd : {listening_, client_, server_}) {
+      if (fd >= 0) {
+        ::shutdown(fd, SHUT_RDWR);
+      }
+    }
+  }
+
+ private:
+  static sockaddr_in loopback(std::uint16_t port) {
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(port);
+    return address;
+  }
+
+  void relay(std::uint16_t target) {
+    const int client = ::accept(listening_, nullptr, nullptr);
+    const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+    const auto address = loopback(target);
+    {
+      const std::lock_guard guard(mu_);
+      client_ = client;
+      server_ = server;
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): POSIX socket address.
+      if (dropped_ || client < 0 || server < 0 ||
+          ::connect(server, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+        return;
+      }
+    }
+    std::array<pollfd, 2> ends{{{client, POLLIN, 0}, {server, POLLIN, 0}}};
+    std::array<char, 16'384> bytes{};
+    while (::poll(ends.data(), ends.size(), -1) > 0) {
+      for (std::size_t from = 0; from < ends.size(); ++from) {
+        if (ends.at(from).revents == 0) {
+          continue;
+        }
+        const auto got = ::read(ends.at(from).fd, bytes.data(), bytes.size());
+        if (got <= 0 || !write_all(ends.at(1 - from).fd, bytes.data(), got)) {
+          return;
+        }
+      }
+    }
+  }
+
+  static bool write_all(int fd, const char* data, ssize_t size) {
+    while (size > 0) {
+      const auto put = ::write(fd, data, static_cast<std::size_t>(size));
+      if (put <= 0) {
+        return false;
+      }
+      data += put;
+      size -= put;
+    }
+    return true;
+  }
+
+  int listening_;
+  std::uint16_t port_ = 0;
+  std::mutex mu_;
+  bool dropped_ = false;
+  int client_ = -1;
+  int server_ = -1;
+  std::thread relaying_;
+};
+
+/// A call that is gone abandons its session: it is aborted for the client,
+/// and no half-close finalized the utterance its one frame opened.
+void expect_abandoned(Served& served) {
+  auto& seen = served.dispatch().seen;
+  ASSERT_TRUE(eventually([&] { return served.listener().live_sessions() == 0; }));
+  EXPECT_GE(seen.aborts(), 1);
+  EXPECT_EQ(seen.cause(), "client_cancelled");
+  EXPECT_FALSE(seen.saw(LogicalSessionEvent::HalfClose)) << "the open utterance was finalized";
+  EXPECT_TRUE(seen.finalizes().empty());
+  EXPECT_EQ(seen.inputs(), 1U);
+}
+
+/// A client whose one frame was accepted, its utterance open. On `relay`,
+/// when given.
+Client with_an_open_utterance(Served& served, const Relay* relay = nullptr) {
+  if (relay != nullptr) {
+    served.use_channel(grpc::ChannelArguments{}, relay->port());
+  }
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  EXPECT_TRUE(client.send_audio(kFrame));
+  return client;
+}
+
+// gRPC reports a cancel to the reactor twice, unordered: as a failed read and
+// as OnCancel. Here nothing holds the listener, which reads on once it has
+// answered the frame: whichever comes first, the session is abandoned.
+TEST(StreamEvents, ACallCancelledWhileItsReadWaitsAbandonsItsOpenUtterance) {
+  Served served;
+  auto client = with_an_open_utterance(served);
+  while (client.accepted.empty()) {
+    ASSERT_TRUE(client.read().has_value());
+  }
+  client.context->TryCancel();
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
+  expect_abandoned(served);
+}
+
+// The listener is held inside the frame's hand-over, with no read of the
+// call pending: OnCancel comes first, and the read that follows fails.
+TEST(StreamEvents, ACallCancelledWhileTheListenerHandsOverAFrameAbandonsItsOpenUtterance) {
+  Served served;
+  auto& dispatch = served.dispatch();
+  dispatch.hold_audio();
+  auto client = with_an_open_utterance(served);
+  ASSERT_TRUE(dispatch.wait_until_handing_audio());
+  client.context->TryCancel();
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
+  ASSERT_TRUE(eventually([&] { return dispatch.seen.aborts() == 1; }));
+  dispatch.release_audio();
+  expect_abandoned(served);
+}
+
+TEST(StreamEvents, ACallWhoseConnectionIsLostWhileItsReadWaitsAbandonsItsOpenUtterance) {
+  Served served;
+  Relay relay{served.listener().bound_port()};
+  auto client = with_an_open_utterance(served, &relay);
+  while (client.accepted.empty()) {
+    ASSERT_TRUE(client.read().has_value());
+  }
+  relay.drop();
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::UNAVAILABLE);
+  expect_abandoned(served);
+}
+
+TEST(StreamEvents, ACallWhoseConnectionIsLostWhileTheListenerHandsOverAFrameAbandonsIt) {
+  Served served;
+  auto& dispatch = served.dispatch();
+  Relay relay{served.listener().bound_port()};
+  dispatch.hold_audio();
+  auto client = with_an_open_utterance(served, &relay);
+  ASSERT_TRUE(dispatch.wait_until_handing_audio());
+  relay.drop();
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::UNAVAILABLE);
+  ASSERT_TRUE(eventually([&] { return dispatch.seen.aborts() == 1; }));
+  dispatch.release_audio();
+  expect_abandoned(served);
+}
+
+// Only the end of the client's stream ends the open utterance as a half-close.
+TEST(StreamEvents, AHalfCloseFinalizesTheOpenUtteranceAndClosesTheSession) {
+  Served served;
+  auto client = with_an_open_utterance(served);
+  ASSERT_TRUE(client.call->WritesDone());
+  ASSERT_NO_FATAL_FAILURE(
+      expect_utterance(client, wire::ENDPOINT_REASON_HALF_CLOSE, 1, kFrame, client.audio_sent, 0));
+  const auto closed = closed_of(client);
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_FALSE(closed.has_cause());
+  EXPECT_EQ(closed.totals().utterances_completed(), 1U);
+  EXPECT_TRUE(end_of(client).ok());
+  auto& seen = served.dispatch().seen;
+  EXPECT_TRUE(seen.saw(LogicalSessionEvent::HalfClose));
+  EXPECT_EQ(seen.aborts(), 0);
 }
 
 }  // namespace

@@ -744,10 +744,9 @@ TEST_F(SpeechWorkerScripted, ACancelMidSynthesisEndsTheSessionAndReleasesItsJobO
   EXPECT_EQ(served.buffers(), 0U);
 }
 
-// gRPC may report a call that was cancelled as the end of the client's stream
-// before it reports the cancellation. The open utterance is then ended as a
-// half-close ends it, and its decode is submitted ahead of the release that
-// cancels it: both orders are held here.
+// gRPC reports a cancelled call to the listener both as a failed read and as
+// a cancellation, in either order; neither ends the open utterance as a
+// half-close would, so none of its audio is decoded.
 TEST_F(SpeechWorkerScripted, AClientThatGoesAwayMidUtteranceEndsItsSession) {
   register_backend();
   auto built = worker(streaming_config(speech_model()));
@@ -766,13 +765,11 @@ TEST_F(SpeechWorkerScripted, AClientThatGoesAwayMidUtteranceEndsItsSession) {
   const auto first_release = sidecar.sent("session_release", 1);
   ASSERT_EQ(first_release.size(), 1U);
   const auto lost = first_release.front().value("session_key", std::uint64_t{0});
-  // Read while the worker is up and before the next session: a decode the
-  // lost session submitted has given its audio back.
+  // Read while the worker is up and before the next session: the release
+  // gave the audio back.
   EXPECT_TRUE(eventually([&] { return served.buffers() == 0; }));
-  // A submit of the lost session precedes its release, so none follows.
-  const auto submitted_by_the_lost_session =
-      count_of(sidecar.sent("job_submit", 0), "job_submit", lost);
-  EXPECT_LE(submitted_by_the_lost_session, 1U) << "the open utterance, in the order that ends it";
+  EXPECT_EQ(count_of(sidecar.sent("job_submit", 0), "job_submit", lost), 0U)
+      << "the open utterance of a cancelled call was decoded";
 
   // Its place is free: the next session is served.
   ASSERT_NO_FATAL_FAILURE(transcribes_one_utterance(served));
@@ -787,17 +784,12 @@ TEST_F(SpeechWorkerScripted, AClientThatGoesAwayMidUtteranceEndsItsSession) {
   EXPECT_EQ(count_of(releases, "session_release", next), 1U);
   const auto written = sidecar.written();
   const auto submits = sidecar.sent("job_submit", 0);
-  EXPECT_EQ(count_of(submits, "job_submit", lost), submitted_by_the_lost_session);
+  ASSERT_EQ(submits.size(), 1U) << "a job of neither session";
   EXPECT_EQ(count_of(submits, "job_submit", next), 1U);
-  EXPECT_EQ(submits.size(), submitted_by_the_lost_session + 1) << "a job of neither session";
-  for (const Json& submit : submits) {
-    const auto job_id = submit.at("job_id").get<std::uint64_t>();
-    const auto kinds = kinds_of(written, job_id);
-    EXPECT_EQ(std::count(kinds.begin(), kinds.end(), "job_released"), 1) << submit.dump();
-    // The lost session's decode may have ended before the release found it.
-    const bool of_the_lost_session = submit.value("session_key", std::uint64_t{0}) == lost;
-    EXPECT_LE(sidecar.cancel_requests(job_id), of_the_lost_session ? 1U : 0U) << submit.dump();
-  }
+  const auto job_id = submits.front().at("job_id").get<std::uint64_t>();
+  const auto kinds = kinds_of(written, job_id);
+  EXPECT_EQ(std::count(kinds.begin(), kinds.end(), "job_released"), 1);
+  EXPECT_EQ(sidecar.cancel_requests(job_id), 0U);
   EXPECT_EQ(count_of(written, "session_released", lost), 1U);
   EXPECT_EQ(count_of(written, "session_released", next), 1U);
   EXPECT_EQ(job_cancels(), 0U);

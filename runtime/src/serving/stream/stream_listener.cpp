@@ -219,7 +219,13 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
       return;
     }
     if (!ok) {
-      half_closed();
+      // gRPC 1.81.1 marks the context cancelled before it reports a read that
+      // failed for a cancel or a lost connection, but not for the stream's end.
+      if (context_.IsCancelled()) {
+        cancelled();
+      } else {
+        half_closed();
+      }
       return;
     }
     // The parse gRPC runs for a typed method, which reports its failure as a
@@ -235,18 +241,7 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
 
   void OnWriteDone(bool ok) override { state_->out->write_done(ok); }
 
-  void OnCancel() override {
-    std::optional<std::uint64_t> key;
-    {
-      const std::lock_guard guard(state_->mu);
-      state_->cancelled = true;
-      key = state_->key;
-    }
-    if (key) {
-      abort(*key);
-    }
-    state_->out->finish(grpc::Status::CANCELLED);
-  }
+  void OnCancel() override { cancelled(); }
 
   void OnDone() override {
     state_->out->detach();
@@ -509,6 +504,21 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
     (void)listener_.manager->apply(
         key, LogicalSessionEvent::Abort,
         Error::make(Error::Code::Cancelled, "the call was cancelled", "client_cancelled"));
+  }
+
+  /// The call was cancelled or its connection lost: its session is abandoned,
+  /// whichever of its failed read and OnCancel tells first.
+  void cancelled() {
+    std::optional<std::uint64_t> key;
+    {
+      const std::lock_guard guard(state_->mu);
+      state_->cancelled = true;
+      key = state_->key;
+    }
+    if (key) {
+      abort(*key);
+    }
+    state_->out->finish(grpc::Status::CANCELLED);
   }
 
   void half_closed() {

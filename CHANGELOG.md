@@ -22,6 +22,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   refused. `validation-pass.py index` now requires `--kind`, which defaulted
   to `validation`. (V030-E06-F02-T01)
 
+- A stream call that the client cancels, or whose connection is lost, no
+  longer finalizes the session's open utterance. gRPC reports such a call to
+  the listener both as a failed read and as a cancellation, in either order,
+  and the failed read was taken for the end of the client's stream: the
+  open utterance was then finalized and, in a speech worker, its decode
+  submitted for a client that was gone, holding the one job lane until it
+  ended. The listener now asks the call's server context at the failed read
+  and aborts the session (`client_cancelled`) when the call is cancelled;
+  only a failed read on a call that is not cancelled is a half-close.
+  (V030-E04-F02-T02)
 - The hosted jobs that install the pinned Rust toolchain now remove a
   half-installed copy and retry, up to three attempts, instead of failing on
   a file conflict that every repeat of the same command met again; the

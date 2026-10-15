@@ -268,18 +268,40 @@ line says `serves_sessions: false`.
   Output stops at once, and `SessionClosed` follows with
   `client_cancelled` and status `CANCELLED` when the dispatch has released
   the session.
-- **Calls that end.** A read that fails is applied as a half-close, except
-  the first read of a call that a bound has refused meanwhile, which is
-  dropped (see "Calls waiting to open"). A read
-  also fails when the call was cancelled or its transport lost, and gRPC
-  reports that cancellation in a reaction of its own, before or after the
-  failed read: a vanished client's session may have begun to drain when
-  the cancellation aborts it (`client_cancelled`). A read fails, too, once
-  the listener has ended a call itself for output it cannot send. A
-  session still live when its call is done is failed (`internal`), so that
-  it does not stay draining with no stream to deliver to. A message that
-  does not parse is not a failed read: the listener parses each message
-  itself and fails the session (see "What it serves").
+- **Calls that end.** A read fails at the end of the client's stream, and
+  also when the call was cancelled (by the client, by its deadline, or by
+  the server), or its connection lost; gRPC reports such a cancellation a
+  second time, in a reaction of its own, before or after the failed read.
+  The listener tells the two apart at the failed read: gRPC 1.81.1 marks
+  the call's server context cancelled before it reports a read that failed
+  because the call was cancelled or its connection lost, and does not for
+  the end of the client's stream (`include/grpcpp/impl/server_callback_handlers.h`
+  and `src/core/ext/transport/chttp2/transport/chttp2_transport.cc` in its
+  source); a message above the receive limit is the exception (see "Not
+  enforced yet"). A failed read on a call that is cancelled aborts the session
+  (`client_cancelled`), as the cancellation's own reaction does, whichever
+  of the two comes first: the open utterance of a client that is gone is
+  not finalized and no decode is started for it. Only a failed read on a
+  call that is not cancelled is a half-close, which finalizes the open
+  utterance, completes every accepted segment and closes the session. A
+  peer that ends its stream with a trailing HEADERS frame, which no gRPC
+  client sends, is read as cancelled too. The first read of a call that a
+  bound has refused meanwhile is dropped (see "Calls waiting to open"). A
+  read fails, too, once the listener has ended a call itself for output it
+  cannot send. A session still live when its call is done is failed
+  (`internal`), so that it does not stay draining with no stream to
+  deliver to. A message that does not parse is not a failed read: the
+  listener parses each message itself and fails the session (see "What it
+  serves"). Tests with a real client: a client that cancels, and a
+  connection dropped under a client by a relay on loopback, each with an
+  utterance open, once with nothing holding the listener (its next read
+  pending) and once with the listener held inside its hand-over of the
+  frame, so that the cancellation comes first; the session is aborted and
+  no half-close is applied in all four. Which of gRPC's two reports comes
+  first when the read is pending is gRPC's to decide, and no test forces
+  it. A half-close after the frame finalizes the utterance (endpoint reason
+  `HALF_CLOSE`) and closes the session with status OK. In the worker, a
+  client that cancels with an utterance open has no job submitted for it.
 - **Transport window.** A delivery is a completed write, and gRPC completes
   a write when HTTP/2 flow control lets the bytes pass, not when the
   client's application reads them. The no-progress limit and the output
@@ -386,9 +408,14 @@ line says `serves_sessions: false`.
   parse: the call ends with a transport status and no `SessionClosed`, and
   its session ends as a cancelled call's does, not failed with a typed
   reason: aborted `client_cancelled`, unless it had nothing in progress
-  and the half-close of the failed read closed it first. Failing it with a
-  typed reason would mean receiving it first, and gRPC buffers a whole
-  message before it hands it over. A text
+  and the half-close of the failed read closed it first. gRPC's message
+  size filter, not the transport, ends that read, so the call's context is
+  not cancelled yet when the read fails unless gRPC's cancel of the call
+  has already been reported: the listener can take it for a half-close,
+  which can finalize an open utterance before that cancel aborts the
+  session. Failing it with a typed reason would mean
+  receiving it first, and gRPC buffers a whole message before it hands it
+  over. A text
   segment is refused as empty when it holds nothing but ASCII whitespace;
   other Unicode whitespace is not recognized, so such a segment is accepted
   and synthesized. The listener's sources build only with the
@@ -1658,8 +1685,8 @@ the runner cases hold that one runner process lives from the load to the
 stop and not past it; a client cancel while the backend holds the segment's job (the
 session is released once, the next session is served); a lost client while
 its utterance is decoded behind a held backend (released once, the job's
-audio given back only when the backend lets go of the job), and a lost
-client with an utterance open, in both orders described below; a job the
+audio given back only when the backend lets go of the job), and a client
+that cancels with an utterance open, for which no job is submitted; a job the
 backend takes and refuses, and a session of a mode the backend does not
 run; a drain that delivers the segment in flight, and a stop at the end of
 the drain window whose unload ends the job, with the job's audio still out
@@ -1691,12 +1718,6 @@ outside. Step 3 is declared as the registry's header describes a pair
 destroyed in order. That the `speech dispatch stopped` line is written
 after the listener's stop, not before it, has no case either: no case moves
 a counter during that stop.
-
-A call the client cancels or loses with an utterance open can reach the
-listener as the end of the client's stream before the cancellation: the
-utterance is then ended as a half-close ends it and its decode is submitted
-ahead of the release that cancels it. The lost-client case holds both
-orders.
 
 ## Test surface
 
