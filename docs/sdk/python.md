@@ -439,8 +439,23 @@ async def show_partials(session: SpeechToTextSession) -> None:
   is refused at open with `StreamProtocolError`, as one that gives no stall
   time is: the schema allows no limit of zero, and a session that sent no
   `Ping` would be ended by the server for it.
-- **No retry.** The client never reopens, resends or replays. A session that
-  was refused, failed or lost is reported once, and opening another is the
+- **One more Open, and no other retry.** An `open()` whose call ends before
+  any server event, with `UNAVAILABLE` or with `INTERNAL` after the client's
+  write of the Open failed (gRPC's status for a write to a call that has
+  ended), makes one more call within the same `open_timeout`. A connection
+  lost as the Open is sent ends a call that way, and the call carried nothing
+  but the Open: the client sends no input before `Ready`. A refusal with
+  status `UNAVAILABLE` (admission closed) is therefore sent twice, and the
+  worker's logs show both. So can be a refusal the worker sends before it
+  reads the Open (when 32 calls are already waiting to open, for example),
+  when the refusal races the Open's write and gRPC reports that write's
+  `INTERNAL`. An
+  endpoint that cannot be reached is tried twice. The session is not ended
+  between the two calls: a `cancel()`, the client's `aclose()` or the
+  `open_timeout` in between ends it, with no second call, and a task
+  already iterating the session takes the second call's events.
+  Otherwise the client never reopens, resends or replays. A session that was
+  refused, failed or lost is reported once, and opening another is the
   caller's decision.
 
 Every error is a `SpeechError` (a `TensorPlateError`), never a gRPC
@@ -489,30 +504,31 @@ server's timers. There is no `retryable` flag either. The schema states one
 thing about sending a call again, that an Open the server did not admit
 (`admitted is False`) may be sent to another server, and gives no rule for
 which reasons pass; a call that was admitted, or whose admission is unknown,
-must not be sent again as if it had not run.
+must not be sent again as if it had not run. The client's one more Open is
+not such a resend: the call it replaces carried only an Open, and had ended.
 
 The client's own channel is opened with gRPC's bandwidth probe off
 (`grpc.http2.bdp_probe` 0), which keeps HTTP/2's receive window at its
-default of about 64 KiB, and with sent and received messages capped at
-64 KiB. With the probe on, gRPC widens the window to megabytes, and a
-session that stopped reading would not hold the server back until that much
-had been sent. A channel passed in with `channel=` has whatever options its
-owner gave it. The worker accepts at most 256 connections at one time; a
-session opened on a connection past them ends with
-`ServiceUnavailableError`. The worker closes a connection with no call open
-60 to 147 minutes after its last call, after the client's own channel has
-closed it (30 to 60 minutes). A channel passed in that turns gRPC's client
-idle limit off, or that was connected without a call, can meet the
-worker's close, and a session opened at that instant may end with
-`ServiceUnavailableError` too; the client does not send it again.
+default of about 64 KiB, and with sent and received messages capped at 64
+KiB. With the probe on, gRPC widens the window to megabytes, and a session
+that stopped reading would not hold the server back until that much had been
+sent. A channel passed in with `channel=` has whatever options its owner
+gave it. The worker accepts at most 256 connections at one time; a session
+opened on a connection past them ends with `ServiceUnavailableError` once
+its second call is refused too. The worker closes a connection with no call
+open 60 to 147 minutes after its last call, after the client's own channel
+has closed it (30 to 60 minutes). A channel passed in that turns gRPC's
+client idle limit off, or that was connected without a call, can meet the
+worker's close. A session opened at that instant sends its Open once more,
+on a new connection.
 
 ### Text-to-speech sessions
 
 `client.synthesize(target, *, language, voice, ...)` returns a
 `TextToSpeechSession`: text segments go in, and each segment's audio comes
 back in chunks of 20 ms. What the section above says of a session holds here
-too: the one rule, the bounds, cancellation, liveness, no retry, and the
-errors. What differs is below.
+too: the one rule, the bounds, cancellation, liveness, the one more Open,
+and the errors. What differs is below.
 
 ```python
 import asyncio

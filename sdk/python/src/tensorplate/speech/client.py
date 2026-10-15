@@ -39,9 +39,10 @@ class SpeechClient:
     does not hold the server back.
 
     Create the client inside a running event loop and close it with
-    ``aclose()`` or ``async with``. The client is asyncio only. It never
-    retries: a session that was refused, failed or lost is reported once,
-    and opening another is the caller's decision.
+    ``aclose()`` or ``async with``. The client is asyncio only. It retries
+    nothing but an Open whose call ended before any server event, once (see
+    ``open()``): a session that was refused, failed or lost is reported
+    once, and opening another is the caller's decision.
     """
 
     def __init__(self, endpoint: str | None = None, *, channel: object | None = None) -> None:
