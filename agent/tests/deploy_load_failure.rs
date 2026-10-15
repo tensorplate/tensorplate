@@ -292,10 +292,11 @@ fn a_port_offered_again_is_not_given_twice() {
     let mut given = BTreeSet::new();
     let first = fresh_from(&mut given, || bind_port(0));
     let port = first.local_addr().expect("addr").port();
-    drop(first);
 
-    let mut offers = [port, 0].into_iter();
-    let next = fresh_from(&mut given, || bind_port(offers.next().expect("an offer")));
+    // Its listener stands for the port offered again: binding the port anew
+    // could find it taken by another process.
+    let mut offers = [first, bind_port(0)].into_iter();
+    let next = fresh_from(&mut given, || offers.next().expect("an offer"));
 
     assert_ne!(next.local_addr().expect("addr").port(), port);
 }
