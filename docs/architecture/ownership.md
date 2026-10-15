@@ -98,7 +98,12 @@ must be designed; STL types, vendor SDK types, Rust-owned memory, and
   `observability/`.
 - `agent/` must not link against `runtime/` or any C++ component.
 - `cli/` must not talk to `serving_worker/` directly. All state-changing
-  calls route through `agent/`.
+  calls route through `agent/`. One exception: `tensorplate doctor` may run
+  the installed worker binary with `--version` and no other argument,
+  read-only, from `/` and bounded in time, to read what the build reports.
+  The CLI never passes the worker a config, never starts it to serve, never
+  uses its control channel or its listeners, and makes no state-changing
+  call except through `agent/`.
 - `observability/` must not depend on `agent/` to detect a wedged
   serving worker.
 - No vendor SDK type (TensorRT, PyTorch/LibTorch, CUDA) appears in

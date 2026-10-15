@@ -72,6 +72,9 @@ pub enum FindingId {
     ObservabilityServiceState,
     ServingSystemdAbsent,
     ServingBinaryInstalled,
+    /// packaging: whether the installed serving worker was built with
+    /// streaming support, as its `--version` reports it.
+    ServingStreamingSupport,
     BackendDescriptor,
     /// packaging: the installed platform support registry loads and every
     /// row in it is valid. Reported separately from the path layout
@@ -152,6 +155,7 @@ impl FindingId {
             Self::ObservabilityServiceState => "observability_service_state",
             Self::ServingSystemdAbsent => "serving_systemd_absent",
             Self::ServingBinaryInstalled => "serving_binary_installed",
+            Self::ServingStreamingSupport => "serving_streaming_support",
             Self::BackendDescriptor => "backend_descriptor",
             Self::PlatformRegistry => "platform_registry",
             Self::AgentConfigValid => "agent_config_valid",
@@ -331,6 +335,10 @@ mod tests {
             (
                 FindingId::RunnerLaunchEnvironment,
                 "runner_launch_environment",
+            ),
+            (
+                FindingId::ServingStreamingSupport,
+                "serving_streaming_support",
             ),
         ];
         for (id, expected) in cases {

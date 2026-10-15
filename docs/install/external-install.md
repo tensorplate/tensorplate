@@ -203,6 +203,7 @@ is already installed, ask it:
 
 Its fourth line is `streaming-grpc on` or `streaming-grpc off`; a worker
 built from a branch that predates this line prints the first three only.
+`tensorplate doctor` reports the same line as `serving_streaming_support`.
 
 To build with it, give the wrapper a vcpkg checkout at the
 `builtin-baseline` of `vcpkg.json`. vcpkg needs `git`, `curl`, `zip`,
