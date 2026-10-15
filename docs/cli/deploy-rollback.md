@@ -97,7 +97,13 @@ Calls `ControlOp::Rollback` and reports:
 - `transaction_id` of the rollback transaction.
 - `restored_deployment_id`, `restored_bundle_digest`, `restored_backend`.
 - Typed `unavailable` (exit code `6`) when there is no previous active
-  deployment.
+  deployment, or its staged copy or that copy's manifest is gone.
+- Typed `load_failed` (exit code `3`) when an artifact of the previous
+  deployment's staged copy is missing, truncated or replaced, and
+  `config_invalid` (exit code `3`) when the copy's manifest no longer
+  validates, as the restore at the agent's start answers them; `internal`
+  (exit code `3`), naming the copy, when a file of it cannot be read. No
+  transaction begins and the active deployment keeps serving.
 
 ## `tensorplate undeploy` and `tensorplate recover`
 

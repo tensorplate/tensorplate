@@ -592,12 +592,16 @@ impl Coordinator {
                 manifest_path.display()
             )));
         }
-        let artifact_relative_path = model_artifact_relative_path(&staged).map_err(|err| {
-            AgentError::Unavailable(format!(
-                "previous active manifest invalid at `{}`: {err}",
-                manifest_path.display()
-            ))
-        })?;
+        // Refused by the check's own kind, as the restore at a start is; an
+        // I/O error is given the copy's path, which its message lacks.
+        let artifact_relative_path =
+            model_artifact_relative_path(&staged).map_err(|err| match err {
+                AgentError::Io(e) => AgentError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!("previous active copy `{}`: {e}", staged.display()),
+                )),
+                other => other,
+            })?;
 
         let transaction_id = new_transaction_id();
         let tx_record = TransactionRecord {

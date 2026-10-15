@@ -248,6 +248,7 @@ mod tests {
         ControlRequest, DeployRequest, ResponseStatus, RollbackRequest,
     };
     use tensorplate_protocol::bundle_manifest::DeviceFamily;
+    use tensorplate_protocol::ErrorCode;
     use tensorplate_protocol::SCHEMA_VERSION;
 
     fn config(state_dir: PathBuf, staging_dir: PathBuf) -> AgentConfig {
@@ -402,6 +403,39 @@ mod tests {
         .expect("ok");
         assert_eq!(r.status, ResponseStatus::Error);
         assert!(r.error.is_some());
+    }
+
+    #[test]
+    fn rollback_to_a_copy_whose_artifact_is_gone_answers_a_typed_load_failed_error() {
+        let td = TempDir::new().expect("td");
+        let state = td.path().join("state");
+        let staging = td.path().join("staging");
+        let cfg = config(state.clone(), staging);
+        let store = Arc::new(StateStore::open(&state).expect("open"));
+        let worker = Arc::new(MockWorkerControl::new());
+        let coord = Arc::new(Coordinator::new(cfg, store, worker));
+        for deployment in ["d1", "d2"] {
+            let bundle = write_bundle(td.path(), deployment);
+            let request = DeployRequest {
+                bundle_path: bundle.display().to_string(),
+                deployment_id: deployment.into(),
+                ..DeployRequest::default()
+            };
+            let deployed = dispatch(&coord, ControlRequest::deploy(None, request)).expect("ok");
+            assert_eq!(deployed.status, ResponseStatus::Ok);
+        }
+        let previous = coord.state().snapshot().expect("state").previous_active;
+        let retained = PathBuf::from(previous.expect("previous").staged_path);
+        fs::remove_file(retained.join("model.engine")).expect("remove");
+
+        let r = dispatch(
+            &coord,
+            ControlRequest::rollback(None, RollbackRequest::default()),
+        )
+        .expect("ok");
+
+        assert_eq!(r.status, ResponseStatus::Error);
+        assert_eq!(r.error.expect("typed").code, ErrorCode::LoadFailed);
     }
 
     #[test]

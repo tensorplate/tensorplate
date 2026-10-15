@@ -478,7 +478,7 @@ fn a_restore_of_a_record_that_names_no_descriptor_is_refused_when_another_bundle
 }
 
 /// Cut the file at `path` to its first half.
-fn halve(path: &Path) {
+pub(super) fn halve(path: &Path) {
     let whole = fs::read(path).unwrap();
     fs::write(path, &whole[..whole.len() / 2]).unwrap();
 }

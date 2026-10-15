@@ -1019,6 +1019,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- A rollback whose previous deployment's staged copy fails its artifact
+  check now answers as the restore at the agent's start does: `load_failed`
+  when an artifact is missing, truncated or replaced, `config_invalid` when
+  the copy's manifest no longer validates, and `internal`, naming the copy,
+  when a file of it cannot be read, each with the CLI's exit code `3`.
+  Before, it answered `unsupported` ("previous active manifest invalid")
+  with exit code `6`. The rollback still begins no transaction and the
+  active deployment keeps serving. (V030-E03-F01-T05)
 - The Python SDK's streaming speech sessions now send their `Open` once more,
   on a new call within the same `open_timeout`, when the call ends before any
   server event with `UNAVAILABLE`, or with `INTERNAL` after the write of the
