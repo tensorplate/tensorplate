@@ -163,12 +163,12 @@ artifact against the staged manifest and refuse a copy whose artifact is
 missing, truncated or replaced. A deploy hashes its bundle before staging
 it; a format 0.2 deploy hashes the staged copy again and compares its
 digest with the record's when it derives the descriptor, and the
-registry's `prepare` of the candidate compares nothing again. A restart of
-a member compares the staged manifest's digest with the record's and
-hashes no artifact: that digest covers each artifact's digest, the bundle
-was hashed before it was copied (a format 0.2 copy again after), the copy
-was synced to disk before a record named it, and the restore hashes it
-again at every start of the agent.
+registry's `prepare` of the candidate compares nothing of the staged copy
+again. A restart of a member compares the staged manifest's digest with
+the record's and hashes no artifact: that digest covers each artifact's
+digest, the bundle was hashed before it was copied (a format 0.2 copy
+again after), the copy was synced to disk before a record named it, and
+the restore hashes it again at every start of the agent.
 
 ---
 
