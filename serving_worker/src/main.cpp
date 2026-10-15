@@ -138,35 +138,6 @@ class SignalWakeup {
   std::array<int, 2> pipe_{-1, -1};
 };
 
-/// How often the wait for a signal also looks whether the worker failed.
-constexpr int kFailureCheckMs = 1000;
-
-tensorplate::ServingExitCode run_until_signal(tensorplate::ServingWorker& worker,
-                                              const SignalWakeup& signals) {
-  // A signal received during load must not be lost or publish a new listener.
-  auto signal = signals.wait(0);
-  if (signal && *signal == 0) {
-    if (auto started = worker.start(); !started) {
-      return started.error().code == tensorplate::Error::Code::ConfigInvalid
-                 ? tensorplate::ServingExitCode::ConfigError
-                 : tensorplate::ServingExitCode::ServeError;
-    }
-    // A worker that failed while serving (a stalled backend) stops as on a
-    // signal; its stop() gives the exit code.
-    do {
-      signal = signals.wait(kFailureCheckMs);
-    } while (signal && *signal == 0 &&
-             worker.health().state() != tensorplate::ServingState::Failed);
-  }
-  const char* reason = "signal wait failed";
-  if (signal) {
-    reason = *signal == SIGINT ? "SIGINT" : (*signal == SIGTERM ? "SIGTERM" : "worker failed");
-  }
-  worker.shutdown(reason);
-  const auto code = worker.stop();
-  return signal ? code : tensorplate::ServingExitCode::Internal;
-}
-
 // The last stderr line of a worker that could not start. The agent reads the
 // code from it to answer the deploy that spawned this worker, so the line is
 // written whether or not the config enables stderr logs.
@@ -186,6 +157,38 @@ void report_startup_failure(const tensorplate::Error& error) noexcept {
     // The exit status still tells the agent the worker failed to start.
     std::fputs("worker startup failed\n", stderr);
   }
+}
+
+/// How often the wait for a signal also looks whether the worker failed.
+constexpr int kFailureCheckMs = 1000;
+
+tensorplate::ServingExitCode run_until_signal(tensorplate::ServingWorker& worker,
+                                              const SignalWakeup& signals) {
+  // A signal received during load must not be lost or publish a new listener.
+  auto signal = signals.wait(0);
+  if (signal && *signal == 0) {
+    if (auto started = worker.start(); !started) {
+      // Stopped first: the stop logs, and the record must be the last line.
+      (void)worker.stop();
+      report_startup_failure(started.error());
+      return started.error().code == tensorplate::Error::Code::ConfigInvalid
+                 ? tensorplate::ServingExitCode::ConfigError
+                 : tensorplate::ServingExitCode::ServeError;
+    }
+    // A worker that failed while serving (a stalled backend) stops as on a
+    // signal; its stop() gives the exit code.
+    do {
+      signal = signals.wait(kFailureCheckMs);
+    } while (signal && *signal == 0 &&
+             worker.health().state() != tensorplate::ServingState::Failed);
+  }
+  const char* reason = "signal wait failed";
+  if (signal) {
+    reason = *signal == SIGINT ? "SIGINT" : (*signal == SIGTERM ? "SIGTERM" : "worker failed");
+  }
+  worker.shutdown(reason);
+  const auto code = worker.stop();
+  return signal ? code : tensorplate::ServingExitCode::Internal;
 }
 
 void print_version() {

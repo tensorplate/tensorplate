@@ -1,0 +1,4 @@
+{"component":"serving","fields":{"code":"unavailable","message":"http server: could not bind 127.0.0.1:45615: Address already in use"},"level":"error","message":"http server start failed","ts_ns":229765838747477}
+{"component":"serving","fields":{"drain_ends_ns":229770838828378},"level":"info","message":"draining requests","ts_ns":229765838830333}
+{"component":"serving","level":"info","message":"shutdown complete","ts_ns":229765838847596}
+{"component":"serving","fields":{"code":"unavailable","message":"http server: could not bind 127.0.0.1:45615: Address already in use"},"level":"error","message":"worker startup failed","ts_ns":229765838857187}

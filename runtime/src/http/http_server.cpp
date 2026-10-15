@@ -95,6 +95,22 @@ Result<BindAddress> resolve_bind_address(std::string_view host, std::uint16_t po
                     std::string{"http server: inet_pton failed for "} + host_str);
 }
 
+// host:port as a URL writes it, an IPv6 literal in brackets.
+std::string address_text(std::string_view host, std::uint16_t port) {
+  const std::string shown{host};
+  return (shown.find(':') == std::string::npos ? shown : "[" + shown + "]") + ":" +
+         std::to_string(port);
+}
+
+// A failed bind() or listen() of the configured address. A port another
+// socket holds may be let go; nothing else will.
+Error port_error(std::string_view call, const HttpServerConfig& config, int saved) {
+  return Error::make(saved == EADDRINUSE ? Error::Code::Unavailable : Error::Code::LoadFailed,
+                     "http server: could not " + std::string{call} + " " +
+                         address_text(config.bind_host, config.bind_port) + ": " +
+                         std::strerror(saved));
+}
+
 // Extract the bound port from a sockaddr_storage of either family.
 std::uint16_t port_from_sockaddr(const sockaddr_storage& ss) {
   if (ss.ss_family == AF_INET6) {
@@ -643,10 +659,9 @@ Result<void> HttpServer::start(const HttpServerConfig& config) {
                       std::string{"http server: socket() failed: "} + std::strerror(errno));
   }
   int one = 1;
+  // Not SO_REUSEPORT: with it, a second process of the same user binds a
+  // port this one listens on, and Linux splits connections between the two.
   ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-#ifdef SO_REUSEPORT
-  ::setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
-#endif
 #ifdef IPV6_V6ONLY
   // Bind an IPv6 literal as pure IPv6 so the listener never silently
   // straddles the IPv4 mapped range; loopback is single-family by intent.
@@ -658,14 +673,13 @@ Result<void> HttpServer::start(const HttpServerConfig& config) {
   if (::bind(fd, reinterpret_cast<sockaddr*>(&resolved->storage), resolved->len) < 0) {
     int saved = errno;
     ::close(fd);
-    return unexpected(Error::Code::LoadFailed,
-                      std::string{"http server: bind() failed: "} + std::strerror(saved));
+    return unexpected(port_error("bind", config, saved));
   }
+  // EADDRINUSE here: another socket bound the port as well and listened first.
   if (::listen(fd, 64) < 0) {
     int saved = errno;
     ::close(fd);
-    return unexpected(Error::Code::LoadFailed,
-                      std::string{"http server: listen() failed: "} + std::strerror(saved));
+    return unexpected(port_error("listen on", config, saved));
   }
   // Read the assigned port back. getsockname reports the bound family, so
   // decode the port from whichever sockaddr variant the kernel filled in.

@@ -21,7 +21,8 @@ add_executable(tp_test_integration
   socket_sigpipe_test.cpp
   # Route dispatch releases routes_mutex before invoking handlers.
   http_route_concurrency_test.cpp
-  # HTTP server binds the loopback family the host literal names.
+  # HTTP server binds the loopback family the host literal names, and no
+  # port another listener holds.
   http_server_bind_test.cpp
   # Header-size limit is enforced before a completed header block is
   # accepted, including the read chunk that carries the terminator.
@@ -33,6 +34,8 @@ add_executable(tp_test_integration
   worker_signal_test.cpp
   # What --version says about streaming support, in both build flavours.
   worker_version_test.cpp
+  # A worker started by hand on a port another process listens on.
+  worker_bind_test.cpp
 )
 
 target_include_directories(tp_test_integration
@@ -61,6 +64,7 @@ if(TARGET tp_serving_worker)
     PRIVATE
       TP_SERVING_WORKER_BINARY="$<TARGET_FILE:tp_serving_worker>"
       TP_ENABLE_STREAMING_GRPC=$<BOOL:${TP_ENABLE_STREAMING_GRPC}>
+      TP_ENABLE_TSAN=$<BOOL:${TP_ENABLE_TSAN}>
   )
 endif()
 
