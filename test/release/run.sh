@@ -80,6 +80,7 @@ python3 test/release/test_native_cache_provenance.py
 python3 test/release/test_native_release_record.py
 python3 test/release/test_native_code_absence.py
 python3 test/release/test_vulnerability_dispositions.py
+python3 test/release/test_install_pinned_toolchain.py
 python3 test/release/test_sdk_distribution.py
 python3 "$verify_speech_runtime_release"
 

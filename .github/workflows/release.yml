@@ -352,7 +352,7 @@ jobs:
             nlohmann-json3-dev \
             pkg-config
           tools/ci/select-clang.sh
-          rustup show active-toolchain || rustup toolchain install
+          tools/ci/install-pinned-toolchain.sh
 
       - name: Assert the toolchain meets the build tree's floor
         shell: bash

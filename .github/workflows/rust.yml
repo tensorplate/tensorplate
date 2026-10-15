@@ -24,7 +24,7 @@ jobs:
 
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: |
-          rustup show active-toolchain || rustup toolchain install
+          tools/ci/install-pinned-toolchain.sh
           rustup component add rustfmt clippy
           rustc --version
           cargo --version
