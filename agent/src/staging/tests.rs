@@ -536,3 +536,57 @@ fn a_tree_the_transaction_in_flight_reads_its_bundle_from_or_from_within_is_kept
     assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
     assert!(!source.exists());
 }
+
+#[test]
+fn nothing_in_a_tree_of_the_earlier_layout_is_removed_whether_a_record_names_it_or_not() {
+    let d = dirs();
+    // An artifact directory may have any safe name, a transaction id's too.
+    let flat = d.staging.join("stt");
+    let artifacts = flat.join(new_transaction_id());
+    fs::create_dir_all(&artifacts).unwrap();
+    fs::write(flat.join("manifest.json"), "{}").unwrap();
+    fs::write(artifacts.join("weights"), "").unwrap();
+    let unnamed = tree(&d.staging, "tts");
+
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
+    assert!(artifacts.join("weights").is_file() && !unnamed.exists());
+
+    let flat_record = |state: &mut AgentState| {
+        state.active = Some(record("stt", &flat));
+        Ok(())
+    };
+    d.store.update(flat_record).unwrap();
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 0);
+    assert!(artifacts.join("weights").is_file());
+
+    // Once its manifest is gone, what is left in it is like any other tree.
+    fs::remove_file(flat.join("manifest.json")).unwrap();
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
+    assert!(!artifacts.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_id_directory_whose_manifest_cannot_be_looked_for_is_named_and_left() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: root looks into a directory of mode 400");
+        return;
+    }
+    let d = dirs();
+    let unnamed = tree(&d.staging, "stt");
+    let id = d.staging.join("stt");
+    let mode = |mode: u32| {
+        fs::set_permissions(&id, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    // Listed, but nothing in it can be looked up.
+    mode(0o400);
+
+    let error = prune(&d.staging, &d.store).unwrap_err().to_string();
+
+    mode(0o755);
+    let named = format!("`{}`: ", id.display());
+    assert!(error.contains(&named), "{error}");
+    assert!(unnamed.is_dir());
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
+}

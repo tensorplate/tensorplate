@@ -123,8 +123,8 @@ fn named_by(state: &AgentState) -> impl Iterator<Item = PathBuf> + '_ {
 /// its path resolves, so the records may spell `staging_dir` another way,
 /// and is kept when a path they name is in it. Only a directory a deploy
 /// named, under a directory a deployment id names, is removed: a tree of the
-/// layout before this one,
-/// `staging_dir/<deployment_id>/` itself, is never. No other deploy may
+/// layout before this one, `staging_dir/<deployment_id>/` itself with its
+/// manifest at its root, is never, nor anything in it. No other deploy may
 /// stage meanwhile.
 ///
 /// # Errors
@@ -175,12 +175,22 @@ fn resolved(path: &Path) -> io::Result<Option<PathBuf>> {
     }
 }
 
-/// The entries of `id` when it is a directory a deployment id names.
+/// The entries of `id` when it is a directory a deployment id names and not
+/// a tree of the earlier layout.
 fn trees_of(id: &DirEntry) -> io::Result<Vec<io::Result<DirEntry>>> {
-    if is_directory(id, is_valid_deployment_id)? {
-        entries(&id.path())
-    } else {
-        Ok(Vec::new())
+    let path = id.path();
+    if !is_directory(id, is_valid_deployment_id)? || holds_a_manifest(&path)? {
+        return Ok(Vec::new());
+    }
+    entries(&path)
+}
+
+/// Whether `dir` holds `manifest.json` at its root, as a tree does.
+fn holds_a_manifest(dir: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(dir.join("manifest.json")) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(at(dir, &e)),
     }
 }
 
