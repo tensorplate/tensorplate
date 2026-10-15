@@ -17,6 +17,10 @@
 // recorded the same way from an agent that runs the member registry, and
 // `agent_control_streaming_deploy.jsonl` a deploy that asks for streaming
 // and the status after it, from one whose configuration gives stream ports.
+// From such an agent too, `agent_control_streaming_handover.jsonl` holds
+// the status between a streaming update's commit and its activation, and
+// `agent_control_unary_status.jsonl` the status of a deployment that does
+// not stream.
 
 #![cfg(unix)]
 #![allow(
@@ -31,7 +35,7 @@ mod common;
 mod registry_agent;
 
 use common::{vision_bundle, write_bundle, BundleSpec, Harness};
-use registry_agent::RegistryAgent;
+use registry_agent::{RegistryAgent, HELD};
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -102,10 +106,11 @@ fn normalize(line: &str, tempdirs: &[String], tx_ids: &mut Vec<String>) -> Strin
         out = out.replace(tempdir.as_str(), "/srv/golden");
     }
     // Transaction ids: `tx-` and a UUID, numbered by first appearance. A
-    // deploy's also names its staged tree, after a `/`.
+    // deploy's also names its staged tree, after a `/`, and a recovery
+    // reason quotes one in backticks.
     let mut rebuilt = String::new();
     let mut rest = out.as_str();
-    while let Some(at) = ["\"tx-", "/tx-"]
+    while let Some(at) = ["\"tx-", "/tx-", "`tx-"]
         .iter()
         .filter_map(|at| rest.find(at))
         .min()
@@ -113,6 +118,7 @@ fn normalize(line: &str, tempdirs: &[String], tx_ids: &mut Vec<String>) -> Strin
         let start = at + 1;
         let end = start + 3 + 36;
         let id = &rest[start..end];
+        assert!(is_uuid(&id[3..]), "`{id}` is not a transaction id");
         let index = tx_ids
             .iter()
             .position(|seen| seen == id)
@@ -145,6 +151,15 @@ fn normalize(line: &str, tempdirs: &[String], tx_ids: &mut Vec<String>) -> Strin
     }
     rebuilt.push_str(rest);
     rebuilt
+}
+
+/// A UUID's text: hex digits in groups of 8, 4, 4, 4 and 12.
+fn is_uuid(text: &str) -> bool {
+    let groups: Vec<&str> = text.split('-').collect();
+    groups.iter().map(|group| group.len()).eq([8, 4, 4, 4, 12])
+        && groups
+            .iter()
+            .all(|group| group.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 fn deploy_request(correlation: &str, bundle: &Path, deployment_id: &str) -> ControlRequest {
@@ -254,4 +269,81 @@ fn a_streaming_deploy_and_the_status_after_it_cross_the_socket_as_recorded() {
         &fixture_path("agent_control_streaming_deploy.jsonl"),
         &lines,
     );
+}
+
+fn speech_bundle(h: &Harness, name: &str) -> PathBuf {
+    let speech = BundleSpec {
+        model_class: Some("speech"),
+        ..BundleSpec::default()
+    };
+    write_bundle(h.td.path(), name, speech)
+}
+
+/// Record one status exchange with `agent`'s control socket.
+fn recorded_status(h: &Harness, agent: &RegistryAgent, correlation: &str) -> Vec<String> {
+    let socket = h.config.socket_path.clone().expect("socket");
+    let mut server = Server::start(&h.config, agent.coord.clone()).expect("start");
+    let request = ControlRequest::status(Some(correlation.into()), StatusRequest::default());
+    let (sent, received) = exchange(&socket, &request);
+    server.shutdown();
+    let (tempdirs, mut tx_ids) = (tempdirs(h), Vec::new());
+    vec![
+        normalize(&sent, &tempdirs, &mut tx_ids),
+        normalize(&received, &tempdirs, &mut tx_ids),
+    ]
+}
+
+#[test]
+fn the_status_between_a_streaming_updates_commit_and_its_activation_crosses_the_socket_as_recorded()
+{
+    let h = Harness::new();
+    let agent = RegistryAgent::start_gated_with_stream_ports(&h);
+    let labels = BTreeMap::new;
+    let first = speech_bundle(&h, "stt");
+    agent
+        .coord
+        .deploy_with("stt", &first, labels(), None, None, true)
+        .expect("deploy");
+    let (at, is_at) = std::sync::mpsc::channel();
+    let (go, gone) = std::sync::mpsc::channel::<()>();
+    agent.gated.before_activate(move || {
+        at.send(()).expect("the test waits");
+        let _ = gone.recv();
+    });
+
+    let update = speech_bundle(&h, "stt-update");
+    let lines = std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets the update end.
+        let go = go;
+        let updating = scope.spawn(|| {
+            agent
+                .coord
+                .deploy_with("stt", &update, labels(), None, None, true)
+        });
+        is_at.recv_timeout(HELD).expect("the update is committed");
+        let lines = recorded_status(&h, &agent, "ctl-000001");
+        go.send(()).expect("the update waits");
+        updating.join().expect("joined").expect("the update");
+        lines
+    });
+
+    assert_recorded(
+        &fixture_path("agent_control_streaming_handover.jsonl"),
+        &lines,
+    );
+}
+
+#[test]
+fn the_status_of_a_deployment_that_does_not_stream_crosses_the_socket_as_recorded() {
+    let h = Harness::new();
+    let agent = RegistryAgent::start_with_stream_ports(&h);
+    let bundle = speech_bundle(&h, "stt");
+    agent
+        .coord
+        .deploy_with("stt", &bundle, BTreeMap::new(), None, None, false)
+        .expect("deploy");
+
+    let lines = recorded_status(&h, &agent, "ctl-000001");
+
+    assert_recorded(&fixture_path("agent_control_unary_status.jsonl"), &lines);
 }

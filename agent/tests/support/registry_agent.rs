@@ -27,8 +27,11 @@ use tensorplate_agent::registry::{
     MemberProcess, MemberRegistry, ProcessLauncher, RegistrySettings,
 };
 use tensorplate_agent::supervision::FakeClock;
-use tensorplate_agent::worker::WorkerControl;
-use tensorplate_protocol::agent_state::decode_agent_state;
+use tensorplate_agent::worker::{
+    LiveMember, MemberEvent, ServingMember, WorkerControl, WorkerReadiness,
+};
+use tensorplate_protocol::agent_state::{decode_agent_state, ErrorRecord};
+use tensorplate_protocol::worker_control::CandidateRef;
 
 use super::common::{vision_bundle, Harness};
 
@@ -213,24 +216,113 @@ pub struct RegistryAgent {
     pub workers: Arc<Workers>,
     pub clock: Arc<FakeClock>,
     pub registry: Arc<MemberRegistry>,
+    /// The registry with an activation hook; the coordinator is given it
+    /// only by [`Self::start_gated_with_stream_ports`].
+    pub gated: Arc<Gated>,
     pub coord: Arc<Coordinator>,
+}
+
+type Hook = Box<dyn FnOnce() + Send>;
+
+/// The member registry, with a hook run once before the next `activate`:
+/// the window between a transaction's commit and its worker's activation.
+/// Every method the registry implements is passed through.
+pub struct Gated {
+    registry: Arc<MemberRegistry>,
+    before_activate: Mutex<Option<Hook>>,
+}
+
+impl Gated {
+    pub fn before_activate(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.before_activate.lock().unwrap() = Some(Box::new(hook));
+    }
+}
+
+impl WorkerControl for Gated {
+    fn prepare(&self, tx: &str, candidate: &CandidateRef, timeout: Duration) -> AgentResult<()> {
+        self.registry.prepare(tx, candidate, timeout)
+    }
+    fn warm(
+        &self,
+        tx: &str,
+        candidate: &CandidateRef,
+        timeout: Duration,
+    ) -> AgentResult<WorkerReadiness> {
+        self.registry.warm(tx, candidate, timeout)
+    }
+    fn fence(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        self.registry.fence(tx, candidate)
+    }
+    fn activate(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        let hook = self.before_activate.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.registry.activate(tx, candidate)
+    }
+    fn owe_restore(&self, candidate: &CandidateRef, error: ErrorRecord) -> bool {
+        self.registry.owe_restore(candidate, error)
+    }
+    fn abandon(&self, candidate: &CandidateRef) {
+        self.registry.abandon(candidate);
+    }
+    fn hold(&self) {
+        self.registry.hold();
+    }
+    fn release(&self) {
+        self.registry.release();
+    }
+    fn unload(&self, deployment_id: &str) {
+        self.registry.unload(deployment_id);
+    }
+    fn active_deployment_id(&self) -> AgentResult<Option<String>> {
+        self.registry.active_deployment_id()
+    }
+    fn serving_member(&self) -> AgentResult<Option<ServingMember>> {
+        self.registry.serving_member()
+    }
+    fn live_members(&self) -> Option<Vec<LiveMember>> {
+        self.registry.live_members()
+    }
+    fn supervise(&self) -> Vec<MemberEvent> {
+        self.registry.supervise()
+    }
+    fn member_failure(&self) -> Option<ErrorRecord> {
+        self.registry.member_failure()
+    }
+    fn shutdown(&self) {
+        self.registry.shutdown();
+    }
+    fn stopping(&self) -> bool {
+        self.registry.stopping()
+    }
 }
 
 impl RegistryAgent {
     pub fn start(h: &Harness) -> Self {
         let ports = PORTS.map(|http| MemberPorts { http, stream: None });
-        Self::start_on(h, h.config.clone(), ports.to_vec())
+        Self::start_on(h, h.config.clone(), ports.to_vec(), false)
     }
 
     /// As [`Self::start`], with [`STREAM_RANGE`] in the configuration and
     /// its pairs in the registry. The configuration says `process`, which
     /// is the mode the registry runs in.
     pub fn start_with_stream_ports(h: &Harness) -> Self {
+        Self::with_stream_ports(h, false)
+    }
+
+    /// As [`Self::start_with_stream_ports`], with the coordinator given
+    /// [`Self::gated`], so a test can hold the next activation.
+    pub fn start_gated_with_stream_ports(h: &Harness) -> Self {
+        Self::with_stream_ports(h, true)
+    }
+
+    fn with_stream_ports(h: &Harness, gate: bool) -> Self {
         let mut config = h.config.clone();
         config.worker.mode = WorkerControlMode::Process;
         config.worker.serving_port_range = Some(STREAM_RANGE);
         let ports = configured_ports(&config.worker);
-        Self::start_on(h, config, ports)
+        Self::start_on(h, config, ports, gate)
     }
 
     /// As [`Self::start`], configured as a packaged agent is: `process`
@@ -239,10 +331,10 @@ impl RegistryAgent {
         let mut config = h.config.clone();
         config.worker.mode = WorkerControlMode::Process;
         let ports = PORTS.map(|http| MemberPorts { http, stream: None });
-        Self::start_on(h, config, ports.to_vec())
+        Self::start_on(h, config, ports.to_vec(), false)
     }
 
-    fn start_on(h: &Harness, config: AgentConfig, ports: Vec<MemberPorts>) -> Self {
+    fn start_on(h: &Harness, config: AgentConfig, ports: Vec<MemberPorts>, gate: bool) -> Self {
         let workers = Arc::new(Workers::default());
         let clock = Arc::new(FakeClock::new());
         let settings = RegistrySettings {
@@ -265,11 +357,21 @@ impl RegistryAgent {
             )
             .with_clock(clock.clone()),
         );
-        let coord = Arc::new(Coordinator::new(config, h.store.clone(), registry.clone()));
+        let gated = Arc::new(Gated {
+            registry: registry.clone(),
+            before_activate: Mutex::new(None),
+        });
+        let worker: Arc<dyn WorkerControl> = if gate {
+            gated.clone()
+        } else {
+            registry.clone()
+        };
+        let coord = Arc::new(Coordinator::new(config, h.store.clone(), worker));
         Self {
             workers,
             clock,
             registry,
+            gated,
             coord,
         }
     }
