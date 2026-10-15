@@ -5,6 +5,9 @@ use super::one_pass::another_format_0_1_bundle;
 use super::start_again::{host, Host, Worker};
 use super::*;
 
+use tensorplate_protocol::agent_state::TransactionKind;
+
+use crate::coordinator::new_transaction_id;
 use crate::recovery::apply_startup;
 
 /// The digest of the bundle staged where `reference` says.
@@ -261,4 +264,23 @@ fn a_removal_a_stop_interrupted_is_finished_by_the_next_start() {
     assert!(!unnamed.exists());
     assert!(named.iter().all(|tree| tree.is_dir()));
     assert_eq!(staged_digest(&next.asked().reference), digest_of(STT));
+}
+
+#[test]
+fn a_deploy_refused_as_busy_removes_no_tree() {
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    // Another deploy is copying its bundle; no record names the copy yet.
+    let copying = new_transaction_id();
+    agent.in_flight(TransactionKind::Deploy, &copying, "tts");
+    let copy = host.td.path().join("staging").join("tts").join(&copying);
+    fs::create_dir_all(&copy).unwrap();
+
+    let error = agent.deploy("stt", STT).unwrap_err();
+
+    assert!(
+        matches!(&error, AgentError::Busy(tx) if *tx == copying),
+        "{error}"
+    );
+    assert!(copy.is_dir() && agent.never_asked());
 }
