@@ -65,8 +65,9 @@ an ephemeral port) is the stream listener's port, which must differ from
 it. Null, non-boolean or out-of-range
 values and unknown keys in `streaming` return `config_invalid`. A config with
 neither field set serializes without the optional block, preserving the
-existing agent-rendered config shape; the agent renders no `streaming` block,
-so a worker with streaming enabled is started by hand from a config. A
+existing agent-rendered config shape; the agent renders the `streaming` block
+only for a deployment deployed with `streaming`
+([the agent's page](agent.md#streaming)). A
 feature-OFF build compiles no stream listener and links no gRPC code.
 
 ### Stream listener

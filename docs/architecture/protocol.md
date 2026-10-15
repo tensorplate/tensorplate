@@ -120,8 +120,8 @@ this). A client sends a non-default value only to an agent that lists the
 matching `control_features` entry, since an older agent would act on the
 rest of the request. A new operation needs no such check: an older agent
 refuses an unknown `op`. `set_operation`, `admission_mode`, `test_count`,
-`evidence_ref`, `rollback.deployment_id`, `undeploy` and `recover` follow
-this rule, which retires with the response exception.
+`evidence_ref`, `rollback.deployment_id`, `deploy.streaming`, `undeploy`
+and `recover` follow this rule, which retires with the response exception.
 
 A second narrow pre-1.0 exception covers the shared closed enums: a value
 may be appended under `0.1` to the error-code enum (`error.json` and every
