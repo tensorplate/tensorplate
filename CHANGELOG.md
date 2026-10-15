@@ -974,6 +974,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `UNAVAILABLE`; an open call is never cut by the idle limit. Before, gRPC
   kept a connection that opened no call until its peer closed it, and
   accepted any number. (V030-E04-F02-T02)
+- A deploy or rollback now writes its commit before the serving member is
+  asked to stop. The candidate is checked before the commit (it still runs
+  and was not given up) and takes the serving slot only after it, and the
+  member it replaces is retired then. A commit write that fails gives the
+  candidate up and leaves the serving member serving; before, the serving
+  member was already stopped and the agent served the candidate while the
+  state named the old record. An agent told to stop between the commit and
+  the activation leaves the transaction at `promoted`, and the next start
+  starts the committed deployment. No admission fence is sent to the
+  outgoing worker yet. A start whose restored worker cannot be started,
+  exits while loading, is not ready or exits before it serves no longer
+  ends the agent with exit code 5 in `worker.mode = "process"`: the agent
+  comes up with the failure in `last_error`, the member registry starts the
+  deployment again after 1, 2 and 4 seconds as it does a serving member
+  that stopped, and the error is cleared once a restart serves.
+  (V030-E03-F01-T04)
 - The Whisper and Kokoro candidate bundles that `tensorplate bundle provision`
   installs, and their test fixture twins, now declare `model_class` `speech`
   (format 0.1, which asks no speech block) at version 0.2.0, and the packaged

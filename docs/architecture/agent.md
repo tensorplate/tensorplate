@@ -337,7 +337,10 @@ The agent records the phases up to `promoted` on the transaction in
 flight. `promoted` is recorded by the commit: one state write moves the
 records (`active` to `previous_active` and the candidate to `active` for a
 deploy, the swap for a rollback) and sets the phase, so a start that finds
-`promoted` with the records moved reads a committed transaction. `active`,
+`promoted` with the records moved reads a committed transaction. The commit
+is written after the candidate is fenced and before it is activated, so the
+member it replaces is asked to stop only once the commit is durable (see
+[Serving-worker handoff](#serving-worker-handoff-v01-e08-f05)). `active`,
 `failed` and `rolled_back` remain values of the phase and are no longer
 written to a transaction in flight: the write that ends a transaction
 clears it.
@@ -376,14 +379,10 @@ Restart the agent: its start settles the transaction (see
 [Restart recovery](#restart-recovery-v01-e08-f07)). What that start finds
 depends on the write that failed:
 
-- A write before the commit, the one that ends a failed transaction
-  included: the candidate, if one was prepared, is abandoned when the
-  request returns, and what served before goes on serving. The start ends
-  the transaction as failed, with a quarantine entry.
-- The commit write. The old member is still retired before it, so the
-  agent goes on serving the candidate while the state names the old
-  record. The start ends the transaction as failed and starts the old
-  record.
+- A write before the commit, the commit and the one that ends a failed
+  transaction included: the candidate, if one was prepared, is abandoned
+  when the request returns, and what served before goes on serving. The
+  start ends the transaction as failed, with a quarantine entry.
 - The write that ends a committed transaction. The deployment is committed
   and serving, and status shows the new deployment as `active` beside
   `in_flight: phase=promoted`. The start clears the transaction, makes no
@@ -417,7 +416,10 @@ the worker via the typed `WorkerControl` trait:
 pub trait WorkerControl: Send + Sync {
     fn prepare(&self, transaction_id, candidate, timeout) -> Result;
     fn warm(&self, transaction_id, candidate, timeout) -> Result<WorkerReadiness>;
+    fn fence(&self, transaction_id, candidate) -> Result;
+    fn activate(&self, transaction_id, candidate) -> Result;
     fn promote(&self, transaction_id, candidate) -> Result;
+    fn owe_restore(&self, candidate, error) -> bool;
     fn abandon(&self, candidate);
     fn hold(&self);
     fn release(&self);
@@ -430,7 +432,20 @@ pub trait WorkerControl: Send + Sync {
 }
 ```
 
-`promote` is the only call that mutates the worker's active deployment.
+`fence` and `activate` are a promotion's two halves, on either side of the
+transaction's commit write. `fence` checks that the prepared candidate
+still runs and was not given up, and moves nothing; the serving worker is
+not told to stop admitting work, since no worker implements that operation
+yet. `activate`, once the commit is durable, gives the candidate the
+serving slot and then asks the member it replaces to stop; it is the only
+call that mutates the worker's active deployment, and is refused only once
+the agent is stopping. A candidate that exited between the two takes the
+slot all the same, and the next supervision step restarts it: after the
+commit the transaction does not fail. `promote`, fence then activate, is
+for the start's restore, which has no commit to write. `owe_restore` hands
+a restore whose worker did not come up to the worker control's restarts
+(see [Restart recovery](#restart-recovery-v01-e08-f07)); it is false by
+default, so a worker control that restarts nothing ends the start.
 `unload` is best-effort (failure is logged but never undoes a successful
 promotion). `abandon` tells the worker control that the transaction
 which prepared a candidate returned without promoting it; the coordinator
@@ -575,9 +590,10 @@ Rollback is a transaction, not a file-pointer swap:
 1. Read the previous active deployment from durable state.
 2. Verify its staged files (`staged_path/` exists and contains
    `manifest.json`).
-3. Walk the same prepare / warm / promote sequence as deploy.
+3. Walk the same prepare / warm / fence sequence as deploy.
 4. On success, swap active <-> previous_active in durable state, in the
-   write that records `promoted`, then clear the transaction.
+   write that records `promoted`, then activate the candidate and clear the
+   transaction.
 
 A failed rollback preserves the current active deployment — the
 previous-active record is left intact, and the operator can retry.
@@ -649,7 +665,7 @@ start does when the restore cannot be made:
 | a descriptor document that is missing, is not a regular file, does not verify, is another identity's or describes another bundle | the same |
 | a re-stamp of the descriptor that is refused | the same |
 | a state write of its own that fails, or a descriptor document it cannot write | ends with exit code `5` |
-| a worker that cannot be started, exits while loading, is not ready within `worker.warm_timeout_ms` or exits before it is promoted | ends with exit code `5`, with the reason in `last_error` |
+| a worker that cannot be started, exits while loading, is not ready within `worker.warm_timeout_ms` or exits before it is promoted | comes up with the reason in `last_error`, and the [member registry](#member-registry) starts the record again as it restarts a serving member that stopped; `last_error` is cleared once a restart serves, and when the restarts are used up status reports the member's failure. A worker control that restarts nothing (`worker.mode = "mock"`) ends the start with exit code `5` |
 
 The refusals in the first five rows are decided by the staged copy and
 the descriptor document, so the agent stays up for `deploy` and
@@ -698,9 +714,10 @@ does not end a worker it left behind: nothing records one. That worker
 still listens on its port, and the agent does not check that a port it
 leases is free (see [Ports](#member-registry)): the worker the restore
 starts cannot bind it, as a worker's listener does not share its port; it
-exits with a startup record, and the start ends with exit code `5`.
-`last_error` is that record's `unavailable`, recoverable, with a message
-naming the address and the bind error, such as
+exits with a startup record, the start comes up with that failure as
+`last_error`, and the registry's restarts meet the same port until they
+are used up. `last_error` is that record's `unavailable`, recoverable,
+with a message naming the address and the bind error, such as
 `http server: could not bind 127.0.0.1:18080: Address already in use`.
 
 ## Versioning policy
@@ -931,9 +948,12 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   process id only: a worker that has to be killed leaves its sidecar to
   exit when it sees its peer closed. Every member is stopped this way when
   the agent itself is told to stop.
-- **Promotion.** A candidate that exited after it was warmed is not
-  promoted: the deploy fails with the worker's failure and the serving
-  member stays.
+- **Promotion.** A candidate that exited after it was warmed is refused
+  by the fence, before the commit write: the deploy fails with the
+  worker's failure and the serving member stays. Once the commit is
+  written the candidate takes the serving slot even if it exited since,
+  and the supervision step restarts it; the member it replaces is sent
+  its stop only after the commit.
 - **Supervision.** The agent's loop runs the registry's supervision step
   (`WorkerControl::supervise`) every 100 ms and logs what it did. The step
   takes the serving generation out of service when its process has exited,
@@ -949,6 +969,11 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   restart inside a sliding five-minute window; a restart that cannot be
   launched counts as one. From the stop until the new generation is ready,
   by the candidate's rule, status carries no `active.serving_url`.
+  A start's restore whose worker does not come up is owed a restart the
+  same way (`WorkerControl::owe_restore`), on the ports of the restore's
+  worker, which is killed, or on free ones, and the agent stays up. None
+  is owed while the agent is stopping, a member serves, a deploy holds the
+  member or a restart is already owed.
 - **Staged bundle check.** Each deploy stages a tree of its own (see
   [Staged trees](#staged-trees)), so the tree a record names holds that
   record's bundle unless it is a directory of the earlier layout that a
@@ -1190,6 +1215,10 @@ start's recovery treats it as it treats that:
 - The deployment that was serving is started again in that same start, so
   after `systemctl restart tensorplate-agent` during a deploy's warm the
   node serves what it served before the deploy.
+- Stopped after its commit write, before its candidate took the serving
+  slot, the transaction is at `promoted`: the start clears it and starts
+  the deployment it committed, although its caller was answered the
+  `unavailable` error.
 
 A failure the deploy met just before the stop began is not recorded
 either. A deploy or rollback that arrives after the flag is refused with

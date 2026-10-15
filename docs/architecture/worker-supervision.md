@@ -277,6 +277,10 @@ The failed state is not written to the state file. An agent restart starts
 the recorded deployment again with all three restarts available, and
 status reports the member as failed until then.
 
+A start whose restore of the recorded deployment does not come up does not
+end the agent: the registry starts it again as a serving member that
+stopped, with the same delays and the same limit.
+
 Before a restart the registry compares the digest of the staged manifest
 with the bundle digest the member was started under; when they differ the
 member is failed at once and nothing is started. A staged manifest that

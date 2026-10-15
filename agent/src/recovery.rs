@@ -233,9 +233,10 @@ pub fn plan_with_worker(
 ///
 /// # Errors
 ///
-/// A state write that fails, and a restore whose worker does not come up;
-/// the process entrypoint ends the start on either. A restore refused by
-/// what is on disk is not an error: see [`restore_active`].
+/// A state write that fails, and a restore whose worker does not come up
+/// when the worker control restarts nothing; the process entrypoint ends
+/// the start on either. A restore refused by what is on disk is not an
+/// error: see [`restore_active`].
 pub fn apply_startup(coordinator: &Coordinator) -> AgentResult<RecoverySummary> {
     let store = coordinator.state().as_ref();
     let state = store.snapshot()?;

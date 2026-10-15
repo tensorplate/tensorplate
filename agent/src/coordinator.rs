@@ -14,14 +14,16 @@
 //   3. Walks the F04 state machine, persisting each phase through the
 //      F02 state store before the next phase begins.
 //   4. Calls the V01-E08-F05 [`WorkerControl`] for prepare / warm /
-//      promote. A failure at any worker-side phase quarantines the
-//      candidate and preserves the active deployment.
-//   5. Records previous-active metadata atomically with promotion so the
-//      F06 rollback path can restore it later.
+//      fence. A failure at any of them, or of the commit write after
+//      them, quarantines the candidate and preserves the active deployment.
+//   5. Commits: records previous-active metadata in the write that moves
+//      the records, so the F06 rollback path can restore it later, and
+//      only then activates the candidate, which retires the member it
+//      replaces.
 //
 // Rollback is the same coordinator with the source/destination swapped:
 // the previous active deployment becomes the candidate and goes back
-// through prepare / warm / promote.
+// through prepare / warm / fence, the commit and activation.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -534,8 +536,9 @@ impl Coordinator {
         })
     }
 
-    /// Drive a rollback transaction. Uses the same prepare/warm/promote
-    /// path as deploy; refuses when no previous active deployment exists.
+    /// Drive a rollback transaction. Uses the same prepare, warm, fence,
+    /// commit and activate path as deploy; refuses when no previous active
+    /// deployment exists.
     ///
     /// # Errors
     ///
@@ -719,10 +722,10 @@ impl Coordinator {
         // so a registry that cannot answer for it does not fail the status.
         if let (Some(recorded), Some(summary)) = (state.active.as_ref(), active.as_mut()) {
             if let Some(serving) = self.worker.serving_member()? {
-                // A worker is promoted before the record that names it is
-                // written, and the worker it replaces is stopped in between:
-                // the member serving may be another deployment's, or another
-                // bundle deployed under the same id.
+                // The record is committed before its worker takes the
+                // serving slot: until then the member serving is the one it
+                // replaces, another deployment's or another bundle's under
+                // the same id.
                 if serves(&serving, recorded) {
                     summary.generation = Some(serving.member.generation);
                 }
