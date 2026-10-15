@@ -109,7 +109,12 @@ Error admission_closed() {
   return Error::make(Error::Code::NotReady, "session admission is closed", "admission_closed");
 }
 
-Error worker_shutdown() {
+/// What a drain for `cause` ends its sessions with.
+Error drain_error(DrainCause cause) {
+  if (cause == DrainCause::DeploymentRetired) {
+    return Error::make(Error::Code::Unavailable, "the deployment generation is retiring",
+                       "deployment_retired");
+  }
   return Error::make(Error::Code::Unavailable, "the worker is shutting down", "worker_shutdown");
 }
 
@@ -167,10 +172,10 @@ struct StreamListener::Impl final
       grpc::CallbackServerContext* context) override;
 
   void on_transition(const ManagedSessionTransition& transition);
-  void close_admission() noexcept;
+  void close_admission(DrainCause cause) noexcept;
   /// Fails every session that has a call and whose cleanup was not asked,
   /// which queues its terminal event at once.
-  void fail_open_sessions() noexcept;
+  void fail_open_sessions(DrainCause cause) noexcept;
   /// Ends a call that was never admitted, for `cause`.
   void refuse(CallOutput& call, const Error& cause) { call.refuse(refused, refusal(cause)); }
   /// Waits for the call's first message, with `start_read` run once the wait
@@ -716,7 +721,7 @@ void StreamListener::Impl::on_transition(const ManagedSessionTransition& transit
   }
 }
 
-void StreamListener::Impl::close_admission() noexcept {
+void StreamListener::Impl::close_admission(DrainCause cause) noexcept {
   {
     const std::lock_guard guard(manager_mu);
     if (admission_stopped || !manager) {
@@ -724,7 +729,7 @@ void StreamListener::Impl::close_admission() noexcept {
     }
     admission_stopped = true;
     try {
-      (void)manager->stop_admission_and_drain(worker_shutdown());
+      (void)manager->stop_admission_and_drain(drain_error(cause));
     } catch (...) {  // NOLINT(bugprone-empty-catch): shutdown continues without the drain.
     }
   }
@@ -737,8 +742,9 @@ void StreamListener::Impl::close_admission() noexcept {
   }
 }
 
-void StreamListener::Impl::fail_open_sessions() noexcept {
+void StreamListener::Impl::fail_open_sessions(DrainCause cause) noexcept {
   try {
+    const auto failure = drain_error(cause);
     std::vector<std::pair<std::uint64_t, std::shared_ptr<CallState>>> open;
     {
       const std::lock_guard guard(calls_mu);
@@ -753,7 +759,7 @@ void StreamListener::Impl::fail_open_sessions() noexcept {
         cleanup_requested = state->cleanup_requested;
       }
       if (!cleanup_requested) {
-        (void)manager->apply(key, LogicalSessionEvent::Fail, worker_shutdown());
+        (void)manager->apply(key, LogicalSessionEvent::Fail, failure);
       }
     }
   } catch (...) {  // NOLINT(bugprone-empty-catch): the stop cancels the calls left open.
@@ -859,7 +865,8 @@ Result<std::unique_ptr<StreamListener>> StreamListener::start(StreamListenerOpti
   Impl* raw = impl.get();
   auto manager = SessionManager::create(
       raw->options.limits, binding_generation(raw->options), clock,
-      [raw](const ManagedSessionTransition& transition) { raw->on_transition(transition); });
+      [raw](const ManagedSessionTransition& transition) { raw->on_transition(transition); },
+      std::move(raw->options.admission_check));
   if (!manager) {
     return unexpected(manager.error());
   }
@@ -921,23 +928,24 @@ std::uint16_t StreamListener::bound_port() const noexcept {
   return impl_->port;
 }
 
-void StreamListener::stop_admission() noexcept {
-  impl_->close_admission();
+void StreamListener::stop_admission(DrainCause cause) noexcept {
+  impl_->close_admission(cause);
 }
 
-void StreamListener::stop(std::chrono::steady_clock::time_point deadline) noexcept {
+void StreamListener::stop(std::chrono::steady_clock::time_point deadline,
+                          DrainCause cause) noexcept {
   const std::lock_guard lock(impl_->lifecycle_mu);
   if (impl_->stopped) {
     return;
   }
   impl_->stopped = true;
-  impl_->close_admission();
+  impl_->close_admission(cause);
   // With a window no longer than the reserve, the sessions are failed at once.
   const auto fail_at = deadline - kTerminalEventReserve;
   while (impl_->manager->held_slots() > 0 && std::chrono::steady_clock::now() < fail_at) {
     std::this_thread::sleep_for(std::chrono::milliseconds{10});
   }
-  impl_->fail_open_sessions();
+  impl_->fail_open_sessions(cause);
   // gRPC waits for the calls until the deadline, then cancels those still
   // open: a reader that stopped never got its terminal event.
   const auto left = std::max(deadline - std::chrono::steady_clock::now(),

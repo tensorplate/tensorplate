@@ -449,6 +449,53 @@ TEST(StreamListener, StopDrainsALiveSessionThenRefusesAndCloses) {
   EXPECT_EQ(served.listener().live_sessions(), 0U) << "the drained session gave its slot back";
 }
 
+// The worker's check of its admission refuses an Open, with the slot free
+// and with the session that holds the other one live, until it lets Opens in.
+TEST(StreamListener, AnAdmissionCheckRefusalRefusesOpensAndKeepsTheLiveSession) {
+  std::atomic<bool> closed{false};
+  const auto check = [&]() -> tensorplate::Result<void> {
+    if (closed.load()) {
+      return tensorplate::unexpected(tensorplate::Error::make(
+          tensorplate::Error::Code::NotReady, "admission is fenced", "admission_closed"));
+    }
+    return {};
+  };
+  Served served{true, "127.0.0.1", nullptr, std::nullopt, 2, {}, {}, check};
+  auto live = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  closed.store(true);
+  const auto refused = served.refused(open_event(wire::SESSION_MODE_TTS_STREAMING));
+  EXPECT_EQ(refused.error_code(), grpc::StatusCode::UNAVAILABLE);
+  EXPECT_NE(refused.error_message().find("FAILURE_REASON_ADMISSION_CLOSED"), std::string::npos)
+      << refused.error_message();
+  EXPECT_EQ(served.listener().live_sessions(), 1U);
+  wire::ClientEvent ping;
+  ping.mutable_ping();
+  ASSERT_TRUE(live.send(ping));
+  const auto pong = live.read();
+  ASSERT_TRUE(pong.has_value());
+  EXPECT_TRUE(pong->has_pong()) << pong->ShortDebugString();
+
+  closed.store(false);
+  auto admitted = served.ready(wire::SESSION_MODE_TTS_STREAMING);
+  EXPECT_FALSE(admitted.session_id.empty());
+  EXPECT_EQ(served.listener().live_sessions(), 2U);
+}
+
+TEST(StreamListener, StopAdmissionForARetireClosesTheSessionAsDeploymentRetired) {
+  Served served;
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  served.listener().stop_admission(tensorplate::serving::DrainCause::DeploymentRetired);
+  ASSERT_NO_FATAL_FAILURE(expect_closed(client.read(), wire::SESSION_STATE_CLOSED,
+                                        wire::FAILURE_REASON_DEPLOYMENT_RETIRED));
+  const auto status = end_of(client);
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
+  EXPECT_NE(status.error_message().find("FAILURE_REASON_DEPLOYMENT_RETIRED"), std::string::npos)
+      << status.error_message();
+  const auto refused = served.refused(open_event(wire::SESSION_MODE_STT_STREAMING));
+  EXPECT_NE(refused.error_message().find("FAILURE_REASON_ADMISSION_CLOSED"), std::string::npos)
+      << refused.error_message();
+}
+
 /// A dispatch that grants speech-to-text and never finishes a drain or
 /// confirms a release, so a session outlives any drain deadline.
 class HoldingDispatch final : public tensorplate::serving::SessionDispatch {
@@ -523,22 +570,24 @@ TEST(StreamListener, AClientDeadlineAbortsItsLiveSession) {
 }
 
 /// What a client that reads gets of a session the stop failed: SessionClosed,
-/// then the status of `worker_shutdown`. The dispatch never confirmed the
-/// release, so the session still holds its slot.
-void expect_failed_by_the_stop(HeldSession& held) {
+/// then the status of `cause`, `worker_shutdown` unless a retirement drained.
+/// The dispatch never confirmed the release, so the session still holds its
+/// slot.
+void expect_failed_by_the_stop(HeldSession& held, const std::string& cause = "worker_shutdown",
+                               wire::FailureReason reason = wire::FAILURE_REASON_WORKER_SHUTDOWN) {
   EXPECT_EQ(held.listener->live_sessions(), 1U);
-  EXPECT_EQ(held.dispatch.seen.cause(), "worker_shutdown");
+  EXPECT_EQ(held.dispatch.seen.cause(), cause);
   wire::ServerEvent event;
   ASSERT_TRUE(held.call->Read(&event)) << "the call ended without SessionClosed";
   ASSERT_TRUE(event.has_session_closed()) << event.ShortDebugString();
   const auto& closed = event.session_closed();
   EXPECT_EQ(closed.state(), wire::SESSION_STATE_FAILED);
-  EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_WORKER_SHUTDOWN);
+  EXPECT_EQ(closed.cause().reason(), reason);
   EXPECT_EQ(closed.admission(), wire::ADMISSION_ADMITTED);
   EXPECT_FALSE(held.call->Read(&event)) << "SessionClosed is the last event";
   const auto status = held.call->Finish();
   EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE) << status.error_message();
-  EXPECT_NE(status.error_message().find("FAILURE_REASON_WORKER_SHUTDOWN"), std::string::npos)
+  EXPECT_NE(status.error_message().find(wire::FailureReason_Name(reason)), std::string::npos)
       << status.error_message();
   EXPECT_EQ(held.dispatch.seen.aborts(), 0) << "the call was cancelled before its session failed";
 }
@@ -560,6 +609,16 @@ TEST(StreamListener, WithADrainWindowNoLongerThanTheReserveTheStopFailsTheSessio
   held.listener->stop(std::chrono::steady_clock::now() +
                       tensorplate::serving::kTerminalEventReserve);
   expect_failed_by_the_stop(held);
+}
+
+// The drain that began first was a retirement's: the session the stop fails
+// ends as retired, not as a worker's shutdown.
+TEST(StreamListener, AStopForARetireFailsTheSessionLeftAsDeploymentRetired) {
+  HeldSession held;
+  held.listener->stop(
+      std::chrono::steady_clock::now() + 2 * tensorplate::serving::kTerminalEventReserve,
+      tensorplate::serving::DrainCause::DeploymentRetired);
+  expect_failed_by_the_stop(held, "deployment_retired", wire::FAILURE_REASON_DEPLOYMENT_RETIRED);
 }
 
 TEST(StreamListener, BindsLoopbackOnlyAndOwnsItsPort) {

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -11,6 +12,8 @@
 #include "tensorplate/core/result.hpp"
 #include "tensorplate/scheduler/clock.hpp"
 #include "tensorplate/serving/session.hpp"
+
+#include "serving/drain_window.hpp"
 
 namespace tensorplate::serving {
 
@@ -54,6 +57,10 @@ struct StreamListenerOptions {
   /// The connections gRPC accepts at one time; kMaxConnections when unset,
   /// which the worker keeps. Set by tests only.
   std::optional<int> max_connections;
+  /// Asked for each Open while admission is open, before the session count;
+  /// an error refuses the Open with it. Runs under the session manager's
+  /// lock, so it must not block, throw or call into the listener.
+  std::function<Result<void>()> admission_check;
 };
 
 /// What the listener asks of gRPC for its connections.
@@ -90,15 +97,17 @@ class StreamListener {
 
   /// Refuses every call that has not sent its Open, and every later call
   /// when it arrives, with `admission_closed`, and drains every live session
-  /// with `worker_shutdown`. Does not wait.
-  void stop_admission() noexcept;
+  /// with `worker_shutdown`, or `deployment_retired` for a retirement. Does
+  /// not wait.
+  void stop_admission(DrainCause cause = DrainCause::WorkerShutdown) noexcept;
 
-  /// stop_admission(), then waits for every session to close until
-  /// kTerminalEventReserve before `deadline`, fails those still open with
-  /// `worker_shutdown` unless their drain completed, waits for the calls
-  /// until `deadline`, cancels those still open, stops the dispatch and
-  /// releases the manager. Safe to repeat.
-  void stop(std::chrono::steady_clock::time_point deadline) noexcept;
+  /// stop_admission(cause), then waits for every session to close until
+  /// kTerminalEventReserve before `deadline`, fails those still open with the
+  /// same cause unless their drain completed, waits for the calls until
+  /// `deadline`, cancels those still open, stops the dispatch and releases
+  /// the manager. Safe to repeat.
+  void stop(std::chrono::steady_clock::time_point deadline,
+            DrainCause cause = DrainCause::WorkerShutdown) noexcept;
 
   /// Sessions holding a slot; after stop(), those that still held one when it
   /// released the manager.
