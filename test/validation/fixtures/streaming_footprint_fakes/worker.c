@@ -12,7 +12,8 @@
 // its HTTP listener and logs the real worker's line for it; built without, it
 // refuses the config at start with the real worker's error and exit status.
 // NO_STREAM_LISTENER stands for a build with the feature from before the
-// listener existed, LISTENER_DELAY_MS delays the line past /health ready, and
+// listener existed, LISTENER_DELAY_MS delays the line that long past the first
+// /health answer, and
 // LISTENER_MIB is touched before the line, so samples taken earlier miss it.
 
 #define _GNU_SOURCE
@@ -37,6 +38,7 @@
 #endif
 
 static const volatile unsigned char payload[PAYLOAD_BYTES] = {1};
+static int answered_health;
 
 static void *touch(size_t mib) {
   if (mib == 0) {
@@ -93,6 +95,9 @@ static int streaming_enabled(const char *path) {
 static void *stream_listener(void *arg) {
   const char *host = arg;
 #ifdef LISTENER_DELAY_MS
+  while (!__atomic_load_n(&answered_health, __ATOMIC_ACQUIRE)) {
+    usleep(10000);
+  }
   usleep(LISTENER_DELAY_MS * 1000);
 #endif
 #ifdef LISTENER_MIB
@@ -145,6 +150,7 @@ static void *serve(void *arg) {
              strlen(body));
     send_all(fd, head);
     send_all(fd, body);
+    __atomic_store_n(&answered_health, 1, __ATOMIC_RELEASE);
   } else if (strncmp(request, "GET /stream", 11) == 0) {
     void *held = touch(STREAM_MIB);
     // The status line tells the driver the stream's memory is in place.

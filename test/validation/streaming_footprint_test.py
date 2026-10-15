@@ -572,7 +572,7 @@ def harness_cases(work: Path) -> None:
     exits = compile_worker(work, "worker-exits", "-DEXIT_AT_START")
     degraded = compile_worker(work, "worker-degraded", "-DSTREAMING", "-DNEVER_READY")
     late = compile_worker(
-        work, "worker-late", "-DSTREAMING", "-DLISTENER_DELAY_MS=1000", "-DLISTENER_MIB=4"
+        work, "worker-late", "-DSTREAMING", "-DLISTENER_DELAY_MS=2000", "-DLISTENER_MIB=4"
     )
     unlistened = compile_worker(work, "worker-unlistened", "-DSTREAMING", "-DNO_STREAM_LISTENER")
     on_pkg = build_package(work, "with", on)
@@ -720,7 +720,7 @@ def harness_cases(work: Path) -> None:
     runs = record.get("sides", {}).get("with_streaming", {}).get("runs", [])
     idle_delta = record.get("result", {}).get("budgets", {}).get("idle_rss", {}).get("max_delta_bytes")
     check(
-        "a listener logged a second after /health is ready is waited for, and the idle samples"
+        "a listener logged two seconds after /health is ready is waited for, and the idle samples"
         " hold the 4 MiB it touched before logging",
         result.returncode == 0
         and [run.get("stream_listener") for run in runs] == ["started"] * 3
