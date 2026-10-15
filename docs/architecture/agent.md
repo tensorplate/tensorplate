@@ -226,7 +226,8 @@ it](#what-status-reads-from-the-registry); an agent whose worker control
 reports no processes (`worker.mode: mock`) leaves all four absent.
 `effective_quota` is the quota the member's worker answered its last
 `activate` with, while its process runs; it is absent before a worker has
-answered one `ok` (see [Admission](#member-registry)).
+answered one `ok` and once it answers one `error` (see
+[Admission](#member-registry)).
 `stream_api_version` and `staged_bytes` stay absent until their sources
 exist.
 Beside a resident set the durable singleton slots
@@ -1076,9 +1077,10 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   judges it ready; it is sent from a thread of its own, so the step does
   not wait for the answer, and not at all while a transaction has fenced
   that generation. An `activate` waits at most 3 seconds for its answer;
-  one after a commit or a restart not answered `ok` is logged and changes
-  nothing else. The quota an
-  `ok` carries is the member's `effective_quota` in status. Operations to
+  one after a commit or a restart not answered `ok` is logged and fails
+  nothing. The quota an `ok` carries is the member's `effective_quota` in
+  status; an `activate` answered `error` clears it, and one not answered,
+  or refused otherwise, leaves it. Operations to
   one worker are sent one at a time, and a restart's activate is not sent
   while a transaction's fence is in force. Each
   is exchanged in the gap before the channel's next ledger poll, so none

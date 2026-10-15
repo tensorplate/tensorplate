@@ -545,15 +545,28 @@ fn a_loading_restart_a_transaction_fenced_is_reopened_by_the_step_once_its_worke
 }
 
 #[test]
-fn an_activate_refused_after_one_answered_ok_keeps_the_quota_answered() {
-    let f = fixture();
-    let serving = f.serve("stt");
-    ready_candidate(&f, "tts");
-    f.registry.fence("tx-2", &candidate("tts")).unwrap();
-    serving.target.lock().unwrap().admission = Admission::Retiring;
+fn an_activate_answered_error_clears_the_quota_and_one_not_answered_keeps_it() {
+    for (case, kept) in [
+        ("error", None),
+        ("unanswered", Some(MemberTarget::quota(0))),
+    ] {
+        let f = fixture();
+        let serving = f.serve("stt");
+        assert_eq!(quota_of(&f, 1), Some(MemberTarget::quota(0)), "{case}");
+        ready_candidate(&f, "tts");
+        f.registry.fence("tx-2", &candidate("tts")).unwrap();
+        match case {
+            "error" => serving.target.lock().unwrap().admission = Admission::Retiring,
+            _ => serving.reply(Reply::Unanswered),
+        }
 
-    f.registry.abandon(&candidate("tts"));
+        f.registry.abandon(&candidate("tts"));
 
-    assert_eq!(serving.ops().last(), Some(&sent(ACTIVATE, "tx-2")));
-    assert_eq!(quota_of(&f, 1), Some(MemberTarget::quota(0)));
+        assert_eq!(
+            serving.ops().last(),
+            Some(&sent(ACTIVATE, "tx-2")),
+            "{case}"
+        );
+        assert_eq!(quota_of(&f, 1), kept, "{case}");
+    }
 }

@@ -1126,10 +1126,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   ready (from a thread of its own, so supervision does not wait). An
   `activate` not answered `ok` within 3 seconds is logged and fails nothing;
   the quota an `ok` carries is reported as the member's `effective_quota` in
-  status. An operation not answered before the channel's next ledger poll is
-  sent again after it as a new request. A serving worker without the control
-  target that answers these operations answers the fence `unsupported`, so a
-  deploy that would replace it fails. (V030-E03-F01-T04, V030-E04-F01-T04)
+  status, until an `activate` is answered `error`. An operation not answered
+  before the channel's next ledger poll is sent again after it as a new
+  request. A serving worker without the control target that answers these
+  operations answers the fence `unsupported`, so a deploy that would replace
+  it fails. (V030-E03-F01-T04, V030-E04-F01-T04)
 - A rollback whose previous deployment's staged copy fails its artifact
   check now answers as the restore at the agent's start does: `load_failed`
   when an artifact is missing, truncated or replaced, `config_invalid` when

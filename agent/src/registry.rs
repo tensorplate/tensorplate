@@ -297,7 +297,8 @@ struct ControlState {
     /// The fence in force. Held while an operation is sent, so operations
     /// reach the member in the order they were decided.
     fenced_by: Mutex<Option<Fence>>,
-    /// What the member's worker answered its last `activate` with.
+    /// What the member's worker answered its last `activate` with, until
+    /// one is answered `error`.
     quota: Mutex<Option<MemberQuota>>,
 }
 
@@ -422,7 +423,13 @@ impl Reach {
                 *lock(&self.control.quota) = answer.quota;
                 Ok(())
             }
-            Ok(answer) => Err(format!("refused: {}", refusal(&answer))),
+            Ok(answer) => {
+                // A quota the worker no longer admits by is worse than none.
+                if answer.status == WorkerStatusOutcome::Error {
+                    *lock(&self.control.quota) = None;
+                }
+                Err(format!("refused: {}", refusal(&answer)))
+            }
             Err(err) => Err(format!("not answered: {err}")),
         }
     }
