@@ -72,6 +72,7 @@ STATUS = {
     "idle_timeout": Code.DEADLINE_EXCEEDED,
     "admission_closed": Code.UNAVAILABLE,
     "worker_shutdown": Code.UNAVAILABLE,
+    "deployment_retired": Code.UNAVAILABLE,
     "backend_reset": Code.UNAVAILABLE,
     "client_cancelled": Code.CANCELLED,
 }
@@ -521,12 +522,17 @@ class StreamServer:
                 return
             self.received.append(first)
             self._notify()
+            if self.fault == "ok_before_ready":
+                return
             ready = self._admit(first)
         except _Ends as refusal:
             reason = str(refusal)
             refused = pb.OpenRefused(cause=end_cause(reason), admission=pb.ADMISSION_NOT_ADMITTED)
             self.refusals.append(refused)
-            await context.abort(STATUS[reason], reason)
+            # The listener's text; nothing on the client decodes it.
+            await context.abort(
+                STATUS[reason], "open refused: " + pb.FailureReason.Name(refused.cause.reason)
+            )
         self.live += 1
         try:
             await _Live(self, context, ready).run()

@@ -12,9 +12,15 @@ from tensorplate._extras import require_speech
 require_speech()
 
 from tensorplate.speech.client import SpeechClient  # noqa: E402
+from tensorplate.speech.discovery import StreamTarget, resolve_stream_target  # noqa: E402
 from tensorplate.speech.errors import (  # noqa: E402
+    DiscoveryError,
     InvalidEventError,
+    NotServingError,
+    NotStreamingError,
     PreconditionFailedError,
+    RemoteAgentError,
+    ResidentSetError,
     ResourceExhaustedError,
     ServerInternalError,
     ServiceUnavailableError,
@@ -45,12 +51,17 @@ from tensorplate.speech.tts import Follow, TextToSpeechEvent, TextToSpeechSessio
 __all__ = [
     "AudioChunk",
     "AudioFormat",
+    "DiscoveryError",
     "EndpointDetected",
     "FinalTranscript",
     "Follow",
     "InvalidEventError",
+    "NotServingError",
+    "NotStreamingError",
     "PartialTranscript",
     "PreconditionFailedError",
+    "RemoteAgentError",
+    "ResidentSetError",
     "ResourceExhaustedError",
     "SegmentCompleted",
     "ServerInternalError",
@@ -66,10 +77,12 @@ __all__ = [
     "SpeechToTextLimits",
     "SpeechToTextSession",
     "StreamProtocolError",
+    "StreamTarget",
     "SynthesisCompleted",
     "Target",
     "TextToSpeechEvent",
     "TextToSpeechLimits",
     "TextToSpeechSession",
     "TranscriptSegment",
+    "resolve_stream_target",
 ]

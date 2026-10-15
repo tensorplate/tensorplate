@@ -78,3 +78,13 @@ discovers the agent over its Unix socket
 configured `agent_url` TCP address. Reserved profile modes
 (`ssh_tunnel` / `overlay` / `relay`) are not used for discovery, mirroring
 the CLI's "unsupported" stance.
+
+## Stream endpoints
+
+The streaming speech client (`tensorplate.speech`) finds its endpoint
+through the same CLI profile and agent transport, and nothing else: it has
+no explicit-URL or loopback tier, and an agent that cannot be read, or whose
+status names no stream target, raises a `DiscoveryError` rather than falling
+through. It refuses a `url`-mode profile whose `agent_url` host is not
+loopback, as the endpoints that agent names are on its own host. See
+[finding the stream endpoint](./python.md#finding-the-stream-endpoint).

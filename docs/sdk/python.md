@@ -276,9 +276,10 @@ client for a serving worker's stream endpoint: one gRPC call per session,
 speaking the [stream session schema](../../protocol/README.md#streaming-session-envelope).
 It is asyncio only; there is no synchronous wrapper. It opens
 speech-to-text sessions, described first, and
-[text-to-speech sessions](#text-to-speech-sessions). Discovery of the stream
-endpoint through the agent is not in the package yet, so the caller names
-the endpoint and the deployment. The schema is a draft. A serving worker
+[text-to-speech sessions](#text-to-speech-sessions). The caller names the
+endpoint and the deployment, or asks the agent for both
+([finding the stream endpoint](#finding-the-stream-endpoint)). The schema is
+a draft. A serving worker
 built with streaming support serves these sessions for a speech deployment
 when its config sets `streaming.enabled`, which the agent renders for a
 deployment made with `tensorplate deploy --streaming`; `tensorplate status`
@@ -459,9 +460,11 @@ async def show_partials(session: SpeechToTextSession) -> None:
   between the two calls: a `cancel()`, the client's `aclose()` or the
   `open_timeout` in between ends it, with no second call, and a task
   already iterating the session takes the second call's events.
-  Otherwise the client never reopens, resends or replays. A session that was
-  refused, failed or lost is reported once, and opening another is the
-  caller's decision.
+  A client made by `SpeechClient.from_agent()` may send that second call to
+  another target ([finding the stream endpoint](#finding-the-stream-endpoint));
+  an `open()` never makes more than two calls. Otherwise the client never
+  reopens, resends or replays. A session that was refused, failed or lost is
+  reported once, and opening another is the caller's decision.
 
 Every error is a `SpeechError` (a `TensorPlateError`), never a gRPC
 exception. Its class follows the final status of the call:
@@ -526,6 +529,83 @@ has closed it (30 to 60 minutes). A channel passed in that turns gRPC's
 client idle limit off, or that was connected without a call, can meet the
 worker's close. A session opened at that instant sends its Open once more,
 on a new connection.
+
+### Finding the stream endpoint
+
+The agent's status names where the active deployment serves streams: its
+`stream_endpoint`, with the deployment id, `generation` and
+`descriptor_digest` an Open names there. They are present while the
+generation serving the active deployment was started with `tensorplate
+deploy --streaming` (see [`tensorplate status`](../cli/status.md)).
+`resolve_stream_target()` reads that status once and returns a
+`StreamTarget`, the `endpoint` and the `Target`:
+
+```python
+from tensorplate.speech import SpeechClient, resolve_stream_target
+
+endpoint, target = await resolve_stream_target()
+async with SpeechClient(endpoint) as client:
+    session = client.transcribe(target, language="en", input_format=audio)
+```
+
+`SpeechClient.from_agent()` reads it for the client, which then opens every
+session on the target last read and takes no `target` argument:
+
+```python
+async with await SpeechClient.from_agent() as client:
+    async with client.transcribe(language="en", input_format=audio) as session:
+        ...
+```
+
+The agent is found as `tensorplate` and the unary clients find it
+([endpoint resolution](./endpoint-resolution.md)): the CLI profile named by
+`profile`, else the config's default, else `local`, the agent's socket at
+`/var/run/tensorplate/agent.sock`. On a packaged install that socket and its
+directory belong to the `tensorplate` group (modes 0660 and 0750), so the
+application's user must be in that group. The SDK reads only the status the
+agent's control socket answers; it reads no CLI output, state file or worker
+configuration. `status_timeout` (5 seconds) bounds each socket operation of
+a read: the connection, the request's write and each wait for more of the
+answer.
+
+Each generation is a worker of its own. A deploy or a rollback normally
+starts the new generation on another stream port and stops the old worker; a
+restart starts a new generation on the same port. So the target a client
+read goes stale, and a client made by `from_agent()` follows it:
+
+- **A session already open stays where it is.** It runs until its worker
+  ends it, which a worker going away does with `ServiceUnavailableError`
+  and `reason` `worker_shutdown`, or `deployment_retired` once the agent
+  retires workers. It is never moved to another generation.
+- **After such an end, the next open reads the status first**, as it does
+  after an open whose read of the status failed.
+- **An open whose first call ends before any server event reads the status
+  once.** That is how an Open ends that reached the old worker as it
+  drains (`admission_closed`), a port nothing listens on any more, or a
+  worker that serves another generation now (`stale_generation`). When the
+  agent names another endpoint or target, the second call goes there.
+  When it names the same one, the second call is made only where the
+  [one more Open](#streaming-speech-client) rule allows it, and otherwise
+  the first call's error is raised. Either way an `open()` makes at most
+  two calls, all within its `open_timeout`, which also bounds the read.
+
+When the status names no stream target, discovery raises a
+`DiscoveryError`, which is a `SpeechError` and an `EndpointResolutionError`,
+with `admitted` `False` when no Open was sent. When the error ends an open
+whose first call was lost, `admitted` is that call's and the call's error is
+its `__cause__`. There is no default endpoint to fall back on.
+
+| Exception | Raised when |
+| --- | --- |
+| `NotStreamingError` | The generation serving the active deployment does not serve streams: it was deployed without `--streaming`, or the agent starts no deployment with streaming (it does not list the `deploy_streaming` control feature). |
+| `NotServingError` | No generation serves the active deployment now, or nothing is deployed. A deploy, a rollback or a restart may be between its steps. |
+| `ResidentSetError` | The agent serves more than one deployment, so no single one is active. Give the client the member's endpoint and target. |
+| `RemoteAgentError` | The profile reaches the agent at another host. Its stream endpoints are on that host's loopback interface; forward one and give the client that endpoint and the target. |
+| `DiscoveryError` | The agent cannot be reached or its answer read, the profile names no agent the SDK reads a status from, or the status names a malformed target. |
+
+The client does not wait for a deployment to start serving. A caller that
+wants to wait calls `resolve_stream_target()`, or opens again, at an
+interval of its own choosing until the error is gone.
 
 ### Text-to-speech sessions
 
@@ -686,7 +766,9 @@ agent-discovered active deployment → loopback `http://127.0.0.1:18080`. An
 agent that reports a resident set but no `serving_url` raises
 `EndpointUnavailableError` rather than reaching the loopback default. The
 full precedence and URL canonicalization rules are in
-[endpoint-resolution.md](./endpoint-resolution.md).
+[endpoint-resolution.md](./endpoint-resolution.md). The streaming speech
+client asks the agent alone, with no default; see
+[finding the stream endpoint](#finding-the-stream-endpoint).
 
 ## Examples
 
@@ -703,9 +785,8 @@ deliberately do **not** provide:
 
 - in-runtime camera or video ingest;
 - a DeepStream sink or any GStreamer integration;
-- a synchronous streaming client or discovery of a stream endpoint: the
-  [streaming speech client](#streaming-speech-client) is asyncio and opens
-  its sessions on an endpoint it is given;
+- a synchronous streaming client: the
+  [streaming speech client](#streaming-speech-client) is asyncio only;
 - any change to runtime serving behavior or ownership.
 
 These are separate, deferred capabilities tracked outside v0.1.3. The

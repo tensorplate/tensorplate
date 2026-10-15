@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
-from tensorplate.speech._session import Session, enum_name
+from tensorplate.speech._session import Session, Targets, enum_name
 from tensorplate.speech.events import (
     AudioChunk,
     AudioFormat,
@@ -74,12 +74,13 @@ class TextToSpeechSession(Session[TextToSpeechEvent]):
         open_timeout: float | None,
         close_timeout: float | Follow | None,
         cancel_timeout: float,
+        targets: Targets | None = None,
     ) -> TextToSpeechSession:
         session = cls.__new__(cls)
         follows = close_timeout is Follow.FINALIZE_DEADLINE
         # A close needs an open session, and Ready sets the bound that follows it.
         given = None if close_timeout is Follow.FINALIZE_DEADLINE else close_timeout
-        session._setup(connect, target, open_timeout, given, cancel_timeout)
+        session._setup(connect, target, open_timeout, given, cancel_timeout, targets)
         session._configure(language, voice, trace_id, turn_id, follows)
         return session
 

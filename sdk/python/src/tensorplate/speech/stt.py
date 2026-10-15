@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from tensorplate.speech._session import Session, enum_name
+from tensorplate.speech._session import Session, Targets, enum_name
 from tensorplate.speech.events import (
     AudioFormat,
     EndpointDetected,
@@ -58,9 +58,10 @@ class SpeechToTextSession(Session[SpeechToTextEvent]):
         open_timeout: float | None,
         close_timeout: float | None,
         cancel_timeout: float,
+        targets: Targets | None = None,
     ) -> SpeechToTextSession:
         session = cls.__new__(cls)
-        session._setup(connect, target, open_timeout, close_timeout, cancel_timeout)
+        session._setup(connect, target, open_timeout, close_timeout, cancel_timeout, targets)
         session._configure(language, input_format, trace_id, turn_id)
         return session
 
