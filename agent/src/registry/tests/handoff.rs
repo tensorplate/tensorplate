@@ -638,10 +638,18 @@ fn started_failing(w: &Wired, fail: &str) -> Wired {
         let last = launcher.launched.lock().unwrap().last().cloned();
         last.unwrap().exited.store(true, Ordering::SeqCst);
     };
+    let probe = next.f.probe.clone();
     match fail {
         "spawn" => next.f.launcher.refuse.store(true, Ordering::SeqCst),
         "ready" => next.f.probe.silent.store(true, Ordering::SeqCst),
-        "loading" => *next.f.probe.during.lock().unwrap() = Some(Box::new(exit_last)),
+        // Gone while loading: the probe that finds it gone gets no answer.
+        "loading" => {
+            let exit_unanswered = move || {
+                exit_last();
+                probe.silent.store(true, Ordering::SeqCst);
+            };
+            *next.f.probe.during.lock().unwrap() = Some(Box::new(exit_unanswered));
+        }
         // Ready, then gone before it would serve.
         "fence" => *next.worker.before_fence.lock().unwrap() = Some(Box::new(exit_last)),
         _ => unreachable!(),
@@ -671,7 +679,11 @@ fn a_start_whose_restored_worker_does_not_come_up_stays_up_and_restarts_it() {
 
         let status = next.coordinator.status().unwrap();
         assert_eq!(status.agent_state, AgentRunState::Degraded, "{fail}");
-        assert!(status.last_error.is_some(), "{fail}");
+        let error = status.last_error.expect(fail);
+        if matches!(fail, "loading" | "fence") {
+            // Ended by the worker's exit, not by the warm's deadline.
+            assert_eq!(error.code, ErrorCode::LoadFailed, "{fail}");
+        }
         // The restore's own generation is not left running.
         assert!(roles(&next.f).is_empty(), "{fail}");
         heal(&next);
