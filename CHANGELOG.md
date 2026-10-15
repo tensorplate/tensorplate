@@ -8,6 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The serving worker writes each of its stderr log records and its newline
+  in one write. Two threads logging at once, as the control thread's
+  `deployment retiring` and the main thread's lines do after a retire,
+  could leave two records on one line, which a reader that parses the
+  worker's stderr line by line could not read. (V030-E04-F01-T04)
+
 - A deploy or rollback now refuses, before its commit, a candidate worker
   whose control channel failed after its warm: the candidate is killed, the
   transaction fails as it does for a candidate that exited, and the serving

@@ -66,6 +66,7 @@ add_executable(tp_test_unit
   speech_dispatch_test.cpp
   control_channel_test.cpp
   drain_window_test.cpp
+  stderr_log_test.cpp
 )
 
 target_include_directories(tp_test_unit

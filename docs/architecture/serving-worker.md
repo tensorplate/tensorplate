@@ -646,9 +646,12 @@ listener is opened. The binary's exit codes are:
 | 66   | Listener bind / accept failure. |
 | 70   | Internal error, and a worker that stopped itself because its speech backend stalled ([A stalled speech backend](#a-stalled-speech-backend)), also when the stall came during a stop it was asked for. |
 
+With `enable_stderr_logs`, the worker writes one JSON record per stderr
+line (`runtime/src/serving/stderr_log.cpp`), each record and its newline in
+one write, so that records its threads write at once never share a line.
 A worker that exits with 64, 65 or 66 ends its stderr with one JSON line,
 the startup failure record, written whether or not `enable_stderr_logs` is
-set:
+set, after the worker has stopped:
 
 ```json
 {"component":"serving","fields":{"code":"unsupported","message":"..."},"level":"error","message":"worker startup failed","ts_ns":0}

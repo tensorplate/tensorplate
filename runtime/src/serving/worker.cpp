@@ -6,7 +6,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -36,6 +35,7 @@
 #include "serving/drain_window.hpp"
 #include "serving/member_control.hpp"
 #include "serving/mock_session.hpp"
+#include "serving/stderr_log.hpp"
 #if TP_ENABLE_STREAMING_GRPC
 #include "serving/session/speech_dispatch.hpp"
 #include "serving/stream/stream_listener.hpp"
@@ -45,23 +45,7 @@ namespace tensorplate {
 
 namespace {
 
-void log_stderr(const ServingConfig& cfg, std::string_view level, std::string_view message,
-                const nlohmann::json& fields = {}) {
-  if (!cfg.enable_stderr_logs) {
-    return;
-  }
-  nlohmann::json j;
-  j["ts_ns"] = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                   std::chrono::steady_clock::now().time_since_epoch())
-                   .count();
-  j["level"] = std::string{level};
-  j["component"] = "serving";
-  j["message"] = std::string{message};
-  if (!fields.empty()) {
-    j["fields"] = fields;
-  }
-  std::cerr << j.dump() << '\n';
-}
+using serving::log_stderr;
 
 /// When the drain window ends, on the clock and in the unit of a line's
 /// `ts_ns`, and the cause its sessions end with.
