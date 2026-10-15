@@ -368,6 +368,11 @@ fn a_deploy_after_one_whose_candidate_never_became_ready_takes_a_new_generation(
     let error = w.deploy("tts", TTS).unwrap_err();
 
     assert!(matches!(error, AgentError::WorkerNotReady), "{error}");
+    // Refused by its warm, not by the fence after a warm a stalled thread
+    // gave up and a repeat then found ready.
+    let state = w.store.snapshot().unwrap();
+    let entry = state.quarantined.last().expect("a quarantine entry");
+    assert_eq!(entry.phase, DeployState::Prepared);
     assert_eq!(w.named(), ["stt@1", "-", "3"]);
     // Its candidate, generation 2, runs until the next deploy displaces it.
     w.f.health(CANDIDATE_PORT, "tts");
