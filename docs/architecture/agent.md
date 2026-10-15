@@ -697,10 +697,11 @@ agent under either. Where an agent is run by hand and killed, the pass
 does not end a worker it left behind: nothing records one. That worker
 still listens on its port, and the agent does not check that a port it
 leases is free (see [Ports](#member-registry)): the worker the restore
-starts exits when it cannot bind, and the start ends with exit code `5`.
-The error does not name the port: a worker writes no startup record for a
-listener it could not start, so `last_error` is `load_failed` with the
-worker's exit status and no reason.
+starts cannot bind it, as a worker's listener does not share its port; it
+exits with a startup record, and the start ends with exit code `5`.
+`last_error` is that record's `unavailable`, recoverable, with a message
+naming the address and the bind error, such as
+`http server: could not bind 127.0.0.1:18080: Address already in use`.
 
 ## Versioning policy
 
@@ -1018,8 +1019,9 @@ be reaped, and then fails with `resource_exhausted`. A failed or unloaded
 member gives its ports back. The agent does not check that a port it
 leases is free on the host: when another process listens on one, the worker
 given it does not start, so every deploy onto it fails with the worker's
-startup error, and a restart, which keeps its ports, fails until its three
-restarts are used up and the member is failed.
+startup error, `unavailable` naming the address, and a restart, which keeps
+its ports, fails until its three restarts are used up and the member is
+failed.
 
 The pool is `worker.serving_port_range` when the configuration has one:
 pairs taken in order from `first`, an HTTP port and the port after it, kept

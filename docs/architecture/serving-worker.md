@@ -620,8 +620,8 @@ listener is opened. The binary's exit codes are:
 | 66   | Listener bind / accept failure. |
 | 70   | Internal error, and a worker that stopped itself because its speech backend stalled ([A stalled speech backend](#a-stalled-speech-backend)), also when the stall came during a stop it was asked for. |
 
-A worker that exits with 64 or 65 ends its stderr with one JSON line, the
-startup failure record, written whether or not `enable_stderr_logs` is
+A worker that exits with 64, 65 or 66 ends its stderr with one JSON line,
+the startup failure record, written whether or not `enable_stderr_logs` is
 set:
 
 ```json
@@ -630,7 +630,17 @@ set:
 
 `fields.code` is the typed error of the step that failed, in its wire
 spelling; when a sidecar runner refuses a load it is the runner's code and
-message unchanged. If the record itself cannot be built the worker writes
+message unchanged. A listener that cannot bind its port because another
+process listens on it gives `unavailable`: the HTTP listener's message names
+the address and the bind error
+(`http server: could not bind 127.0.0.1:18080: Address already in use`), the
+stream listener's names the address only
+(`stream listener could not bind 127.0.0.1:18081`), as gRPC gives the
+listener no cause (gRPC writes a line of its own about the bind above the
+record). Any other bind error of the HTTP listener is `load_failed`, named
+the same way, and so is a failed `listen()`
+(`http server: could not listen on ...`), `unavailable` when another socket
+bound the port as well and listened first. If the record itself cannot be built the worker writes
 the plain line `worker startup failed` instead. The agent reads this line to answer the deploy that
 started the worker (see [agent.md](agent.md#serving-worker-handoff-v01-e08-f05)).
 
@@ -646,6 +656,12 @@ The HTTP server is a small in-tree implementation (see
   The listener honors the address family the host literal names: an
   IPv4 literal binds an `AF_INET` socket, `::1` binds an `AF_INET6`
   socket (IPv6-only), and `localhost` maps to the IPv4 loopback.
+- **One listener per port.** The listening socket sets `SO_REUSEADDR`, so
+  a restarted worker binds its port beside earlier connections that are
+  still closing, `TIME_WAIT` included, and not `SO_REUSEPORT`: a port
+  another process listens on, another worker of the same user included,
+  fails the bind. With `SO_REUSEPORT` both would listen, and on Linux the
+  kernel would split connections between them.
 - **Request limits.** `max_body_bytes`, `max_header_bytes`, and
   `request_timeout` are enforced inline by the parser. Oversized
   requests return 413 before any buffer-plane allocation is

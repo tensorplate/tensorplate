@@ -21,6 +21,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   starts its worker once, so a deployment the agent runs is unchanged.
   (V030-E04-F03-T02)
 
+- A serving worker's HTTP listener no longer shares its port. It set
+  `SO_REUSEPORT`, so a second worker of the same user, such as the one an
+  agent restored beside a worker an earlier agent process left running,
+  bound a port the first still listened on, and on Linux the kernel split
+  connections between the two. A worker whose HTTP or stream listener
+  cannot bind now ends its stderr with the startup failure record before it
+  exits with 66, so the agent's deploy, restart or restore reports
+  `unavailable` with a message naming the address, and for the HTTP
+  listener the bind error, instead of `load_failed` with the exit status
+  and no reason. The HTTP listener's own error for a port in use changes
+  from `load_failed` to `unavailable`; its other bind and listen errors stay
+  `load_failed`, and each now names the address. (V030-E03-F01-T04)
+
 - The rolling validation comparison now sets a line only against an earlier
   line of the same kind: a validation pass against an earlier pass, an
   evidence line (a run filed publicly, such as a standalone qualification
