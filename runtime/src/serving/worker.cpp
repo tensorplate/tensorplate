@@ -593,12 +593,12 @@ void ServingWorker::Impl::stop_stream_listener() noexcept {
     // Sessions drain inside the window that began when shutdown was asked.
     const auto end =
         drain_window.begin(std::chrono::steady_clock::now(), config.shutdown.drain_deadline);
-    const auto cause = drain_window.cause();
     try {
-      log_stderr(config, "info", "stream listener stopping", drain_end_fields(end, cause));
+      log_stderr(config, "info", "stream listener stopping",
+                 drain_end_fields(end, drain_window.cause()));
     } catch (...) {  // NOLINT(bugprone-empty-catch): the stop continues without the line.
     }
-    listener->stop(end, cause);
+    listener->stop(drain_window);
     if (speech_dispatch != nullptr) {
       try {
         const auto stats = speech_dispatch->stats();
@@ -623,8 +623,8 @@ void ServingWorker::Impl::stop_stream_listener() noexcept {
 
 // On the dispatch's thread. It asks for the worker's stop and does not wait:
 // the stop runs on the thread that waits for shutdown. The request comes
-// before `failed`, which the binary's main thread answers with a shutdown of
-// its own that then finds this one.
+// before `failed`, which the binary's main thread answers with its stop,
+// which then finds this request.
 void ServingWorker::Impl::on_speech_stall(const Error& cause) noexcept {
   backend_stalled.store(true);
   health.record_error(cause);
@@ -698,17 +698,19 @@ void ServingWorker::Impl::evictor_loop() {
 
 void ServingWorker::Impl::run_drain() {
   shutdown.enter_draining();
-  set_serving_state(ServingState::Draining);
   if (config.shutdown.cancel_queued_immediately) {
     (void)scheduler->shutdown();
     async_store->cancel_all();
   }
   // Wait for in-flight to settle, for what is left of the drain window: a
-  // stream drain before this one has used part of it.
+  // stream drain before this one has used part of it. A shortened window
+  // ends the wait.
   const auto deadline =
       drain_window.begin(std::chrono::steady_clock::now(), config.shutdown.drain_deadline);
   log_stderr(config, "info", "draining requests", drain_end_fields(deadline, drain_window.cause()));
-  while (std::chrono::steady_clock::now() < deadline) {
+  // Draining once the wait has its end, which a shutdown after it shortens.
+  set_serving_state(ServingState::Draining);
+  while (std::chrono::steady_clock::now() < drain_window.end()) {
     const auto m = scheduler->metrics();
     if (m.queue_depth == 0 && m.in_flight == 0) {
       break;
@@ -843,11 +845,27 @@ void ServingWorker::shutdown(std::string_view reason) noexcept {
     if (!impl_) {
       return;
     }
-    if (!impl_->shutdown.is_stopping()) {
-      impl_->metrics.increment_shutdown_started();
-      log_stderr(impl_->config, "info", "shutdown requested", {{"reason", std::string{reason}}});
+    {
+      // The lock a retire's check and window take: a retire began its window
+      // before this request, which shortens it, or sees the request and leaves.
+      const std::lock_guard guard(impl_->state_mu);
+      if (!impl_->shutdown.is_stopping()) {
+        impl_->metrics.increment_shutdown_started();
+        log_stderr(impl_->config, "info", "shutdown requested", {{"reason", std::string{reason}}});
+      }
+      impl_->shutdown.request(std::string{reason});
+      // A retire's window ends no later than this shutdown's drain would,
+      // unless the worker is stopped.
+      if (const auto end =
+              impl_->shutdown.phase() == serving::ShutdownPhase::Stopped
+                  ? std::nullopt
+                  : impl_->drain_window.shorten(std::chrono::steady_clock::now(),
+                                                impl_->config.shutdown.drain_deadline)) {
+        auto fields = drain_end_fields(*end, impl_->drain_window.cause());
+        fields["reason"] = std::string{reason};
+        log_stderr(impl_->config, "info", "drain window shortened", fields);
+      }
     }
-    impl_->shutdown.request(std::string{reason});
     impl_->shutdown.notify_request();
     if (impl_->router != nullptr) {
       impl_->router->set_stopping(true);
@@ -856,7 +874,11 @@ void ServingWorker::shutdown(std::string_view reason) noexcept {
       impl_->pipeline->set_stopping(true);
     }
     impl_->stop_stream_admission();
-    impl_->set_serving_state(ServingState::Stopping);
+    const std::lock_guard guard(impl_->state_mu);
+    // A stop under way moves the state on itself.
+    if (!impl_->stopped.load()) {
+      impl_->health.set_state(ServingState::Stopping);
+    }
   } catch (...) {  // NOLINT(bugprone-empty-catch): noexcept shutdown is fire-and-forget.
   }
 }

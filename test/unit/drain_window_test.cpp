@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -51,6 +52,26 @@ TEST(DrainWindow, TheFirstCallerAlsoGivesTheWindowItsCause) {
   ASSERT_EQ(retired.begin(kAsked, 30s, DrainCause::DeploymentRetired), kAsked + 30s);
   EXPECT_EQ(retired.begin(kAsked + 1s, 2s), kAsked + 30s);
   EXPECT_EQ(retired.cause(), DrainCause::DeploymentRetired);
+}
+
+TEST(DrainWindow, AShortenEndsABegunWindowEarlierAndKeepsItsCause) {
+  DrainWindow window;
+  EXPECT_EQ(window.end(), DrainWindow::TimePoint::min()) << "before the window begins";
+  ASSERT_EQ(window.begin(kAsked, 30s, DrainCause::DeploymentRetired), kAsked + 30s);
+  EXPECT_EQ(window.end(), kAsked + 30s);
+  EXPECT_EQ(window.shorten(kAsked + 10s, 5s), kAsked + 15s);
+  EXPECT_EQ(window.end(), kAsked + 15s);
+  EXPECT_EQ(window.begin(kAsked + 11s, 30s), kAsked + 15s);
+  EXPECT_EQ(window.cause(), DrainCause::DeploymentRetired);
+}
+
+TEST(DrainWindow, AShortenNeitherLengthensAWindowNorBeginsOne) {
+  DrainWindow window;
+  EXPECT_EQ(window.shorten(kAsked, 5s), std::nullopt);
+  EXPECT_EQ(window.begin(kAsked + 1s, 2s), kAsked + 3s) << "the shorten began nothing";
+  EXPECT_EQ(window.shorten(kAsked + 2s, 5s), std::nullopt);
+  EXPECT_EQ(window.shorten(kAsked + 1s, 2s), std::nullopt) << "an end it already has";
+  EXPECT_EQ(window.end(), kAsked + 3s);
 }
 
 TEST(DrainWindow, CallersThatRaceAreAllGivenOneEndAndOneCause) {

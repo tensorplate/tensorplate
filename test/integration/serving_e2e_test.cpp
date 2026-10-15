@@ -885,6 +885,96 @@ TEST(ServingE2E, ARetireAfterAShutdownLeavesTheShutdownsDrainWindowAndCause) {
   EXPECT_EQ(draining.front().value("cause", ""), "worker_shutdown");
 }
 
+// The signal comes while the HTTP drain waits on an accepted job: the wait
+// ends by the shutdown's drain, not the retire's thirty seconds, and the
+// scheduler cancels the job then.
+TEST(ServingE2E, ASignalWhileARetireDrainsRequestsShortensTheWait) {
+  auto gate = std::make_shared<InferGate>();
+  BackendRegistry registry;
+  auto capability = BackendCapability::create("gated", {PrecisionHint::Auto}, ShapeSupport::Dynamic,
+                                              std::nullopt, /*supports_async=*/true);
+  ASSERT_TRUE(capability.has_value()) << capability.error().message;
+  ASSERT_TRUE(registry
+                  .register_backend(BackendEntry{
+                      "gated",
+                      capability.value(),
+                      [gate](ExecutionSessionRuntimeHooks hooks)
+                          -> Result<std::unique_ptr<ExecutionSession>> {
+                        return std::unique_ptr<ExecutionSession>(new GatedSession(hooks, gate));
+                      },
+                  })
+                  .has_value());
+  auto cfg = default_test_config();
+  cfg.enable_stderr_logs = true;
+  cfg.shutdown.cancel_queued_immediately = false;
+  cfg.shutdown.drain_deadline = std::chrono::milliseconds{300};
+  cfg.deployment.use_mock_session = false;
+  cfg.deployment.backend = "gated";
+  cfg.deployment.endpoint = "draining-member";
+  cfg.deployment.generation = 10;
+  cfg.deployment.model =
+      ModelSpec::create("gated-model", ModelClass::Custom, "fixture://gated", "gated").value();
+  const ipc::WorkerMember member{"draining-member", 10};
+  auto pair = ControlSocketPair::create();
+  const StdinReplaced as_the_agent_passes_it(pair.worker.get());
+  pair.worker.reset();
+  auto h = ServingHarness::start(std::move(cfg), registry);
+  HttpClient client("127.0.0.1", h.port);
+  const auto accepted = client.post("/policy/infer", make_infer_body("held-async"));
+  ASSERT_EQ(accepted.status, 202) << accepted.body;
+  std::thread stopper;
+  struct OpenAndJoin {
+    InferGate& gate;
+    std::thread& stopper;
+    ~OpenAndJoin() {
+      gate.release();
+      if (stopper.joinable()) {
+        stopper.join();
+      }
+    }
+  } open_and_join{*gate, stopper};
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    ASSERT_TRUE(gate->cv.wait_for(lock, std::chrono::seconds{10}, [&] { return gate->entered; }));
+  }
+
+  ::testing::internal::CaptureStderr();
+  EXPECT_EQ(ask_member(pair.agent.get(), ipc::WorkerControlOp::Retire, member).status,
+            ipc::WorkerControlStatus::Ok);
+  ServingExitCode stopped_with = ServingExitCode::Internal;
+  stopper = std::thread([&] { stopped_with = h.worker->stop(); });
+  const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds{60};
+  while (h.worker->health().state() != ServingState::Draining &&
+         std::chrono::steady_clock::now() < give_up) {
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+  h.worker->shutdown("SIGTERM");
+  while (h.worker->scheduler().metrics().cancelled_in_flight == 0 &&
+         std::chrono::steady_clock::now() < give_up) {
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+  const auto cancelled_at = std::chrono::steady_clock::now();
+  gate->release();
+  stopper.join();
+  const auto log = ::testing::internal::GetCapturedStderr();
+  EXPECT_EQ(stopped_with, ServingExitCode::Ok);
+  EXPECT_EQ(h.worker->scheduler().metrics().cancelled_in_flight, 1U);
+  const auto retiring = logged(log, "deployment retiring");
+  const auto draining = logged(log, "draining requests");
+  const auto shortened = logged(log, "drain window shortened");
+  ASSERT_EQ(retiring.size(), 1U) << log;
+  ASSERT_EQ(draining.size(), 1U) << log;
+  ASSERT_EQ(shortened.size(), 1U) << log;
+  const std::chrono::nanoseconds retire_ends{
+      retiring.front().value("drain_ends_ns", std::int64_t{0})};
+  EXPECT_EQ(draining.front().value("drain_ends_ns", std::int64_t{0}), retire_ends.count())
+      << "the signal came once the wait had its end";
+  EXPECT_EQ(shortened.front().value("cause", ""), "deployment_retired");
+  EXPECT_LT(shortened.front().value("drain_ends_ns", std::int64_t{0}), retire_ends.count());
+  // A wait that kept the retire's end cancels the job no earlier than this.
+  EXPECT_LT(cancelled_at.time_since_epoch(), retire_ends);
+}
+
 TEST(ServingE2E, ReservedSchedulerPolicyIsRefusedWhenTheWorkerIsBuilt) {
   auto cfg = default_test_config();
   cfg.scheduler.policy = "session_round_robin";
@@ -1136,6 +1226,15 @@ TEST(ServingE2E, ShutdownReleasesBuffers) {
   (void)h.worker->stop();
   // After stop, the buffer manager should report zero active buffers.
   EXPECT_EQ(h.worker->buffer_manager().accounting().active_count, 0U);
+}
+
+// As the binary's watch may, after the stop its own retire asked for.
+TEST(ServingE2E, AShutdownAfterTheStopLeavesTheWorkerStopped) {
+  auto h = ServingHarness::start(default_test_config());
+  ASSERT_EQ(h.worker->stop(), ServingExitCode::Ok);
+  ASSERT_EQ(h.worker->health().state(), ServingState::Stopped);
+  h.worker->shutdown("SIGTERM");
+  EXPECT_EQ(h.worker->health().state(), ServingState::Stopped);
 }
 
 TEST(ServingE2E, RejectsAdmissionWhileStopping) {

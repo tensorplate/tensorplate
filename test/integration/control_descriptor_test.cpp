@@ -183,13 +183,14 @@ TEST(ControlDescriptor, ARetiredMemberStopsItselfAndExitsWithSuccess) {
   EXPECT_EQ(*status, static_cast<int>(ServingExitCode::Ok)) << log;
   ASSERT_NO_FATAL_FAILURE(expect_stopped_for_the_retire(log));
   EXPECT_TRUE(logged(log, "retirement drain capped").empty()) << log;
+  EXPECT_TRUE(logged(log, "drain window shortened").empty()) << log;
   std::filesystem::remove_all(dir);
 }
 
 // The signal comes while the retire's drain has begun: the stop keeps the
-// retire's reason, cause and window, which the agent's ten minutes were cut
-// to thirty seconds for.
-TEST(ControlDescriptor, ASigtermAfterARetireKeepsTheRetiresReasonAndWindow) {
+// retire's reason and cause, and a window the agent's ten minutes were cut to
+// thirty seconds for, or that the signal shortened.
+TEST(ControlDescriptor, ASigtermAfterARetireKeepsTheRetiresReasonAndCause) {
   const auto dir = scratch_dir("retired-signalled");
   const auto port = testing::unused_loopback_port();
   auto pair = testing::ControlSocketPair::create();
@@ -214,7 +215,7 @@ TEST(ControlDescriptor, ASigtermAfterARetireKeepsTheRetiresReasonAndWindow) {
   EXPECT_EQ(retiring.front().value("window_ms", 0), 30'000);
   EXPECT_EQ(retiring.front().value("cause", ""), "deployment_retired");
   EXPECT_EQ(draining.front().value("cause", ""), "deployment_retired");
-  EXPECT_EQ(draining.front().value("drain_ends_ns", std::int64_t{0}),
+  EXPECT_LE(draining.front().value("drain_ends_ns", std::int64_t{0}),
             retiring.front().value("drain_ends_ns", std::int64_t{-1}));
   std::filesystem::remove_all(dir);
 }

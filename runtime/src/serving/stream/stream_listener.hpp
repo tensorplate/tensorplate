@@ -109,6 +109,11 @@ class StreamListener {
   void stop(std::chrono::steady_clock::time_point deadline,
             DrainCause cause = DrainCause::WorkerShutdown) noexcept;
 
+  /// stop() until `window` ends and for its cause. A window shortened while
+  /// the sessions drain ends their wait; once the wait for the calls has
+  /// begun, it keeps the end it read.
+  void stop(const DrainWindow& window) noexcept;
+
   /// Sessions holding a slot; after stop(), those that still held one when it
   /// released the manager.
   [[nodiscard]] std::size_t live_sessions() const noexcept;

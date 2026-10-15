@@ -1207,7 +1207,8 @@ TEST_F(SpeechWorkerScripted, AnActivateReopensAFencedMemberWithItsCeiling) {
 }
 
 // The retire answers, asks for the stop and changes nothing else; the stop
-// main then asks for drains the session with the retire's cause.
+// main then runs, with no shutdown of its own, drains the session with the
+// retire's cause and window.
 TEST_F(SpeechWorkerScripted, ARetireDrainsTheSessionWhichClosesAsRetired) {
   register_backend();
   backend->hold();
@@ -1233,10 +1234,11 @@ TEST_F(SpeechWorkerScripted, ARetireDrainsTheSessionWhichClosesAsRetired) {
   EXPECT_EQ(logged(log, "shutdown requested").size(), 1U) << log;
   EXPECT_EQ(state_of(client), wire::SESSION_STATE_ACTIVE) << "the retire drained the session";
 
-  served.worker->shutdown("deployment retired");
-  EXPECT_EQ(state_of(client), wire::SESSION_STATE_DRAINING);
+  ::testing::internal::CaptureStderr();
+  std::thread stopping([&] { EXPECT_EQ(served.worker->stop(), tensorplate::ServingExitCode::Ok); });
+  EXPECT_TRUE(eventually([&] { return state_of(client) == wire::SESSION_STATE_DRAINING; }));
   backend->release();
-  ASSERT_NO_FATAL_FAILURE(expect_segment(client, 1, text.size(), ready.output_format()));
+  EXPECT_NO_FATAL_FAILURE(expect_segment(client, 1, text.size(), ready.output_format()));
   const auto closed = closed_of(client.next());
   EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
   EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_DEPLOYMENT_RETIRED);
@@ -1245,7 +1247,15 @@ TEST_F(SpeechWorkerScripted, ARetireDrainsTheSessionWhichClosesAsRetired) {
   EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE);
   EXPECT_NE(status.error_message().find("FAILURE_REASON_DEPLOYMENT_RETIRED"), std::string::npos)
       << status.error_message();
-  (void)served.stop();
+  stopping.join();
+  // A signal once the drain is over moves no window.
+  served.worker->shutdown("SIGTERM");
+  const auto stopped = ::testing::internal::GetCapturedStderr();
+  const auto stopping_line = logged(stopped, "stream listener stopping");
+  ASSERT_EQ(stopping_line.size(), 1U) << stopped;
+  EXPECT_EQ(stopping_line.front().value("drain_ends_ns", std::int64_t{0}),
+            logged(log, "deployment retiring").front().value("drain_ends_ns", std::int64_t{-1}));
+  EXPECT_TRUE(logged(stopped, "drain window shortened").empty()) << stopped;
   expect_one_job_that_ran_uncancelled();
   EXPECT_EQ(count_of(sidecar.sent("session_release", 0), "session_release", session_key), 1U);
 }
@@ -1282,11 +1292,87 @@ TEST_F(SpeechWorkerScripted, ASigtermAfterARetireKeepsTheRetiresCauseAndWindow) 
   EXPECT_EQ(stopping.front().value("cause", ""), "deployment_retired");
   EXPECT_EQ(stopping.front().value("drain_ends_ns", std::int64_t{0}),
             retiring.front().value("drain_ends_ns", std::int64_t{-1}));
+  EXPECT_TRUE(logged(asked, "drain window shortened").empty()) << asked;
 
   const auto closed = closed_of(client.next());
   EXPECT_EQ(closed.state(), wire::SESSION_STATE_FAILED);
   EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_DEPLOYMENT_RETIRED);
   EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::UNAVAILABLE);
+}
+
+// The SIGTERM comes while the stop waits on the session, which then has the
+// shutdown's drain of the retire's thirty seconds, and fails as retired.
+TEST_F(SpeechWorkerScripted, ASigtermWhileARetireDrainsShortensItsWindowAndKeepsItsCause) {
+  register_backend();
+  backend->hold();
+  tensorplate::testing::OwnedFd agent;
+  auto config = streaming_config(speech_model());
+  config.shutdown.drain_deadline = 300ms;
+  auto built = member(config, agent);
+  ASSERT_NE(built, nullptr);
+  const Serving served{std::move(built), kServed};
+  poll_member(agent.get());
+  auto client = served.ready(wire::SESSION_MODE_TTS_STREAMING);
+  ASSERT_TRUE(client.send_text(1, "held"));
+  (void)running_job();
+
+  ::testing::internal::CaptureStderr();
+  EXPECT_EQ(ask(agent.get(), ipc::WorkerControlOp::Retire).status, ipc::WorkerControlStatus::Ok);
+  std::thread stopping([&] { EXPECT_EQ(served.worker->stop(), tensorplate::ServingExitCode::Ok); });
+  // Draining: the stop has read the window's end and waits on the session.
+  EXPECT_TRUE(eventually([&] { return state_of(client) == wire::SESSION_STATE_DRAINING; }));
+  served.worker->shutdown("SIGTERM");
+  const auto closed = closed_of(client.next());
+  const auto failed_at = std::chrono::steady_clock::now();
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_FAILED);
+  EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_DEPLOYMENT_RETIRED);
+  EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::UNAVAILABLE);
+  stopping.join();
+  const auto log = ::testing::internal::GetCapturedStderr();
+
+  const auto retiring = logged(log, "deployment retiring");
+  const auto shortened = logged(log, "drain window shortened");
+  const auto requested = logged(log, "shutdown requested");
+  ASSERT_EQ(retiring.size(), 1U) << log;
+  ASSERT_EQ(shortened.size(), 1U) << log;
+  ASSERT_EQ(requested.size(), 1U) << log;
+  EXPECT_EQ(requested.front().value("reason", ""), "deployment retired");
+  EXPECT_EQ(shortened.front().value("reason", ""), "SIGTERM");
+  EXPECT_EQ(shortened.front().value("cause", ""), "deployment_retired");
+  const std::chrono::nanoseconds retire_ends{
+      retiring.front().value("drain_ends_ns", std::int64_t{0})};
+  EXPECT_LT(shortened.front().value("drain_ends_ns", std::int64_t{0}), retire_ends.count());
+  // A wait that kept the retire's end fails the session no earlier than this.
+  EXPECT_LT(failed_at.time_since_epoch(),
+            retire_ends - tensorplate::serving::kTerminalEventReserve);
+}
+
+// As when the binary's wait reads a SIGTERM before it notices the retire: the
+// shutdown drains the session with the retire's cause, before the stop.
+TEST_F(SpeechWorkerScripted, ASigtermBeforeTheStopDrainsTheSessionAsRetired) {
+  register_backend();
+  backend->hold();
+  tensorplate::testing::OwnedFd agent;
+  auto built = member(streaming_config(speech_model()), agent);
+  ASSERT_NE(built, nullptr);
+  const Serving served{std::move(built), kServed};
+  poll_member(agent.get());
+  wire::Ready ready;
+  auto client = served.ready(wire::SESSION_MODE_TTS_STREAMING, &ready);
+  const std::string text = "fifteen bytes!!";
+  ASSERT_TRUE(client.send_text(1, text));
+  (void)running_job();
+
+  EXPECT_EQ(ask(agent.get(), ipc::WorkerControlOp::Retire).status, ipc::WorkerControlStatus::Ok);
+  served.worker->shutdown("SIGTERM");
+  EXPECT_EQ(state_of(client), wire::SESSION_STATE_DRAINING);
+  backend->release();
+  ASSERT_NO_FATAL_FAILURE(expect_segment(client, 1, text.size(), ready.output_format()));
+  const auto closed = closed_of(client.next());
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_DEPLOYMENT_RETIRED);
+  EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::UNAVAILABLE);
+  (void)served.stop();
 }
 
 TEST_F(SpeechWorkerScripted, ARetireAfterAShutdownKeepsTheShutdownsCause) {
@@ -1898,11 +1984,62 @@ TEST_F(SpeechWorkerRunner, ARetiredWorkerProcessClosesItsSessionAndExitsWithSucc
   const auto requested = logged(log, "shutdown requested");
   ASSERT_EQ(requested.size(), 1U) << log;
   EXPECT_EQ(requested.front().value("reason", ""), "deployment retired");
+  EXPECT_TRUE(logged(log, "drain window shortened").empty()) << log;
   const auto stopped = logged(log, "speech dispatch stopped");
   ASSERT_EQ(stopped.size(), 1U) << log;
   EXPECT_EQ(stopped.front().value("jobs_completed", 0), 1);
   EXPECT_EQ(stopped.front().value("releases_refused", -1), 0);
   EXPECT_EQ(stopped.front().value("releases_past_bound", -1), 0);
+}
+
+/// A retired worker process drains the session of its held job when
+/// `signal` comes, which only the binary's watch during its stop reads: the
+/// retire's window ends by the shutdown's drain and the session fails as
+/// retired.
+void signal_shortens_the_retires_window(int signal, const char* name) {
+  HeldJob held;
+  auto pair = ControlSocketPair::create();
+  ASSERT_NO_FATAL_FAILURE(hold_a_job(held, &pair));
+  Client& client = held.client;
+  EXPECT_EQ(ask(pair.agent.get(), ipc::WorkerControlOp::Retire).status,
+            ipc::WorkerControlStatus::Ok)
+      << held.log();
+  ASSERT_TRUE(eventually([&] { return state_of(client) == wire::SESSION_STATE_DRAINING; }))
+      << held.log();
+  // Past the watch's first wait (the binary's 100 ms), so that a later one
+  // reads the signal.
+  std::this_thread::sleep_for(3 * 100ms);
+  ASSERT_EQ(::kill(held.worker->pid(), signal), 0);
+
+  const auto closed = closed_of(client.next());
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_FAILED) << held.log();
+  EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_DEPLOYMENT_RETIRED);
+  EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::UNAVAILABLE);
+  // The cancelled job ends within its release bound.
+  std::ofstream{held.scratch.dir / "release"};
+  const auto status = held.worker->wait_exit(60s);
+  const auto log = held.log();
+  ASSERT_TRUE(status.has_value()) << log;
+  EXPECT_EQ(*status, static_cast<int>(tensorplate::ServingExitCode::Ok)) << log;
+  const auto requested = logged(log, "shutdown requested");
+  const auto retiring = logged(log, "deployment retiring");
+  const auto shortened = logged(log, "drain window shortened");
+  ASSERT_EQ(requested.size(), 1U) << log;
+  ASSERT_EQ(retiring.size(), 1U) << log;
+  ASSERT_EQ(shortened.size(), 1U) << log;
+  EXPECT_EQ(requested.front().value("reason", ""), "deployment retired");
+  EXPECT_EQ(shortened.front().value("reason", ""), name);
+  EXPECT_EQ(shortened.front().value("cause", ""), "deployment_retired");
+  EXPECT_LT(shortened.front().value("drain_ends_ns", std::int64_t{0}),
+            retiring.front().value("drain_ends_ns", std::int64_t{0}));
+}
+
+TEST_F(SpeechWorkerRunner, ASigtermWhileARetiredWorkerProcessDrainsShortensItsWindow) {
+  signal_shortens_the_retires_window(SIGTERM, "SIGTERM");
+}
+
+TEST_F(SpeechWorkerRunner, ASigintWhileARetiredWorkerProcessDrainsShortensItsWindow) {
+  signal_shortens_the_retires_window(SIGINT, "SIGINT");
 }
 
 #if defined(__linux__)

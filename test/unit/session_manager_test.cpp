@@ -131,6 +131,30 @@ TEST(SessionManager, TheAdmissionCheckIsAskedBeforeTheCountLimit) {
   EXPECT_EQ((*manager)->held_slots(), 1U);
 }
 
+TEST(SessionManager, AManagerThatStoppedAdmissionRefusesBeforeAskingTheAdmissionCheck) {
+  const auto limits = SessionLimits::create(60s, 10s, 30s, 60min, 1);
+  ASSERT_TRUE(limits);
+  testing::FakeSchedulerClock clock;
+  int asked = 0;
+  auto manager = SessionManager::create(
+      *limits, 7, clock, [](const auto&) {},
+      [&]() -> Result<void> {
+        ++asked;
+        return unexpected(
+            Error::make(Error::Code::NotReady, "admission is fenced", "admission_closed"));
+      },
+      false);
+  ASSERT_TRUE(manager);
+  EXPECT_TRUE((*manager)
+                  ->stop_admission_and_drain(Error::make(
+                      Error::Code::Unavailable, "the worker is shutting down", "worker_shutdown"))
+                  .empty());
+  const auto refused = (*manager)->open(7, kBudgets);
+  ASSERT_FALSE(refused);
+  EXPECT_EQ(refused.error().message, "session admission is closed");
+  EXPECT_EQ(asked, 0);
+}
+
 TEST(SessionManager, InitializationFailureNeverEmitsReadyAndRetainsCleanupSlot) {
   const auto limits = SessionLimits::create(60s, 10s, 30s, 60min, 1);
   ASSERT_TRUE(limits);

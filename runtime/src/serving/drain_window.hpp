@@ -13,7 +13,8 @@ enum class DrainCause : std::uint8_t { WorkerShutdown, DeploymentRetired };
 
 /// The one drain window of a worker's shutdown. The first caller begins it,
 /// for its cause, and every later caller is given the same end, so whatever
-/// drains after another drain has what that one left and no more.
+/// drains after another drain has what that one left and no more. Only
+/// shorten() moves the end, and only earlier.
 ///
 /// Thread-safe. The caller supplies `now`: the window reads no clock.
 class DrainWindow {
@@ -30,6 +31,25 @@ class DrainWindow {
       begun_ = Begun{now + length, cause};
     }
     return begun_->end;
+  }
+
+  /// Ends a begun window by `now` plus `length` when it would end later,
+  /// keeping its cause.
+  /// @return the new end, or nothing when the window has not begun or
+  /// already ends by then.
+  std::optional<TimePoint> shorten(TimePoint now, std::chrono::milliseconds length) noexcept {
+    const std::lock_guard guard(mu_);
+    if (!begun_ || begun_->end <= now + length) {
+      return std::nullopt;
+    }
+    begun_->end = now + length;
+    return begun_->end;
+  }
+
+  /// When the window ends; TimePoint::min() before it begins.
+  [[nodiscard]] TimePoint end() const noexcept {
+    const std::lock_guard guard(mu_);
+    return begun_ ? begun_->end : TimePoint::min();
   }
 
   /// The first caller's cause; WorkerShutdown before the window begins.

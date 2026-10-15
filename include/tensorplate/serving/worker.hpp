@@ -110,6 +110,7 @@ class ServingWorker {
 
   /// Begin graceful shutdown. Non-blocking. Use `stop()` to wait for
   /// the drain to complete.
+  /// After a retire, a call ends its drain window by `shutdown.drain_deadline` from now.
   void shutdown(std::string_view reason) noexcept;
 
   /// Block until shutdown completes. Safe to call multiple times.

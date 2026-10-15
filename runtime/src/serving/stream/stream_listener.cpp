@@ -934,22 +934,30 @@ void StreamListener::stop_admission(DrainCause cause) noexcept {
 
 void StreamListener::stop(std::chrono::steady_clock::time_point deadline,
                           DrainCause cause) noexcept {
+  DrainWindow window;
+  (void)window.begin(deadline, std::chrono::milliseconds::zero(), cause);
+  stop(window);
+}
+
+void StreamListener::stop(const DrainWindow& window) noexcept {
   const std::lock_guard lock(impl_->lifecycle_mu);
   if (impl_->stopped) {
     return;
   }
   impl_->stopped = true;
+  const auto cause = window.cause();
   impl_->close_admission(cause);
   // With a window no longer than the reserve, the sessions are failed at once.
-  const auto fail_at = deadline - kTerminalEventReserve;
-  while (impl_->manager->held_slots() > 0 && std::chrono::steady_clock::now() < fail_at) {
+  while (impl_->manager->held_slots() > 0 &&
+         std::chrono::steady_clock::now() + kTerminalEventReserve < window.end()) {
     std::this_thread::sleep_for(std::chrono::milliseconds{10});
   }
   impl_->fail_open_sessions(cause);
   // gRPC waits for the calls until the deadline, then cancels those still
   // open: a reader that stopped never got its terminal event.
-  const auto left = std::max(deadline - std::chrono::steady_clock::now(),
-                             std::chrono::steady_clock::duration::zero());
+  const auto now = std::chrono::steady_clock::now();
+  const auto deadline = window.end();
+  const auto left = deadline > now ? deadline - now : std::chrono::steady_clock::duration::zero();
   impl_->server->Shutdown(std::chrono::system_clock::now() +
                           std::chrono::duration_cast<std::chrono::system_clock::duration>(left));
   if (impl_->dispatch != nullptr) {
