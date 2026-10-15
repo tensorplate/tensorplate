@@ -528,14 +528,22 @@ transaction id (`tx-` and a UUID). The tree is created new: a deploy never
 writes into a tree that is there, and a copy that fails removes its tree
 and each directory it made above it, with an error that names the tree.
 The candidate record names the tree once the copy is complete and synced
-to disk: every file and directory of the tree; the id's directory,
-`staging_dir` and the directory it is in, whether or not this deploy made
-them (a deploy that was stopped may have left them unsynced); and any
-further directory above them that gained an entry. A power loss after that
-state write therefore cannot leave a record naming a tree whose bytes
-never reached the disk; only a directory above the one `staging_dir` is
-in, made by a deploy that was stopped, is not synced by a later deploy.
-The agent must be able to read `staging_dir` and the directory it is in.
+to disk: every file and directory of the tree, each directory above it
+that this deploy made, and the nearest one that was there, which gained an
+entry. A deploy under a `staging_dir` that is there therefore never opens
+the directory `staging_dir` is in. A power loss after that state write
+cannot leave a record naming a tree whose bytes never reached the disk,
+with one exception: a directory that a deploy that was stopped made and
+left unsynced is not synced by a later deploy that finds it there. An
+id's directory left so is removed once it holds nothing (see below), when
+the agent starts and before the next deploy stages, so that deploy makes
+it again and syncs `staging_dir`. What remains is a `staging_dir`, or a
+directory above it, that the agent made in a first deploy that was
+stopped, or an id's directory a removal could not remove: a power loss
+after a later deploy can lose its entry, and with it the trees under it
+that the records name. The agent must be able to read `staging_dir`, and,
+when a deploy makes `staging_dir`, the nearest directory above it that
+was there.
 A sync that fails fails the deploy as a copy that fails does. On macOS
 each of these syncs, of every file and directory, is an `F_FULLFSYNC` (what
 Rust's `File::sync_all` issues there), so a deploy's cost there differs

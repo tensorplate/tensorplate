@@ -336,7 +336,7 @@ fn a_deploy_syncs_its_tree_and_each_directory_it_adds_to_before_a_state_write_na
     let of_staging = |path: &Path| path.starts_with(&staging) || staging.starts_with(path);
     assert!(!staging.exists());
     let first: (_, &[_], _) = (TTS, &["warmup/segment.txt", "warmup"], 3);
-    let second: (_, &[_], _) = (STT, &[], 3);
+    let second: (_, &[_], _) = (STT, &[], 1);
 
     let mut earlier = None;
     for (bundle, nested, above) in [first, second] {
@@ -386,6 +386,25 @@ fn a_deploy_syncs_its_tree_and_each_directory_it_adds_to_before_a_state_write_na
         assert!(!rest.iter().any(|path| of_staging(path)), "{synced:?}");
         earlier = Some(tree);
     }
+}
+
+#[test]
+fn a_deploy_after_a_stage_that_was_stopped_makes_its_id_directory_again_and_syncs_staging_dir() {
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    let staging = host.td.path().join("staging");
+    // What a stage stopped before its syncs leaves.
+    let left = staging.join("tts").join(new_transaction_id());
+    fs::create_dir_all(&left).unwrap();
+    fs::write(left.join("manifest.json"), "{").unwrap();
+    drop(crate::durable::hooks::synced());
+
+    agent.deploy("tts", TTS).unwrap();
+    drop(agent.asked());
+
+    let synced = crate::durable::hooks::synced();
+    assert!(!left.exists());
+    assert!(synced.contains(&staging), "{synced:?}");
 }
 
 #[test]

@@ -189,11 +189,40 @@ fn each_directory_a_stage_makes_in_its_tree_is_synced_however_deep() {
     }
 }
 
+#[cfg(unix)]
 #[test]
-fn a_stage_syncs_up_to_the_directory_staging_dir_is_in_when_the_id_directory_was_there() {
+fn a_stage_under_a_staging_dir_that_was_there_never_opens_the_directory_it_is_in() {
+    use std::os::unix::fs::PermissionsExt;
+    let bundle = verified(&repo(FIXTURE));
+    for id_dir_there in [false, true] {
+        let d = dirs();
+        let top = d.staging.parent().unwrap().to_path_buf();
+        let id_dir = d.staging.join("stt");
+        fs::create_dir_all(if id_dir_there { &id_dir } else { &d.staging }).unwrap();
+        let mode = |mode| fs::set_permissions(&top, fs::Permissions::from_mode(mode)).unwrap();
+        // Searched through, never read.
+        mode(0o100);
+        drop(crate::durable::hooks::synced());
+
+        let staged = stage(&d.staging, "stt", &new_transaction_id(), &bundle);
+
+        mode(0o700);
+        let tree = staged.unwrap();
+        let synced = crate::durable::hooks::synced();
+        let above: Vec<_> = synced.iter().filter(|dir| tree.starts_with(dir)).collect();
+        let there = if id_dir_there {
+            vec![&tree, &id_dir]
+        } else {
+            vec![&tree, &id_dir, &d.staging]
+        };
+        assert_eq!(above, there, "id directory there: {id_dir_there}");
+    }
+}
+
+#[test]
+fn a_stage_that_makes_staging_dir_syncs_the_directory_it_is_in() {
     let d = dirs();
-    let id_dir = d.staging.join("stt");
-    fs::create_dir_all(&id_dir).unwrap();
+    let top = d.staging.parent().unwrap().to_path_buf();
     drop(crate::durable::hooks::synced());
 
     let tree = stage(
@@ -206,8 +235,7 @@ fn a_stage_syncs_up_to_the_directory_staging_dir_is_in_when_the_id_directory_was
 
     let synced = crate::durable::hooks::synced();
     let above: Vec<_> = synced.iter().filter(|dir| tree.starts_with(dir)).collect();
-    let top = d.staging.parent().unwrap().to_path_buf();
-    assert_eq!(above, [&tree, &id_dir, &d.staging, &top]);
+    assert_eq!(above, [&tree, &d.staging.join("stt"), &d.staging, &top]);
 }
 
 #[test]
