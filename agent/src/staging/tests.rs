@@ -211,6 +211,45 @@ fn a_stage_syncs_up_to_the_directory_staging_dir_is_in_when_the_id_directory_was
 }
 
 #[test]
+fn a_stage_that_makes_the_directory_staging_dir_is_in_syncs_each_one_it_made_and_the_one_there() {
+    let d = dirs();
+    let top = d.staging.parent().unwrap().to_path_buf();
+    let staging = top.join("a/b/staging");
+    drop(crate::durable::hooks::synced());
+
+    let tree = stage(
+        &staging,
+        "stt",
+        &new_transaction_id(),
+        &verified(&repo(FIXTURE)),
+    )
+    .unwrap();
+
+    let synced = crate::durable::hooks::synced();
+    let above: Vec<_> = synced.iter().filter(|dir| tree.starts_with(dir)).collect();
+    let (id_dir, a) = (staging.join("stt"), top.join("a"));
+    assert_eq!(above, [&tree, &id_dir, &staging, &a.join("b"), &a, &top]);
+}
+
+#[test]
+fn a_stage_that_fails_keeps_the_directory_that_was_there_however_empty() {
+    let d = dirs();
+    fs::create_dir_all(&d.staging).unwrap();
+    crate::durable::hooks::fail_next_sync_of(|path| path.ends_with("manifest.json"));
+
+    let failed = stage(
+        &d.staging,
+        "stt",
+        &new_transaction_id(),
+        &verified(&repo(FIXTURE)),
+    );
+
+    assert!(failed.is_err());
+    assert!(d.staging.is_dir());
+    assert_eq!(fs::read_dir(&d.staging).unwrap().count(), 0);
+}
+
+#[test]
 fn a_stage_that_fails_leaves_no_directory_it_made_so_the_next_one_makes_and_syncs_them() {
     let bundle = verified(&repo(FIXTURE));
     let cases = [
