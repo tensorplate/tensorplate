@@ -952,6 +952,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The streaming footprint harness now runs the with-streaming worker with
+  `streaming: {enabled: true, port: 0}` added to its packaged config. The
+  worker therefore binds its stream listener, and the harness waits for its
+  `stream listener bound` log line before it samples the idle resident set:
+  `/health` reports ready a few milliseconds before the listener is bound.
+  The without-streaming worker keeps the packaged config, which its build
+  would refuse otherwise. Each run of the record carries `stream_listener`
+  (`started` or `not_started`; a schema field, required), and the idle and
+  steady budgets are incomplete for a with-streaming run that did not start
+  it; the check refuses a record in which a without-streaming run started
+  it. Before, the idle samples measured a worker that had linked gRPC but
+  started no listener. The footprint page drops its passages saying that no
+  listener exists. (V030-E04-F02-T01, V030-E04-F02-T02)
+
 - The release jobs' closure check,
   `tools/release/assert-static-streaming-closure.sh`, now also requires the
   worker to define gRPC core (`grpc_version_string`), a constructor of the

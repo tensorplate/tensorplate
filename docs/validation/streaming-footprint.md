@@ -26,7 +26,7 @@ the checkout running the check.
 | Budget | Maximum delta, with streaming minus without | What is measured |
 | --- | --- | --- |
 | `installed_size` | 32 MiB | the sum of the stripped sizes of every ELF file the serving package installs |
-| `idle_rss` | 64 MiB | the worker's `VmRSS` once `/health` reports `ready` and no stream is open |
+| `idle_rss` | 64 MiB | the worker's `VmRSS` once `/health` reports `ready`, the with-streaming worker's stream listener is bound, and no stream is open |
 | `steady_rss` | 128 MiB | the worker's `VmRSS` while 16 bounded synthetic streams are held open |
 
 Each budget is measured three times per side. A run's value is the largest
@@ -54,12 +54,9 @@ tools/release/build-release-artifacts.sh --snapshot --branch develop \
   --without-streaming --artifacts-dir /var/tmp/footprint/without
 ```
 
-`--without-streaming` arrives with the release-builder change that builds
-the feature in both release jobs; until that change is in the tree, a
-worker configured by hand with `-DTP_ENABLE_STREAMING_GRPC=OFF` and
-packaged with `packaging/scripts/build-deb.sh` is the same without-streaming
-package, and `test/packaging/verify_cpu_only_smoke.sh` shows that build,
-step by step.
+`--without-streaming` builds the snapshot without the feature and without
+vcpkg; no release job passes it (see
+[`docs/release/artifacts.md`](../release/artifacts.md)).
 
 The harness does not know which package is which beyond what it is told.
 It records each package's file name, SHA-256, version and architecture,
@@ -82,15 +79,30 @@ For each side and each run the harness extracts the package with
 `dpkg-deb -x`, strips a copy of every ELF file it installs and records both
 sizes and the `size` breakdown, starts the extracted worker on a free
 loopback port with the packaged configuration (the mock session: no model,
-no sidecar, the same on both sides), waits for `/health` to report `ready`,
-lets it settle, samples `VmRSS` from `/proc/<pid>/status`, runs the stream
-driver if one was given and samples again while the streams are held, then
-stops the worker. The settle time, the sample count and the interval are
-options (`--help` lists them); the defaults are five seconds, ten samples a
-second apart. A package for another architecture, a worker that is not an
-ELF executable or never reports ready, a driver that does not hold its
-streams, and a record directory that already holds captures all stop the
-run rather than produce a record with a gap.
+no sidecar), waits for `/health` to report `ready`, lets it settle, samples
+`VmRSS` from `/proc/<pid>/status`, runs the stream driver if one was given
+and samples again while the streams are held, then stops the worker. The
+settle time, the sample count and the interval are options (`--help` lists
+them); the defaults are five seconds, ten samples a second apart. A package
+for another architecture, a worker that is not an ELF executable or never
+reports ready, a driver that does not hold its streams, and a record
+directory that already holds captures all stop the run rather than produce a
+record with a gap.
+
+The with-streaming worker runs with a copy of that configuration that adds
+`streaming: {enabled: true, port: 0}`, so it also binds its stream listener
+on an ephemeral loopback port. With the mock session there is no dispatch
+behind it, and it refuses every `Open`. The other side keeps the packaged
+file, because a worker built without the feature refuses `streaming.enabled`
+at start. `/health` reports `ready` a few milliseconds before the listener
+is bound, so after `ready` the harness waits for the worker's
+`stream listener bound` log line, up to the ready timeout, before it lets
+the worker settle. Each run records whether the listener started. A
+with-streaming run in which it did not start leaves the idle and steady
+budgets incomplete, because those budgets are defined with the listener
+running. The check refuses a record in which a without-streaming run started
+it: such a run contradicts its side, and a worker built without the feature
+cannot start one.
 
 The exit status is the verdict: 0 when every budget is complete and within
 its limit, 1 when every budget is complete and one is over, 2 when there is
@@ -100,8 +112,11 @@ no verdict because the record is incomplete or could not be assembled.
 
 The steady-state case needs something that opens the declared number of
 streams against the running worker and holds them. The harness defines the
-hook and ships no driver: no stream listener exists in the worker yet, and
-the driver comes with the measurement that first needs it. The contract:
+hook and ships no driver. The worker serves one stream session at a time,
+and with the mock session its listener refuses every `Open`, so nothing can
+hold the declared count yet. The driver comes with the measurement that
+first needs it, and with the stream port, which the harness does not pass
+to a driver today. The contract:
 
 - The driver is an executable given with `--stream-driver`, run once per
   run after the worker is ready, with `TP_FOOTPRINT_WORKER_URL` (the
@@ -129,6 +144,7 @@ contract against the test's fake worker, not a driver for the real one.
     with_streaming/
       package.txt            file name, sha256, version, architecture
       version-output.txt     the worker's --version lines
+      serving_worker.json    the config the worker ran with
       run-1/
         elf-files.tsv        path, installed bytes, stripped bytes
         size.txt             size(1) of each stripped file
@@ -138,6 +154,7 @@ contract against the test's fake worker, not a driver for the real one.
         steady-not-run.txt   why the steady state was not measured
         steady-streams.txt   the stream count the driver was told to hold
         worker.log           the worker's output
+        stream-listener.txt  started or not_started
         worker-exit.txt      how it stopped
         driver.out, driver.log
       run-2/ run-3/
@@ -179,12 +196,14 @@ when it reads one.
 
 ## What cannot be measured yet
 
-A worker built with the feature today references no symbol from the gRPC
-and protobuf archives, because no stream listener exists yet; the linker
-discards them, and the with-streaming package is the without-streaming
-package plus the feature's configuration check. A measurement taken now
-reports deltas near zero and says nothing about the transport's
-footprint. The measurement that qualifies the feature is taken on the
-Jetson Orin Nano once the listener exists, from both release builds of the
-same commit, with the driver that holds real streams; its summary is filed
-as above with the version it was taken for.
+The steady-state budget needs the declared number of streams held open at
+once. The worker serves one stream session at a time, and with the mock
+session its listener refuses every `Open`. So no driver exists, and every
+record is incomplete on that budget. The size and idle budgets can be
+measured: the with-streaming worker links the gRPC closure, and it starts
+its listener before the idle samples are taken. The measurement that
+qualifies the feature is taken on the Jetson Orin Nano, from both release
+builds of the same commit, with a driver that holds real streams. Its
+summary is filed as above, with the version it was taken for. A run on any
+other machine, an amd64 workstation for one, is informational: nothing files
+it.

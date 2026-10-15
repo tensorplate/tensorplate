@@ -154,7 +154,7 @@
     "Run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["index", "elf_files", "idle_rss_samples_kib", "steady"],
+      "required": ["index", "elf_files", "idle_rss_samples_kib", "stream_listener", "steady"],
       "properties": {
         "index": { "type": "integer", "minimum": 1 },
         "elf_files": {
@@ -173,7 +173,11 @@
         "idle_rss_samples_kib": {
           "type": "array",
           "items": { "type": "integer", "minimum": 0 },
-          "description": "VmRSS from /proc/<pid>/status, in KiB as the kernel prints it, sampled after /health reported ready."
+          "description": "VmRSS from /proc/<pid>/status, in KiB as the kernel prints it, sampled after /health reported ready and, on the with-streaming side, after the worker logged `stream listener bound`."
+        },
+        "stream_listener": {
+          "enum": ["started", "not_started"],
+          "description": "Whether the worker logged `stream listener bound`: on the with-streaming side, which runs with `streaming.enabled`, before its samples were taken; on the other side, at any time before it stopped. The resident-set budgets are incomplete for a with-streaming run that did not start the listener, and the check refuses a record in which a without-streaming run started it."
         },
         "steady": {
           "type": "object",
