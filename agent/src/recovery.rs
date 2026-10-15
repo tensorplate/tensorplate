@@ -405,6 +405,7 @@ mod tests {
             staged_path: format!("/staging/{id}"),
             promoted_monotonic_ns: Some(1),
             labels: Default::default(),
+            streaming: false,
         }
     }
 

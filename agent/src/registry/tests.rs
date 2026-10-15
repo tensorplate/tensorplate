@@ -281,6 +281,7 @@ fn candidate_staged_at(id: &str, staged_path: &str) -> CandidateRef {
         bundle_name: Some("m".into()),
         bundle_version: Some("1".into()),
         artifact_relative_path: Some("model.bin".into()),
+        streaming: false,
     }
 }
 

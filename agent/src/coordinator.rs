@@ -410,6 +410,7 @@ impl Coordinator {
             staged_path: staged_path.display().to_string(),
             promoted_monotonic_ns: None,
             labels,
+            streaming: false,
         };
         self.store.record_candidate(candidate_record.clone())?;
         self.advance(&transaction_id, DeployState::Verified, DeployState::Staged)?;
@@ -1102,6 +1103,8 @@ fn deployment_summary(d: &DeploymentRecord) -> DeploymentSummary {
         staged_path: Some(d.staged_path.clone()),
         promoted_monotonic_ns: d.promoted_monotonic_ns,
         serving_url: None,
+        stream_endpoint: None,
+        descriptor_digest: None,
     }
 }
 

@@ -145,6 +145,36 @@ fn every_fixture_is_schema_valid_decodes_and_round_trips() {
 }
 
 #[test]
+fn a_record_carries_its_streaming_flag_only_when_true() {
+    let streams = edited(IDENTITY, |v| *at(v, "/active/streaming") = json!(true));
+    let decoded = decode(&streams).expect("decodes");
+    assert!(decoded.active.as_ref().expect("active").streaming);
+    assert_eq!(serde_json::to_value(&decoded).expect("encode"), streams);
+
+    // An agent through 0.2.x would drop the flag: a state carrying it
+    // needs version 0.2.
+    let mut legacy = decode(&load_value(LEGACY)).expect("decodes");
+    assert_eq!(
+        legacy.required_schema_version(),
+        AGENT_STATE_SCHEMA_VERSION_LEGACY
+    );
+    legacy.active.as_mut().expect("active").streaming = true;
+    assert_eq!(
+        legacy.required_schema_version(),
+        AGENT_STATE_SCHEMA_VERSION_RESIDENT_SET
+    );
+
+    let unary = edited(IDENTITY, |v| *at(v, "/active/streaming") = json!(false));
+    let decoded = decode(&unary).expect("decodes");
+    assert!(!decoded.active.as_ref().expect("active").streaming);
+    assert_eq!(
+        serde_json::to_value(&decoded).expect("encode"),
+        load_value(IDENTITY),
+        "`false` is written as an absent field"
+    );
+}
+
+#[test]
 fn the_legacy_fixture_is_the_writers_exact_encoding() {
     // The store writes `serde_json::to_vec_pretty` with no trailing newline;
     // the committed file adds one.
@@ -508,6 +538,30 @@ fn refused_by_both() -> Vec<Refusal> {
             "cannot read (the generation counter",
         ),
         refusal(
+            "a 0.1 stamp on a record that streams",
+            LEGACY,
+            |v| v["active"]["streaming"] = json!(true),
+            "/active",
+            "a record's descriptor identity or streaming flag",
+        ),
+        refusal(
+            "a 0.1 stamp on a previous record that streams",
+            LEGACY,
+            |v| v["previous_active"]["streaming"] = json!(true),
+            "/previous_active",
+            "a record's descriptor identity or streaming flag",
+        ),
+        refusal(
+            "a 0.1 stamp on a candidate that streams",
+            LEGACY,
+            |v| {
+                v["candidate"] = load_value(LEGACY)["active"].clone();
+                v["candidate"]["streaming"] = json!(true);
+            },
+            "/candidate",
+            "a record's descriptor identity or streaming flag",
+        ),
+        refusal(
             "a 0.1 stamp on a transaction that names a descriptor",
             LEGACY,
             |v| v["in_flight_transaction"] = load_value(IDENTITY)["in_flight_transaction"].clone(),
@@ -558,6 +612,13 @@ fn refused_by_both() -> Vec<Refusal> {
             |v| *at(v, "/in_flight_transaction/configuration_digest") = json!("sha256:"),
             "/in_flight_transaction/configuration_digest",
             "`in_flight_transaction` `configuration_digest` is not a digest",
+        ),
+        refusal(
+            "a streaming flag that is not a boolean",
+            IDENTITY,
+            |v| *at(v, "/active/streaming") = json!("yes"),
+            "/active/streaming",
+            "invalid type: string",
         ),
         refusal(
             "an unknown field beside a record's identity",
@@ -1251,6 +1312,17 @@ fn documents_both_accept() {
             *at(v, &format!("{M0}/labels")) = json!({"team": "speech"});
         }),
         ("records that name descriptors", IDENTITY, |_| {}),
+        ("a 0.1 record that does not stream, said so", LEGACY, |v| {
+            v["active"]["streaming"] = json!(false);
+        }),
+        (
+            "records of a deployment that serves streams",
+            IDENTITY,
+            |v| {
+                *at(v, "/active/streaming") = json!(true);
+                *at(v, "/candidate/streaming") = json!(true);
+            },
+        ),
         ("a transaction that names no descriptor", IDENTITY, |v| {
             for key in IDENTITY_KEYS {
                 remove(v, "/in_flight_transaction", key);

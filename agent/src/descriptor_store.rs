@@ -663,6 +663,7 @@ fn reference_of(record: &DeploymentRecord, artifact_relative_path: Option<String
         bundle_name: Some(record.bundle_name.clone()),
         bundle_version: Some(record.bundle_version.clone()),
         artifact_relative_path,
+        streaming: false,
     }
 }
 

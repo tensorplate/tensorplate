@@ -37,6 +37,7 @@ impl Agent {
             generation: active.generation,
             descriptor_digest: active.descriptor_digest.clone(),
             configuration_digest: active.configuration_digest.clone(),
+            streaming: false,
         };
         let descriptors = Arc::new(DescriptorStore::new(host.state_dir()));
         let stamp = restart_stamp(self.store.clone(), descriptors);

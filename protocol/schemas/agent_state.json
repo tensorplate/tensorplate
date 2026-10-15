@@ -34,14 +34,14 @@
   },
   "allOf": [
     {
-      "$comment": "State version 0.1 is exactly what agents through 0.2.x read: no generation counter (and so no resident set, which requires it), no descriptor identity on a record, and only the error codes, phases and transaction kinds those agents know.",
+      "$comment": "State version 0.1 is exactly what agents through 0.2.x read: no generation counter (and so no resident set, which requires it), no descriptor identity and no streaming flag on a record, and only the error codes, phases and transaction kinds those agents know.",
       "if": {"properties": {"schema_version": {"const": "0.1"}}},
       "then": {
         "not": {"required": ["next_generation"]},
         "properties": {
-          "active": {"$ref": "#/definitions/NoDescriptorIdentity"},
-          "previous_active": {"$ref": "#/definitions/NoDescriptorIdentity"},
-          "candidate": {"$ref": "#/definitions/NoDescriptorIdentity"},
+          "active": {"$ref": "#/definitions/LegacyDeploymentRecord"},
+          "previous_active": {"$ref": "#/definitions/LegacyDeploymentRecord"},
+          "candidate": {"$ref": "#/definitions/LegacyDeploymentRecord"},
           "last_error": {"$ref": "#/definitions/LegacyErrorRecord"},
           "in_flight_transaction": {
             "allOf": [{"$ref": "#/definitions/NoDescriptorIdentity"}],
@@ -83,6 +83,10 @@
           "enum": ["config_invalid", "load_failed", "not_ready", "shape_mismatch", "unsupported", "oom_error", "timeout", "inference_failed", "internal"]
         }
       }
+    },
+    "LegacyDeploymentRecord": {
+      "allOf": [{"$ref": "#/definitions/NoDescriptorIdentity"}],
+      "not": {"required": ["streaming"], "properties": {"streaming": {"const": true}}}
     },
     "NoDescriptorIdentity": {
       "not": {
@@ -250,7 +254,11 @@
         },
         "generation": {"$ref": "#/definitions/StateCounter"},
         "descriptor_digest": {"$ref": "#/definitions/Digest"},
-        "configuration_digest": {"$ref": "#/definitions/Digest"}
+        "configuration_digest": {"$ref": "#/definitions/Digest"},
+        "streaming": {
+          "type": "boolean",
+          "description": "The deploy asked for streaming (`DeployRequest.streaming`): every generation started from this record serves stream sessions. Written only when true."
+        }
       },
       "dependencies": {
         "generation": ["descriptor_digest", "configuration_digest"],

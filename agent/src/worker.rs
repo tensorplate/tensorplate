@@ -825,6 +825,7 @@ mod tests {
             bundle_name: Some("m".into()),
             bundle_version: Some("1".into()),
             artifact_relative_path: Some("model.bin".into()),
+            streaming: false,
         }
     }
 

@@ -50,6 +50,7 @@ fn staged_as(id: &str, recorded: &DeploymentRecord) -> CandidateRef {
         bundle_name: None,
         bundle_version: None,
         artifact_relative_path: None,
+        streaming: false,
     }
 }
 

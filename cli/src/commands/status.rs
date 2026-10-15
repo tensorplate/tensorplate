@@ -783,6 +783,8 @@ mod tests {
                 staged_path: None,
                 promoted_monotonic_ns: Some(1),
                 serving_url: None,
+                stream_endpoint: None,
+                descriptor_digest: None,
             }),
             previous_active: None,
             candidate: None,

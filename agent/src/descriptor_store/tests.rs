@@ -113,6 +113,7 @@ pub(crate) fn reference(descriptor: &DeploymentDescriptor) -> CandidateRef {
         generation: Some(descriptor.generation),
         descriptor_digest: Some(descriptor.descriptor_digest.clone()),
         configuration_digest: Some(descriptor.configuration_digest.clone()),
+        streaming: false,
     }
 }
 
@@ -142,6 +143,7 @@ fn record(descriptor: &DeploymentDescriptor) -> DeploymentRecord {
         generation: named.generation,
         descriptor_digest: named.descriptor_digest,
         configuration_digest: named.configuration_digest,
+        streaming: false,
     }
 }
 

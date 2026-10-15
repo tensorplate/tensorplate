@@ -627,6 +627,8 @@ mod tests {
                     staged_path: None,
                     promoted_monotonic_ns: Some(1),
                     serving_url: None,
+                    stream_endpoint: None,
+                    descriptor_digest: None,
                 }),
                 previous_active: None,
                 candidate: None,
@@ -666,6 +668,8 @@ mod tests {
                     staged_path: None,
                     promoted_monotonic_ns: Some(1),
                     serving_url: Some("http://127.0.0.1:18081/infer".into()),
+                    stream_endpoint: None,
+                    descriptor_digest: None,
                 }),
                 previous_active: None,
                 candidate: None,
@@ -697,6 +701,8 @@ mod tests {
             staged_path: None,
             promoted_monotonic_ns: None,
             serving_url: serving_url.map(str::to_string),
+            stream_endpoint: None,
+            descriptor_digest: None,
         }
     }
 
