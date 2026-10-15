@@ -428,7 +428,12 @@ line says `serves_sessions: false`.
   not cancelled yet when the read fails unless gRPC's cancel of the call
   has already been reported: the listener can take it for a half-close,
   which can finalize an open utterance before that cancel aborts the
-  session. Failing it with a typed reason would mean
+  session, and the decode it starts holds the speech lane until it ends.
+  A client that keeps the limits its `Ready` announces never sends such an
+  event to the speech dispatch: a frame is at most 320 ms of 16 kHz mono
+  16-bit PCM, 10,240 bytes, and a text segment at most 4,096 bytes, so
+  only a client that breaks those limits pays that cost. Failing it with a
+  typed reason would mean
   receiving it first, and gRPC buffers a whole message before it hands it
   over. A text
   segment is refused as empty when it holds nothing but ASCII whitespace;
