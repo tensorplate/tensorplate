@@ -440,6 +440,21 @@ fn a_write_that_stops_leaves_the_document_it_replaces_or_none_and_no_temporary_f
 }
 
 #[test]
+fn a_write_syncs_the_directory_it_renames_the_document_into_and_fails_when_it_cannot() {
+    let f = fixture();
+    let new = derive("stt", 3, STAGED);
+    drop(crate::durable::hooks::synced());
+
+    f.descriptors.write(&new).unwrap();
+
+    assert_eq!(crate::durable::hooks::synced(), [f.td.path()]);
+    let dir = f.td.path().to_path_buf();
+    crate::durable::hooks::fail_next_sync_of(move |path| path == dir);
+    let error = f.descriptors.write(&new).unwrap_err();
+    assert!(matches!(error, AgentError::Io(_)), "{error}");
+}
+
+#[test]
 fn a_state_write_that_fails_after_the_document_leaves_a_document_no_record_names() {
     let f = fixture();
     let before = f.store.snapshot().unwrap();

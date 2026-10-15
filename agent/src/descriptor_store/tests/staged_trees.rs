@@ -5,6 +5,9 @@ use super::one_pass::another_format_0_1_bundle;
 use super::start_again::{host, Host, Worker};
 use super::*;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use tensorplate_protocol::agent_state::TransactionKind;
 
 use crate::coordinator::new_transaction_id;
@@ -336,12 +339,25 @@ fn a_deploy_syncs_its_tree_and_each_directory_it_adds_to_before_a_state_write_na
     let second: (_, &[_], _) = (STT, &[], 1);
 
     for (bundle, nested, above) in [first, second] {
+        // The paths the records name at each sync of a staging path.
+        let named = Rc::new(RefCell::new(BTreeSet::new()));
+        let (seen, dir, under) = (Rc::clone(&named), state_dir.clone(), staging.clone());
+        crate::durable::hooks::fail_next_sync_of(move |path| {
+            if path.starts_with(&under) || under.starts_with(path) {
+                let state = StateStore::open(&dir).unwrap().snapshot().unwrap();
+                let records = [state.active, state.previous_active, state.candidate];
+                let paths = records.into_iter().flatten().map(|r| r.staged_path);
+                seen.borrow_mut().extend(paths.map(PathBuf::from));
+            }
+            false
+        });
         drop(crate::durable::hooks::synced());
         agent.deploy("tts", bundle).unwrap();
         drop(agent.asked());
 
         let synced = crate::durable::hooks::synced();
         let tree = staged_path(&host, active);
+        assert!(!named.borrow().contains(&tree), "{named:?}");
         let start = synced.iter().position(|path| of_staging(path)).unwrap();
         let block = synced[start..].iter().take_while(|path| of_staging(path));
         let block: Vec<_> = block.cloned().collect();
@@ -354,7 +370,6 @@ fn a_deploy_syncs_its_tree_and_each_directory_it_adds_to_before_a_state_write_na
         let blocked: BTreeSet<_> = block.iter().cloned().collect();
         assert_eq!((blocked, block.len()), (expected.clone(), expected.len()));
         let rest = &synced[start + block.len()..];
-        assert_eq!(rest.first(), Some(&state_dir), "{synced:?}");
         assert!(!rest.iter().any(|path| of_staging(path)), "{synced:?}");
     }
 }

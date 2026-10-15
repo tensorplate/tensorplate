@@ -1664,6 +1664,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
+    fn a_0_2_write_syncs_the_state_directory_after_each_rename_and_fails_when_it_cannot() {
+        let td = TempDir::new().expect("td");
+        let legacy = fixture(LEGACY_FIXTURE);
+        write_pair(td.path(), Some(&legacy), Some(&legacy));
+        let store = StateStore::open(td.path()).expect("open");
+        drop(crate::durable::hooks::synced());
+
+        store.update(allocate).expect("0.2 write");
+
+        assert_eq!(crate::durable::hooks::synced(), [td.path(), td.path()]);
+        let dir = td.path().to_path_buf();
+        crate::durable::hooks::fail_next_sync_of(move |path| path == dir);
+        store
+            .update(allocate)
+            .expect_err("the sync after the backup rename fails");
+    }
+
+    #[test]
     fn a_failed_sync_does_not_stop_a_legacy_write() {
         let td = TempDir::new().expect("td");
         let legacy = fixture(LEGACY_FIXTURE);
