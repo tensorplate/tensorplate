@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::Harness;
 use tensorplate_agent::control::dispatch;
@@ -184,6 +184,14 @@ fn hold_next_launch(agent: &Agent) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
     (has_started, release)
 }
 
+fn shutdown_begun(agent: &Agent) {
+    let deadline = Instant::now() + HELD;
+    while !agent.registry.stopping() {
+        assert!(Instant::now() < deadline, "shutdown never began");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// Stop `agent`'s registry while `request` is held in a launch; returns
 /// the request's answer once both have ended.
 fn stop_during<T: Send>(
@@ -202,6 +210,8 @@ fn stop_during<T: Send>(
             assert_eq!(agent.launcher.running(), 0, "a worker outlived shutdown");
             done.send(()).unwrap();
         });
+        // Released before the shutdown begins, the request would complete.
+        shutdown_begun(agent);
         assert!(
             is_done.recv_timeout(Duration::from_millis(100)).is_err(),
             "shutdown returned while a worker was starting"
