@@ -338,6 +338,7 @@ fn a_deploy_syncs_its_tree_and_each_directory_it_adds_to_before_a_state_write_na
     let first: (_, &[_], _) = (TTS, &["warmup/segment.txt", "warmup"], 3);
     let second: (_, &[_], _) = (STT, &[], 3);
 
+    let mut earlier = None;
     for (bundle, nested, above) in [first, second] {
         // The paths the records name at each sync of a staging path.
         let named = Rc::new(RefCell::new(BTreeSet::new()));
@@ -358,6 +359,9 @@ fn a_deploy_syncs_its_tree_and_each_directory_it_adds_to_before_a_state_write_na
         let synced = crate::durable::hooks::synced();
         let tree = staged_path(&host, active);
         assert!(!named.borrow().contains(&tree), "{named:?}");
+        // The records read are the agent's own: they name the earlier tree.
+        let seen_earlier = earlier.as_ref().map(|t| named.borrow().contains(t));
+        assert_ne!(seen_earlier, Some(false), "{named:?}");
         let start = synced.iter().position(|path| of_staging(path)).unwrap();
         let block = synced[start..].iter().take_while(|path| of_staging(path));
         let block: Vec<_> = block.cloned().collect();
@@ -371,6 +375,7 @@ fn a_deploy_syncs_its_tree_and_each_directory_it_adds_to_before_a_state_write_na
         assert_eq!((blocked, block.len()), (expected.clone(), expected.len()));
         let rest = &synced[start + block.len()..];
         assert!(!rest.iter().any(|path| of_staging(path)), "{synced:?}");
+        earlier = Some(tree);
     }
 }
 
