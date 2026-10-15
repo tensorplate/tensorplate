@@ -15,8 +15,8 @@ artifacts authored outside the repo.
 | `mps_python_pytorch_smoke/` | `custom` | `python_pytorch` | Package-validation fixture whose load performs and synchronizes an MPS tensor operation. |
 | `x86_fixture_smoke/` | `custom` | `python_pytorch` | Package-validation fixture for the Ubuntu x86_64 cloud rows. Selects the device-neutral `fixture` profile, so it exercises admission and the worker path without executing an accelerator kernel. |
 | `x86_cuda_smoke/` | `custom` | `python_pytorch` | Package-validation fixture for the Ubuntu x86_64 cloud rows. Selects the `cuda_fixture` profile, whose load performs a CUDA matmul and checks its result before the fixture serves. |
-| `stt_whisper_candidate/` | `custom` | `python_pytorch` | Candidate-only; not a public bundle format. Selects the `faster_whisper` runner profile; its entry lists a converted Whisper model directory as an artifact set. See [candidate speech fixtures](#candidate-speech-fixtures). |
-| `tts_kokoro_candidate/` | `custom` | `python_pytorch` | Candidate-only; not a public bundle format. Selects the `kokoro` runner profile; its entry lists a Kokoro config, checkpoint and one voice as an artifact set. See [candidate speech fixtures](#candidate-speech-fixtures). |
+| `stt_whisper_candidate/` | `speech` | `python_pytorch` | Candidate-only; not a public bundle format. Selects the `faster_whisper` runner profile; its entry lists a converted Whisper model directory as an artifact set. See [candidate speech fixtures](#candidate-speech-fixtures). |
+| `tts_kokoro_candidate/` | `speech` | `python_pytorch` | Candidate-only; not a public bundle format. Selects the `kokoro` runner profile; its entry lists a Kokoro config, checkpoint and one voice as an artifact set. See [candidate speech fixtures](#candidate-speech-fixtures). |
 | `language_reserved/` | `language` | `libtorch` | Reserved language block (tokenizer + empty generation_config). Parses cleanly; v0.1.0 never executes generation. |
 | `vitis_synthetic/` | `vision` | `vitis_ai` | `.xmodel` placeholder + Vitis INT8 calibration metadata. Parser-only. |
 
@@ -43,6 +43,13 @@ you publish:
 - the tensors those runners exchange: UTF-8 text in as a one-dimensional
   `uint8` tensor named `text_utf8`, and the structured result out as one
   named `result_json`, each at most 1 MiB.
+
+Both manifests declare `model_class` `speech` under format 0.1, which asks no
+speech block of the class. The class is what selects the serving worker's
+speech dispatch for a deployment that enables streaming; on `/infer` it
+changes nothing. The provisioned bundles under `packaging/provisioning/bundles/`
+declare the same format, class, version and precision, and
+`cli/tests/bundle_fetch.rs` fails when they differ.
 
 Each entry's `artifact_set` lists the files its runner profile opens, by a
 path relative to the entry's directory and a `sha256:` digest. A runner

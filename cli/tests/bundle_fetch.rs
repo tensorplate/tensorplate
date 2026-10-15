@@ -467,6 +467,19 @@ fn shipped_references_pin_exact_entry_sets_and_preserve_candidate_declarations()
         )
         .unwrap();
         assert!(validator.is_valid(&emitted), "{name}: bundle schema");
+        // The fixture twin is what the tests deploy: it must declare what the
+        // operator provisions.
+        let twin: Value = serde_json::from_str(
+            &fs::read_to_string(repo(&format!(
+                "test/models/bundles/v0_1/{fixture}/manifest.json"
+            )))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(emitted["model_class"], "speech", "{name}");
+        for field in ["format_version", "model_class", "version", "precision_hint"] {
+            assert_eq!(emitted[field], twin[field], "{name}: {field}");
+        }
         assert_eq!(
             emitted["runtime_compatibility"]["min_runtime_version"],
             "0.3.0"

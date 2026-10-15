@@ -7,6 +7,14 @@ fixtures, with real upstream files and their recorded SHA-256 digests. They
 use the existing unary candidate path; provisioning grants no speech support
 or performance claim.
 
+Both manifests are format 0.1 with `model_class` `speech`, at version 0.2.0;
+version 0.1.0 declared `custom`, which the serving worker never gives its
+speech dispatch. A host that holds a bundle provisioned from an earlier
+manifest removes its directory under `/var/lib/tensorplate/bundles/import/`
+before provisioning again: provision verifies an existing destination and
+never replaces it, so it refuses one that differs (`destination_mismatch`). A
+deployment made from the earlier bundle keeps serving from its staged copy.
+
 The eight model files were downloaded from the following immutable revisions
 on 2026-09-30, then hashed from their exact bytes. The provisioning manifest
 records every size, SHA-256 and URL. Model bytes are fetched by the operator;

@@ -850,6 +850,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The Whisper and Kokoro candidate bundles that `tensorplate bundle provision`
+  installs, and their test fixture twins, now declare `model_class` `speech`
+  (format 0.1, which asks no speech block) at version 0.2.0, and the packaged
+  provisioning manifest pins the new manifests. With streaming enabled, the
+  class is what selects the serving worker's speech dispatch; until the agent
+  renders a streaming block, `/infer` behaves as before, and only status, the
+  state records, logs and the worker's metrics label name `speech`. A host
+  holding a candidate provisioned from the earlier manifest removes its
+  import directory before provisioning again: provision never replaces an
+  existing destination and refuses one that differs (`destination_mismatch`).
+  (V030-E01-F02-T01, V030-E01-F02-T02)
+
 - A serving worker built with the streaming feature now serves stream
   sessions for a speech deployment. With `streaming.enabled` and a
   `deployment.model` of the model class `speech`, the worker builds its

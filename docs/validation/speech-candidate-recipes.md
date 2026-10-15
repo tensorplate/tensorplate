@@ -78,7 +78,10 @@ and loop; they supply no candidate memory or reserve qualification.
 On the qualification host, run `tensorplate bundle provision
 stt-whisper-candidate` and `tensorplate bundle provision tts-kokoro-candidate`
 from the operator shell before denying egress. Use the resulting directories
-under `/var/lib/tensorplate/bundles/import/` unchanged. The
+under `/var/lib/tensorplate/bundles/import/` unchanged. On a host that holds
+a candidate provisioned from an earlier manifest, remove that bundle's
+directory there first: provision never replaces an existing destination and
+refuses one that differs. The
 [packaged example manifest](../../packaging/provisioning/manifest.json) pins
 the converted Whisper directory and Kokoro config, weights and af_heart voice;
 its companion [provenance record](../../packaging/provisioning/README.md) names

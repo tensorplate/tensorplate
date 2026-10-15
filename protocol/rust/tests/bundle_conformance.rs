@@ -193,7 +193,10 @@ fn x86_64_python_pytorch_device(runtime_version: &str) -> DeviceContext {
 /// the same digests: a file only one of them names escapes one of the checks.
 fn assert_candidate_speech_bundle(root: &Path, profile: &str) {
     let d = parse_bundle(root).expect("candidate fixture must parse");
-    assert_eq!(d.manifest.model_class, ModelClass::Custom);
+    // Format 0.1 asks no speech block of the speech class.
+    assert_eq!(d.manifest.format_version, "0.1");
+    assert_eq!(d.manifest.model_class, ModelClass::Speech);
+    assert!(d.manifest.model_blocks.speech.is_none());
     assert_eq!(d.manifest.backend_hint, "python_pytorch");
     assert_eq!(
         d.manifest.target_hardware.device_family,
