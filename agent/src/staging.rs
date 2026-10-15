@@ -102,7 +102,7 @@ pub(crate) fn stage(
         .unwrap_or(floor);
     let synced = || {
         for dir in id_dir.ancestors() {
-            crate::durable::sync(dir)?;
+            sync_naming(dir)?;
             if dir == last {
                 break;
             }
@@ -133,7 +133,7 @@ fn copy(verified: &VerifiedBundle, tree: &Path) -> io::Result<()> {
     let source = &verified.root_path;
     let manifest = tree.join("manifest.json");
     fs::copy(source.join("manifest.json"), &manifest)?;
-    crate::durable::sync(&manifest)?;
+    sync_naming(&manifest)?;
     #[cfg(test)]
     if DISK_FULL.with(|full| full.replace(false)) {
         return Err(rustix::io::Errno::NOSPC.into());
@@ -147,13 +147,19 @@ fn copy(verified: &VerifiedBundle, tree: &Path) -> io::Result<()> {
             directories.extend(made.map(Path::to_path_buf));
         }
         fs::copy(source.join(&artifact.path), &destination)?;
-        crate::durable::sync(&destination)?;
+        sync_naming(&destination)?;
     }
     // Deepest first: each directory after every entry in it.
     directories
         .iter()
         .rev()
-        .try_for_each(|dir| crate::durable::sync(dir))
+        .try_for_each(|dir| sync_naming(dir))
+}
+
+/// Sync `path`, with an error that names it.
+fn sync_naming(path: &Path) -> io::Result<()> {
+    crate::durable::sync(path)
+        .map_err(|e| io::Error::new(e.kind(), format!("sync `{}`: {e}", path.display())))
 }
 
 /// The staged path of every record of `state` (the singleton records, and

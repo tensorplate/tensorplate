@@ -415,8 +415,9 @@ fn a_deploy_whose_tree_cannot_be_synced_fails_and_leaves_every_tree_as_it_was() 
         let (view, trees) = (host.view(), host.trees("stt"));
         let named = staged_path(&host, active);
         let served = contents(&named);
-        let id = id_dir.clone();
-        crate::durable::hooks::fail_next_sync_of(move |path| picks(path, &id));
+        let (picks, id) = (Rc::new(picks), id_dir.clone());
+        let picked = Rc::clone(&picks);
+        crate::durable::hooks::fail_next_sync_of(move |path| picked(path, &id));
         let error = agent.deploy("stt", TTS).unwrap_err();
 
         let failed = std::io::Error::from(rustix::io::Errno::IO);
@@ -425,6 +426,12 @@ fn a_deploy_whose_tree_cannot_be_synced_fails_and_leaves_every_tree_as_it_was() 
         assert!(matches!(error, AgentError::Io(_)), "{case}: {message}");
         let told = message.contains(&says) && message.ends_with(&failed.to_string());
         assert!(told, "{case}: {message}");
+        let synced = message
+            .split("sync `")
+            .nth(1)
+            .and_then(|r| r.split("`: ").next());
+        let names_it = synced.is_some_and(|path| picks(Path::new(path), &id_dir));
+        assert!(names_it, "{case}: {message}");
         assert!(agent.never_asked(), "{case}");
         let left = (host.view(), host.trees("stt"));
         assert_eq!(left, (view, trees), "{case}");
