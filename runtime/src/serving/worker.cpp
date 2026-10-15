@@ -691,6 +691,11 @@ Result<void> ServingWorker::start() {
   if (!impl_) {
     return unexpected(Error::Code::Internal, "serving worker: impl null");
   }
+  // A stop unloaded the session, and nothing loads it again.
+  if (impl_->stopped.load()) {
+    return unexpected(
+        Error::make(Error::Code::Unavailable, "the worker was stopped", "worker_shutdown"));
+  }
   if (impl_->started.exchange(true)) {
     return Result<void>{};
   }
@@ -727,8 +732,11 @@ ServingExitCode ServingWorker::serve_forever() {
     return ServingExitCode::Internal;
   }
   if (auto r = start(); !r) {
-    impl_->exit_code = r.error().code == Error::Code::ConfigInvalid ? ServingExitCode::ConfigError
-                                                                    : ServingExitCode::ServeError;
+    // A stopped worker keeps the exit code its stop returned.
+    if (!impl_->stopped.load()) {
+      impl_->exit_code = r.error().code == Error::Code::ConfigInvalid ? ServingExitCode::ConfigError
+                                                                      : ServingExitCode::ServeError;
+    }
     return impl_->exit_code;
   }
   impl_->shutdown.wait_for_request();

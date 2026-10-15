@@ -849,6 +849,45 @@ TEST(ServingE2E, RejectsAdmissionWhileStopping) {
   (void)h.worker->stop();
 }
 
+// The flag the first start set is still set after the stop; the refusal must
+// not read it as "already serving".
+TEST(ServingE2E, AStartAfterAStopIsRefused) {
+  auto cfg = default_test_config();
+  cfg.enable_stderr_logs = true;
+  auto created = ServingWorker::create(cfg);
+  ASSERT_TRUE(created.has_value()) << created.error().message;
+  const auto worker = std::move(created).value();
+  ::testing::internal::CaptureStderr();
+  const auto first = worker->start();
+  const auto first_log = ::testing::internal::GetCapturedStderr();
+  ASSERT_TRUE(first.has_value()) << first.error().message;
+  ASSERT_NE(first_log.find("http server bound"), std::string::npos);
+  EXPECT_EQ(worker->stop(), ServingExitCode::Ok);
+
+  ::testing::internal::CaptureStderr();
+  const auto again = worker->start();
+  const auto log = ::testing::internal::GetCapturedStderr();
+  EXPECT_EQ(log.find("http server bound"), std::string::npos);
+  ASSERT_FALSE(again.has_value()) << "a stopped worker reported serving";
+  EXPECT_EQ(again.error().code, Error::Code::Unavailable);
+  EXPECT_EQ(again.error().context, "worker_shutdown");
+  EXPECT_EQ(worker->serve_forever(), ServingExitCode::Ok) << "the refusal replaced the stop's code";
+  EXPECT_EQ(worker->stop(), ServingExitCode::Ok);
+}
+
+TEST(ServingE2E, AWorkerStoppedBeforeItsFirstStartIsNotStarted) {
+  auto created = ServingWorker::create(default_test_config());
+  ASSERT_TRUE(created.has_value()) << created.error().message;
+  const auto worker = std::move(created).value();
+  EXPECT_EQ(worker->stop(), ServingExitCode::Ok);
+
+  const auto started = worker->start();
+  EXPECT_EQ(worker->bound_port(), 0) << "a stopped worker opened its listener";
+  ASSERT_FALSE(started.has_value());
+  EXPECT_EQ(started.error().code, Error::Code::Unavailable);
+  EXPECT_EQ(started.error().context, "worker_shutdown");
+}
+
 TEST(ServingE2E, AdapterFailureFailsRequest) {
   auto h = ServingHarness::start(default_test_config());
   // The mock session installed by the worker is unreachable through

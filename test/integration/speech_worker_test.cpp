@@ -1091,6 +1091,34 @@ TEST_F(SpeechWorkerScripted, AStartThatCouldNotBindItsStreamPortIsNotRetried) {
   EXPECT_EQ(built->stop(), tensorplate::ServingExitCode::Ok);
 }
 
+// A start that failed at the HTTP listener never reached the stream listener,
+// so only the stop tells a later start that the session is gone.
+TEST_F(SpeechWorkerScripted, AStartAfterAStopOpensNoListenerOverTheUnloadedSession) {
+  register_backend();
+  TakenPort taken;
+  auto config = streaming_config(speech_model());
+  config.bind.port = taken.port;
+  auto built = worker(config);
+  ASSERT_NE(built, nullptr);
+  ::testing::internal::CaptureStderr();
+  const auto first = built->start();
+  ASSERT_EQ(logged(::testing::internal::GetCapturedStderr(), "http server start failed").size(),
+            1U);
+  ASSERT_FALSE(first.has_value());
+  EXPECT_EQ(built->stop(), tensorplate::ServingExitCode::Ok);
+  EXPECT_EQ(sidecar.sent("unload", 1).size(), 1U);
+
+  taken.give_back();
+  ::testing::internal::CaptureStderr();
+  const auto again = built->start();
+  const auto log = ::testing::internal::GetCapturedStderr();
+  EXPECT_TRUE(logged(log, "stream listener bound").empty());
+  EXPECT_TRUE(logged(log, "http server bound").empty());
+  ASSERT_FALSE(again.has_value()) << "a stopped worker started again";
+  EXPECT_EQ(again.error().code, Error::Code::Unavailable);
+  EXPECT_EQ(again.error().context.value_or(""), "worker_shutdown");
+}
+
 // The bridge refuses a job of a class the loaded backend did not declare
 // when it is submitted: the session fails at its first job, nothing reaches
 // the sidecar and no counter of the dispatch moves. The worker goes on
