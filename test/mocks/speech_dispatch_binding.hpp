@@ -366,10 +366,16 @@ class SpeechUnderTest final : public DispatchUnderTest {
     const std::lock_guard guard(stalls_mu_);
     return stalls_;
   }
+  /// Waits until the dispatch has reported a stall.
+  [[nodiscard]] bool stalled(std::chrono::milliseconds patience) {
+    std::unique_lock lock(stalls_mu_);
+    return stalls_cv_.wait_for(lock, patience, [&] { return !stalls_.empty(); });
+  }
 
   // Ahead of `strategy`, whose thread reports stalls.
  private:
   mutable std::mutex stalls_mu_;
+  std::condition_variable stalls_cv_;
   std::vector<Error> stalls_;
 
  public:
@@ -385,8 +391,11 @@ class SpeechUnderTest final : public DispatchUnderTest {
   serving::SpeechDispatchOptions recording_stalls(serving::SpeechDispatchOptions dispatch) {
     dispatch.generation = kGeneration;
     dispatch.on_stall = [this](const Error& cause) {
-      const std::lock_guard guard(stalls_mu_);
-      stalls_.push_back(cause);
+      {
+        const std::lock_guard guard(stalls_mu_);
+        stalls_.push_back(cause);
+      }
+      stalls_cv_.notify_all();
     };
     return dispatch;
   }
