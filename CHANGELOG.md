@@ -76,11 +76,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   complete left the deployment not serving. A tree no state record names is
   removed when the agent starts and when a deploy begins; a directory an
   earlier agent staged at `<staging_dir>/<deployment_id>/` is still started
-  from, and the agent removes nothing in it while its manifest is there, so
-  each later deploy of that id keeps a full copy in it until an operator
-  removes the earlier agent's files. A rollback now compares the staged
-  bundle with the record's for a record that names no descriptor as well,
-  as the start does, and is refused when they differ. A copy that
+  from and is never removed by the agent. A rollback now compares the
+  staged bundle with the record's for a record that names no descriptor as
+  well, as the start does, and is refused when they differ. A copy that
   fails, as on a full disk, removes its tree, and its error names the tree.
   Because an agent removes every tree its state does not name, the
   documented rollback now sets `/var/lib/tensorplate/bundles/staging` aside

@@ -206,8 +206,7 @@ fn a_tree_of_the_earlier_layout_is_started_again_and_never_written_or_removed() 
     drop(host.start(Worker::default()));
     assert_ne!(staged_path(&host, previous), flat);
     assert_eq!(contents(&flat), before);
-    // Nor anything in it: each later deploy's tree is there.
-    assert_eq!(host.trees("stt").len(), 4);
+    assert_eq!(host.trees("stt").len(), 2);
 }
 
 #[test]

@@ -7,13 +7,15 @@
 //! tree no record names is removed at a start and when a deploy begins.
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fs::{self, DirEntry};
 use std::io::{self, ErrorKind};
 use std::iter;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
 use tensorplate_protocol::agent_state::AgentState;
+use tensorplate_protocol::bundle::{parse_bundle_with, ParseOptions};
 
 use crate::bundle::VerifiedBundle;
 use crate::error::{AgentError, AgentResult};
@@ -124,8 +126,9 @@ fn named_by(state: &AgentState) -> impl Iterator<Item = PathBuf> + '_ {
 /// and is kept when a path they name is in it. Only a directory a deploy
 /// named, under a directory a deployment id names, is removed: a tree of the
 /// layout before this one, `staging_dir/<deployment_id>/` itself with its
-/// manifest at its root, is never, nor anything in it. No other deploy may
-/// stage meanwhile.
+/// manifest at its root, is never, nor a directory in it that its manifest
+/// lists an artifact under, nor anything in it while this build cannot read
+/// or parse that manifest. No other deploy may stage meanwhile.
 ///
 /// # Errors
 ///
@@ -175,14 +178,48 @@ fn resolved(path: &Path) -> io::Result<Option<PathBuf>> {
     }
 }
 
-/// The entries of `id` when it is a directory a deployment id names and not
-/// a tree of the earlier layout.
+/// The entries of `id` when it is a directory a deployment id names, less
+/// those that are part of a tree of the earlier layout at `id`.
 fn trees_of(id: &DirEntry) -> io::Result<Vec<io::Result<DirEntry>>> {
     let path = id.path();
-    if !is_directory(id, is_valid_deployment_id)? || holds_a_manifest(&path)? {
+    if !is_directory(id, is_valid_deployment_id)? {
         return Ok(Vec::new());
     }
-    entries(&path)
+    if !holds_a_manifest(&path)? {
+        return entries(&path);
+    }
+    let Some(listed) = artifact_roots(&path) else {
+        return Ok(Vec::new());
+    };
+    let mut trees = entries(&path)?;
+    trees.retain(|tree| {
+        tree.as_ref()
+            .map_or(true, |t| !listed.contains(&t.file_name()))
+    });
+    Ok(trees)
+}
+
+/// The first segment of each artifact path the manifest at `dir` lists; none
+/// when it cannot be read or parsed.
+fn artifact_roots(dir: &Path) -> Option<BTreeSet<OsString>> {
+    let options = ParseOptions {
+        verify_artifact_digests: false,
+    };
+    let flat = parse_bundle_with(dir, options).ok()?;
+    let first = |path: &String| {
+        let mut segments = Path::new(path).components();
+        segments.find_map(|segment| match segment {
+            Component::Normal(name) => Some(name.to_owned()),
+            _ => None,
+        })
+    };
+    Some(
+        flat.manifest
+            .artifacts
+            .iter()
+            .filter_map(|a| first(&a.path))
+            .collect(),
+    )
 }
 
 /// Whether `dir` holds `manifest.json` at its root, as a tree does.

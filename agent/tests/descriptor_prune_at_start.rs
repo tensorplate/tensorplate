@@ -140,15 +140,11 @@ fn the_agent_removes_unnamed_documents_at_its_start_before_recovery_writes_the_n
     DescriptorStore::new(&state_dir).write(&unnamed).unwrap();
     std::fs::write(state_dir.join("descriptor-stt-8.json.tmp"), "{").unwrap();
     std::fs::write(state_dir.join("descriptor-notes.txt"), "kept").unwrap();
-    // Trees a deploy staged and no record names: one inside the tree of the
-    // layout before trees of their own, which `active` names, and one of
-    // another id.
-    let kept_tree = td.path().join("staging/stt").join(new_transaction_id());
-    let unnamed_tree = td.path().join("staging/tts").join(new_transaction_id());
-    for tree in [&kept_tree, &unnamed_tree] {
-        std::fs::create_dir_all(tree).unwrap();
-        std::fs::write(tree.join("manifest.json"), "{}").unwrap();
-    }
+    // Beside the tree of the layout before trees of their own, which `active`
+    // names: one a deploy staged and no record names.
+    let unnamed_tree = td.path().join("staging/stt").join(new_transaction_id());
+    std::fs::create_dir(&unnamed_tree).unwrap();
+    std::fs::write(unnamed_tree.join("manifest.json"), "{}").unwrap();
 
     let (_agent, stderr) = start_agent(td.path());
 
@@ -169,10 +165,9 @@ fn the_agent_removes_unnamed_documents_at_its_start_before_recovery_writes_the_n
     let says = "deployment descriptors: 2 removed that no state record names";
     assert!(stderr.contains(says), "{stderr}");
     assert!(!unnamed_tree.exists(), "{stderr}");
-    let kept = kept_tree.file_name().unwrap().to_str().unwrap();
     assert_eq!(
         files(&td.path().join("staging/stt")),
-        ["entry.json", "manifest.json", kept]
+        ["entry.json", "manifest.json"]
     );
     let says = "staged bundles: 1 removed that no state record names";
     assert!(stderr.contains(says), "{stderr}");

@@ -541,12 +541,11 @@ the set-aside state names: an operator who sets `state` aside sets
 [rollback procedure](../install/lifecycle.md#downgrade-and-rollback)).
 
 A singleton agent holds at most three trees, besides any it could not
-remove and those inside a directory of the earlier layout (below): the one
-`active` names, the one `previous_active` names, and either the candidate's
-while a deploy is in flight or what the last transaction left. A same-id
-update holds two trees, the active record's and the retained record's,
-until the retained record goes. When the file system holding `staging_dir`
-is full, the copy fails:
+remove: the one `active` names, the
+one `previous_active` names, and either the candidate's while a deploy is in
+flight or what the last transaction left. A same-id update holds two trees,
+the active record's and the retained record's, until the retained record
+goes. When the file system holding `staging_dir` is full, the copy fails:
 the deploy fails before `staged` with an `internal` error that names the
 tree and the system's reason, the partial tree is removed, and the active
 deployment keeps serving; the quarantine entry and `last_error` carry the
@@ -558,14 +557,13 @@ Agents before this one staged every deploy of an id into
 `<staging_dir>/<deployment_id>/` itself, overwriting in place. A record such
 an agent wrote names that directory, and is started again from it; no
 deploy writes its files again (a later deploy's tree is created inside it,
-beside them), and while its `manifest.json` is there the agent removes
-nothing in it, those trees included: each deploy of the id keeps a full copy
-of its bundle there. Once neither `state.json` nor `state.json.bak` in the
-state directory names it as a `staged_path` (two deploys of the id have
-committed since it was last active), an operator can remove its files:
-`manifest.json` and the artifacts that manifest lists, leaving the
-`tx-` directories inside it, which the agent then removes as any other tree
-no record names. A same-id update
+beside them), and the agent never removes it, nor a directory in it that
+its `manifest.json` lists an artifact under. A later deploy's tree in it is
+removed as any other once no record names it; while this agent cannot read
+or parse that manifest, nothing in the directory is. Once neither `state.json` nor
+`state.json.bak` in the state directory names it as a `staged_path`, an
+operator can remove its files: `manifest.json` and the artifacts that
+manifest lists, leaving the `tx-` directories inside it. A same-id update
 made by such an agent left the directory holding the update's bundle: the
 rollback to the earlier record and the restore of it are refused (see the
 [staged bundle check](#member-registry)) until the id is deployed again.

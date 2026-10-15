@@ -537,19 +537,34 @@ fn a_tree_the_transaction_in_flight_reads_its_bundle_from_or_from_within_is_kept
     assert!(!source.exists());
 }
 
+/// A tree of the earlier layout at `staging_dir/<id>`, its artifacts under
+/// `root` where the fixture has `assets`.
+fn flat_tree(staging: &Path, id: &str, root: &str) -> PathBuf {
+    let flat = staging.join(id);
+    let manifest = fs::read_to_string(repo(FIXTURE).join("manifest.json")).unwrap();
+    let manifest = manifest.replace("\"assets/", &format!("\"{root}/"));
+    fs::create_dir_all(flat.join(root)).unwrap();
+    fs::write(flat.join("manifest.json"), manifest).unwrap();
+    fs::write(flat.join(root).join("tokenizer.json"), "{}").unwrap();
+    let options = tensorplate_protocol::bundle::ParseOptions {
+        verify_artifact_digests: false,
+    };
+    tensorplate_protocol::bundle::parse_bundle_with(&flat, options).unwrap();
+    flat
+}
+
 #[test]
-fn nothing_in_a_tree_of_the_earlier_layout_is_removed_whether_a_record_names_it_or_not() {
+fn a_directory_a_tree_of_the_earlier_layout_lists_an_artifact_under_is_kept_named_or_not() {
     let d = dirs();
-    // An artifact directory may have any safe name, a transaction id's too.
-    let flat = d.staging.join("stt");
-    let artifacts = flat.join(new_transaction_id());
-    fs::create_dir_all(&artifacts).unwrap();
-    fs::write(flat.join("manifest.json"), "{}").unwrap();
-    fs::write(artifacts.join("weights"), "").unwrap();
-    let unnamed = tree(&d.staging, "tts");
+    // An artifact directory may have any safe name, a transaction id's too,
+    // and the artifact may be deeper in it.
+    let listed = new_transaction_id();
+    let flat = flat_tree(&d.staging, "stt", &format!("{listed}/deeper"));
+    let artifact = flat.join(&listed).join("deeper/tokenizer.json");
+    let unnamed = tree(&d.staging, "stt");
 
     assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
-    assert!(artifacts.join("weights").is_file() && !unnamed.exists());
+    assert!(artifact.is_file() && !unnamed.exists());
 
     let flat_record = |state: &mut AgentState| {
         state.active = Some(record("stt", &flat));
@@ -557,12 +572,57 @@ fn nothing_in_a_tree_of_the_earlier_layout_is_removed_whether_a_record_names_it_
     };
     d.store.update(flat_record).unwrap();
     assert_eq!(prune(&d.staging, &d.store).unwrap(), 0);
-    assert!(artifacts.join("weights").is_file());
+    assert!(artifact.is_file());
+}
 
-    // Once its manifest is gone, what is left in it is like any other tree.
-    fs::remove_file(flat.join("manifest.json")).unwrap();
+#[test]
+fn a_deploy_s_tree_inside_a_tree_of_the_earlier_layout_is_removed_once_no_record_names_it() {
+    let d = dirs();
+    let flat = flat_tree(&d.staging, "stt", "assets");
+    let [named, unnamed] = ["stt", "stt"].map(|id| tree(&d.staging, id));
+    let records = |state: &mut AgentState| {
+        state.active = Some(record("stt", &named));
+        state.previous_active = Some(record("stt", &flat));
+        Ok(())
+    };
+    d.store.update(records).unwrap();
+
     assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
-    assert!(!artifacts.exists());
+
+    assert!(named.is_dir() && !unnamed.exists());
+    assert!(flat.join("manifest.json").is_file());
+    assert!(flat.join("assets/tokenizer.json").is_file());
+}
+
+#[test]
+fn nothing_in_a_tree_of_the_earlier_layout_is_removed_while_its_manifest_cannot_be_read() {
+    let d = dirs();
+    let flat = flat_tree(&d.staging, "stt", "assets");
+    let whole = fs::read(flat.join("manifest.json")).unwrap();
+    let unnamed = tree(&d.staging, "stt");
+    fs::write(flat.join("manifest.json"), "{").unwrap();
+
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 0);
+    assert!(unnamed.is_dir());
+
+    #[cfg(unix)]
+    if !rustix::process::geteuid().is_root() {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(flat.join("manifest.json"), &whole).unwrap();
+        let mode = |mode: u32| {
+            let permissions = fs::Permissions::from_mode(mode);
+            fs::set_permissions(flat.join("manifest.json"), permissions).unwrap();
+        };
+        mode(0o000);
+        let pruned = prune(&d.staging, &d.store);
+        mode(0o644);
+        assert_eq!(pruned.unwrap(), 0);
+        assert!(unnamed.is_dir());
+    }
+
+    fs::write(flat.join("manifest.json"), whole).unwrap();
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
+    assert!(!unnamed.exists());
 }
 
 #[cfg(unix)]
