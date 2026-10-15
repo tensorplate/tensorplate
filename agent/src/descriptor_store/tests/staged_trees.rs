@@ -373,6 +373,15 @@ fn a_deploy_syncs_its_tree_and_each_directory_it_adds_to_before_a_state_write_na
         expected.extend(tree.ancestors().skip(1).take(above).map(Path::to_path_buf));
         let blocked: BTreeSet<_> = block.iter().cloned().collect();
         assert_eq!((blocked, block.len()), (expected.clone(), expected.len()));
+        for (at, path) in block.iter().enumerate() {
+            let dir = path
+                .parent()
+                .and_then(|dir| block.iter().position(|p| p == dir));
+            assert!(
+                dir.map_or(true, |dir| at < dir),
+                "{path:?} after its directory: {block:?}"
+            );
+        }
         let rest = &synced[start + block.len()..];
         assert!(!rest.iter().any(|path| of_staging(path)), "{synced:?}");
         earlier = Some(tree);

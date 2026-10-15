@@ -149,8 +149,10 @@ fn copy(verified: &VerifiedBundle, tree: &Path) -> io::Result<()> {
         fs::copy(source.join(&artifact.path), &destination)?;
         crate::durable::sync(&destination)?;
     }
+    // Deepest first: each directory after every entry in it.
     directories
         .iter()
+        .rev()
         .try_for_each(|dir| crate::durable::sync(dir))
 }
 
