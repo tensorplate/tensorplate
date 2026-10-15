@@ -560,11 +560,7 @@ fn a_stop_that_begins_while_the_descriptor_is_re_stamped_starts_nothing() {
             .recv_timeout(GRACE)
             .expect("the restart is stamped");
         let stopping = scope.spawn(|| d.registry.shutdown());
-        let deadline = Instant::now() + GRACE;
-        while !d.registry.stopping() {
-            assert!(Instant::now() < deadline, "shutdown never began");
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        wait_for_stopping(&d.registry);
         release.send(()).unwrap();
         assert_eq!(restarting.join().unwrap(), []);
         stopping.join().unwrap();

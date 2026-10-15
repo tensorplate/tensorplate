@@ -188,6 +188,15 @@ struct Fixture {
     registry: MemberRegistry,
 }
 
+/// Waits, with a bound, until another thread's stop of `registry` has begun.
+fn wait_for_stopping(registry: &MemberRegistry) {
+    let deadline = Instant::now() + GRACE;
+    while !registry.stopping() {
+        assert!(Instant::now() < deadline, "shutdown never began");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn settings(dir: &std::path::Path) -> RegistrySettings {
     RegistrySettings {
         bind_host: "127.0.0.1".into(),
