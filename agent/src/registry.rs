@@ -324,8 +324,9 @@ impl ControlState {
 
 struct Fence {
     transaction_id: String,
-    /// Set once the transaction failed and its activate was not answered
-    /// `ok`: when the supervision step sends that activate again.
+    /// Set once the transaction failed and its activate was answered
+    /// neither `ok` nor `unsupported`: when the supervision step sends that
+    /// activate again.
     reopen_at: Option<Instant>,
 }
 
@@ -371,52 +372,61 @@ impl Reach {
         if unless_fenced && fenced_by.is_some() {
             return;
         }
-        if let Err(why) = self.send_activate(transaction_id) {
-            eprintln!("{}: activate {why}", self.name);
+        if let Err(failed) = self.send_activate(transaction_id) {
+            eprintln!("{}: activate {}", self.name, failed.why);
         }
     }
 
     /// Re-activate the member a transaction fenced and did not commit. One
-    /// not answered `ok` stays fenced, owed the activate from `now` on.
+    /// not answered `ok` stays fenced, owed the activate from `now` on,
+    /// unless its worker answered `unsupported`.
     fn reopen(&self, now: Instant) {
         let mut fenced_by = lock(&self.control.fenced_by);
         let Some(fence) = fenced_by.as_mut() else {
             return;
         };
         let transaction_id = fence.transaction_id.clone();
-        match self.send_activate(&transaction_id) {
-            Ok(()) => *fenced_by = None,
-            Err(why) => {
-                if fence.reopen_at.replace(now).is_none() {
-                    eprintln!(
-                        "{}: activate after failed transaction `{transaction_id}` {why}; sent again until it is answered ok",
-                        self.name
-                    );
-                }
-            }
+        let Err(failed) = self.send_activate(&transaction_id) else {
+            *fenced_by = None;
+            return;
+        };
+        if failed.unsupported {
+            *fenced_by = None;
+            eprintln!(
+                "{}: activate after failed transaction `{transaction_id}` {}",
+                self.name, failed.why
+            );
+        } else if fence.reopen_at.replace(now).is_none() {
+            eprintln!(
+                "{}: activate after failed transaction `{transaction_id}` {}; sent again until it is answered ok",
+                self.name, failed.why
+            );
         }
     }
 
     /// Send again the activate a failed transaction owes the member, unless
-    /// it was answered `ok` or another transaction fenced the member since.
+    /// another transaction fenced the member since.
     fn retry_reopen(&self) {
         let mut fenced_by = lock(&self.control.fenced_by);
         let owed = fenced_by.as_ref().filter(|fence| fence.reopen_at.is_some());
         let Some(transaction_id) = owed.map(|fence| fence.transaction_id.clone()) else {
             return;
         };
-        if self.send_activate(&transaction_id).is_ok() {
-            *fenced_by = None;
-            eprintln!(
-                "{}: activate after failed transaction `{transaction_id}` answered ok",
-                self.name
-            );
-        }
+        let why = match self.send_activate(&transaction_id) {
+            Ok(()) => "answered ok".to_owned(),
+            Err(failed) if failed.unsupported => failed.why,
+            Err(_) => return,
+        };
+        *fenced_by = None;
+        eprintln!(
+            "{}: activate after failed transaction `{transaction_id}` {why}",
+            self.name
+        );
     }
 
-    /// Why an answer was not `ok`, for the caller to log: an activate
+    /// The answer other than `ok` is the caller's to log: an activate
     /// follows a commit or a failure that it cannot undo.
-    fn send_activate(&self, transaction_id: &str) -> Result<(), String> {
+    fn send_activate(&self, transaction_id: &str) -> Result<(), NotActivated> {
         let command = RuntimeCommand::Activate {
             transaction_id: transaction_id.to_owned(),
         };
@@ -430,11 +440,25 @@ impl Reach {
                 if answer.status == WorkerStatusOutcome::Error {
                     *lock(&self.control.quota) = None;
                 }
-                Err(format!("refused: {}", refusal(&answer)))
+                Err(NotActivated {
+                    why: format!("refused: {}", refusal(&answer)),
+                    unsupported: answer.status == WorkerStatusOutcome::Unsupported,
+                })
             }
-            Err(err) => Err(format!("not answered: {err}")),
+            Err(err) => Err(NotActivated {
+                why: format!("not answered: {err}"),
+                unsupported: false,
+            }),
         }
     }
+}
+
+/// An `activate` that was not answered `ok`.
+struct NotActivated {
+    why: String,
+    /// A worker without the control target: it never closed its admission,
+    /// so a failed transaction has nothing to reopen.
+    unsupported: bool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

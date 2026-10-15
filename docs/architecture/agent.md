@@ -1071,7 +1071,9 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   it the same activate again, from a thread of its own and at most once a
   `worker.status_poll_interval_ms`, until it answers `ok`, it leaves
   service, or another transaction fences it; the agent logs when it begins
-  sending it again and when it is answered. After the commit the new
+  sending it again and when it is answered. A worker that answers it
+  `unsupported` has no admission control, so it never closed its admission
+  and is not sent it again. After the commit the new
   serving worker is sent `activate`. A restarted generation is sent
   `activate`, with a transaction id of its own, once the supervision step
   judges it ready; it is sent from a thread of its own, so the step does

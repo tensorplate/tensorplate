@@ -407,6 +407,41 @@ fn a_reopen_not_answered_ok_is_sent_again_from_the_supervision_step_until_it_is(
 }
 
 #[test]
+fn a_reopen_answered_unsupported_is_not_sent_again() {
+    for case in ["at once", "when sent again"] {
+        let f = fixture();
+        let serving = f.serve("stt");
+        ready_candidate(&f, "tts");
+        let unimplemented = || serving.target.lock().unwrap().unimplemented = true;
+        if case == "at once" {
+            unimplemented();
+            f.registry.fence("tx-2", &candidate("tts")).unwrap_err();
+        } else {
+            f.registry.fence("tx-2", &candidate("tts")).unwrap();
+            serving.reply(Reply::Unanswered);
+        }
+
+        f.registry.abandon(&candidate("tts"));
+        if case == "when sent again" {
+            unimplemented();
+            serving.reply(Reply::Answered);
+            step(&f);
+            activations_answered(&f);
+        }
+        step(&f);
+        activations_answered(&f);
+
+        assert_eq!(fence_of(&control_of(&f, 1)), None, "{case}");
+        let reopens = serving
+            .ops()
+            .into_iter()
+            .filter(|op| op.0 == ACTIVATE)
+            .count();
+        assert_eq!(reopens, if case == "at once" { 2 } else { 3 }, "{case}");
+    }
+}
+
+#[test]
 fn a_reopen_is_sent_again_at_most_once_a_poll_interval() {
     let f = fixture_with(
         |settings| RegistrySettings {
