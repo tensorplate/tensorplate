@@ -81,12 +81,13 @@ sizes and the `size` breakdown, starts the extracted worker on a free
 loopback port with the packaged configuration (the mock session: no model,
 no sidecar), waits for `/health` to report `ready`, lets it settle, samples
 `VmRSS` from `/proc/<pid>/status`, runs the stream driver if one was given
-and samples again while the streams are held, then stops the worker. The settle time, the sample count and the interval are
-options (`--help` lists them); the defaults are five seconds, ten samples a
-second apart. A package for another architecture, a worker that is not an
-ELF executable or never reports ready, a driver that does not hold its
-streams, and a record directory that already holds captures all stop the
-run rather than produce a record with a gap.
+and samples again while the streams are held, then stops the worker. The
+settle time, the sample count and the interval are options (`--help` lists
+them); the defaults are five seconds, ten samples a second apart. A package
+for another architecture, a worker that is not an ELF executable or never
+reports ready, a driver that does not hold its streams, and a record
+directory that already holds captures all stop the run rather than produce a
+record with a gap.
 
 The with-streaming worker runs with a copy of that configuration that adds
 `streaming: {enabled: true, port: 0}`, so it also binds its stream listener
@@ -200,6 +201,7 @@ record is incomplete on that budget. The size and idle budgets can be
 measured: the with-streaming worker links the gRPC closure, and it starts
 its listener before the idle samples are taken. The measurement that
 qualifies the feature is taken on the Jetson Orin Nano, from both release
-builds of the same commit, with a driver that holds real streams. Its summary is filed as above, with
-the version it was taken for. A run on any other machine, an amd64
-workstation for one, is informational: nothing files it.
+builds of the same commit, with a driver that holds real streams. Its
+summary is filed as above, with the version it was taken for. A run on any
+other machine, an amd64 workstation for one, is informational: nothing files
+it.

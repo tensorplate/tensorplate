@@ -13,8 +13,8 @@
 // refuses the config at start with the real worker's error and exit status.
 // NO_STREAM_LISTENER stands for a build with the feature from before the
 // listener existed, LISTENER_DELAY_MS delays the line that long past the first
-// /health answer, and
-// LISTENER_MIB is touched before the line, so samples taken earlier miss it.
+// /health answer, and LISTENER_MIB is touched before the line, so samples
+// taken earlier miss it.
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
