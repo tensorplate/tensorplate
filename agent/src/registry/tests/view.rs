@@ -51,7 +51,7 @@ fn a_warm_that_does_not_find_the_candidate_ready_judges_nothing() {
     };
     assert_eq!(view(&f), [loading.clone()]);
 
-    assert!(!f.warm("stt").unwrap().ready);
+    assert!(!f.warm_briefly("stt").unwrap().ready);
 
     // A warm that gives up abandons the candidate.
     assert_eq!(
@@ -258,7 +258,7 @@ fn a_candidate_whose_polls_go_unanswered_is_not_judged_ready() {
     f.health(ACTIVE_PORT, "stt");
     f.launcher.handle(1).set_contact(ControlContact::Unanswered);
 
-    assert!(!f.warm("stt").unwrap().ready);
+    assert!(!f.warm_briefly("stt").unwrap().ready);
     assert!(!view(&f)[0].ready);
 }
 

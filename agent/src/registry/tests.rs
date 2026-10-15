@@ -21,7 +21,12 @@ mod view;
 const ACTIVE_PORT: u16 = 41_080;
 const CANDIDATE_PORT: u16 = 41_081;
 const DRAIN: Duration = Duration::from_millis(60);
-const WARM: Duration = Duration::from_millis(40);
+/// Given to a port lease or a warm that succeeds, which returns as soon as
+/// it does: longer than load makes either take.
+const WARM: Duration = Duration::from_secs(10);
+/// Waited out in full by a warm that is never ready or a lease that finds no
+/// free port.
+const WAIT_OUT: Duration = Duration::from_millis(40);
 /// On the fake clock: no test waits it out in real time.
 const RESTART_WARM: Duration = Duration::from_secs(30);
 /// Longer than any launch a test holds.
@@ -271,8 +276,14 @@ impl Fixture {
     fn prepare(&self, id: &str) -> AgentResult<()> {
         self.registry.prepare("tx", &candidate(id), WARM)
     }
+    fn prepare_briefly(&self, id: &str) -> AgentResult<()> {
+        self.registry.prepare("tx", &candidate(id), WAIT_OUT)
+    }
     fn warm(&self, id: &str) -> AgentResult<WorkerReadiness> {
         self.registry.warm("tx", &candidate(id), WARM)
+    }
+    fn warm_briefly(&self, id: &str) -> AgentResult<WorkerReadiness> {
+        self.registry.warm("tx", &candidate(id), WAIT_OUT)
     }
     /// Make `/health` on `port` report `id` ready.
     fn health(&self, port: u16, id: &str) {
@@ -376,14 +387,23 @@ fn a_candidate_is_warm_only_with_health_ready_and_its_ledger_reported() {
 
     handle.set_contact(ControlContact::Pending);
     f.health(ACTIVE_PORT, "stt");
-    assert!(!f.warm("stt").unwrap().ready, "health alone is not warm");
+    assert!(
+        !f.warm_briefly("stt").unwrap().ready,
+        "health alone is not warm"
+    );
 
     handle.set_contact(ControlContact::Reporting);
     f.health(ACTIVE_PORT, "another-model");
-    assert!(!f.warm("stt").unwrap().ready, "ready for another model");
+    assert!(
+        !f.warm_briefly("stt").unwrap().ready,
+        "ready for another model"
+    );
 
     f.probe.silent.store(true, Ordering::SeqCst);
-    assert!(!f.warm("stt").unwrap().ready, "a ledger alone is not warm");
+    assert!(
+        !f.warm_briefly("stt").unwrap().ready,
+        "a ledger alone is not warm"
+    );
 
     f.probe.silent.store(false, Ordering::SeqCst);
     f.health(ACTIVE_PORT, "stt");
@@ -775,10 +795,10 @@ fn an_exit_during_the_last_probe_outranks_the_warm_deadline() {
     let handle = f.launcher.handle(1);
     *f.probe.during.lock().unwrap() = Some(Box::new(move || {
         handle.exited.store(true, Ordering::SeqCst);
-        std::thread::sleep(WARM * 2);
+        std::thread::sleep(WAIT_OUT * 2);
     }));
 
-    let err = f.warm("stt").unwrap_err();
+    let err = f.warm_briefly("stt").unwrap_err();
     assert!(matches!(err, AgentError::WorkerExited(_)), "{err}");
 }
 

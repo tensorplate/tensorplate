@@ -392,7 +392,7 @@ fn a_restart_starts_once_the_deploy_that_held_the_member_gave_up() {
     f.registry.supervise();
     assert_eq!(step(&f, secs(60)), []);
 
-    assert!(!f.warm("tts").unwrap().ready);
+    assert!(!f.warm_briefly("tts").unwrap().ready);
 
     assert_eq!(
         step(&f, Duration::ZERO),
@@ -452,7 +452,7 @@ fn a_successor_started_as_a_deploy_began_is_stopped_and_owed_again() {
 
     // Once the deploy gives up, the owed restart starts at the next step.
     f.probe.silent.store(true, Ordering::SeqCst);
-    assert!(!f.warm("stt").unwrap().ready);
+    assert!(!f.warm_briefly("stt").unwrap().ready);
     f.probe.silent.store(false, Ordering::SeqCst);
     assert_eq!(
         step(&f, Duration::ZERO),

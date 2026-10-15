@@ -99,7 +99,7 @@ fn a_draining_members_ports_are_not_given_out_until_it_is_reaped() {
             .recv_timeout(GRACE)
             .expect("the old member is asked to stop");
 
-        let refused = f.prepare("third").unwrap_err();
+        let refused = f.prepare_briefly("third").unwrap_err();
         assert!(matches!(refused, AgentError::NoFreePort(_)), "{refused}");
         assert_eq!(
             refused.code(),
