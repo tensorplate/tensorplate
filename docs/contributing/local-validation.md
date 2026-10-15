@@ -100,6 +100,36 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-fail-fast
 ```
 
+## Python SDK streams through a real agent (optional)
+
+`sdk/python/tests/test_e2e_agent_stream.py` runs the streaming client
+against a real agent, which deploys with `--streaming` to a serving worker
+built with the stream listener. The worker starts the Python sidecar, whose
+fixture backend serves speech without a model. No GPU is needed. The cases
+are skipped unless the three binaries are named:
+
+```bash
+cmake -S . -B build-streaming -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DTP_ENABLE_STREAMING_GRPC=ON -DVCPKG_MANIFEST_FEATURES=streaming-grpc \
+  -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+  -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
+cmake --build build-streaming --target tp_serving_worker --parallel
+cargo build -p tensorplate-agent -p tensorplate-cli
+export TENSORPLATE_STREAMING_WORKER_BIN=$PWD/build-streaming/serving_worker/tensorplate-serving
+export TENSORPLATE_AGENT_BIN=$PWD/target/debug/tensorplate-agent
+export TENSORPLATE_CLI_BIN=$PWD/target/debug/tensorplate
+cd sdk/python && pytest -q tests/test_e2e_agent_stream.py
+```
+
+Run it with the interpreter the SDK is installed in, with its `speech`
+extra. The sidecar runs on that interpreter too. Each case starts its own
+agent on six free loopback ports between 20000 and 30000. The four cases take
+about half a minute; the redeploy case waits 20 seconds of that on purpose.
+The agent's platform gate admits only a host one of the rows in
+`config/platform` describes. On a host none describes, for instance one
+with a GPU no row names, set `TENSORPLATE_PLATFORM_REGISTRY_DIR` to a copy
+of that directory with a row for the host.
+
 ## Public hygiene (before every push)
 
 The repository is public and a push is permanent, so the scan

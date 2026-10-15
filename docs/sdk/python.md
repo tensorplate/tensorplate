@@ -284,9 +284,10 @@ built with streaming support serves these sessions for a speech deployment
 when its config sets `streaming.enabled`, which the agent renders for a
 deployment made with `tensorplate deploy --streaming`; `tensorplate status`
 then prints its `stream_endpoint` and the `descriptor_digest` an Open names
-beside its generation. This client's own tests run
-against an in-process server built from the same schema, not against a
-worker.
+beside its generation. This client's default tests run
+against an in-process server built from the same schema; an opt-in case
+runs it through a real agent and a streaming worker
+([local validation](../contributing/local-validation.md)).
 
 ```python
 import asyncio

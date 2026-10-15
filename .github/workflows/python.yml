@@ -165,6 +165,6 @@ jobs:
           TENSORPLATE_REQUIRE_SPEECH_EXTRAS: '1'
         run: >-
           pytest -q tests/test_import_safety.py tests/test_speech_import.py
-          tests/test_stream_modules.py tests/test_distribution.py
+          tests/test_stream_modules.py tests/test_distribution.py tests/test_e2e_agent_stream.py
           tests/test_streaming_server.py tests/test_streaming_client.py
           tests/test_streaming_tts.py tests/test_streaming_discovery.py
