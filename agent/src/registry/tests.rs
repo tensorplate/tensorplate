@@ -72,9 +72,10 @@ impl MemberProcess for FakeProcess {
     }
     fn startup_failure(&mut self) -> AgentError {
         let held = self.0.hold_failure.lock().unwrap().take();
+        // A case that failed before its gate has dropped both ends.
         if let Some((started, release)) = held {
-            started.send(()).unwrap();
-            release.recv().unwrap();
+            let _ = started.send(());
+            let _ = release.recv();
         }
         AgentError::WorkerExited(format!("generation {}", self.0.spec.member.generation))
     }
@@ -84,9 +85,10 @@ impl MemberProcess for FakeProcess {
     fn terminate(&mut self) {
         self.0.calls.lock().unwrap().push("terminate");
         let held = self.0.hold_terminate.lock().unwrap().take();
+        // A case that failed before its gate has dropped both ends.
         if let Some((started, release)) = held {
-            started.send(()).unwrap();
-            release.recv().unwrap();
+            let _ = started.send(());
+            let _ = release.recv();
         }
         if self.0.obeys_terminate.load(Ordering::SeqCst) {
             self.0.exited.store(true, Ordering::SeqCst);
@@ -129,9 +131,10 @@ impl ProcessLauncher for FakeLauncher {
             return Err(AgentError::WorkerControl("spawn refused".into()));
         }
         let held = self.hold_first.lock().unwrap().take();
+        // A case that failed before its gate has dropped both ends.
         if let Some((started, release)) = held {
-            started.send(()).unwrap();
-            release.recv().unwrap();
+            let _ = started.send(());
+            let _ = release.recv();
         }
         let config = serde_json::from_slice(&std::fs::read(&spec.config_path).unwrap()).unwrap();
         let handle = Arc::new(Handle {
