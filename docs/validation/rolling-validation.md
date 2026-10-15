@@ -383,7 +383,7 @@ A line is derived, never written by hand:
 tools/validation/validation-pass.py index \
   --date 2026-10-01 --session "L4 session, first of October" \
   --row ubuntu2404-x86-l4-g2s8 --machine "g2-standard-8, one NVIDIA L4" \
-  --build v0.3.1-rc.1 \
+  --build v0.3.1-rc.1 --kind evidence \
   --lifecycle-report lifecycle/lifecycle-report.json \
   --qualification-record stt-whisper=whisper/record.json \
   --qualification-record tts-kokoro=kokoro/record.json \
@@ -440,13 +440,12 @@ tools/validation/validation-pass.py compare \
 Each current line is compared with the newest earlier line of the same kind,
 row and subject. A line's kind is the one it was indexed with: `run` writes
 `validation`, a rolling pass filed nowhere public, for every line of a pass;
-`index` writes `validation` too unless it is given `--kind evidence`, the kind
-of a run whose records are filed publicly, standalone qualification runs among
-them. Kinds are never compared with each other. A pass deploys each candidate
-once from a dropped page cache before it qualifies it, and a standalone run
-does not, so the two measure the first request after a deploy differently; a
-standalone run indexed without `--kind evidence` would be compared with
-passes. Every metric and check gets one status:
+`index` writes the `--kind` it is given, which it requires: `validation`, or
+`evidence` for a run whose records are filed publicly, standalone
+qualification runs among them. Kinds are never compared with each other. A
+pass deploys each candidate once from a dropped page cache before it qualifies
+it, and a standalone run does not, so the two measure the first request after
+a deploy differently. Every metric and check gets one status:
 
 | Status | Meaning |
 | --- | --- |

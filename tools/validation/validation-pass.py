@@ -44,11 +44,11 @@ def add_envelope_arguments(parser: argparse.ArgumentParser, a_pass: bool = False
         parser.add_argument(
             "--kind",
             choices=("validation", "evidence"),
-            default="validation",
+            required=True,
             help=(
-                "validation: a rolling pass, filed nowhere public (the default); evidence: a run"
-                " whose records are filed publicly, a standalone qualification run among them."
-                " The comparison never sets one kind against the other"
+                "validation: a rolling pass, filed nowhere public; evidence: a run whose records"
+                " are filed publicly, a standalone qualification run among them. No default: the"
+                " comparison never sets one kind against the other"
             ),
         )
         parser.add_argument("--raw-object", help="the raw archive's object name, once stored")

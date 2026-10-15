@@ -694,6 +694,7 @@ def check_more_cli(lines: dict[str, dict]) -> None:
         envelope_arguments = (
             "--date", "2026-10-01", "--session", "recorded runs of 2026-10-01", "--row", ROW,
             "--machine", "g2-standard-8, one NVIDIA L4", "--build", "v0.3.1-rc.1",
+            "--kind", "validation",
         )  # fmt: skip
 
         def doctor_result(payload: object, *extra: str) -> subprocess.CompletedProcess:
@@ -858,7 +859,8 @@ def check_first_request_and_cold_deploy(lines: dict[str, dict]) -> None:
         cold.write_text(json.dumps(cold_deploy_of(record)), encoding="utf-8")
         arguments = (
             "index", "--date", "2026-10-01", "--session", "s", "--row", ROW, "--machine", "m",
-            "--build", "b", "--qualification-record", f"stt-whisper={record_path('whisper', 1)}",
+            "--build", "b", "--kind", "evidence",
+            "--qualification-record", f"stt-whisper={record_path('whisper', 1)}",
         )  # fmt: skip
         completed = run_tool(*arguments, "--cold-deploy", f"stt-whisper={cold}")
         assert json.loads(completed.stdout)["metrics"]["deploy_wall_cold_cache_ms"] == 17900
@@ -920,11 +922,16 @@ def check_streaming_line_without_a_session(complete: dict) -> None:
     # Through the tool the line is written, and the other subjects' lines with it.
     with tempfile.TemporaryDirectory() as raw_tmp:
         out = Path(raw_tmp) / "lines.jsonl"
-        completed = run_tool(
+        arguments = (
             "index", "--date", "2026-10-01", "--session", "s", "--row", ROW, "--machine", "m",
             "--build", "b", "--lifecycle-report", str(LIFECYCLE_REPORT),
             "--streaming-record", str(NO_SESSION_RECORD), "--out", str(out),
         )  # fmt: skip
+        # A line's kind is never assumed: it decides what the line is compared with.
+        completed = run_tool(*arguments)
+        assert completed.returncode == 2 and "--kind" in completed.stderr, completed
+        assert not out.exists()
+        completed = run_tool(*arguments, "--kind", "validation")
         assert completed.returncode == 0, completed
         written = index_mod.read_index(out)
         assert [entry["subject"] for entry in written] == ["lifecycle", "streaming-latency"]
