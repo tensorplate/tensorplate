@@ -37,8 +37,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `docs/bundles/integrity.md` no longer says that a recovery or a rollback
   starts a deployment without verifying it again: the restore at the
   agent's start and a rollback hash every staged artifact, and a member's
-  restart and the registry's `prepare` compare the staged manifest's digest
-  only. (V030-E03-F01-T05)
+  restart compares the staged manifest's digest only. (V030-E03-F01-T05)
 - The agent's member registry tests no longer fail now and then on a loaded
   machine. One 40 ms budget served both the warms and port leases that must
   succeed and the cases that wait out a worker that never becomes ready or a
