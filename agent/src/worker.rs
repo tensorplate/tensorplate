@@ -142,7 +142,7 @@ pub trait WorkerControl: Send + Sync {
     /// Before the transaction's commit is written: the prepared candidate
     /// still runs, keeps its control channel and was not given up. Nothing
     /// is stopped or moved; the serving member is not told to stop
-    /// admitting, since no worker implements that operation yet.
+    /// admitting, since the agent does not send `admission_fence` yet.
     ///
     /// # Errors
     ///

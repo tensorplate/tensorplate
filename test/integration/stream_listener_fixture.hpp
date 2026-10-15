@@ -463,12 +463,14 @@ struct ConnectionLimits {
 class Served {
  public:
   /// `clock`, when given, is the listener's and its manager's;
-  /// `max_refused_calls`, the listener's places for refused calls.
+  /// `max_refused_calls`, the listener's places for refused calls;
+  /// `admission_check`, what the manager asks before it admits an Open.
   explicit Served(bool with_dispatch = true, const std::string& host = "127.0.0.1",
                   const SchedulerClock* clock = nullptr,
                   std::optional<std::size_t> max_refused_calls = std::nullopt,
                   std::uint32_t max_sessions = 1, ConnectionLimits connection_limits = {},
-                  ServedGeneration generation = {})
+                  ServedGeneration generation = {},
+                  std::function<Result<void>()> admission_check = {})
       : clock_(clock != nullptr ? *clock : system_clock_), generation_(std::move(generation)) {
     if (with_dispatch) {
       dispatch_ = std::make_unique<SteeredDispatch>(clock_);
@@ -481,6 +483,7 @@ class Served {
     options.max_refused_calls = max_refused_calls;
     options.max_connection_idle = connection_limits.idle;
     options.max_connections = connection_limits.connections;
+    options.admission_check = std::move(admission_check);
     options.limits = serving::SessionLimits::create(
                          std::chrono::seconds{60}, std::chrono::seconds{10},
                          std::chrono::seconds{30}, std::chrono::minutes{60}, max_sessions)

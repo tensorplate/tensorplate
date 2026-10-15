@@ -52,6 +52,7 @@ add_executable(tp_test_unit
   serving_health_metrics_test.cpp
   serving_async_store_test.cpp
   serving_error_status_test.cpp
+  serving_router_test.cpp
   session_state_machine_test.cpp
   session_limits_test.cpp
   session_timers_test.cpp
@@ -65,6 +66,7 @@ add_executable(tp_test_unit
   speech_dispatch_test.cpp
   control_channel_test.cpp
   drain_window_test.cpp
+  stderr_log_test.cpp
 )
 
 target_include_directories(tp_test_unit

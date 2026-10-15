@@ -111,6 +111,13 @@ Result<ManagedSessionTransition> SessionManager::open(std::uint64_t requested_ge
       return unexpected(
           Error::make(Error::Code::NotReady, "session admission is closed", "admission_closed"));
     }
+    // Before the count: a closed admission is the answer whatever the slots hold.
+    if (admission_check_) {
+      auto check = admission_check_();
+      if (!check) {
+        return unexpected(check.error());
+      }
+    }
     if (entries_.size() >= limits_.max_sessions()) {
       return unexpected(Error::make(Error::Code::ResourceExhausted, "session count limit reached",
                                     "session_count_limit"));
@@ -122,12 +129,6 @@ Result<ManagedSessionTransition> SessionManager::open(std::uint64_t requested_ge
     auto machine = LogicalSessionMachine::open(serving_generation_, requested_generation);
     if (!machine) {
       return unexpected(machine.error());
-    }
-    if (admission_check_) {
-      auto check = admission_check_();
-      if (!check) {
-        return unexpected(check.error());
-      }
     }
     const auto key = next_key_++;
     const auto now = clock_.now();

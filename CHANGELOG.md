@@ -8,6 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The serving worker writes each of its stderr log records and its newline
+  in one write. Two threads logging at once, as the control thread's
+  `deployment retiring` and the main thread's lines do after a retire,
+  could leave two records on one line, which a reader that parses the
+  worker's stderr line by line could not read. (V030-E04-F01-T04)
+
 - A deploy or rollback now refuses, before its commit, a candidate worker
   whose control channel failed after its warm: the candidate is killed, the
   transaction fails as it does for a candidate that exited, and the serving
@@ -357,6 +363,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   and the CLI otherwise refuses `--streaming` locally with `unsupported`. A
   deploy without the flag is unchanged; a speech worker serving streams
   refuses unary `/infer`. (V030-E03-F01-T03)
+
+- The serving worker answers the agent's `admission_fence`, `activate` and
+  `retire` on its control channel, which it refused as `unsupported`
+  before; the agent sends none of them yet. A fence closes the member's
+  admission and an activate opens it again, answering the quota in force:
+  the stream sessions it serves at one time (1 for a speech deployment
+  that serves streams) with `guest_ram` 0 bytes, none being reserved per
+  session yet, or 0 sessions and no domain. An activate before the model
+  has loaded is `not_ready`, and one after a retire an `error`. A retire
+  closes admission for good, begins the drain window with cause
+  `deployment_retired` for the `drain_timeout_ms` asked, at most 30
+  seconds, logs `deployment retiring` (and `retirement drain capped` when
+  it cut the drain), and asks for the worker's stop, which it never runs
+  on the control thread; a retire once a stop was asked closes admission
+  for good and answers `ok`, but begins no window and asks for no stop.
+  Each operation is idempotent; `quota_assign` and `pressure_directive`
+  stay `unsupported` and `ledger_status` reports the empty ledger. A
+  worker without a generation has no control channel and is unchanged.
+  (V030-E04-F01-T04)
 
 - `tensorplate doctor` reports `serving_streaming_support`: it runs the
   installed serving worker's `--version`, stopped after 5 s, and reads its
@@ -1072,6 +1097,35 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   Before, it answered `unsupported` ("previous active manifest invalid")
   with exit code `6`. The rollback still begins no transaction and the
   active deployment keeps serving. (V030-E03-F01-T05)
+- A serving worker with a deployment generation now refuses a new stream
+  `Open` with `admission_closed` while it is fenced, retiring or out of
+  contact with the agent (three seconds without a request, until the next
+  one; for good once the channel has ended), and refuses `/infer` and
+  `/policy/infer` with 503 `not_ready`, context `admission_closed`, while
+  it is fenced or retiring; the message names which. Sessions and requests
+  already admitted go on. The stream session manager asks this check
+  right after its own admission flag, before the session count, the key
+  space and the generation, so a fenced worker whose one slot is taken
+  refuses with `admission_closed`, not `session_count_limit`, as it does
+  an `Open` for another generation, not `stale_generation`; the `Open`'s
+  own validation, terms and budgets are still checked first. A stream
+  client reads the reason alone, as before. (V030-E04-F01-T04)
+- After a retire, the worker binary's once-a-second wait ends on its own
+  and the ordinary stop runs, with no shutdown of its own: stream sessions
+  drain and are failed with `deployment_retired` instead of
+  `worker_shutdown`, also when a signal follows, and the HTTP drain waits
+  until the retire's window ends (up to 30 seconds) instead of
+  `shutdown.drain_deadline` from the first drain. The process exits 0.
+  A SIGTERM or SIGINT after the retire, which a thread reads while that
+  stop runs, or a `ServingWorker::shutdown()` call, ends the retire's
+  window by `shutdown.drain_deadline` from then when that is sooner,
+  keeping the cause, and logs `drain window shortened`; the stream
+  sessions' wait and the HTTP drain read the window's end as they wait.
+  A `shutdown()` during or after a stop leaves the health the stop sets,
+  and the health reads `draining` once the HTTP drain's wait has begun.
+  After a retire during the load, the binary stops the built worker
+  without opening a port. The `stream listener stopping` and `draining
+  requests` lines carry the drain's `cause`. (V030-E04-F01-T04)
 - The Python SDK's streaming speech sessions now send their `Open` once more,
   on a new call within the same `open_timeout`, when the call ends before any
   server event with `UNAVAILABLE`, or with `INTERNAL` after the write of the

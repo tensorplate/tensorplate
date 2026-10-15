@@ -119,12 +119,10 @@ line says `serves_sessions: false`.
   generation that never reaches the wire, because the session layer refuses
   generation zero.
 - **Known limit.** Streaming is not offered through the agent yet. A member
-  that serves streams answers the agent through the control target described
-  under "Control channel", which implements no admission fence and no
-  retire. The agent can stop such a worker, which then drains its sessions
-  for its drain window and ends the rest as `worker_shutdown`; it cannot
-  close a generation to new sessions while the worker keeps serving, nor
-  retire one so that its sessions end as `deployment_retired`.
+  that serves streams answers `admission_fence`, `activate` and `retire`
+  (see "Control channel"), but the agent sends none of them yet: it stops a
+  worker with a signal, which drains its sessions for its drain window and
+  ends the rest as `worker_shutdown`.
 - **Calls waiting to open.** The listener waits on a call from the moment
   gRPC hands it over until the call's first message has been read: on at
   most 32 calls at one time, and on each for at most the open handshake
@@ -522,17 +520,19 @@ line says `serves_sessions: false`.
   sanitizer leg for the write path and the wait for a call's first message
   alone, since that leg cannot run a gRPC call.
 - **Shutdown order.** `shutdown()` stops admission and drains every live
-  session with `worker_shutdown`, so later `Open`s are refused with
-  `admission_closed`, also by a worker that has no dispatch, and a call
-  that has not sent its `Open` is refused at once, so it does not hold the
-  gRPC server through the drain unless the transport cannot deliver its
-  status. `stop()` stops the stream listener first.
+  session with `worker_shutdown`, or with `deployment_retired` when a
+  retire began the drain window (see "Control channel"), so later `Open`s
+  are refused with `admission_closed`, also by a worker that has no
+  dispatch, and a call that has not sent its `Open` is refused at once, so
+  it does not hold the gRPC server through the drain unless the transport
+  cannot deliver its status. `stop()` stops the stream listener first.
   The listener waits for the stream sessions to close until 250 ms before
   the end of the drain window (`shutdown.drain_deadline` after the shutdown
-  was asked), and then fails each session still open with
-  `worker_shutdown`, which queues its `SessionClosed` at once. It then
-  shuts the gRPC server down with what is left of the window: gRPC waits
-  for the calls until the window's end and then cancels those still open.
+  was asked, or a retire's window from the retire), and then fails each
+  session still open with the drain's cause, which queues its
+  `SessionClosed` at once. It then shuts the gRPC server down with what is
+  left of the window: gRPC waits for the calls until the window's end and
+  then cancels those still open.
   A client that reads gets `SessionClosed` (state failed, cause
   `worker_shutdown`) and then status `UNAVAILABLE`; one that does not read
   cannot take the event, is cancelled at the window's end and reads no
@@ -569,11 +569,19 @@ line says `serves_sessions: false`.
   HTTP listener and run the HTTP drain
   below, which waits only for what is left of the same window. One value
   holds that window (`runtime/src/serving/drain_window.hpp`): whichever
-  drain is asked first begins it, and each later one is given the same
-  end. The worker logs that end as `drain_ends_ns`, on the clock of the
-  lines' `ts_ns`, when it stops the stream listener (`stream listener
-  stopping`) and when it starts the HTTP drain (`draining requests`); a
-  test reads both and holds them to the instant shutdown was asked.
+  drain is asked first, or a retire before the stop was asked, begins it
+  with its cause, and each later one is given the same end and cause. Only
+  a shutdown asked after a retire moves that end: to
+  `shutdown.drain_deadline` from then, when that is sooner, with the cause
+  kept (`drain window shortened`, with `drain_ends_ns`, `cause` and
+  `reason`). The stream sessions' wait and the HTTP drain read the end as
+  they wait, so a shortened window ends them; gRPC's wait for the calls
+  keeps the end it began with. The worker logs that end as
+  `drain_ends_ns`, on the clock of the lines'
+  `ts_ns`, and the cause as `cause`, when it stops the stream listener
+  (`stream listener stopping`) and when it starts the HTTP drain
+  (`draining requests`); a test reads both and holds them to the instant
+  shutdown was asked.
   The HTTP port stays open until the stream listener has stopped:
   `/health` answers 503 from the moment shutdown was asked, and the router
   refuses new inference requests with `not_ready`. The HTTP listener's
@@ -638,9 +646,12 @@ listener is opened. The binary's exit codes are:
 | 66   | Listener bind / accept failure. |
 | 70   | Internal error, and a worker that stopped itself because its speech backend stalled ([A stalled speech backend](#a-stalled-speech-backend)), also when the stall came during a stop it was asked for. |
 
+With `enable_stderr_logs`, the worker writes one JSON record per stderr
+line (`runtime/src/serving/stderr_log.cpp`), each record and its newline in
+one write, so that records its threads write at once never share a line.
 A worker that exits with 64, 65 or 66 ends its stderr with one JSON line,
 the startup failure record, written whether or not `enable_stderr_logs` is
-set:
+set, after the worker has stopped:
 
 ```json
 {"component":"serving","fields":{"code":"unsupported","message":"..."},"level":"error","message":"worker startup failed","ts_ns":0}
@@ -710,6 +721,11 @@ deliberate v0.2+ decision.
 
 Every response carries the `x-correlation-id` header. Clients that
 do not supply one receive a server-generated `cid-<hex>` value.
+
+A member whose admission is closed, fenced or retiring (see "Control
+channel"), answers `/infer` and `/policy/infer` with 503 `not_ready`,
+context `admission_closed` and a message that names why, before it reads
+the request. A stopping worker answers as it did before.
 
 Routes that match a known path but a different method return 405;
 unknown paths return 404. Loopback binding is enforced server-side.
@@ -821,20 +837,26 @@ preserves `errno`; it never touches the worker, allocates, logs, or locks.
 The main thread waits on that pipe after `start()`, then calls
 `shutdown("SIGINT" | "SIGTERM")` and `stop()` in ordinary thread context.
 While it waits it reads the worker's health once a second: a worker that
-reads `failed`, which only a stalled speech backend sets, is shut down the
-same way (the worker has already logged why) and exits with the code its
-`stop()` returns.
-A second signal during shutdown cannot re-enter either call. SIGPIPE
-remains ignored through worker teardown.
+reads `failed`, which only a stalled speech backend sets, or `stopping`,
+which a retire sets, has asked for its own stop and logged why. The main
+thread then runs `stop()` alone, with no shutdown of its own, and exits
+with the code it returns: 0 after a retire. While that stop runs, a
+thread reads the pipe every 100 ms and passes each SIGINT or SIGTERM on as
+`shutdown("SIGINT" | "SIGTERM")`: the first shortens a retire's drain
+window (see "Control channel") and a later one changes nothing. After a
+signal the main thread itself shuts down and stops, and nothing reads the
+pipe again: a second signal cannot re-enter either call. SIGPIPE remains
+ignored through worker teardown.
 
 The pipe retains a signal received while the model loads. After a successful
 load, the main thread shuts down without opening the listener if a signal
-is already queued. Load failures retain their typed startup failure record
-and exit status. The pipe is close-on-exec, lives above the standard
-descriptors, and outlives the worker and its threads. The control channel's
-teardown order is unchanged: its thread stops before the components it may
-reach are destroyed. Library callers can still use `serve_forever()` and
-request shutdown from an ordinary thread.
+is already queued, or if a retire came during the load: the built worker
+then reads `stopping`, not `ready`. Load failures retain their typed
+startup failure record and exit status. The pipe is close-on-exec, lives
+above the standard descriptors, and outlives the worker and its threads.
+The control channel's teardown order is unchanged: its thread stops before
+the components it may reach are destroyed. Library callers can still use
+`serve_forever()` and request shutdown from an ordinary thread.
 
 Shutdown flows through `ShutdownController` (Running → Stopping →
 Draining → Stopped):
@@ -847,8 +869,14 @@ Draining → Stopped):
 3. If `shutdown.cancel_queued_immediately` is true, `InferScheduler::shutdown`
    cancels every queued request and releases their input buffers. This
    follows step 2: the stream drain and the HTTP listener's stop come first.
-4. The composition root waits up to `shutdown.drain_deadline` for
-   the scheduler's queue depth and logical in-flight count to reach zero.
+4. The composition root waits until the drain window ends for the
+   scheduler's queue depth and logical in-flight count to reach zero. A
+   retire that came before the stop was asked began the window at the
+   retire. Otherwise the first drain began it, `shutdown.drain_deadline`
+   long: the stream drain, when shutdown was asked, in a worker whose
+   stream listener runs, and this step in any other. The wait reads the
+   window's end as it waits, and the health reads `draining` once the
+   wait has begun.
 5. `InferScheduler::shutdown` is called again to clear anything left.
 6. `AsyncPolicyStore::cancel_all` releases retained input / completed
    buffers.
@@ -903,24 +931,87 @@ line, at most 65,536 bytes each. A request that names another
 deployment or generation is answered `member_mismatch` with this
 worker's member and goes no further. `ledger_status` and the other five
 operations are answered through `ControlTarget`, whose methods return
-at once. The worker's target implements none of them yet: it reports an
-empty ledger and refuses `admission_fence`, `activate`, `retire`,
-`quota_assign` and `pressure_directive` as `unsupported`, so the agent
-is never told that an operation took effect. An answer the wire format
-refuses is sent as an `error`. A complete frame that does not decode is
+at once. The worker's target (`MemberControlTarget`,
+`runtime/src/serving/member_control.hpp`) implements the admission fence,
+activate and retire below; it reports an empty ledger and refuses
+`quota_assign` and `pressure_directive` as `unsupported`, so the agent is
+never told that those took effect. An answer the wire format refuses is
+sent as an `error`. A complete frame that does not decode is
 skipped; a line longer than the frame limit ends the channel, and so
 does a response the agent does not take within one second.
+
+**Fence, activate and retire.** Each is idempotent by the state it leaves:
+a repeat of the latest request gets the same answer, and no record of
+correlation ids is kept.
+
+- `admission_fence` closes admission: a new stream `Open` is refused with
+  `admission_closed`, and `/infer` and `/policy/infer` with 503 (see
+  [Route contract](#route-contract)). Sessions and requests already
+  admitted go on. The stream session manager asks for this right after its
+  own admission flag, before each of its other checks: the session count,
+  the session key space and the `Open`'s generation. A fenced worker whose
+  one slot is taken therefore refuses with `admission_closed`, not
+  `session_count_limit`, and so does one asked for another generation,
+  not `stale_generation`. What the listener checks before it asks the
+  manager, the `Open` itself, its terms and their budgets, still comes
+  first.
+- `activate` opens admission again and answers with the quota in force:
+  the stream sessions the worker serves at one time (1 for a speech
+  deployment that serves streams), and `guest_ram`, the domain the
+  sessions' buffers live in, at 0 bytes: none is reserved per session
+  yet, and deriving the bytes is a later change. A worker that serves no
+  stream session answers 0 sessions and no domain. An `activate` before
+  the model has loaded is answered `not_ready` (`member_loading`), and
+  one after a retire `error` (`member_retiring`): a retire is never
+  undone.
+- `retire` closes admission for good and begins the drain window at once,
+  with cause `deployment_retired`, for the `drain_timeout_ms` asked up to
+  30 seconds (a value beyond what the worker's clock holds counts as its
+  largest). It logs `deployment retiring` (`asked_ms`, `window_ms`,
+  `drain_ends_ns`, `cause`), and `retirement drain capped` (level `warn`)
+  once when it cut the drain. It then asks for the worker's stop
+  (`shutdown requested`, reason `deployment retired`) and moves the health
+  to `stopping`, never `failed`, and answers. It runs no part of the stop
+  on the control thread: the binary's main thread, within its
+  once-a-second wait, or `serve_forever()` runs the ordinary stop, which
+  drains the stream sessions with the retire's cause and window, and the
+  process exits 0. A SIGTERM or SIGINT after the retire, before that stop
+  or during it, or a `shutdown()` call, ends the window by
+  `shutdown.drain_deadline` from then (5 s as the agent renders it) when
+  that is sooner, and the cause stays `deployment_retired`: the agent's
+  stop, which kills a worker still running 10 s after its SIGTERM, then
+  still finds the sessions closed with their typed reason. The binary's
+  own stop after a retire shortens nothing. A retire that comes while the
+  model loads is answered then, and the binary stops the built worker
+  without opening a port
+  (`serve_forever()` opens its listeners and then stops). A repeated
+  retire answers `ok` and changes nothing. One that comes once a shutdown
+  or a stop was asked answers `ok` and closes admission for good, so a
+  later `activate` is an `error`, but it begins no window, logs nothing
+  and asks for no stop: the stop keeps its own window, cause and reason,
+  also in a worker whose window begins only at its HTTP drain.
+
+The refusal's cause, `fenced`, `retiring` or `lost contact with the
+agent`, is in the HTTP body and in the error's message; a stream client
+reads `admission_closed` alone, which is the reason the stream contract
+defines. The main thread notices a retire up to a second after it, inside
+the retire's window: with a `drain_timeout_ms` of about 1.25 s or less, the
+stream sessions are failed as soon as the listener stops. The window also
+bounds the HTTP drain, up to 30 s instead of the 5 s
+`shutdown.drain_deadline` default. `SessionManager::check_generation` and
+`tombstone()` still have no caller: a worker serves one generation and a
+later client message names none, and no status reads the tombstones yet.
 
 **Contact.** The agent is in contact from the start. Three seconds
 without a decodable request is loss of contact, which the next request
 ends; a closed channel is loss of contact for good. While contact is
 lost `ControlChannel::admission` refuses with `unavailable`
-(`control_contact_lost` or `control_channel_closed`). Nothing consumes
-it yet: it is the admission check logical sessions will use, and
-sessions already admitted are not affected. Losing the agent does not
-stop a worker that is serving. A worker whose channel ended while it was
-being built does not start serving: `start` returns `unavailable`
-(`control_channel_closed`) and opens no listener.
+(`control_contact_lost` or `control_channel_closed`), and the stream
+listener's admission check refuses a new `Open` with `admission_closed`.
+`/infer` is not affected, and neither are sessions already admitted.
+Losing the agent does not stop a worker that is serving. A worker whose
+channel ended while it was being built does not start serving: `start`
+returns `unavailable` (`control_channel_closed`) and opens no listener.
 
 **The sidecar's descriptors.** The Python sidecar launcher closes every
 descriptor above stderr between `fork` and `exec` (`close_range`, or a
@@ -944,8 +1035,10 @@ admits.
 
 `SessionManager` owns those machines, their count reservations and their
 input credit. It opens only for the worker's generation, admits at most
-the configured count (2,048 by default), and offers an admission check
-for a separate memory quota. An optional bounded initialization step
+the configured count (2,048 by default), and asks an optional admission
+check, right after its own admission flag and before the count: a
+member's check refuses while it is fenced, retiring or out of contact
+with the agent. An optional bounded initialization step
 runs after slot reservation and before `emit_ready`; failure emits one
 terminal error and holds the slot for physical cleanup. Its sink applies
 each machine's effects in order; the manager serializes event
@@ -1853,14 +1946,15 @@ keeps this order:
 `unload` is reached only from `stop()`, on its caller's thread, never from
 a sink callback.
 
-**A drain.** `shutdown()` drains the open session with `worker_shutdown`. A
+**A drain.** `shutdown()` drains the open session with `worker_shutdown`,
+or with `deployment_retired` after a retire, in the retire's window. A
 segment already accepted is still synthesized and delivered inside the
 drain window, and the session then closes with that cause. A session whose
 job outlasts the window has its call cancelled by the listener's stop and
 is released through the bridge once by the dispatch, at the cleanup the
 abort asks for or, when its thread has not reached that, at its stop. Its
 job is ended by the unload. The dispatch itself gives no session
-`worker_shutdown`.
+`worker_shutdown` or `deployment_retired`.
 
 **Known, not changed here: a stop past the drain window sends no
 `SessionClosed`.** The client of such a session reads the events already

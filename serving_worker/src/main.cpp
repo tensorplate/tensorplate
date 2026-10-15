@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -25,6 +26,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/serving/config.hpp"
@@ -159,14 +161,58 @@ void report_startup_failure(const tensorplate::Error& error) noexcept {
   }
 }
 
-/// How often the wait for a signal also looks whether the worker failed.
+/// How often the wait for a signal also looks whether the worker still serves.
 constexpr int kFailureCheckMs = 1000;
+
+/// How often the watch for a signal during a stop looks whether the stop is over.
+constexpr int kStopWatchMs = 100;
+
+/// False once the worker failed or a retire asked for its stop.
+bool serving(tensorplate::ServingWorker& worker) {
+  const auto state = worker.health().state();
+  return state == tensorplate::ServingState::Ready || state == tensorplate::ServingState::Degraded;
+}
+
+/// The stop of a worker that asked for its own. A signal meanwhile is passed
+/// on, so that it shortens a retire's drain window to the shutdown's.
+tensorplate::ServingExitCode stop_passing_signals(tensorplate::ServingWorker& worker,
+                                                  const SignalWakeup& signals) {
+  struct Watch {
+    std::atomic<bool> over{false};
+    std::thread thread;
+    Watch() = default;
+    Watch(const Watch&) = delete;
+    Watch& operator=(const Watch&) = delete;
+    ~Watch() {
+      over.store(true);
+      if (thread.joinable()) {
+        thread.join();
+      }
+    }
+  } watch;
+  try {
+    watch.thread = std::thread([&worker, &signals, &over = watch.over] {
+      while (!over.load()) {
+        const auto signal = signals.wait(kStopWatchMs);
+        if (!signal) {
+          return;
+        }
+        if (*signal != 0) {
+          worker.shutdown(*signal == SIGINT ? "SIGINT" : "SIGTERM");
+        }
+      }
+    });
+  } catch (...) {  // NOLINT(bugprone-empty-catch): the stop goes on without the watch.
+  }
+  return worker.stop();
+}
 
 tensorplate::ServingExitCode run_until_signal(tensorplate::ServingWorker& worker,
                                               const SignalWakeup& signals) {
-  // A signal received during load must not be lost or publish a new listener.
+  // A signal received during load must not be lost or publish a new listener,
+  // and neither must a retire.
   auto signal = signals.wait(0);
-  if (signal && *signal == 0) {
+  if (signal && *signal == 0 && serving(worker)) {
     if (auto started = worker.start(); !started) {
       // Stopped first: the stop logs, and the record must be the last line.
       (void)worker.stop();
@@ -175,16 +221,20 @@ tensorplate::ServingExitCode run_until_signal(tensorplate::ServingWorker& worker
                  ? tensorplate::ServingExitCode::ConfigError
                  : tensorplate::ServingExitCode::ServeError;
     }
-    // A worker that failed while serving (a stalled backend) stops as on a
-    // signal; its stop() gives the exit code.
+    // A worker that failed while serving (a stalled backend), or that a
+    // retire stopped, stops as on a signal; its stop() gives the exit code.
     do {
       signal = signals.wait(kFailureCheckMs);
-    } while (signal && *signal == 0 &&
-             worker.health().state() != tensorplate::ServingState::Failed);
+    } while (signal && *signal == 0 && serving(worker));
+  }
+  if (signal && *signal == 0) {
+    // The worker has asked for its own stop, and a shutdown asked here would
+    // shorten a retire's window.
+    return stop_passing_signals(worker, signals);
   }
   const char* reason = "signal wait failed";
   if (signal) {
-    reason = *signal == SIGINT ? "SIGINT" : (*signal == SIGTERM ? "SIGTERM" : "worker failed");
+    reason = *signal == SIGINT ? "SIGINT" : "SIGTERM";
   }
   worker.shutdown(reason);
   const auto code = worker.stop();
