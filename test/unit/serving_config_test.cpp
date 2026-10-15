@@ -14,6 +14,9 @@ namespace {
 
 using namespace tensorplate;
 
+constexpr const char* kDigest =
+    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
 TEST(ServingConfig, DefaultsValidate) {
   ServingConfig cfg;
   EXPECT_TRUE(cfg.validate());
@@ -55,6 +58,18 @@ TEST(ServingConfig, StreamingSchemaDeclaresOptionalFields) {
   for (const auto& required : schema.at("required")) {
     EXPECT_NE(required, "streaming");
   }
+}
+
+TEST(ServingConfig, SchemaDeclaresTheDescriptorDigestBesideTheGeneration) {
+  std::ifstream input{std::string{TP_SOURCE_DIR} + "/config/schemas/serving_worker.json"};
+  ASSERT_TRUE(input.is_open());
+  const auto deployment = nlohmann::json::parse(input).at("properties").at("deployment");
+  const auto& digest = deployment.at("properties").at("descriptor_digest");
+  EXPECT_EQ(digest.at("type"), "string");
+  EXPECT_EQ(digest.at("pattern"), "^sha256:[0-9a-f]{64}$");
+  EXPECT_EQ(deployment.at("dependencies").at("descriptor_digest"),
+            nlohmann::json::array({"generation"}));
+  EXPECT_FALSE(deployment.contains("required"));
 }
 
 TEST(ServingConfig, StreamingRequiresCompiledFeature) {
@@ -108,15 +123,23 @@ TEST(ServingConfig, StreamingPortAloneRoundTripsInEitherBuild) {
   EXPECT_FALSE(again->streaming.enabled);
 }
 
-TEST(ServingConfig, StreamingRefusesAGenerationAMalformedDeploymentIdAndTheHttpPort) {
+TEST(ServingConfig, StreamingRefusesAMemberWithoutADigestABadDeploymentIdAndTheHttpPort) {
   ServingConfig with_generation;
   with_generation.streaming.enabled = true;
   with_generation.deployment.endpoint = "dep-a";
   with_generation.deployment.generation = 3;
   const auto refused = with_generation.validate();
   ASSERT_FALSE(refused.has_value());
+#if TP_ENABLE_STREAMING_GRPC
+  EXPECT_EQ(refused.error().code, Error::Code::ConfigInvalid);
+  EXPECT_NE(refused.error().message.find("deployment.descriptor_digest"), std::string::npos);
+  with_generation.deployment.descriptor_digest = kDigest;
+  EXPECT_TRUE(with_generation.validate().has_value());
+#else
   EXPECT_EQ(refused.error().code, Error::Code::Unsupported);
+#endif
   with_generation.streaming.enabled = false;
+  with_generation.deployment.descriptor_digest.reset();
   EXPECT_TRUE(with_generation.validate().has_value());
 
   ServingConfig malformed;
@@ -282,6 +305,61 @@ TEST(ServingConfig, DeploymentGenerationIsOptionalAndRoundTrips) {
       R"({"schema_version":"0.1","deployment":{"generation":9007199254740991}})");
   ASSERT_TRUE(largest.has_value());
   EXPECT_EQ(largest->deployment.generation, std::optional<std::uint64_t>{9007199254740991ULL});
+}
+
+TEST(ServingConfig, DeploymentDescriptorDigestIsOptionalAndRoundTrips) {
+  const auto without = ServingConfig::parse_json(
+      R"({"schema_version":"0.1","deployment":{"endpoint":"speech-en","generation":7}})");
+  ASSERT_TRUE(without.has_value()) << without.error().message;
+  EXPECT_FALSE(without->deployment.descriptor_digest.has_value());
+  EXPECT_EQ(without->to_json().find("descriptor_digest"), std::string::npos);
+
+  const auto with = ServingConfig::parse_json(
+      std::string{R"({"schema_version":"0.1","deployment":{"endpoint":"speech-en","generation":7,)"
+                  R"("descriptor_digest":")"} +
+      kDigest + R"("}})");
+  ASSERT_TRUE(with.has_value()) << with.error().message;
+  EXPECT_EQ(with->deployment.descriptor_digest, std::optional<std::string>{kDigest});
+  const auto again = ServingConfig::parse_json(with->to_json());
+  ASSERT_TRUE(again.has_value());
+  EXPECT_EQ(again->deployment.descriptor_digest, std::optional<std::string>{kDigest});
+}
+
+TEST(ServingConfig, DeploymentDescriptorDigestIsASha256DigestBesideAGeneration) {
+  const std::string hex(64, 'a');
+  for (const std::string& digest :
+       {std::string{"null"}, std::string{"7"}, std::string{"[]"},
+        "\"sha256:" + hex.substr(1) + "\"", "\"sha256:" + hex + "0\"",
+        "\"sha256:" + std::string(64, 'A') + "\"", "\"sha256:" + hex.substr(1) + "g\"",
+        "\"sha512:" + hex + "\"", "\"sha256-" + hex + "\"", "\"" + hex + "\"",
+        "\"sha256:" + hex.substr(1) + "/\"", "\"sha256:" + hex.substr(1) + ":\"",
+        "\"sha256:" + hex.substr(1) + "`\"", std::string{R"("")"}}) {
+    SCOPED_TRACE(digest);
+    const auto parsed = ServingConfig::parse_json(
+        std::string{
+            R"({"schema_version":"0.1","deployment":{"generation":7,"descriptor_digest":)"} +
+        digest + "}}");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, Error::Code::ConfigInvalid);
+    EXPECT_NE(parsed.error().message.find("deployment.descriptor_digest"), std::string::npos);
+  }
+  const auto without_generation = ServingConfig::parse_json(
+      std::string{R"({"schema_version":"0.1","deployment":{"descriptor_digest":")"} + kDigest +
+      R"("}})");
+  ASSERT_FALSE(without_generation.has_value());
+  EXPECT_EQ(without_generation.error().code, Error::Code::ConfigInvalid);
+  EXPECT_NE(without_generation.error().message.find("requires deployment.generation"),
+            std::string::npos);
+
+  ServingConfig config;
+  config.deployment.descriptor_digest = kDigest;
+  EXPECT_EQ(config.validate().error().code, Error::Code::ConfigInvalid);
+  config.deployment.generation = 7;
+  EXPECT_TRUE(config.validate().has_value());
+  config.deployment.descriptor_digest = "sha256:" + std::string(54, '0') + "0123456789";
+  EXPECT_TRUE(config.validate().has_value());
+  config.deployment.descriptor_digest = "sha256:" + std::string(58, 'f') + "abcdef";
+  EXPECT_TRUE(config.validate().has_value());
 }
 
 TEST(ServingConfig, DeploymentGenerationMustBeAPositiveSafeInteger) {

@@ -70,6 +70,9 @@ struct ActiveDeploymentConfig {
   /// be 1 to 128 of letters, digits, '.', '_' and '-'. Unset, which is the
   /// default, the worker has no control channel.
   std::optional<std::uint64_t> generation;
+
+  /// Digest of the generation's descriptor, `sha256:` + 64 lowercase hex; requires `generation`.
+  std::optional<std::string> descriptor_digest;
 };
 
 /// Health response mode. v0.1.0 supports a single "local_json"
@@ -183,8 +186,8 @@ struct AsyncPolicyConfig {
 /// Optional streaming transport settings, mirroring the streaming JSON object.
 struct StreamingConfig {
   /// Opt in to the gRPC stream listener. False by default; true requires a
-  /// build with TP_ENABLE_STREAMING_GRPC and a worker without
-  /// `deployment.generation`.
+  /// build with TP_ENABLE_STREAMING_GRPC, and `deployment.descriptor_digest`
+  /// in a worker with `deployment.generation`.
   bool enabled = false;
 
   /// TCP port of the stream listener, on `bind.host` and under the same
