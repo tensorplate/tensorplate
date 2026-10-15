@@ -1028,6 +1028,12 @@ TEST_F(SpeechWorkerScripted, ACancelledSessionWhoseJobDoesNotEndFailsTheWorker) 
   ASSERT_EQ(stopped.size(), 1U);
   EXPECT_EQ(stopped.front().value("jobs_past_deadline", 0), 1);
   EXPECT_EQ(stopped.front().value("releases_past_bound", 0), 1);
+  // A start after that stop is refused, and the worker keeps the stop's 70.
+  const auto again = served.worker->start();
+  ASSERT_FALSE(again.has_value());
+  EXPECT_EQ(again.error().context, "worker_shutdown");
+  EXPECT_EQ(served.worker->serve_forever(), tensorplate::ServingExitCode::Internal);
+  EXPECT_EQ(served.worker->stop(), tensorplate::ServingExitCode::Internal);
 }
 
 // The backend takes the job and then refuses it: a failed job.

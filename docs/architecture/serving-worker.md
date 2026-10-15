@@ -1763,7 +1763,8 @@ start after a stop that followed a start failed at the HTTP listener, which
 opens neither listener; the
 refused unary request; each row of the table above; and a session
 cancelled under a job the backend does not end, which fails the worker
-once its release passes the bound, in process (`stop()` returns 70) and as
+once its release passes the bound, in process (`stop()` returns 70, and
+after a refused `start()` so do `serve_forever()` and `stop()`) and as
 the worker binary over the runner with a backend that never ends a job
 (`test/mocks/worker_held_job_sidecar.py`), which exits 70 after its unload
 gave up on the job. Both wait out the provisional figures, about 20 and 36
