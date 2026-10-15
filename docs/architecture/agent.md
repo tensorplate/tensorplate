@@ -1084,7 +1084,9 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   status; an `activate` answered `error` clears it, and one not answered,
   or refused otherwise, leaves it. Operations to
   one worker are sent one at a time, and a restart's activate is not sent
-  while a transaction's fence is in force. Each
+  while a transaction's fence is in force; a fence that finds an activate
+  being sent to its worker waits for it, at most 3 seconds, before its own
+  3 seconds begin. Each
   is exchanged in the gap before the channel's next ledger poll, so none
   delays a poll; one not answered when its gap ends is sent again after
   the poll, as a new request with its own `correlation_id`.
