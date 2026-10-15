@@ -46,9 +46,10 @@ you publish:
 
 Both manifests declare `model_class` `speech` under format 0.1, which asks no
 speech block of the class. The class is what selects the serving worker's
-speech dispatch for a deployment that enables streaming; on `/infer` it
-changes nothing. The provisioned bundles under `packaging/provisioning/bundles/`
-declare the same format, class, version and precision, and
+speech dispatch for a deployment that enables streaming. Without streaming,
+`/infer` is unchanged; with streaming enabled, the worker refuses `/infer`
+for this class and serves stream sessions instead. The provisioned bundles under `packaging/provisioning/bundles/`
+declare the same manifest apart from the artifact lists, and
 `cli/tests/bundle_fetch.rs` fails when they differ.
 
 Each entry's `artifact_set` lists the files its runner profile opens, by a

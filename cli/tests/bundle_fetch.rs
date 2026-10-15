@@ -477,9 +477,17 @@ fn shipped_references_pin_exact_entry_sets_and_preserve_candidate_declarations()
         )
         .unwrap();
         assert_eq!(emitted["model_class"], "speech", "{name}");
-        for field in ["format_version", "model_class", "version", "precision_hint"] {
-            assert_eq!(emitted[field], twin[field], "{name}: {field}");
-        }
+        // Only the artifact lists may differ between the twin and the bundle.
+        let without_artifacts = |manifest: &Value| {
+            let mut manifest = manifest.clone();
+            manifest.as_object_mut().unwrap().remove("artifacts");
+            manifest
+        };
+        assert_eq!(
+            without_artifacts(&emitted),
+            without_artifacts(&twin),
+            "{name}: manifest differs from its fixture twin"
+        );
         assert_eq!(
             emitted["runtime_compatibility"]["min_runtime_version"],
             "0.3.0"

@@ -4,8 +4,10 @@
 An operator may supply any manifest of the same schema. These candidate-only
 bundles preserve the entry layouts and declarations of the synthetic speech
 fixtures, with real upstream files and their recorded SHA-256 digests. They
-use the existing unary candidate path; provisioning grants no speech support
-or performance claim.
+use the existing unary candidate path, which the agent keeps while it renders
+no streaming setting; a deployment with streaming enabled would have the
+worker refuse `/infer` for the speech class and serve stream sessions instead.
+Provisioning grants no speech support or performance claim.
 
 Both manifests are format 0.1 with `model_class` `speech`, at version 0.2.0;
 version 0.1.0 declared `custom`, which the serving worker never gives its
