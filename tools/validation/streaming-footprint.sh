@@ -10,6 +10,10 @@
 # derives the verdict from the raw captures and refuses a record it cannot
 # derive. Linux only: the resident set is read from /proc.
 #
+# The with-streaming worker runs with `streaming.enabled` added to the packaged
+# config, so its stream listener is bound before anything is sampled; the
+# other keeps the packaged config, which its build would refuse otherwise.
+#
 # Usage:
 #   streaming-footprint.sh --with-streaming FILE.deb --without-streaming FILE.deb \
 #     --out DIR [--stream-driver COMMAND] [options]
@@ -27,6 +31,7 @@ record_tool="${here}/streaming_footprint_record.py"
 thresholds="${here}/streaming-footprint-thresholds.json"
 worker_path=usr/lib/tensorplate/tensorplate-serving
 config_path=etc/tensorplate/serving_worker.json
+listener_line='"message":"stream listener bound"'
 
 with_pkg=""
 without_pkg=""
@@ -171,6 +176,15 @@ sample_vmrss() {
   done
 }
 
+# /health reports ready a few milliseconds before the stream listener is bound.
+wait_for_listener() {
+  local log="$1" deadline=$((SECONDS + ready_timeout))
+  until grep -qF "$listener_line" "$log"; do
+    ((SECONDS < deadline)) || return 1
+    sleep 0.1
+  done
+}
+
 stop_worker() {
   local pid="$1" file="$2" status=0 i
   kill -TERM "$pid" 2>/dev/null || true
@@ -212,7 +226,7 @@ run_driver() {
 }
 
 measure_side() {
-  local side="$1" pkg="$2" side_dir arch version run run_dir root worker port url
+  local side="$1" pkg="$2" side_dir arch version run run_dir root worker port url config listener
   side_dir="${captures}/${side}"
   mkdir -p "$side_dir"
   arch="$(dpkg-deb -f "$pkg" Architecture)"
@@ -239,7 +253,23 @@ measure_side() {
     is_elf "$worker" || die "${side}: ${worker_path} is not an ELF executable"
     [[ -f "${root}/${config_path}" ]] || die "${side}: package ships no ${config_path}"
     chmod u+x "$worker"
+    config="${root}/${config_path}"
+    if [[ "$side" == with_streaming ]]; then
+      config="${work}/serving_worker.json"
+      "$python" - "${root}/${config_path}" "$config" <<'PY' ||
+import json
+import sys
+
+with open(sys.argv[1]) as packaged:
+    document = json.load(packaged)
+document["streaming"] = {"enabled": True, "port": 0}
+with open(sys.argv[2], "w") as written:
+    json.dump(document, written, indent=2)
+PY
+        die "${side}: cannot add streaming to ${config_path}"
+    fi
     if ((run == 1)); then
+      cp "$config" "${side_dir}/serving_worker.json"
       "$worker" --version >"${side_dir}/version-output.txt" 2>>"${side_dir}/version-output.log" ||
         die "${side}: ${worker_path} --version failed (see ${side_dir}/version-output.log)"
     fi
@@ -247,12 +277,17 @@ measure_side() {
 
     port="$("$python" "$record_tool" free-port)"
     url="http://127.0.0.1:${port}"
-    "$worker" --config "${root}/${config_path}" --bind-host 127.0.0.1 --bind-port "$port" \
+    "$worker" --config "$config" --bind-host 127.0.0.1 --bind-port "$port" \
       >"${run_dir}/worker.log" 2>&1 &
     worker_pid=$!
     "$python" "$record_tool" wait-ready --url "${url}/health" --timeout "$ready_timeout" \
       --out "${run_dir}/health.json" ||
       die "${side} run ${run}: worker not ready (see ${run_dir}/worker.log)"
+    listener=""
+    if [[ "$side" == with_streaming ]]; then
+      listener=not_started
+      wait_for_listener "${run_dir}/worker.log" && listener=started
+    fi
     sleep "$settle_seconds"
     sample_vmrss "$worker_pid" "${run_dir}/idle-vmrss.tsv" "idle"
     if [[ -n "$driver" ]]; then
@@ -261,6 +296,11 @@ measure_side() {
       echo "no stream driver was given" >"${run_dir}/steady-not-run.txt"
     fi
     stop_worker "$worker_pid" "${run_dir}/worker-exit.txt"
+    if [[ -z "$listener" ]]; then
+      listener=not_started
+      grep -qF "$listener_line" "${run_dir}/worker.log" && listener=started
+    fi
+    printf '%s\n' "$listener" >"${run_dir}/stream-listener.txt"
     rm -rf "$work"
     work=""
     printf 'streaming-footprint: %s run %s of %s captured\n' "$side" "$run" "$runs"

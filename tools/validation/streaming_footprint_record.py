@@ -87,8 +87,12 @@ def load_thresholds(path: Path = THRESHOLDS_PATH) -> dict[str, Any]:
     return thresholds
 
 
-def run_value(budget: str, run: dict[str, Any]) -> tuple[int | None, str | None]:
+def run_value(
+    budget: str, run: dict[str, Any], listener_required: bool
+) -> tuple[int | None, str | None]:
     """One run's value for a budget in bytes, or why it has none."""
+    if budget != "installed_size" and listener_required and run["stream_listener"] != "started":
+        return None, "the stream listener was not started"
     if budget == "installed_size":
         files = run["elf_files"]
         if not files:
@@ -119,7 +123,7 @@ def derive_result(thresholds: dict[str, Any], sides: dict[str, Any]) -> dict[str
             if len(runs) < thresholds["runs"]:
                 reasons.append(f"{side}: {len(runs)} of {thresholds['runs']} runs recorded")
             for run in runs:
-                value, reason = run_value(budget, run)
+                value, reason = run_value(budget, run, side == "with_streaming")
                 if value is None:
                     reasons.append(f"{side} run {run['index']}: {reason}")
                 else:
@@ -292,6 +296,7 @@ def _read_run(run_dir: Path, index: int) -> dict[str, Any]:
         except ValueError as exc:
             raise CaptureError(f"{run_dir / 'elf-files.tsv'}:{number}: {exc}") from exc
     idle = _read_samples(run_dir / "idle-vmrss.tsv")
+    listener = _read_text(run_dir / "stream-listener.txt").strip()
     measured = run_dir / "steady-vmrss.tsv"
     not_run = run_dir / "steady-not-run.txt"
     if measured.exists() and not_run.exists():
@@ -315,7 +320,13 @@ def _read_run(run_dir: Path, index: int) -> dict[str, Any]:
         steady = {"status": "not_run", "reason": reason, "streams": None, "samples_kib": []}
     else:
         raise CaptureError(f"{run_dir}: neither a steady-state capture nor a not-run reason")
-    return {"index": index, "elf_files": files, "idle_rss_samples_kib": idle, "steady": steady}
+    return {
+        "index": index,
+        "elf_files": files,
+        "idle_rss_samples_kib": idle,
+        "stream_listener": listener,
+        "steady": steady,
+    }
 
 
 def _read_side(side_dir: Path, runs: int) -> dict[str, Any]:
