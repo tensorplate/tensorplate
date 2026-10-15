@@ -56,13 +56,14 @@
 #                 the baseline's machine-type record is byte-identical
 #                 after it, and the candidate has bound it to the instance
 #   rollback      the documented procedure -- stop, set state aside as
-#                 state.bak, restore the machine-type record from it,
+#                 state.bak and the staged bundles as staging.bak beside
+#                 it, restore the machine-type record from state.bak,
 #                 remove (not purge) every TensorPlate package, install the
 #                 baseline fresh -- returns exactly the baseline set, keeps
-#                 the operator edit and the set-aside state, keeps the
-#                 machine-type record and the instance binding byte for
-#                 byte, starts with no active deployment, and deploys and
-#                 serves again
+#                 the operator edit, the set-aside state and the set-aside
+#                 staged bundles, keeps the machine-type record and the
+#                 instance binding byte for byte, starts with no active
+#                 deployment, and deploys and serves again
 # With a baseline the offline stage also rolls back and then upgrades
 # before it lifts the denial, each package operation in a denied transient
 # unit: the machine-type record must be in place, unchanged and in the
@@ -146,6 +147,13 @@ JOURNAL_SCRATCH=""
 # (docs/install/lifecycle.md) rather than carrying it back.
 readonly STATE_DIR="/var/lib/tensorplate/state"
 readonly STATE_ASIDE_DIR="/var/lib/tensorplate/state.bak"
+# The staged bundles go aside with it: an agent that started on other state
+# would remove every staged tree state.bak names.
+readonly STAGED_BUNDLES_DIR="/var/lib/tensorplate/bundles/staging"
+readonly STAGED_BUNDLES_ASIDE_DIR="/var/lib/tensorplate/bundles/staging.bak"
+# Every staged file's size and path, taken with the services stopped and
+# before the move.
+STAGED_LISTING=""
 # The agent's deployment state, the one file in that directory the
 # rollback stage is written around: without it there is nothing for the
 # rollback to preserve. It is NOT the only durable file there, which is
@@ -2144,6 +2152,42 @@ check_state_preserved() {
   return 1
 }
 
+# One sorted "<size> <path>" line per staged file: sizes, not digests, as
+# the trees hold model weights. An empty listing fails, as an empty state does.
+staged_listing() {
+  local listing
+  listing="$(sudo find "$1" -mindepth 1 -type f -printf '%s %P\n')" || return
+  if [[ -z "$listing" ]]; then
+    printf '%s holds no staged files; there are no staged bundles here to preserve\n' "$1" >&2
+    return 1
+  fi
+  printf '%s\n' "$listing" | LC_ALL=C sort
+}
+
+capture_staged_listing() {
+  STAGED_LISTING="$(staged_listing "$STAGED_BUNDLES_DIR")"
+}
+
+# Every staged file the stopped services left, at its size, and nothing
+# more. The first file that is gone or resized is named.
+check_staged_preserved() {
+  local now line
+  now="$(staged_listing "$STAGED_BUNDLES_ASIDE_DIR")" || return
+  if [[ "$now" == "$STAGED_LISTING" ]]; then
+    return 0
+  fi
+  while IFS= read -r line; do
+    if [[ $'\n'"${now}"$'\n' != *$'\n'"${line}"$'\n'* ]]; then
+      printf 'the rollback did not preserve %s: it no longer holds "%s" (size, path) as the stopped services left it\n' \
+        "$STAGED_BUNDLES_ASIDE_DIR" "$line" >&2
+      return 1
+    fi
+  done <<<"$STAGED_LISTING"
+  printf 'the rollback did not preserve %s: it holds staged files the stopped services did not leave\n' \
+    "$STAGED_BUNDLES_ASIDE_DIR" >&2
+  return 1
+}
+
 capture_identity_digests() {
   MACHINE_TYPE_RECORD_SHA256="$(privileged_sha256 "$MACHINE_TYPE_RECORD")" || return
   if (($# > 0)); then
@@ -2320,13 +2364,16 @@ removable_packages() {
 
 stage_rollback() {
   local remove=() pkg
-  # Checked before anything changes. A state.bak from before the run is
-  # already gone -- install and upgrade delete /var/lib/tensorplate while
-  # clearing the host -- so this does not keep an earlier copy. It makes
-  # sure the move below lands on a name nothing else holds, refused by
-  # name before the services are stopped, rather than leaving mv -T to
-  # replace an empty directory or refuse a full one halfway through.
+  # Checked before anything changes. A state.bak or staging.bak from before
+  # the run is already gone -- install and upgrade delete
+  # /var/lib/tensorplate while clearing the host -- so this does not keep an
+  # earlier copy. It makes sure each move below lands on a name nothing
+  # else holds, refused by name before the services are stopped, rather
+  # than leaving mv -T to replace an empty directory or refuse a full one
+  # halfway through.
   step "refuse to replace an existing ${STATE_ASIDE_DIR}" sudo test ! -e "$STATE_ASIDE_DIR" || return
+  step "refuse to replace an existing ${STAGED_BUNDLES_ASIDE_DIR}" \
+    sudo test ! -e "$STAGED_BUNDLES_ASIDE_DIR" || return
 
   note "rolling back by the documented procedure"
   step "stop the services" sudo systemctl stop "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
@@ -2334,9 +2381,12 @@ stage_rollback() {
   # carry across, and before anything moves or removes it -- after the
   # move there is no original left to compare the saved copy with.
   step "digest the durable state before setting it aside" capture_state_manifest || return
+  step "list the staged bundles before setting them aside" capture_staged_listing || return
   step "digest the machine-type record and the instance binding" \
     capture_identity_digests binding || return
   step "set durable state aside" sudo mv -T "$STATE_DIR" "$STATE_ASIDE_DIR" || return
+  # Always there: the packages create it, and the upgrade's deployment staged into it.
+  step "set the staged bundles aside" sudo mv -T "$STAGED_BUNDLES_DIR" "$STAGED_BUNDLES_ASIDE_DIR" || return
   step "restore the machine-type record for the baseline" restore_machine_type_record || return
 
   while read -r pkg; do
@@ -2357,6 +2407,7 @@ stage_rollback() {
     check_record_kept "when the baseline started" || return
   step "the rollback left the instance binding alone" check_binding_kept || return
   step "the set-aside state is preserved, file by file" check_state_preserved || return
+  step "the set-aside staged bundles are preserved" check_staged_preserved || return
   record_baseline_doctor "${EVIDENCE_DIR}/doctor-after-rollback.json" || return
 
   # The older agent must not have loaded the newer agent's state: it
@@ -2376,7 +2427,7 @@ PY
 
   note "deploying on the rolled-back version"
   deploy_bundle "${EVIDENCE_DIR}/rollback-result.json" || return
-  pass "rolled back to the baseline; operator edit kept; state set aside unchanged and not loaded; machine-type record restored and instance binding kept; deploy and inference answered"
+  pass "rolled back to the baseline; operator edit kept; state and staged bundles set aside unchanged, state not loaded; machine-type record restored and instance binding kept; deploy and inference answered"
 }
 
 # --- restart, rollback and upgrade under the denial ----------------------
@@ -2458,13 +2509,18 @@ offline_rollback_under_denial() {
   local work="$1" remove=() pkg
   offline_step_begin offline-rollback "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
   step "refuse to replace an existing ${STATE_ASIDE_DIR}" sudo test ! -e "$STATE_ASIDE_DIR" || return
+  step "refuse to replace an existing ${STAGED_BUNDLES_ASIDE_DIR}" \
+    sudo test ! -e "$STAGED_BUNDLES_ASIDE_DIR" || return
 
   note "rolling back by the documented procedure with the denial in place"
   step "stop the services" sudo systemctl stop "$AGENT_UNIT" "$OBSERVABILITY_UNIT" || return
   step "digest the durable state before setting it aside" capture_state_manifest || return
+  step "list the staged bundles before setting them aside" capture_staged_listing || return
   step "digest the machine-type record and the instance binding" \
     capture_identity_digests binding || return
   step "set durable state aside" sudo mv -T "$STATE_DIR" "$STATE_ASIDE_DIR" || return
+  # Always there: the packages create it, and the candidate's deployments staged into it.
+  step "set the staged bundles aside" sudo mv -T "$STAGED_BUNDLES_DIR" "$STAGED_BUNDLES_ASIDE_DIR" || return
   step "restore the machine-type record for the baseline" restore_machine_type_record || return
   while read -r pkg; do
     remove+=("$pkg")
@@ -2487,6 +2543,7 @@ offline_rollback_under_denial() {
   step "the denied rollback left the instance binding alone" \
     check_binding_kept "the denied rollback" || return
   step "the set-aside state is preserved, file by file" check_state_preserved || return
+  step "the set-aside staged bundles are preserved" check_staged_preserved || return
   offline_step_started_denied || return
 
   # Not the id the candidate was serving when state was set aside, so

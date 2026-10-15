@@ -80,7 +80,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   staged bundle with the record's for a record that names no descriptor as
   well, as the start does, and is refused when they differ. A copy that
   fails, as on a full disk, removes its tree, and its error names the tree.
-  (V030-E03-F01-T05)
+  Because an agent removes every tree its state does not name, the
+  documented rollback now sets `/var/lib/tensorplate/bundles/staging` aside
+  with `state`, and the two are restored together. (V030-E03-F01-T05)
 - A start of the agent now settles the transaction it finds and starts the
   recorded active deployment again in one pass. Before, a transaction
   interrupted while its candidate was prepared, warming or promoted was

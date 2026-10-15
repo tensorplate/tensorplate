@@ -77,12 +77,23 @@ to miss: the backend only Recommends the agent, so removing the agent leaves
 it installed. `tensorplate-apt-source` only configures the APT channel and can
 stay.
 
+The staging directory, `/var/lib/tensorplate/bundles/staging`, moves aside
+with durable state. When the agent starts and when a deploy begins, it removes
+the staged bundles no record in its state names, so an agent started while
+`state` is set aside would remove the bundles `state.bak` names.
+
 ```bash
 sudo systemctl stop tensorplate-agent tensorplate-observability
 # Move durable state aside so the older agent cannot misinterpret it. If
 # state.bak already exists from an earlier rollback, move that elsewhere
 # first: mv would otherwise put state inside it.
 sudo mv /var/lib/tensorplate/state /var/lib/tensorplate/state.bak
+# Move the staged bundles aside with it, when there is a staging directory.
+# The same care: if staging.bak already exists from an earlier rollback,
+# move that elsewhere first.
+if sudo test -e /var/lib/tensorplate/bundles/staging; then
+  sudo mv /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/bundles/staging.bak
+fi
 # On a Compute Engine instance, put the machine-type record back: the older
 # agent reads it at this path, and without it an older agent started with
 # no answer from the metadata service cannot establish its machine type.
@@ -117,11 +128,13 @@ sudo systemctl enable --now tensorplate-agent tensorplate-observability
 ```
 
 Leave out `tensorplate-backend-python-pytorch` if it was not installed.
+`<arch>` is `arm64` on Jetson and `amd64` on Ubuntu x86_64.
 
 The older agent will report "no active deployment" until you decide whether
-to restore `state.bak` (manually verify the schema_version of each journal
-first) or to redeploy from a known-good bundle. The machine-type record is
-the one file it gets back straight away, in the layout it reads.
+to restore `state.bak` with `staging.bak` (manually verify the schema_version
+of each journal first) or to redeploy from a known-good bundle. The
+machine-type record is the one file it gets back straight away, in the layout
+it reads.
 `/var/lib/tensorplate/identity/` is not set aside and not needed: releases
 up to 0.2.1 do not read it, and a later upgrade finds it where it was. The
 older agent does not update it either, so if the instance is given a
@@ -129,7 +142,25 @@ different machine type before that upgrade, the upgraded agent refuses the
 binding; reprovision by stopping `tensorplate-agent`, deleting both
 identity files and starting it with the metadata service reachable.
 
-`<arch>` is `arm64` on Jetson and `amd64` on Ubuntu x86_64.
+To restore, put both back together, with the services stopped:
+
+```bash
+sudo systemctl stop tensorplate-agent tensorplate-observability
+# Set aside (or remove) what the agent wrote since the rollback, then move
+# each .bak back.
+sudo mv /var/lib/tensorplate/state /var/lib/tensorplate/state.after-rollback
+sudo mv /var/lib/tensorplate/state.bak /var/lib/tensorplate/state
+if sudo test -e /var/lib/tensorplate/bundles/staging.bak; then
+  sudo mv /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/bundles/staging.after-rollback
+  sudo mv /var/lib/tensorplate/bundles/staging.bak /var/lib/tensorplate/bundles/staging
+fi
+sudo systemctl start tensorplate-agent tensorplate-observability
+```
+
+Restoring one without the other leaves records that name bundles that are
+gone: the deployments they name do not serve, and a rollback to them is
+refused.
+
 `test/packaging/apt-lifecycle-e2e.sh` asserts with `dpkg` that the downgrade
 guard stays armed both with and without durable state present, and rehearses
 an older form of this rollback: it downgrades `tensorplate-common` in place,

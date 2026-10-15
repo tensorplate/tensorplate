@@ -211,8 +211,14 @@ pass "downgrade refused by the upgrade preflight"
 
 # Same attempt with durable state moved aside: still refused, because the guard
 # compares versions and never inspects state. This is why rollback cannot be a
-# downgrade at all.
+# downgrade at all. The staged bundles move aside with the state, as
+# docs/install/lifecycle.md does it.
 mv /var/lib/tensorplate/state /var/lib/tensorplate/state.bak
+staging_aside=0
+if [[ -e /var/lib/tensorplate/bundles/staging ]]; then
+  mv -T /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/bundles/staging.bak
+  staging_aside=1
+fi
 if dpkg -i "${runtime_set[@]}" >"${work}/downgrade2.log" 2>&1; then
   die "setting state aside must not unlock a downgrade; the preflight compares versions only"
 fi
@@ -237,6 +243,10 @@ done
   die "operator config under /etc/tensorplate was lost by the rollback"
 [[ -f /var/lib/tensorplate/state.bak/marker ]] ||
   die "the set-aside state was not preserved for the operator to restore"
+if ((staging_aside)); then
+  [[ -d /var/lib/tensorplate/bundles/staging.bak ]] ||
+    die "the set-aside staged bundles were not preserved for the operator to restore"
+fi
 pass "rolled back to ${baseline_ver}; operator config kept and prior state preserved for review"
 
 note "apt lifecycle rehearsal complete"

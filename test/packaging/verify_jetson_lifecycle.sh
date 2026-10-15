@@ -1049,6 +1049,22 @@ case "$*" in
     [ ! -e "${TP_FAKE_VARLIB}/state.bak" ]
     exit
     ;;
+  "test ! -e /var/lib/tensorplate/bundles/staging.bak")
+    [ ! -e "${TP_FAKE_VARLIB}/bundles/staging.bak" ]
+    exit
+    ;;
+  # The privileged listing of the staged files, run by GNU find against the
+  # fixture's copy; a directory that is not there fails as find fails.
+  "find /var/lib/tensorplate/"*)
+    [ "$#" -eq 8 ] || exit 9
+    target="${TP_FAKE_VARLIB}/${2#/var/lib/tensorplate/}"
+    if [ ! -d "$target" ]; then
+      printf "find: '%s': No such file or directory\n" "$2" >&2
+      exit 1
+    fi
+    shift 2
+    exec find "$target" "$@"
+    ;;
   # The privileged listing of a directory under /var/lib/tensorplate: the
   # entry set the manifest is built from, including the dotfiles `ls -A`
   # shows. A directory that is not there is reported the way ls reports
@@ -1107,6 +1123,20 @@ print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$target")" |
         ;;
     esac
     exit
+    ;;
+  "mv -T /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/bundles/staging.bak")
+    # GNU mv -T, as above.
+    [ -d "${TP_FAKE_VARLIB}/bundles/staging" ] || {
+      echo "mv: cannot stat '/var/lib/tensorplate/bundles/staging': No such file or directory" >&2
+      exit 1
+    }
+    if [ -e "${TP_FAKE_VARLIB}/bundles/staging.bak" ]; then
+      rmdir "${TP_FAKE_VARLIB}/bundles/staging.bak" 2>/dev/null || {
+        echo "mv: cannot overwrite '/var/lib/tensorplate/bundles/staging.bak': Directory not empty" >&2
+        exit 1
+      }
+    fi
+    exec mv "${TP_FAKE_VARLIB}/bundles/staging" "${TP_FAKE_VARLIB}/bundles/staging.bak"
     ;;
   *"systemctl restart"*)
     : >"${TP_FAKE_RESTART_MARKER}"
@@ -1238,8 +1268,9 @@ for pkg in $runtime; do
   printf 'installed\n' >"${TP_FAKE_PKG_DB}/${pkg}"
 done
 # install-paths.sh lays out the state directory at configure time; the
-# agent writes state.json into it when something is deployed.
-mkdir -p "${TP_FAKE_VARLIB}/state"
+# agent writes state.json into it when something is deployed. The staging
+# directory each deploy stages into is laid out with it.
+mkdir -p "${TP_FAKE_VARLIB}/state" "${TP_FAKE_VARLIB}/bundles/staging"
 # A file in that directory that belongs to neither the agent nor the
 # harness's own idea of it: packaging/conf/observability.json points the
 # observability unit's snapshot sink at
@@ -1277,6 +1308,11 @@ fi
 if [ "$mode" = rollback-state-aside-exists ] && [ "$phase" = upgraded ]; then
   mkdir -p "${TP_FAKE_VARLIB}/state.bak"
   printf '{"fixture":"an earlier rollback"}\n' >"${TP_FAKE_VARLIB}/state.bak/state.json"
+fi
+if [ "$mode" = rollback-staging-aside-exists ] && [ "$phase" = upgraded ]; then
+  mkdir -p "${TP_FAKE_VARLIB}/bundles/staging.bak/earlier"
+  printf '{"fixture":"an earlier rollback"}\n' \
+    >"${TP_FAKE_VARLIB}/bundles/staging.bak/earlier/manifest.json"
 fi
 # The set-aside state destroyed by the install that follows the removal,
 # while its pathname stays a regular file: emptied, truncated, and
@@ -1318,6 +1354,10 @@ if [ "$phase" = rolled-back ]; then
     # as a directory that is there and holds nothing, which must not be
     # what "unchanged" means.
     rollback-empties-state-dir) rm -f "${TP_FAKE_VARLIB}/state.bak/"* ;;
+    # A set-aside staged weights file gone.
+    rollback-loses-staged-file)
+      find "${TP_FAKE_VARLIB}/bundles/staging.bak" -name model.bin -type f -delete
+      ;;
     # The set-aside state destroyed by an install that then fails the way
     # install.sh does, after every package is installed: the stage never
     # reaches its preservation check, and the stranded-device report is
@@ -2056,6 +2096,12 @@ JSON
     printf '{"fixture":"durable state"}\n' >"${TP_FAKE_VARLIB}/state/state.json"
     printf '{"fixture":"durable state","recovery":true}\n' \
       >"${TP_FAKE_VARLIB}/state/state.json.bak"
+    # Staged in a tree of its own, numbered by the deploys so far, which the
+    # state names and the rollback sets aside with it.
+    tree="${TP_FAKE_VARLIB}/bundles/staging/${deployment_id}/tx-$(wc -l <"${TP_FAKE_DEPLOY_LOG}" | tr -d ' ')"
+    mkdir -p "$tree"
+    printf '{"deployment_id":"%s"}\n' "$deployment_id" >"${tree}/manifest.json"
+    printf 'fixture weights\n' >"${tree}/model.bin"
     deploy_phase=active
     deployed="$deployment_id"
     [ "$mode" = deploy-not-active ] && deploy_phase=rolled_back
@@ -4415,6 +4461,32 @@ check "  and the saved copy is read back after the baseline install, file by fil
        "$(sudo_after "$fourth" 'sha256sum /var/lib/tensorplate/state.bak/state.json')" \
        "$(sudo_after "$fourth" 'sha256sum /var/lib/tensorplate/state.bak/state.json.bak')" \
        "$(sudo_after "$fourth" 'sha256sum /var/lib/tensorplate/state.bak/observability-snapshot.json')")"
+# staging.bak refused, staging listed after the stop and moved on the line
+# after the state, and read back after the baseline install.
+check "  the staged bundles are set aside alongside the state" \
+  "refuse-staging stop list-staging mv-state mv-staging readback" \
+  "$(python3 - "${appliance}/sudo.log" <<'PY'
+import re, sys
+
+sudo = open(sys.argv[1], encoding="utf-8").read().splitlines()
+tokens = (("refuse-staging", r"test ! -e /var/lib/tensorplate/bundles/staging\.bak"),
+          ("stop", r"systemctl stop tensorplate-agent tensorplate-observability"),
+          ("list-staging", r"find /var/lib/tensorplate/bundles/staging -.*"),
+          ("mv-state", r"mv -T /var/lib/tensorplate/state /var/lib/tensorplate/state\.bak"),
+          ("mv-staging", r"mv -T /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/bundles/staging\.bak"))
+start = next((i for i, line in enumerate(sudo) if line == "test ! -e /var/lib/tensorplate/state.bak"), len(sudo))
+moved = next((i for i in range(start, len(sudo)) if re.fullmatch(tokens[3][1], sudo[i])), len(sudo))
+shape = [name for line in sudo[start:moved + 2] for name, pattern in tokens if re.fullmatch(pattern, line)]
+install = next((i for i in range(moved, len(sudo)) if "/install.sh --local-artifacts " in sudo[i]), len(sudo))
+if any(line.startswith("find /var/lib/tensorplate/bundles/staging.bak ") for line in sudo[install:]):
+    shape.append("readback")
+print(" ".join(shape))
+PY
+)"
+check "  and the staged tree the upgrade left is set aside whole" \
+  "jetson-lifecycle-smoke-baseline/tx-3/manifest.json jetson-lifecycle-smoke-baseline/tx-3/model.bin" \
+  "$(cd "${appliance}/varlib/bundles/staging.bak" 2>/dev/null &&
+     find . -type f | sed 's#^\./##' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
 check "  the operator's conffile edit survived both directions" yes "$(operator_config_edited)"
 check "  the baseline versions are filed per package" 5 \
   "$(grep -c "${baseline_version} " "${baseline_evidence}/packages-baseline.txt" || true)"
@@ -4861,6 +4933,8 @@ check "  and filed" yes "$(stranded_filed "$evidence")"
 # mode|exit|whether the run ends inside the rollback's windows|reason
 for mode_case in "rollback-other-active|1|no|the rollback must start from jetson-lifecycle-smoke-baseline" \
                  "rollback-state-aside-exists|1|no|step failed (exit 1): refuse to replace an existing /var/lib/tensorplate/state.bak" \
+                 "rollback-staging-aside-exists|1|no|step failed (exit 1): refuse to replace an existing /var/lib/tensorplate/bundles/staging.bak" \
+                 "rollback-loses-staged-file|1|no|step failed (exit 1): the set-aside staged bundles are preserved" \
                  "rollback-keeps-candidate-version|1|no|installed package versions do not match the v0.1.5 set" \
                  "rollback-resets-conffile|1|no|the rollback did not keep the operator-edited" \
                  "rollback-state-not-preserved|1|no|step failed (exit 1): the set-aside state is preserved, file by file" \
@@ -4914,7 +4988,7 @@ for mode_case in "rollback-other-active|1|no|the rollback must start from jetson
     "$(stranded_filed "$evidence")"
   check "  and printed only then" "$stranded" "$(err_says "$evidence" 'the rollback did not finish')"
   case "$mode" in
-    rollback-other-active|rollback-state-aside-exists)
+    rollback-other-active|rollback-state-aside-exists|rollback-staging-aside-exists)
       # A precondition is only a precondition if it is checked before the
       # device is touched.
       check "  and nothing was stopped, set aside or removed after the upgrade" "no no no" \
@@ -4943,6 +5017,11 @@ for mode_case in "rollback-other-active|1|no|the rollback must start from jetson
         "$(err_says "$evidence" 'installing v0.1.5 is a downgrade apt-get refuses')"
       check "  and that the conffiles and state are where the procedure put them" "yes yes" \
         "$(err_says "$evidence" '/etc/tensorplate conffiles are kept.') $(err_says "$evidence" 'durable state is at /var/lib/tensorplate/state.bak and still matches the digests taken before the move.')"
+      ;;
+    rollback-loses-staged-file)
+      check "  and the failure names the staged file and the size it had" yes \
+        "$(logged "${evidence}/rollback.log" \
+           'the rollback did not preserve /var/lib/tensorplate/bundles/staging.bak: it no longer holds "16 jetson-lifecycle-smoke-baseline/tx-3/model.bin"')"
       ;;
     rollback-digest-not-hex)
       # A leading field that is not sha256 hex is refused where it is
@@ -5107,8 +5186,8 @@ $(err_says "$evidence" 'durable state is at /var/lib/tensorplate/state.bak and s
       # install. The harness says so and reinstalls nothing by itself.
       check "  and reports the bare device" yes \
         "$(err_says "$evidence" 'this device has NO TensorPlate installed')"
-      check "  and the kept conffiles and the set-aside state" "yes yes" \
-        "$(err_says "$evidence" '/etc/tensorplate conffiles are kept.') $(err_says "$evidence" 'durable state is at /var/lib/tensorplate/state.bak and still matches the digests taken before the move.')"
+      check "  and the kept conffiles, the set-aside state and the staged bundles beside it" "yes yes yes" \
+        "$(err_says "$evidence" '/etc/tensorplate conffiles are kept.') $(err_says "$evidence" 'durable state is at /var/lib/tensorplate/state.bak and still matches the digests taken before the move.') $(err_says "$evidence" 'the staged bundles are at /var/lib/tensorplate/bundles/staging.bak, set aside with it; restore both together or neither.')"
       check "  and that the installer ran, and where its output is" yes \
         "$(err_says "$evidence" "the v0.1.5 installer was started and its install was not accepted; its output is in ${evidence}/install-rollback.txt")"
       check "  and hands the operator the command rather than attempting it" "4 yes" \
@@ -5116,7 +5195,7 @@ $(err_says "$evidence" 'durable state is at /var/lib/tensorplate/state.bak and s
       # Re-running the harness is offered as a recovery, and its install
       # stage deletes the state.bak the lines above point the operator at.
       check "  and says what re-running this harness would cost" yes \
-        "$(err_says "$evidence" "its install stage deletes ${cleared_dirs} first, including any /var/lib/tensorplate/state.bak")"
+        "$(err_says "$evidence" "its install stage deletes ${cleared_dirs} first, including any /var/lib/tensorplate/state.bak and /var/lib/tensorplate/bundles/staging.bak.")"
       ;;
     install-late-fails-rolled-back)
       check "  and the report names what the installer left" yes \
@@ -5136,8 +5215,13 @@ $(err_says "$evidence" 'durable state is at /var/lib/tensorplate/state.bak and s
         "$(err_says "$evidence" "the rollback did not finish: it had started stopping the candidate's services and had not removed any package.")"
       check "  and that the listing could not be read, with the query to run" "yes yes" \
         "$(err_says "$evidence" 'what this device carries could NOT be read') $(err_says "$evidence" "dpkg-query -W -f='\${binary:Package} \${db:Status-Status}\\n' 'tensorplate*'")"
-      check "  and how to return to the candidate, state first" "yes yes" \
-        "$(err_says "$evidence" '  sudo mv -T /var/lib/tensorplate/state.bak /var/lib/tensorplate/state') $(err_says "$evidence" '  sudo systemctl start tensorplate-agent tensorplate-observability')"
+      check "  and how to return to the candidate, state and staged bundles first" "yes yes yes" \
+        "$(err_says "$evidence" '  sudo mv -T /var/lib/tensorplate/state.bak /var/lib/tensorplate/state') $(err_says "$evidence" '  sudo mv -T /var/lib/tensorplate/bundles/staging.bak /var/lib/tensorplate/bundles/staging') $(err_says "$evidence" '  sudo systemctl start tensorplate-agent tensorplate-observability')"
+      check "  in that order" "state staging start" \
+        "$(grep -E '^  sudo (mv -T|systemctl start) ' "${evidence}/stranded-device.txt" |
+           sed -e 's#^  sudo mv -T /var/lib/tensorplate/state\.bak .*#state#' \
+               -e 's#^  sudo mv -T /var/lib/tensorplate/bundles/staging\.bak .*#staging#' \
+               -e 's#^  sudo systemctl start .*#start#' | tr '\n' ' ' | sed 's/ $//')"
       ;;
     listing-fails-after-remove)
       check "  and the report says the listing could not be read" yes \
@@ -5206,6 +5290,20 @@ for injected_case in "systemctl stop tensorplate-agent tensorplate-observability
       "$(err_says "$evidence" '  sudo systemctl start tensorplate-agent tensorplate-observability') $(err_says "$evidence" '  sudo mv -T')"
   fi
 done
+
+# The staged bundles' move failing after the state's: the way back moves
+# the state alone, and says the staged bundles never left.
+evidence="${td}/stages-rollback-sudo-set-the-staged-bundles-aside"
+check "a failing 'set the staged bundles aside' during the rollback is recorded as a failed rollback" fail \
+  "$(run_baseline_stages ok "$evidence" 'mv -T /var/lib/tensorplate/bundles/staging' >/dev/null; \
+     stage_status "${evidence}/lifecycle-report.json" rollback)"
+check "  and the failed step is the one named" yes \
+  "$(logged "${evidence}/rollback.log" 'step failed (exit 9): set the staged bundles aside')"
+check "  and filed" yes "$(stranded_filed "$evidence")"
+check "  and the report says the state is set aside and the staged bundles are not" "yes yes" \
+  "$(err_says "$evidence" 'durable state is at /var/lib/tensorplate/state.bak and still matches the digests taken before the move.') $(err_says "$evidence" 'the staged bundles are still at /var/lib/tensorplate/bundles/staging.')"
+check "  and returns to the candidate by moving the state back alone" "yes no yes" \
+  "$(err_says "$evidence" '  sudo mv -T /var/lib/tensorplate/state.bak /var/lib/tensorplate/state') $(err_says "$evidence" '  sudo mv -T /var/lib/tensorplate/bundles/staging.bak') $(err_says "$evidence" '  sudo systemctl start tensorplate-agent tensorplate-observability')"
 
 # A terminal that goes away while the device is stranded -- an SSH
 # session dropping -- fails every write to the harness's stderr, and the

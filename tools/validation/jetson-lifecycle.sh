@@ -54,12 +54,13 @@
 #                 baseline's deployment re-warms from durable state with
 #                 no deploy call of the harness's own
 #   rollback      the documented procedure -- stop, set durable state
-#                 aside, remove every TensorPlate package except the apt
-#                 channel's bootstrap, install the baseline fresh --
-#                 returns exactly the baseline set, keeps the operator
-#                 edit and the set-aside state byte for byte, leaves the
-#                 older agent with no deployment to misread, and serves
-#                 a fresh one
+#                 aside and the staged bundles with it, remove every
+#                 TensorPlate package except the apt channel's bootstrap,
+#                 install the baseline fresh -- returns exactly the
+#                 baseline set, keeps the operator edit and the set-aside
+#                 state byte for byte and the staged bundles file for
+#                 file, leaves the older agent with no deployment to
+#                 misread, and serves a fresh one
 #
 # A run with a baseline leaves the BASELINE installed when it finishes.
 #
@@ -177,6 +178,13 @@ CRASH_LOOP_BACKUP=""
 # (docs/install/lifecycle.md) rather than carrying it back.
 readonly STATE_DIR="/var/lib/tensorplate/state"
 readonly STATE_ASIDE_DIR="/var/lib/tensorplate/state.bak"
+# The staged bundles go aside with it: an agent that started on other state
+# would remove every staged tree state.bak names.
+readonly STAGED_BUNDLES_DIR="/var/lib/tensorplate/bundles/staging"
+readonly STAGED_BUNDLES_ASIDE_DIR="/var/lib/tensorplate/bundles/staging.bak"
+# Every staged file's size and path, taken with the services stopped and
+# before the move.
+STAGED_LISTING=""
 # The agent's deployment state, the one file in that directory this stage
 # is written around: without it there is nothing for the rollback to
 # preserve. It is NOT the only durable file there, which is why the check
@@ -218,11 +226,13 @@ STRANDED_WINDOW=""
 #
 #   STRANDED_STATE_CLEARED  clear_install deleted the state directories
 #   STRANDED_STATE_ASIDE    the rollback moved durable state to state.bak
+#   STRANDED_STAGED_ASIDE   the rollback moved the staged bundles to staging.bak
 #   STRANDED_CONFFILES      what check_removed read: `kept`, `lost <pkgs>`,
 #                           or `unread` when it never read a listing
 #   STRANDED_INSTALL_LOG    the baseline installer's output, once started
 STRANDED_STATE_CLEARED=0
 STRANDED_STATE_ASIDE=0
+STRANDED_STAGED_ASIDE=0
 STRANDED_CONFFILES=unread
 STRANDED_INSTALL_LOG=""
 # Scratch directory holding a bundle this run built, removed on exit.
@@ -2512,6 +2522,42 @@ check_state_preserved() {
   return 1
 }
 
+# One sorted "<size> <path>" line per staged file: sizes, not digests, as
+# the trees hold model weights. An empty listing fails, as an empty state does.
+staged_listing() {
+  local listing
+  listing="$(sudo find "$1" -mindepth 1 -type f -printf '%s %P\n')" || return
+  if [[ -z "$listing" ]]; then
+    printf '%s holds no staged files; there are no staged bundles here to preserve\n' "$1" >&2
+    return 1
+  fi
+  printf '%s\n' "$listing" | LC_ALL=C sort
+}
+
+capture_staged_listing() {
+  STAGED_LISTING="$(staged_listing "$STAGED_BUNDLES_DIR")"
+}
+
+# Every staged file the stopped services left, at its size, and nothing
+# more. The first file that is gone or resized is named.
+check_staged_preserved() {
+  local now line
+  now="$(staged_listing "$STAGED_BUNDLES_ASIDE_DIR")" || return
+  if [[ "$now" == "$STAGED_LISTING" ]]; then
+    return 0
+  fi
+  while IFS= read -r line; do
+    if [[ $'\n'"${now}"$'\n' != *$'\n'"${line}"$'\n'* ]]; then
+      printf 'the rollback did not preserve %s: it no longer holds "%s" (size, path) as the stopped services left it\n' \
+        "$STAGED_BUNDLES_ASIDE_DIR" "$line" >&2
+      return 1
+    fi
+  done <<<"$STAGED_LISTING"
+  printf 'the rollback did not preserve %s: it holds staged files the stopped services did not leave\n' \
+    "$STAGED_BUNDLES_ASIDE_DIR" >&2
+  return 1
+}
+
 # Doctor on the baseline is filed, not asserted. The baseline's own
 # install.sh already refuses a critical finding, and the baseline deploy
 # and inference below are what show it is a working place to move from or
@@ -2823,11 +2869,20 @@ stranded_device_text() {
   elif [[ "$STRANDED_WINDOW" != upgrade ]]; then
     printf 'durable state is still at %s.\n' "$STATE_DIR"
   fi
+  if ((STRANDED_STAGED_ASIDE)); then
+    printf 'the staged bundles are at %s, set aside with it; restore both together or neither.\n' \
+      "$STAGED_BUNDLES_ASIDE_DIR"
+  elif ((STRANDED_STATE_ASIDE)); then
+    printf 'the staged bundles are still at %s.\n' "$STAGED_BUNDLES_DIR"
+  fi
 
   if [[ "$STRANDED_WINDOW" == rollback-stopped ]]; then
     printf 'if the candidate is still installed, return to it with:\n'
     if ((STRANDED_STATE_ASIDE)); then
       printf '  sudo mv -T %s %s\n' "$STATE_ASIDE_DIR" "$STATE_DIR"
+    fi
+    if ((STRANDED_STAGED_ASIDE)); then
+      printf '  sudo mv -T %s %s\n' "$STAGED_BUNDLES_ASIDE_DIR" "$STAGED_BUNDLES_DIR"
     fi
     printf '  sudo systemctl start %s %s\n' "$AGENT_UNIT" "$OBSERVABILITY_UNIT"
   elif ((!read_ok)); then
@@ -2843,8 +2898,8 @@ stranded_device_text() {
     printf 'install %s by hand with:\n  sudo bash %s/install.sh --local-artifacts %s --yes\n' \
       "$BASELINE_TAG" "$BASELINE_DIR" "$BASELINE_DIR"
   fi
-  printf 'or re-run this harness, which installs the candidate from scratch -- but its install stage deletes %s first, including any %s. Copy anything you want to keep elsewhere before re-running.\n' \
-    "${CLEARED_STATE_DIRS[*]}" "$STATE_ASIDE_DIR"
+  printf 'or re-run this harness, which installs the candidate from scratch -- but its install stage deletes %s first, including any %s and %s. Copy anything you want to keep elsewhere before re-running.\n' \
+    "${CLEARED_STATE_DIRS[*]}" "$STATE_ASIDE_DIR" "$STAGED_BUNDLES_ASIDE_DIR"
 }
 
 # Printed when the run ends inside one of the windows above, including
@@ -2883,13 +2938,16 @@ if active.get("deployment_id") != expected:
 print(f"rolling back from the candidate serving {expected}")
 PY
 
-  # Checked before anything changes. A state.bak from before the run is
-  # already gone -- install and upgrade delete /var/lib/tensorplate while
-  # clearing the device -- so this does not keep an earlier copy. It
-  # makes sure the move below lands on a name nothing else holds, refused
-  # by name before the services are stopped, rather than leaving mv -T to
-  # replace an empty directory or refuse a full one halfway through.
+  # Checked before anything changes. A state.bak or staging.bak from before
+  # the run is already gone -- install and upgrade delete
+  # /var/lib/tensorplate while clearing the device -- so this does not keep
+  # an earlier copy. It makes sure each move below lands on a name nothing
+  # else holds, refused by name before the services are stopped, rather
+  # than leaving mv -T to replace an empty directory or refuse a full one
+  # halfway through.
   step "refuse to replace an existing ${STATE_ASIDE_DIR}" sudo test ! -e "$STATE_ASIDE_DIR" || return
+  step "refuse to replace an existing ${STAGED_BUNDLES_ASIDE_DIR}" \
+    sudo test ! -e "$STAGED_BUNDLES_ASIDE_DIR" || return
 
   note "rolling back to ${BASELINE_TAG} by the documented procedure"
   # From the stop on, the candidate serves nothing until the rollback
@@ -2903,8 +2961,12 @@ PY
   # carry across, and before anything moves or removes it -- after the
   # move there is no original left to compare the saved copy with.
   step "digest the durable state before setting it aside" capture_state_manifest || return
+  step "list the staged bundles before setting them aside" capture_staged_listing || return
   step "set durable state aside" sudo mv -T "$STATE_DIR" "$STATE_ASIDE_DIR" || return
   STRANDED_STATE_ASIDE=1
+  # Always there: the packages create it, and the upgrade's deployment staged into it.
+  step "set the staged bundles aside" sudo mv -T "$STAGED_BUNDLES_DIR" "$STAGED_BUNDLES_ASIDE_DIR" || return
+  STRANDED_STAGED_ASIDE=1
 
   # Every installed TensorPlate package, not a fixed list, and including
   # tensorplate-common: every runtime package Pre-Depends on common at
@@ -2943,6 +3005,7 @@ PY
     "${EVIDENCE_DIR}/packages-after-rollback.txt" "$BASELINE_DIR" "$BASELINE_TAG" || return
   check_operator_config_kept "the rollback" || return
   step "the set-aside state is preserved, file by file" check_state_preserved || return
+  step "the set-aside staged bundles are preserved" check_staged_preserved || return
   record_baseline_doctor "${EVIDENCE_DIR}/doctor-after-rollback.json" || return
 
   # The older agent must not have loaded the newer agent's state: it
@@ -2971,7 +3034,7 @@ PY
   step "rolled-back worker round trip" check_deployment_round_trip "$ROLLBACK_DEPLOYMENT_ID" \
     "${EVIDENCE_DIR}/status-after-redeploy.json" "${EVIDENCE_DIR}/rollback-result.json" \
     "${EVIDENCE_DIR}/rollback-deploy.json" || return
-  pass "rolled back to ${BASELINE_TAG}; operator edit kept; state set aside unchanged and not loaded; a fresh deployment answered"
+  pass "rolled back to ${BASELINE_TAG}; operator edit kept; state and staged bundles set aside unchanged, state not loaded; a fresh deployment answered"
 }
 
 # --- run ---------------------------------------------------------------

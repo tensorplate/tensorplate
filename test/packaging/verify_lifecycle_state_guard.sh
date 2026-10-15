@@ -9,7 +9,9 @@
 # digests taken from the stopped agent's own directory before the move --
 # and they make it with the same five functions: privileged_sha256,
 # state_manifest, manifest_digest, capture_state_manifest and
-# check_state_preserved.
+# check_state_preserved. The staged bundles set aside beside it are held
+# to their files and sizes by three more: staged_listing,
+# capture_staged_listing and check_staged_preserved.
 #
 # Two harnesses making one claim by copied code drift. Only one of them
 # is driven against a stubbed appliance for any given regression, so a
@@ -19,7 +21,7 @@
 # on. Nothing else reads both files: each harness verifier reads only its
 # own harness.
 #
-# So this binds them. Each of the five functions must be defined exactly
+# So this binds them. Each of the eight functions must be defined exactly
 # once in each harness, in any spelling bash accepts, and the two bodies
 # must be byte-identical. Every harness variable those bodies touch must
 # be bound on exactly one line in each harness, and that line must be the
@@ -84,7 +86,10 @@ guard_functions="privileged_sha256
 state_manifest
 manifest_digest
 capture_state_manifest
-check_state_preserved"
+check_state_preserved
+staged_listing
+capture_staged_listing
+check_staged_preserved"
 
 failures=0
 checks=0
@@ -121,14 +126,14 @@ trap 'rm -rf "$td"' EXIT
 
 # --- reading a harness.
 #
-# `functions` finds every definition of each of the five, cuts out the
+# `functions` finds every definition of each of the eight, cuts out the
 # one this binding compares, and derives the variables each body
 # touches. `bindings` then finds, for each of those variables, every line
-# outside the five bodies that could give it a value.
+# outside the eight bodies that could give it a value.
 #
 # A body runs from its `name() {` line to the next line that is exactly
 # `}`, which is this repo's shell style throughout: every function opens
-# at column zero and closes at column zero, and nothing inside these five
+# at column zero and closes at column zero, and nothing inside these eight
 # closes a brace there. That assumption is not taken on trust -- each
 # extracted body is handed to `bash -n` below, so a cut that ended in the
 # wrong place fails here rather than silently comparing fragments.
@@ -265,7 +270,7 @@ def functions(path, out_dir, wanted):
 
 
 def bindings(path, out_dir, wanted, variables_path):
-    """Every line outside the five bodies that names a variable unexpanded.
+    """Every line outside the eight bodies that names a variable unexpanded.
 
     That is every way a harness can give it a value: an assignment in any
     spelling (readonly, declare, export, +=), a local in a caller that
@@ -327,7 +332,7 @@ mkdir -p "${td}/cloud" "${td}/jetson"
 analyse functions "$cloud" "${td}/cloud" "$guard_functions"
 analyse functions "$jetson" "${td}/jetson" "$guard_functions"
 
-# --- the five functions: one definition each, the same code in both.
+# --- the eight functions: one definition each, the same code in both.
 #
 # A function defined zero times, twice in any spelling, or only in a form
 # the cut cannot read is a failure rather than an empty or a partial
@@ -415,6 +420,7 @@ def bound(name):
 
 
 ASIDE = 'readonly STATE_ASIDE_DIR="/var/lib/tensorplate/state.bak"'
+STAGED_ASIDE = 'readonly STAGED_BUNDLES_ASIDE_DIR="/var/lib/tensorplate/bundles/staging.bak"'
 RECOVERY = 'readonly STATE_RECOVERY_DIR="/var/lib/tensorplate/state.recovery"'
 LIMIT = "readonly STATE_RECOVERY_LIMIT=3"
 
@@ -527,6 +533,21 @@ CASES = [
         "the one binding respelled to another value",
         [("jetson", "replace_line", ASIDE, 'declare -r STATE_ASIDE_DIR="/var/lib/tensorplate/state.aside"')],
         ["STATE_ASIDE_DIR is bound to the same value in both"],
+    ),
+    # The staged bundles' check is bound as the state's is.
+    (
+        "staged-check-drifted",
+        "a staged bundles comparison weakened in one harness",
+        [("jetson", "replace_line", '  if [[ "$now" == "$STAGED_LISTING" ]]; then',
+          '  if [[ "${now%%$\'\\n\'*}" == "${STAGED_LISTING%%$\'\\n\'*}" ]]; then')],
+        ["check_staged_preserved is the same code in both harnesses"],
+    ),
+    (
+        "staged-aside-bound-elsewhere",
+        "the staged bundles set aside under another name in one harness",
+        [("jetson", "replace_line", STAGED_ASIDE,
+          'readonly STAGED_BUNDLES_ASIDE_DIR="/var/lib/tensorplate/staging.bak"')],
+        ["STAGED_BUNDLES_ASIDE_DIR is bound to the same value in both"],
     ),
 ]
 
