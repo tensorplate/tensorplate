@@ -420,7 +420,7 @@ def bound(name):
 
 
 ASIDE = 'readonly STATE_ASIDE_DIR="/var/lib/tensorplate/state.bak"'
-STAGED_ASIDE = 'readonly STAGED_BUNDLES_ASIDE_DIR="/var/lib/tensorplate/bundles/staging.bak"'
+STAGED_ASIDE = 'readonly STAGED_BUNDLES_ASIDE_DIR="/var/lib/tensorplate/staging.bak"'
 RECOVERY = 'readonly STATE_RECOVERY_DIR="/var/lib/tensorplate/state.recovery"'
 LIMIT = "readonly STATE_RECOVERY_LIMIT=3"
 
@@ -546,7 +546,7 @@ CASES = [
         "staged-aside-bound-elsewhere",
         "the staged bundles set aside under another name in one harness",
         [("jetson", "replace_line", STAGED_ASIDE,
-          'readonly STAGED_BUNDLES_ASIDE_DIR="/var/lib/tensorplate/staging.bak"')],
+          'readonly STAGED_BUNDLES_ASIDE_DIR="/var/lib/tensorplate/bundles/staging.bak"')],
         ["STAGED_BUNDLES_ASIDE_DIR is bound to the same value in both"],
     ),
 ]

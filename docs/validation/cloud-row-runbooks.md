@@ -528,9 +528,8 @@ over the running baseline. It passes when:
 **rollback** follows the procedure in
 [`docs/install/lifecycle.md`](../install/lifecycle.md). It stops both
 services, moves durable state aside to `state.bak` and the staged bundles
-to `bundles/staging.bak` right after it, copies the machine-type record
-back into a fresh `state/`, and removes — never
-purges — every installed TensorPlate package except
+to `staging.bak` beside it right after, copies the machine-type record
+back into a fresh `state/`, and removes — never purges — every installed TensorPlate package except
 `tensorplate-apt-source`. Every package, because any newer one left
 behind makes the older installer's `apt-get -y` a refused downgrade.
 Before installing the baseline fresh through its `install.sh`, it
@@ -566,7 +565,7 @@ removed: there is no deployment state for the rollback to preserve, and
 two directories holding only the rest would compare equal all the way to
 a pass.
 
-No `state.bak` or `bundles/staging.bak` from before the run survives it:
+No `state.bak` or `staging.bak` from before the run survives it:
 install and upgrade each delete `/var/lib/tensorplate` while clearing the
 host, so copy any earlier one off the VM before running the harness.
 Rollback still refuses to start if either exists when it begins, so a move

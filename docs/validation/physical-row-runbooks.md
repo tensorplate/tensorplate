@@ -463,7 +463,7 @@ Prerequisites:
    **rollback** follows [the documented procedure](../install/lifecycle.md):
    it requires the candidate to be serving `<deployment-id>-baseline`,
    refuses to start if `/var/lib/tensorplate/state.bak` or
-   `/var/lib/tensorplate/bundles/staging.bak` already exists, stops both
+   `/var/lib/tensorplate/staging.bak` already exists, stops both
    services, moves `/var/lib/tensorplate/state` aside to `state.bak` and
    `/var/lib/tensorplate/bundles/staging` to `staging.bak` right after it,
    files dpkg's unfiltered listing in
@@ -546,10 +546,9 @@ Prerequisites:
    `/etc/tensorplate` and `/var/lib/tensorplate` along with the packages —
    the report says whether it got that far — while the rollback sets
    durable state aside at `state.bak` first, and the staged bundles at
-   `bundles/staging.bak` with it; the report says where those are too.
-   Where it says `state.bak`, it also says what is behind that pathname,
-   because this report is
-   written in the window where a baseline install that failed may already
+   `staging.bak` beside it; the report says where those are too. Where it
+   says `state.bak`, it also says what is behind that pathname, because
+   this report is written in the window where a baseline install that failed may already
    have destroyed it: whether the set-aside copy **still matches** the
    digests taken before the move, **no longer matches** them and should
    be treated as damaged, or could not be read back at all. That read is

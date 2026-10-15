@@ -605,8 +605,8 @@ def install(db, directory):
     # The same for the staged bundles, before each rollback in turn.
     if (mode == "rollback-staging-aside-exists" and phase == "upgraded") \
             or (mode == "offline-rollback-staging-aside-exists" and phase == "candidate"):
-        (varlib / "bundles" / "staging.bak" / "earlier").mkdir(parents=True)
-        (varlib / "bundles" / "staging.bak" / "earlier" / "manifest.json").write_text(
+        (varlib / "staging.bak" / "earlier").mkdir(parents=True)
+        (varlib / "staging.bak" / "earlier" / "manifest.json").write_text(
             '{"fixture": "an earlier rollback"}\n')
 
     # A conffile is written only where none exists, as --force-confold
@@ -681,13 +681,13 @@ def install(db, directory):
         # The set-aside staged bundles: a weights file gone, one cut short,
         # and one more than was set aside.
         elif mode == "rollback-loses-staged-file":
-            for weights in list((varlib / "bundles" / "staging.bak").rglob("model.bin")):
+            for weights in list((varlib / "staging.bak").rglob("model.bin")):
                 weights.unlink()
         elif mode == "rollback-resizes-staged-file":
-            for weights in list((varlib / "bundles" / "staging.bak").rglob("model.bin")):
+            for weights in list((varlib / "staging.bak").rglob("model.bin")):
                 weights.write_text("fixture\n")
         elif mode == "rollback-adds-staged-file":
-            for weights in list((varlib / "bundles" / "staging.bak").rglob("model.bin")):
+            for weights in list((varlib / "staging.bak").rglob("model.bin")):
                 weights.with_name("extra.bin").write_text("not what was set aside\n")
     db["phase"] = phase
     save(db)
@@ -1852,8 +1852,8 @@ case "$*" in
     [ ! -e "${TP_FAKE_VARLIB}/state.bak" ]
     exit
     ;;
-  "test ! -e /var/lib/tensorplate/bundles/staging.bak")
-    [ ! -e "${TP_FAKE_VARLIB}/bundles/staging.bak" ]
+  "test ! -e /var/lib/tensorplate/staging.bak")
+    [ ! -e "${TP_FAKE_VARLIB}/staging.bak" ]
     exit
     ;;
   # The privileged listing of the staged files, run by GNU find against the
@@ -1921,9 +1921,9 @@ print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$target")" |
     esac
     exit
     ;;
-  "mv -T /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/bundles/staging.bak")
+  "mv -T /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/staging.bak")
     source_dir="${TP_FAKE_VARLIB}/bundles/staging"
-    target_dir="${TP_FAKE_VARLIB}/bundles/staging.bak"
+    target_dir="${TP_FAKE_VARLIB}/staging.bak"
     [ -d "$source_dir" ] || { echo "mv: cannot stat '/var/lib/tensorplate/bundles/staging': No such file or directory" >&2; exit 1; }
     if [ -e "$target_dir" ]; then
       rmdir "$target_dir" 2>/dev/null || { echo "mv: cannot overwrite '$target_dir': Directory not empty" >&2; exit 1; }
@@ -4016,11 +4016,11 @@ check "  each rollback sets the staged bundles aside alongside the state" \
 import re, sys
 
 sudo = open(sys.argv[1], encoding="utf-8").read().splitlines()
-tokens = (("refuse-staging", r"test ! -e /var/lib/tensorplate/bundles/staging\.bak"),
+tokens = (("refuse-staging", r"test ! -e /var/lib/tensorplate/staging\.bak"),
           ("stop", r"systemctl stop tensorplate-agent tensorplate-observability"),
           ("list-staging", r"find /var/lib/tensorplate/bundles/staging -.*"),
           ("mv-state", r"mv -T /var/lib/tensorplate/state /var/lib/tensorplate/state\.bak"),
-          ("mv-staging", r"mv -T /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/bundles/staging\.bak"))
+          ("mv-staging", r"mv -T /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/staging\.bak"))
 refusals = [i for i, line in enumerate(sudo) if line == "test ! -e /var/lib/tensorplate/state.bak"]
 shapes = []
 for n, start in enumerate(refusals):
@@ -4029,7 +4029,7 @@ for n, start in enumerate(refusals):
     shape = [name for line in sudo[start:moved + 2]
              for name, pattern in tokens if re.fullmatch(pattern, line)]
     install = next((i for i in range(moved, end) if "/install.sh --local-artifacts " in sudo[i]), end)
-    if any(line.startswith("find /var/lib/tensorplate/bundles/staging.bak ") for line in sudo[install:end]):
+    if any(line.startswith("find /var/lib/tensorplate/staging.bak ") for line in sudo[install:end]):
         shape.append("readback")
     shapes.append(" ".join(shape))
 print(" | ".join(shapes))
@@ -4038,7 +4038,7 @@ PY
 check "  the staged trees the upgrade left are set aside whole, and the baseline stages afresh" \
   "${deployment_id}/tx-3/manifest.json ${deployment_id}/tx-3/model.bin | ${deployment_id}/tx-4/manifest.json ${deployment_id}/tx-4/model.bin" \
   "$(printf '%s | %s' \
-     "$(cd "${appliance}/varlib/bundles/staging.bak" 2>/dev/null && find . -type f | sed 's#^\./##' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')" \
+     "$(cd "${appliance}/varlib/staging.bak" 2>/dev/null && find . -type f | sed 's#^\./##' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')" \
      "$(cd "${appliance}/varlib/bundles/staging" 2>/dev/null && find . -type f | sed 's#^\./##' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')")"
 check "  the operator's cli.json edit survived both directions" yes \
   "$(python3 -c 'import sys
@@ -4175,7 +4175,7 @@ check "  and no crash-loop restore ran over the purged install" no \
 
 for case in \
   "rollback-state-aside-exists::step failed (exit 1): refuse to replace an existing /var/lib/tensorplate/state.bak" \
-  "rollback-staging-aside-exists::step failed (exit 1): refuse to replace an existing /var/lib/tensorplate/bundles/staging.bak" \
+  "rollback-staging-aside-exists::step failed (exit 1): refuse to replace an existing /var/lib/tensorplate/staging.bak" \
   "rollback-loses-staged-file::step failed (exit 1): the set-aside staged bundles are preserved" \
   "rollback-resizes-staged-file::step failed (exit 1): the set-aside staged bundles are preserved" \
   "rollback-adds-staged-file::step failed (exit 1): the set-aside staged bundles are preserved" \
@@ -4234,7 +4234,7 @@ for case in \
       ;;
     rollback-staging-aside-exists)
       check "  and the earlier set-aside staged bundles are untouched" yes \
-        "$([[ "$(cat "${appliance}/varlib/bundles/staging.bak/earlier/manifest.json")" == '{"fixture": "an earlier rollback"}' ]] && echo yes || echo no)"
+        "$([[ "$(cat "${appliance}/varlib/staging.bak/earlier/manifest.json")" == '{"fixture": "an earlier rollback"}' ]] && echo yes || echo no)"
       check "  because nothing was stopped, moved or removed" "no no no" \
         "$(after="$(last_sudo_line 'assets-rc2/install.sh')"
            printf '%s %s %s' "$(sudo_after "$after" 'systemctl stop')" \
@@ -4243,14 +4243,14 @@ for case in \
     rollback-loses-staged-file|rollback-resizes-staged-file)
       check "  and the failure names the staged file and the size it had" yes \
         "$(stage_log_says "${evidence}/rollback.log" \
-           "the rollback did not preserve /var/lib/tensorplate/bundles/staging.bak: it no longer holds \"16 ${deployment_id}/tx-3/model.bin\"")"
+           "the rollback did not preserve /var/lib/tensorplate/staging.bak: it no longer holds \"16 ${deployment_id}/tx-3/model.bin\"")"
       check "  and the stage stopped before reading the agent back" no \
         "$(stage_log_says "${evidence}/rollback.log" 'the rolled-back agent answers')"
       ;;
     rollback-adds-staged-file)
       check "  and the failure says it holds staged files that were not set aside" yes \
         "$(stage_log_says "${evidence}/rollback.log" \
-           'the rollback did not preserve /var/lib/tensorplate/bundles/staging.bak: it holds staged files the stopped services did not leave')"
+           'the rollback did not preserve /var/lib/tensorplate/staging.bak: it holds staged files the stopped services did not leave')"
       ;;
     rollback-remove-leaves-backend)
       check "  and the baseline was never installed over the leftover" no \
@@ -4617,7 +4617,7 @@ for case in \
   "offline-rollback-baseline-rewrites-record:the machine-type record is byte-identical with the denied baseline up:offline-restart:offline-rollback" \
   "offline-rollback-touches-binding:the denied rollback left the instance binding alone:offline-restart:offline-rollback" \
   "offline-rollback-state-not-preserved:the set-aside state is preserved, file by file:offline-restart:offline-rollback" \
-  "offline-rollback-staging-aside-exists:refuse to replace an existing /var/lib/tensorplate/bundles/staging.bak:offline-restart:offline-rollback" \
+  "offline-rollback-staging-aside-exists:refuse to replace an existing /var/lib/tensorplate/staging.bak:offline-restart:offline-rollback" \
   "offline-rollback-loses-staged-file:the set-aside staged bundles are preserved:offline-restart:offline-rollback" \
   "offline-rollback-identity-live-metadata:the machine type came from the record, not from metadata:offline-restart:offline-rollback" \
   "offline-rollback-infer-garbled:inference checks:offline-restart:offline-rollback" \
@@ -4642,7 +4642,7 @@ for case in \
   case "$mode" in
     offline-rollback-staging-aside-exists)
       check "  and nothing was stopped or set aside after the refusal" "no no" \
-        "$(refused="$(last_sudo_line 'test ! -e /var/lib/tensorplate/bundles/staging.bak')"
+        "$(refused="$(last_sudo_line 'test ! -e /var/lib/tensorplate/staging.bak')"
            printf '%s %s' "$(sudo_after "$refused" 'systemctl stop')" "$(sudo_after "$refused" 'mv -T')")" ;;
     offline-rollback-remove-*)
       check "  and the baseline's installer is never run" 0 \

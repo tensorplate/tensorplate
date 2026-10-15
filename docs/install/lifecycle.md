@@ -78,9 +78,11 @@ it installed. `tensorplate-apt-source` only configures the APT channel and can
 stay.
 
 The staging directory, `/var/lib/tensorplate/bundles/staging`, moves aside
-with durable state. When the agent starts and when a deploy begins, it removes
-the staged bundles no record in its state names, so an agent started while
-`state` is set aside would remove the bundles `state.bak` names.
+with durable state, to `/var/lib/tensorplate/staging.bak` beside
+`state.bak`, where a purge leaves both. When the agent starts and when a
+deploy begins, it removes the staged bundles no record in its state names,
+so an agent started while `state` is set aside would remove the bundles
+`state.bak` names.
 
 ```bash
 sudo systemctl stop tensorplate-agent tensorplate-observability
@@ -92,7 +94,7 @@ sudo mv /var/lib/tensorplate/state /var/lib/tensorplate/state.bak
 # The same care: if staging.bak already exists from an earlier rollback,
 # move that elsewhere first.
 if sudo test -e /var/lib/tensorplate/bundles/staging; then
-  sudo mv /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/bundles/staging.bak
+  sudo mv /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/staging.bak
 fi
 # On a Compute Engine instance, put the machine-type record back: the older
 # agent reads it at this path, and without it an older agent started with
@@ -147,19 +149,22 @@ To restore, put both back together, with the services stopped:
 ```bash
 sudo systemctl stop tensorplate-agent tensorplate-observability
 # Set aside (or remove) what the agent wrote since the rollback, then move
-# each .bak back.
+# each .bak back. If an .after-rollback directory already exists, move that
+# elsewhere first: mv would otherwise put the directory inside it.
 sudo mv /var/lib/tensorplate/state /var/lib/tensorplate/state.after-rollback
 sudo mv /var/lib/tensorplate/state.bak /var/lib/tensorplate/state
-if sudo test -e /var/lib/tensorplate/bundles/staging.bak; then
-  sudo mv /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/bundles/staging.after-rollback
-  sudo mv /var/lib/tensorplate/bundles/staging.bak /var/lib/tensorplate/bundles/staging
+if sudo test -e /var/lib/tensorplate/staging.bak; then
+  sudo mv /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/staging.after-rollback
+  sudo mv /var/lib/tensorplate/staging.bak /var/lib/tensorplate/bundles/staging
 fi
 sudo systemctl start tensorplate-agent tensorplate-observability
 ```
 
-Restoring one without the other leaves records that name bundles that are
-gone: the deployments they name do not serve, and a rollback to them is
-refused.
+Restoring `state.bak` without `staging.bak` leaves records that name
+bundles that are gone: the deployments they name do not serve, and a
+rollback to them is refused. Restoring `staging.bak` without `state.bak`
+puts back bundles no record names, and the agent removes them when it
+starts.
 
 `test/packaging/apt-lifecycle-e2e.sh` asserts with `dpkg` that the downgrade
 guard stays armed both with and without durable state present, and rehearses
@@ -215,6 +220,9 @@ In addition to everything `remove` does, purge runs the postrm in
 
 It does **not** delete:
 
+- `/var/lib/tensorplate/state.bak` and `/var/lib/tensorplate/staging.bak`,
+  which the [rollback](#downgrade-and-rollback) sets aside: a purge leaves
+  the two together.
 - The `tensorplate` user / group. Removing them would orphan files on
   appliances that share the user with other tooling; operator policy
   owns the user lifecycle.

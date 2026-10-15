@@ -181,7 +181,7 @@ readonly STATE_ASIDE_DIR="/var/lib/tensorplate/state.bak"
 # The staged bundles go aside with it: an agent that started on other state
 # would remove every staged tree state.bak names.
 readonly STAGED_BUNDLES_DIR="/var/lib/tensorplate/bundles/staging"
-readonly STAGED_BUNDLES_ASIDE_DIR="/var/lib/tensorplate/bundles/staging.bak"
+readonly STAGED_BUNDLES_ASIDE_DIR="/var/lib/tensorplate/staging.bak"
 # Every staged file's size and path, taken with the services stopped and
 # before the move.
 STAGED_LISTING=""

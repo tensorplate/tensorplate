@@ -216,7 +216,7 @@ pass "downgrade refused by the upgrade preflight"
 mv /var/lib/tensorplate/state /var/lib/tensorplate/state.bak
 staging_aside=0
 if [[ -e /var/lib/tensorplate/bundles/staging ]]; then
-  mv -T /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/bundles/staging.bak
+  mv -T /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/staging.bak
   staging_aside=1
 fi
 if dpkg -i "${runtime_set[@]}" >"${work}/downgrade2.log" 2>&1; then
@@ -244,7 +244,7 @@ done
 [[ -f /var/lib/tensorplate/state.bak/marker ]] ||
   die "the set-aside state was not preserved for the operator to restore"
 if ((staging_aside)); then
-  [[ -d /var/lib/tensorplate/bundles/staging.bak ]] ||
+  [[ -d /var/lib/tensorplate/staging.bak ]] ||
     die "the set-aside staged bundles were not preserved for the operator to restore"
 fi
 pass "rolled back to ${baseline_ver}; operator config kept and prior state preserved for review"
