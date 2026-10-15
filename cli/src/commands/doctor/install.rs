@@ -2649,6 +2649,22 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
     }
 
     #[test]
+    fn the_first_streaming_grpc_line_is_read_whatever_follows_it() {
+        let body = worker_version("streaming-grpc on\\nsomething printed after it");
+        let finding = streaming_support(&body, Duration::from_secs(30));
+        assert_eq!(finding.status_label(), "ok", "{finding:?}");
+    }
+
+    #[test]
+    fn a_long_stderr_line_is_bounded_in_the_warning() {
+        let body = format!("echo '{}' >&2\nexit 1", "x".repeat(2000));
+        let finding = streaming_support(&body, Duration::from_secs(30));
+        assert_eq!(finding.status_label(), "warning", "{finding:?}");
+        assert!(finding.message.ends_with('…'), "{finding:?}");
+        assert!(finding.message.chars().count() < 1000, "{finding:?}");
+    }
+
+    #[test]
     fn a_worker_that_does_not_answer_does_not_hold_doctor() {
         let finding = streaming_support("exec sleep 30", Duration::from_millis(300));
         assert_eq!(finding.status_label(), "warning", "{finding:?}");
