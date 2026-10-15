@@ -421,3 +421,64 @@ fn a_prune_goes_on_past_what_it_cannot_read_or_remove_and_reports_the_first() {
     assert!(locked.join("weights").is_file());
     assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
 }
+
+#[test]
+fn entries_come_back_in_name_order_whatever_order_they_were_made_in() {
+    let td = TempDir::new().unwrap();
+    // Neither in name order nor in its reverse, so no file system lists
+    // them in name order by itself.
+    for i in (0..64).map(|i| (i * 37) % 64) {
+        fs::create_dir(td.path().join(format!("{i:02}"))).unwrap();
+    }
+
+    let names: Vec<_> = entries(td.path())
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+
+    let ordered: Vec<_> = (0..64).map(|i| format!("{i:02}")).collect();
+    assert_eq!(names, ordered);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tree_that_cannot_be_removed_is_named() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: root removes a directory of mode 000");
+        return;
+    }
+    let d = dirs();
+    let stuck = tree(&d.staging, "stt");
+    let locked = stuck.join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::write(locked.join("weights"), "").unwrap();
+    let mode = |mode: u32| {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    mode(0o000);
+
+    let error = prune(&d.staging, &d.store).unwrap_err().to_string();
+
+    mode(0o755);
+    let named = format!("`{}`: ", stuck.display());
+    assert!(error.contains(&named), "{error}");
+    assert!(locked.join("weights").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_id_directory_that_is_a_link_is_not_followed() {
+    let d = dirs();
+    let outside = d.staging.parent().unwrap().join("outside");
+    let tree = outside.join(new_transaction_id());
+    fs::create_dir_all(&tree).unwrap();
+    fs::create_dir_all(&d.staging).unwrap();
+    std::os::unix::fs::symlink(&outside, d.staging.join("stt")).unwrap();
+
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 0);
+
+    assert!(tree.is_dir());
+    assert!(d.staging.join("stt").symlink_metadata().is_ok());
+}
