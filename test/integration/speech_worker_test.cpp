@@ -744,6 +744,10 @@ TEST_F(SpeechWorkerScripted, ACancelMidSynthesisEndsTheSessionAndReleasesItsJobO
   EXPECT_EQ(served.buffers(), 0U);
 }
 
+/// gRPC alone orders its two reports of a cancelled call, so the case below
+/// lets a client go away this many times.
+constexpr std::size_t kClientsThatGoAway = 20;
+
 // gRPC reports a cancelled call to the listener both as a failed read and as
 // a cancellation, in either order; neither ends the open utterance as a
 // half-close would, so none of its audio is decoded.
@@ -752,37 +756,44 @@ TEST_F(SpeechWorkerScripted, AClientThatGoesAwayMidUtteranceEndsItsSession) {
   auto built = worker(streaming_config(speech_model()));
   ASSERT_NE(built, nullptr);
   const Serving served{std::move(built)};
-  {
-    auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
-    ASSERT_TRUE(client.send_audio(kFrame));
-    const auto last = client.sequence;
-    while (client.accepted.empty() || client.accepted.back().accepted_sequence() < last) {
-      ASSERT_TRUE(client.read().has_value()) << "the stream ended before the frame was accepted";
+  std::vector<std::uint64_t> lost;
+  for (std::size_t round = 1; round <= kClientsThatGoAway; ++round) {
+    SCOPED_TRACE(round);
+    {
+      auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+      ASSERT_TRUE(client.send_audio(kFrame));
+      const auto last = client.sequence;
+      while (client.accepted.empty() || client.accepted.back().accepted_sequence() < last) {
+        ASSERT_TRUE(client.read().has_value()) << "the stream ended before the frame was accepted";
+      }
+      client.context->TryCancel();
+      (void)client.call->Finish();
     }
-    client.context->TryCancel();
-    (void)client.call->Finish();
+    const auto released = sidecar.sent("session_release", round);
+    ASSERT_EQ(released.size(), round);
+    lost.push_back(released.back().value("session_key", std::uint64_t{0}));
+    // Read while the worker is up and before the next session: the release
+    // gave the audio back.
+    EXPECT_TRUE(eventually([&] { return served.buffers() == 0; }));
+    EXPECT_EQ(count_of(sidecar.sent("job_submit", 0), "job_submit", lost.back()), 0U)
+        << "the open utterance of a cancelled call was decoded";
   }
-  const auto first_release = sidecar.sent("session_release", 1);
-  ASSERT_EQ(first_release.size(), 1U);
-  const auto lost = first_release.front().value("session_key", std::uint64_t{0});
-  // Read while the worker is up and before the next session: the release
-  // gave the audio back.
-  EXPECT_TRUE(eventually([&] { return served.buffers() == 0; }));
-  EXPECT_EQ(count_of(sidecar.sent("job_submit", 0), "job_submit", lost), 0U)
-      << "the open utterance of a cancelled call was decoded";
 
-  // Its place is free: the next session is served.
+  // Their places are free: the next session is served.
   ASSERT_NO_FATAL_FAILURE(transcribes_one_utterance(served));
   const auto stopped = logged(served.stop(), "speech dispatch stopped");
   ASSERT_EQ(stopped.size(), 1U);
   EXPECT_EQ(stopped.front().value("releases_refused", -1), 0);
   const auto releases = sidecar.sent("session_release", 0);
-  ASSERT_EQ(releases.size(), 2U) << "one release for each session";
+  ASSERT_EQ(releases.size(), kClientsThatGoAway + 1) << "one release for each session";
   const auto next = releases.back().value("session_key", std::uint64_t{0});
-  EXPECT_NE(next, lost);
-  EXPECT_EQ(count_of(releases, "session_release", lost), 1U);
-  EXPECT_EQ(count_of(releases, "session_release", next), 1U);
   const auto written = sidecar.written();
+  for (const auto key : lost) {
+    EXPECT_NE(next, key);
+    EXPECT_EQ(count_of(releases, "session_release", key), 1U);
+    EXPECT_EQ(count_of(written, "session_released", key), 1U);
+  }
+  EXPECT_EQ(count_of(releases, "session_release", next), 1U);
   const auto submits = sidecar.sent("job_submit", 0);
   ASSERT_EQ(submits.size(), 1U) << "a job of neither session";
   EXPECT_EQ(count_of(submits, "job_submit", next), 1U);
@@ -790,7 +801,6 @@ TEST_F(SpeechWorkerScripted, AClientThatGoesAwayMidUtteranceEndsItsSession) {
   const auto kinds = kinds_of(written, job_id);
   EXPECT_EQ(std::count(kinds.begin(), kinds.end(), "job_released"), 1);
   EXPECT_EQ(sidecar.cancel_requests(job_id), 0U);
-  EXPECT_EQ(count_of(written, "session_released", lost), 1U);
   EXPECT_EQ(count_of(written, "session_released", next), 1U);
   EXPECT_EQ(job_cancels(), 0U);
   EXPECT_EQ(served.buffers(), 0U);

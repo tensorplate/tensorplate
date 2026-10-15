@@ -1464,6 +1464,10 @@ void expect_abandoned(Served& served) {
   EXPECT_EQ(seen.inputs(), 1U);
 }
 
+/// gRPC alone orders its two reports of a call cancelled while its read
+/// waits, so each such case plays its scenario this many times.
+constexpr int kUnorderedRounds = 20;
+
 /// A client whose one frame was accepted, its utterance open. On `relay`,
 /// when given.
 Client with_an_open_utterance(Served& served, const Relay* relay = nullptr) {
@@ -1479,14 +1483,17 @@ Client with_an_open_utterance(Served& served, const Relay* relay = nullptr) {
 // as OnCancel. Here nothing holds the listener, which reads on once it has
 // answered the frame: whichever comes first, the session is abandoned.
 TEST(StreamEvents, ACallCancelledWhileItsReadWaitsAbandonsItsOpenUtterance) {
-  Served served;
-  auto client = with_an_open_utterance(served);
-  while (client.accepted.empty()) {
-    ASSERT_TRUE(client.read().has_value());
+  for (int round = 0; round < kUnorderedRounds; ++round) {
+    SCOPED_TRACE(round);
+    Served served;
+    auto client = with_an_open_utterance(served);
+    while (client.accepted.empty()) {
+      ASSERT_TRUE(client.read().has_value());
+    }
+    client.context->TryCancel();
+    EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
+    ASSERT_NO_FATAL_FAILURE(expect_abandoned(served));
   }
-  client.context->TryCancel();
-  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
-  expect_abandoned(served);
 }
 
 // The listener is held inside the frame's hand-over, with no read of the
@@ -1505,15 +1512,18 @@ TEST(StreamEvents, ACallCancelledWhileTheListenerHandsOverAFrameAbandonsItsOpenU
 }
 
 TEST(StreamEvents, ACallWhoseConnectionIsLostWhileItsReadWaitsAbandonsItsOpenUtterance) {
-  Served served;
-  Relay relay{served.listener().bound_port()};
-  auto client = with_an_open_utterance(served, &relay);
-  while (client.accepted.empty()) {
-    ASSERT_TRUE(client.read().has_value());
+  for (int round = 0; round < kUnorderedRounds; ++round) {
+    SCOPED_TRACE(round);
+    Served served;
+    Relay relay{served.listener().bound_port()};
+    auto client = with_an_open_utterance(served, &relay);
+    while (client.accepted.empty()) {
+      ASSERT_TRUE(client.read().has_value());
+    }
+    relay.drop();
+    EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::UNAVAILABLE);
+    ASSERT_NO_FATAL_FAILURE(expect_abandoned(served));
   }
-  relay.drop();
-  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::UNAVAILABLE);
-  expect_abandoned(served);
 }
 
 TEST(StreamEvents, ACallWhoseConnectionIsLostWhileTheListenerHandsOverAFrameAbandonsIt) {

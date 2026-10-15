@@ -308,9 +308,11 @@ line says `serves_sessions: false`.
   frame, so that the cancellation comes first; the session is aborted and
   no half-close is applied in all four. Which of gRPC's two reports comes
   first when the read is pending is gRPC's to decide, and no test forces
-  it. A half-close after the frame finalizes the utterance (endpoint reason
-  `HALF_CLOSE`) and closes the session with status OK. In the worker, a
-  client that cancels with an utterance open has no job submitted for it.
+  it, so each of those two cases plays its scenario twenty times, on a
+  fresh listener each time. A half-close after the frame finalizes the
+  utterance (endpoint reason `HALF_CLOSE`) and closes the session with
+  status OK. In the worker, twenty clients in turn cancel with an utterance
+  open, and none has a job submitted for it.
 - **Transport window.** A delivery is a completed write, and gRPC completes
   a write when HTTP/2 flow control lets the bytes pass, not when the
   client's application reads them. The no-progress limit and the output
@@ -1732,8 +1734,9 @@ the runner cases hold that one runner process lives from the load to the
 stop and not past it; a client cancel while the backend holds the segment's job (the
 session is released once, the next session is served); a lost client while
 its utterance is decoded behind a held backend (released once, the job's
-audio given back only when the backend lets go of the job), and a client
-that cancels with an utterance open, for which no job is submitted; a job the
+audio given back only when the backend lets go of the job), and twenty
+clients in turn that cancel with an utterance open, for none of which a job
+is submitted; a job the
 backend takes and refuses, and a session of a mode the backend does not
 run; a drain that delivers the segment in flight, and a stop at the end of
 the drain window whose unload ends the job, with the job's audio still out
