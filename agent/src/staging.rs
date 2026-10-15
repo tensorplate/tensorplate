@@ -101,16 +101,20 @@ fn named_by(state: &AgentState) -> impl Iterator<Item = PathBuf> + '_ {
 }
 
 /// Remove every tree under `staging_dir` that no record of either state
-/// file names, and return how many were removed. Only a directory a deploy
-/// named, under a directory a deployment id names, is removed: a tree of
-/// the layout before this one, `staging_dir/<deployment_id>/` itself, is
-/// never. No other deploy may stage meanwhile.
+/// file names, and return how many were removed. A tree is matched by where
+/// its path resolves, so the records may spell `staging_dir` another way.
+/// Only a directory a deploy named, under a directory a deployment id names,
+/// is removed: a tree of the layout before this one,
+/// `staging_dir/<deployment_id>/` itself, is never. No other deploy may
+/// stage meanwhile.
 ///
 /// # Errors
 ///
 /// As [`StateStore::files`], when what a state file holds cannot be told,
-/// and then nothing is removed; [`AgentError::Io`] when a directory cannot
-/// be read or a tree cannot be removed.
+/// and [`AgentError::Io`] when a record's path cannot be resolved or
+/// `staging_dir` cannot be read: then nothing is removed. Otherwise the
+/// first [`AgentError::Io`] of an entry that could not be read or removed,
+/// once every other entry has been seen to.
 pub fn prune(staging_dir: &Path, store: &StateStore) -> AgentResult<usize> {
     #[cfg(test)]
     if PRUNE_FAILS.with(|fails| fails.replace(false)) {
@@ -118,31 +122,79 @@ pub fn prune(staging_dir: &Path, store: &StateStore) -> AgentResult<usize> {
     }
     let mut named = BTreeSet::new();
     for state in store.files()? {
-        named.extend(named_by(&state));
+        for path in named_by(&state) {
+            named.extend(resolved(&path)?);
+        }
     }
     let mut removed = 0;
+    let mut first_error = None;
     for id in entries(staging_dir)? {
-        let id = id?;
-        if !is_directory(&id, is_valid_deployment_id)? {
-            continue;
-        }
-        for tree in entries(&id.path())? {
-            let tree = tree?;
-            if is_directory(&tree, names_a_tree)? && !named.contains(&tree.path()) {
-                fs::remove_dir_all(tree.path())?;
-                removed += 1;
+        let trees = id.and_then(|id| trees_of(&id));
+        for tree in trees.unwrap_or_else(|e| vec![Err(e)]) {
+            match tree.and_then(|tree| remove_unnamed(&tree, &named)) {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
             }
         }
     }
-    Ok(removed)
+    first_error.map_or(Ok(removed), |e| Err(e.into()))
 }
 
-fn entries(dir: &Path) -> AgentResult<Vec<io::Result<DirEntry>>> {
-    match fs::read_dir(dir) {
-        Ok(entries) => Ok(entries.collect()),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(e.into()),
+/// Where `path` resolves once its links and `..` are followed; none when
+/// nothing is there.
+fn resolved(path: &Path) -> io::Result<Option<PathBuf>> {
+    match fs::canonicalize(path) {
+        Ok(resolved) => Ok(Some(resolved)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => {
+            let unresolved = format!("staged path `{}` does not resolve: {e}", path.display());
+            Err(io::Error::new(e.kind(), unresolved))
+        }
     }
+}
+
+/// The entries of `id` when it is a directory a deployment id names.
+fn trees_of(id: &DirEntry) -> io::Result<Vec<io::Result<DirEntry>>> {
+    if is_directory(id, is_valid_deployment_id)? {
+        entries(&id.path())
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+/// Remove `tree` when it is a tree no path in `named` resolves to, and say
+/// whether it was removed.
+fn remove_unnamed(tree: &DirEntry, named: &BTreeSet<PathBuf>) -> io::Result<bool> {
+    if !is_directory(tree, names_a_tree)? {
+        return Ok(false);
+    }
+    let path = tree.path();
+    if named.contains(&fs::canonicalize(&path).map_err(|e| at(&path, &e))?) {
+        return Ok(false);
+    }
+    fs::remove_dir_all(&path).map_err(|e| at(&path, &e))?;
+    Ok(true)
+}
+
+/// The entries of `dir` in name order, so a prune that meets one it cannot
+/// remove does the same each time; none when `dir` is not there.
+fn entries(dir: &Path) -> io::Result<Vec<io::Result<DirEntry>>> {
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            let mut entries: Vec<_> = entries.collect();
+            entries.sort_by_key(|entry| entry.as_ref().ok().map(DirEntry::file_name));
+            Ok(entries)
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(at(dir, &e)),
+    }
+}
+
+fn at(path: &Path, e: &io::Error) -> io::Error {
+    io::Error::new(e.kind(), format!("`{}`: {e}", path.display()))
 }
 
 /// Whether `entry` is a directory, not a link to one, with a name `rule`

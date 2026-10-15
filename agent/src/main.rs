@@ -846,7 +846,7 @@ fn main() -> ExitCode {
     match staging::prune(&cfg.staging_dir, &store) {
         Ok(0) => {}
         Ok(removed) => eprintln!("staged bundles: {removed} removed that no state record names"),
-        Err(err) => eprintln!("staged bundles: unnamed copies were not removed: {err}"),
+        Err(err) => eprintln!("staged bundles: not all unnamed copies were removed: {err}"),
     }
     let worker = match worker::from_config(&cfg, &store) {
         Ok(w) => w,

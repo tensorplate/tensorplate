@@ -242,7 +242,7 @@ impl Coordinator {
             Ok(removed) => {
                 eprintln!("staged bundles: {removed} removed that no state record names");
             }
-            Err(err) => eprintln!("staged bundles: unnamed copies were not removed: {err}"),
+            Err(err) => eprintln!("staged bundles: not all unnamed copies were removed: {err}"),
         }
 
         if let Some(admission) = &self.platform_admission {

@@ -309,3 +309,115 @@ fn a_prune_finds_nothing_to_remove_before_anything_was_staged() {
     let d = dirs();
     assert_eq!(prune(&d.staging, &d.store).unwrap(), 0);
 }
+
+#[test]
+fn a_staging_dir_that_cannot_be_read_is_reported() {
+    let d = dirs();
+    fs::write(&d.staging, "").unwrap();
+
+    let error = prune(&d.staging, &d.store).unwrap_err().to_string();
+
+    let says = format!("`{}`: ", d.staging.display());
+    assert!(error.contains(&says), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tree_a_record_names_is_kept_however_staging_dir_is_spelled() {
+    let d = dirs();
+    let root = d.staging.parent().unwrap();
+    fs::create_dir_all(root.join("elsewhere")).unwrap();
+    fs::create_dir_all(&d.staging).unwrap();
+    std::os::unix::fs::symlink(&d.staging, root.join("alias")).unwrap();
+    let spellings = [
+        d.staging.clone(),
+        root.join("alias"),
+        root.join("elsewhere").join("..").join("staging"),
+    ];
+    for recorded in &spellings {
+        for pruned in &spellings {
+            let [named, unnamed] = ["stt", "stt"].map(|id| tree(&d.staging, id));
+            let staged = recorded.join("stt").join(named.file_name().unwrap());
+            let records = |state: &mut AgentState| {
+                state.active = Some(record("stt", &staged));
+                Ok(())
+            };
+            d.store.update(records).unwrap();
+
+            let removed = prune(pruned, &d.store).unwrap();
+
+            let spelled = format!("recorded as {recorded:?}, pruned as {pruned:?}");
+            assert_eq!(removed, 1, "{spelled}");
+            assert!(named.is_dir() && !unnamed.exists(), "{spelled}");
+            fs::remove_dir_all(named).unwrap();
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn nothing_is_removed_while_a_record_s_path_does_not_resolve_and_a_missing_one_names_nothing() {
+    let d = dirs();
+    let root = d.staging.parent().unwrap();
+    std::os::unix::fs::symlink(root.join("loop-b"), root.join("loop-a")).unwrap();
+    std::os::unix::fs::symlink(root.join("loop-a"), root.join("loop-b")).unwrap();
+    let unnamed = tree(&d.staging, "stt");
+    let name = |staged: PathBuf| {
+        move |state: &mut AgentState| {
+            state.active = Some(record("stt", &staged));
+            Ok(())
+        }
+    };
+    let looping = root.join("loop-a").join(new_transaction_id());
+    d.store.update(name(looping.clone())).unwrap();
+
+    let error = prune(&d.staging, &d.store).unwrap_err().to_string();
+
+    let says = format!("staged path `{}` does not resolve: ", looping.display());
+    assert!(error.contains(&says), "{error}");
+    assert!(unnamed.is_dir());
+    let missing = d.staging.join("stt").join(new_transaction_id());
+    d.store.update(name(missing)).unwrap();
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
+    assert!(!unnamed.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_prune_goes_on_past_what_it_cannot_read_or_remove_and_reports_the_first() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: root reads and removes a directory of mode 000");
+        return;
+    }
+    let d = dirs();
+    // In name order: an id's directory that cannot be read, then a tree that
+    // cannot be removed, then trees that can.
+    let unreadable = d.staging.join("aaa");
+    let stuck = d
+        .staging
+        .join("stt")
+        .join(format!("tx-{}", uuid::Uuid::nil()));
+    let locked = stuck.join("locked");
+    fs::create_dir_all(&unreadable).unwrap();
+    fs::create_dir_all(&locked).unwrap();
+    fs::write(locked.join("weights"), "").unwrap();
+    let last = format!("tx-{}", uuid::Uuid::from_u128(u128::MAX));
+    let removable = [d.staging.join("stt").join(last), tree(&d.staging, "tts")];
+    fs::create_dir_all(&removable[0]).unwrap();
+    let mode = |dir: &Path, mode: u32| {
+        fs::set_permissions(dir, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    mode(&unreadable, 0o000);
+    mode(&locked, 0o000);
+
+    let error = prune(&d.staging, &d.store).unwrap_err().to_string();
+
+    mode(&unreadable, 0o755);
+    mode(&locked, 0o755);
+    let first = format!("`{}`: ", unreadable.display());
+    assert!(error.contains(&first), "{error}");
+    assert!(removable.iter().all(|tree| !tree.exists()));
+    assert!(locked.join("weights").is_file());
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
+}

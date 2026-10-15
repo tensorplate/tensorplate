@@ -196,6 +196,6 @@ fn a_prune_that_fails_is_logged_and_does_not_stop_the_start() {
         state_dir.join("descriptor-stt-7.json").is_file(),
         "{stderr}"
     );
-    let says = "staged bundles: unnamed copies were not removed: ";
+    let says = "staged bundles: not all unnamed copies were removed: ";
     assert!(stderr.contains(says) && unnamed_tree.is_dir(), "{stderr}");
 }

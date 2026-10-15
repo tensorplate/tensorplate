@@ -514,15 +514,29 @@ agent's standard error and neither stops the start nor fails the deploy.
 Nothing is removed while what a state file holds cannot be told (it cannot
 be read, or is at a state version this agent does not read), and only a
 directory named as a transaction id, under a directory named as a
-deployment id, is ever removed. So the tree of a record a commit dropped
-from `previous_active`, and the tree of a deploy that failed, stay until the
-next deploy begins or the agent starts again. A deploy that failed after
+deployment id, is ever removed. A tree is matched by where its path
+resolves, so a `staging_dir` spelled another way than the records spell it
+(through a link, or with `..`) removes nothing a record names; a record
+whose path does not resolve, other than because nothing is there, stops the
+removal before anything goes. An entry that cannot be read or removed is
+left and printed, and the removal goes on to the others. So the tree of a
+record a commit dropped from `previous_active`, and the tree of a deploy
+that failed, stay until the next deploy begins or the agent starts again. A deploy that failed after
 its candidate was prepared leaves that candidate's process running until
 the next deploy or rollback prepares a candidate, or the agent stops; the
 abandoned candidate's tree can be removed before then, and nothing reads it
 again.
 
-A singleton agent holds at most three trees: the one `active` names, the
+A `staging_dir` belongs to one state directory, because the agent removes
+every tree its own state files do not name. Two agents with separate state
+directories that share a `staging_dir` remove each other's trees, and an
+agent started while its `state` directory is set aside removes every tree
+the set-aside state names: an operator who sets `state` aside sets
+`staging_dir` aside with it and puts both back together (see the
+[rollback procedure](../install/lifecycle.md#downgrade-and-rollback)).
+
+A singleton agent holds at most three trees, besides any it could not
+remove: the one `active` names, the
 one `previous_active` names, and either the candidate's while a deploy is in
 flight or what the last transaction left. A same-id update holds two trees,
 the active record's and the retained record's, until the retained record
