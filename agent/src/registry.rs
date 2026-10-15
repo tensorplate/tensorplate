@@ -30,8 +30,8 @@ use crate::state::StateStore;
 use crate::supervision::{MonotonicClock, SystemMonotonicClock};
 use crate::worker::{
     forward_stderr, get_health_json, send_sigterm, spawn_with_control, startup_error, LiveMember,
-    MemberEvent, MemberRole, ServingMember, WorkerControl, WorkerReadiness, WorkerStderr,
-    WorkerStderrSink, STDERR_DRAIN_WAIT,
+    MemberEvent, MemberRole, ServingMember, StreamTarget, WorkerControl, WorkerReadiness,
+    WorkerStderr, WorkerStderrSink, STDERR_DRAIN_WAIT,
 };
 
 /// The drain a worker is told to give its sessions once it is asked to stop.
@@ -774,7 +774,7 @@ impl MemberRegistry {
                 held_by_a_deploy: false,
             });
         }
-        let rendered = self.render_config(&recipe, generation, ports.ports.http, runner_profile);
+        let rendered = self.render_config(&recipe, generation, ports.ports, runner_profile);
         let launched = rendered.and_then(|config_path| {
             let spec = LaunchSpec {
                 member: MemberRef::new(recipe.deployment_id.clone(), generation),
@@ -814,7 +814,7 @@ impl MemberRegistry {
         &self,
         candidate: &CandidateRef,
         generation: u64,
-        port: u16,
+        ports: MemberPorts,
         runner_profile: Option<&str>,
     ) -> AgentResult<PathBuf> {
         let descriptor =
@@ -841,7 +841,7 @@ impl MemberRegistry {
             "schema_version": tensorplate_protocol::SCHEMA_VERSION,
             "bind": {
                 "host": self.settings.bind_host,
-                "port": port,
+                "port": ports.http,
                 "allow_non_loopback": false
             },
             "health_mode": "local_json",
@@ -867,6 +867,16 @@ impl MemberRegistry {
         });
         if let Some(profile) = runner_profile {
             config["deployment"]["model"]["runner_profile"] = profile.into();
+        }
+        if candidate.streaming {
+            let Some(port) = ports.stream else {
+                return Err(AgentError::Config(format!(
+                    "`{}` serves stream sessions, and the agent's configuration holds no stream port for its worker: `worker.serving_port_range` gives one to each",
+                    candidate.deployment_id
+                )));
+            };
+            config["streaming"] = serde_json::json!({"enabled": true, "port": port});
+            config["deployment"]["descriptor_digest"] = stream_digest(candidate).into();
         }
         fs::write(&path, serde_json::to_vec_pretty(&config)?)?;
         Ok(path)
@@ -1560,6 +1570,15 @@ impl WorkerControl for MemberRegistry {
                 "http://{}:{}/infer",
                 self.settings.bind_host, member.ports.ports.http
             ),
+            stream: member
+                .ports
+                .ports
+                .stream
+                .filter(|_| member.recipe.streaming)
+                .map(|port| StreamTarget {
+                    endpoint: host_port(&self.settings.bind_host, port),
+                    descriptor_digest: stream_digest(&member.recipe).to_owned(),
+                }),
         })
     }
 
@@ -1667,6 +1686,22 @@ impl Drop for MemberRegistry {
             .map(|member| members.stopping(member))
             .collect();
         self.retire(stopped);
+    }
+}
+
+/// The digest a stream Open names for a worker started from `candidate`.
+fn stream_digest(candidate: &CandidateRef) -> &str {
+    candidate
+        .descriptor_digest
+        .as_deref()
+        .unwrap_or(&candidate.bundle_digest)
+}
+
+fn host_port(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
     }
 }
 

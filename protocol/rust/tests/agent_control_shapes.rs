@@ -33,6 +33,9 @@ use tensorplate_protocol::{
 const GOLDEN: &str = "agent_control_singleton_lifecycle.jsonl";
 /// Status exchanges recorded from an agent that runs the member registry.
 const MEMBER_STATUS: &str = "agent_control_member_status.jsonl";
+/// A deploy that asks for streaming and the status after it, recorded the
+/// same way from an agent whose configuration gives stream ports.
+const STREAMING: &str = "agent_control_streaming_deploy.jsonl";
 
 fn fixture(name: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -122,7 +125,7 @@ fn committed_set(fixture_name: &str) -> ResidentSet {
 
 #[test]
 fn the_recorded_exchanges_still_decode_and_reencode_byte_for_byte() {
-    for name in [GOLDEN, MEMBER_STATUS] {
+    for name in [GOLDEN, MEMBER_STATUS, STREAMING] {
         for (index, line) in fixture(name).lines().enumerate() {
             let value: Value = serde_json::from_str(line).expect("json");
             let errors = schema_error_paths(&value);
@@ -1205,6 +1208,18 @@ fn status_with_a_stream_endpoint() -> Value {
     active["stream_endpoint"] = json!("127.0.0.1:18105");
     active["descriptor_digest"] = json!(format!("sha256:{}", "5e".repeat(32)));
     response
+}
+
+#[test]
+fn the_recorded_streaming_status_names_its_endpoint_and_the_manifest_digest() {
+    let recorded = fixture(STREAMING);
+    let line = recorded.lines().nth(3).expect("the status response");
+    let response: Value = serde_json::from_str(line).expect("json");
+    let active = &response["agent_status"]["active"];
+    assert_eq!(active["stream_endpoint"], "127.0.0.1:41285");
+    // A format 0.1 bundle names no descriptor: an Open names its manifest.
+    assert_eq!(active["descriptor_digest"], active["bundle_digest"]);
+    assert_eq!(active["generation"], 1);
 }
 
 #[test]

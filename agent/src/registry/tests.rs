@@ -783,7 +783,15 @@ fn the_worker_is_told_a_drain_that_ends_before_the_registry_would_kill_it() {
     assert_eq!(registry.settings.worker_drain, WORKER_DRAIN);
     assert_eq!(registry.settings.stop_deadline, STOP_DEADLINE);
     let rendered = registry
-        .render_config(&candidate("stt"), 1, 18080, None)
+        .render_config(
+            &candidate("stt"),
+            1,
+            MemberPorts {
+                http: 18080,
+                stream: None,
+            },
+            None,
+        )
         .unwrap();
     let rendered: serde_json::Value =
         serde_json::from_slice(&std::fs::read(rendered).unwrap()).unwrap();

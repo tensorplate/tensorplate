@@ -464,6 +464,50 @@ fn a_restart_re_stamps_the_descriptor_and_the_restart_after_it_starts_from_that(
 }
 
 #[test]
+fn a_streaming_member_names_the_descriptor_of_each_generation_it_is_started_as() {
+    let d = described_on(
+        |settings| RegistrySettings {
+            ports: configured_ports(&crate::config::WorkerConfig {
+                serving_port_range: Some(crate::config::PortRange {
+                    first: ACTIVE_PORT,
+                    last: ACTIVE_PORT + 3,
+                }),
+                ..crate::config::WorkerConfig::default()
+            }),
+            ..settings
+        },
+        |stamp| stamp,
+    );
+    let recipe = CandidateRef {
+        streaming: true,
+        ..d.recipe.clone()
+    };
+    d.serve(&recipe);
+    let launched = |generation: u64| d.launcher.handle(generation).config.clone();
+    assert_eq!(launched(1)["streaming"]["port"], ACTIVE_PORT + 1);
+    assert_eq!(
+        launched(1)["deployment"]["descriptor_digest"],
+        serde_json::json!(d.first.descriptor_digest)
+    );
+
+    d.stop(1);
+    assert_eq!(d.step(1), restarted(2));
+    let second = d.first.restamp(2).unwrap();
+    assert_eq!(launched(2)["streaming"]["port"], ACTIVE_PORT + 1);
+    assert_eq!(
+        launched(2)["deployment"]["descriptor_digest"],
+        serde_json::json!(second.descriptor_digest)
+    );
+    let member = MemberRef::new("stt", 2);
+    assert_eq!(d.step(0), [MemberEvent::Serving { member }]);
+    let serving = d.registry.serving_member().unwrap().unwrap();
+    assert_eq!(
+        serving.stream.unwrap().descriptor_digest,
+        second.descriptor_digest
+    );
+}
+
+#[test]
 fn a_restart_whose_descriptor_cannot_be_re_stamped_is_a_launch_that_failed_and_writes_nothing() {
     const NOT_NAMED: &str = "the active deployment record does not name it";
     let other = serde_json::to_vec(&derive("stt", 1, "/staged/other")).unwrap();

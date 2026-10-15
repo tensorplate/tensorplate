@@ -14,7 +14,9 @@
 // recording and the replay. Run with `UPDATE_GOLDEN=1` to re-record.
 //
 // `agent_control_member_status.jsonl` beside it holds two status exchanges
-// recorded the same way from an agent that runs the member registry.
+// recorded the same way from an agent that runs the member registry, and
+// `agent_control_streaming_deploy.jsonl` a deploy that asks for streaming
+// and the status after it, from one whose configuration gives stream ports.
 
 #![cfg(unix)]
 #![allow(
@@ -28,7 +30,7 @@ mod common;
 #[path = "support/registry_agent.rs"]
 mod registry_agent;
 
-use common::{vision_bundle, Harness};
+use common::{vision_bundle, write_bundle, BundleSpec, Harness};
 use registry_agent::RegistryAgent;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -217,4 +219,39 @@ fn the_status_of_an_agent_that_runs_the_member_registry_crosses_the_socket_as_re
     server.shutdown();
 
     assert_recorded(&fixture_path("agent_control_member_status.jsonl"), &lines);
+}
+
+#[test]
+fn a_streaming_deploy_and_the_status_after_it_cross_the_socket_as_recorded() {
+    let h = Harness::new();
+    let agent = RegistryAgent::start_with_stream_ports(&h);
+    let socket = h.config.socket_path.clone().expect("socket");
+    let mut server = Server::start(&h.config, agent.coord.clone()).expect("start");
+    let tempdirs = tempdirs(&h);
+    let mut tx_ids = Vec::new();
+    let mut lines = Vec::new();
+    let mut record = |request: &ControlRequest| {
+        let (sent, received) = exchange(&socket, request);
+        lines.push(normalize(&sent, &tempdirs, &mut tx_ids));
+        lines.push(normalize(&received, &tempdirs, &mut tx_ids));
+    };
+
+    let speech = BundleSpec {
+        model_class: Some("speech"),
+        ..BundleSpec::default()
+    };
+    let bundle = write_bundle(h.td.path(), "stt", speech);
+    let mut deploy = deploy_request("ctl-000001", &bundle, "stt");
+    deploy.deploy.as_mut().expect("a deploy payload").streaming = true;
+    record(&deploy);
+    record(&ControlRequest::status(
+        Some("ctl-000002".into()),
+        StatusRequest::default(),
+    ));
+    server.shutdown();
+
+    assert_recorded(
+        &fixture_path("agent_control_streaming_deploy.jsonl"),
+        &lines,
+    );
 }

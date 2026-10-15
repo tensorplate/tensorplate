@@ -19,11 +19,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
+use tensorplate_agent::config::{AgentConfig, PortRange, WorkerControlMode};
 use tensorplate_agent::coordinator::{Coordinator, DeployOutcome};
 use tensorplate_agent::error::{AgentError, AgentResult};
 use tensorplate_agent::registry::{
-    durable_generations, ControlContact, HealthProbe, LaunchSpec, MemberPorts, MemberProcess,
-    MemberRegistry, ProcessLauncher, RegistrySettings,
+    configured_ports, durable_generations, ControlContact, HealthProbe, LaunchSpec, MemberPorts,
+    MemberProcess, MemberRegistry, ProcessLauncher, RegistrySettings,
 };
 use tensorplate_agent::supervision::FakeClock;
 use tensorplate_agent::worker::WorkerControl;
@@ -33,6 +34,13 @@ use super::common::{vision_bundle, Harness};
 
 /// The two ports the agent's workers are given, in the order they are leased.
 pub const PORTS: [u16; 2] = [41_280, 41_281];
+
+/// The range [`RegistryAgent::start_with_stream_ports`] configures: two
+/// pairs of an HTTP and a stream port.
+pub const STREAM_RANGE: PortRange = PortRange {
+    first: 41_284,
+    last: 41_287,
+};
 
 /// The member of the resident set [`RegistryAgent::commit_member_as_a_set`]
 /// commits, the deployment before it, and the generations they take.
@@ -64,6 +72,8 @@ fn hold(slot: &Mutex<Option<Hold>>) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
 /// One started worker.
 pub struct Worker {
     pub spec: LaunchSpec,
+    /// The serving config it was started with.
+    pub config: serde_json::Value,
     pub port: u16,
     model: String,
     exited: AtomicBool,
@@ -169,6 +179,7 @@ impl ProcessLauncher for Workers {
         }
         let worker = Arc::new(Worker {
             spec: spec.clone(),
+            config: config.clone(),
             port,
             model: config["deployment"]["model"]["model_id"]
                 .as_str()
@@ -207,13 +218,27 @@ pub struct RegistryAgent {
 
 impl RegistryAgent {
     pub fn start(h: &Harness) -> Self {
+        let ports = PORTS.map(|http| MemberPorts { http, stream: None });
+        Self::start_on(h, h.config.clone(), ports.to_vec())
+    }
+
+    /// As [`Self::start`], with [`STREAM_RANGE`] in the configuration and
+    /// its pairs in the registry. The configuration says `process`, which
+    /// is the mode the registry runs in.
+    pub fn start_with_stream_ports(h: &Harness) -> Self {
+        let mut config = h.config.clone();
+        config.worker.mode = WorkerControlMode::Process;
+        config.worker.serving_port_range = Some(STREAM_RANGE);
+        let ports = configured_ports(&config.worker);
+        Self::start_on(h, config, ports)
+    }
+
+    fn start_on(h: &Harness, config: AgentConfig, ports: Vec<MemberPorts>) -> Self {
         let workers = Arc::new(Workers::default());
         let clock = Arc::new(FakeClock::new());
         let settings = RegistrySettings {
             bind_host: "127.0.0.1".into(),
-            ports: PORTS
-                .map(|http| MemberPorts { http, stream: None })
-                .to_vec(),
+            ports,
             config_dir: h.td.path().join("worker-configs"),
             use_mock_session: true,
             status_poll_interval: Duration::from_millis(1),
@@ -231,11 +256,7 @@ impl RegistryAgent {
             )
             .with_clock(clock.clone()),
         );
-        let coord = Arc::new(Coordinator::new(
-            h.config.clone(),
-            h.store.clone(),
-            registry.clone(),
-        ));
+        let coord = Arc::new(Coordinator::new(config, h.store.clone(), registry.clone()));
         Self {
             workers,
             clock,

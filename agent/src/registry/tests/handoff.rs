@@ -153,6 +153,19 @@ fn wired() -> Wired {
     wired_with(Step::BeforePrepare, |_| {})
 }
 
+/// The fixture's two ports, each given a stream port when the agent's
+/// configuration says it holds them (its range itself is not used).
+fn with_stream_ports(settings: RegistrySettings, streams: bool) -> RegistrySettings {
+    let ports = settings.ports.iter().map(|ports| MemberPorts {
+        stream: streams.then_some(ports.http + 10),
+        ..*ports
+    });
+    RegistrySettings {
+        ports: ports.collect(),
+        ..settings
+    }
+}
+
 fn wired_with(step: Step, configure: impl FnOnce(&mut AgentConfig)) -> Wired {
     wired_at(Arc::new(TempDir::new().unwrap()), step, configure)
 }
@@ -170,7 +183,11 @@ fn wired_at(root: Arc<TempDir>, step: Step, configure: impl FnOnce(&mut AgentCon
         let stamped = registry.with_restart_stamp(stamp);
         stamped.with_descriptor_store(descriptors)
     };
-    let f = Arc::new(fixture_with(|settings| settings, wire));
+    let streams = config.worker.holds_stream_ports();
+    let f = Arc::new(fixture_with(
+        |settings| with_stream_ports(settings, streams),
+        wire,
+    ));
     // The first deployment is given the first port, the next the second.
     f.health(ACTIVE_PORT, "stt");
     f.health(CANDIDATE_PORT, "tts");
@@ -1120,6 +1137,57 @@ fn a_transaction_whose_activation_a_stop_refused_is_settled_forward_at_the_next_
         let member = next.f.registry.serving_member().unwrap().unwrap().member;
         assert_eq!(member.deployment_id, incoming, "{rollback}");
     }
+}
+
+#[test]
+fn status_withholds_the_stream_endpoint_between_the_commit_and_the_activation() {
+    let w = wired_with(Step::BeforePrepare, |config| {
+        config.worker.mode = crate::config::WorkerControlMode::Process;
+        config.worker.serving_port_range = Some(crate::config::PortRange {
+            first: ACTIVE_PORT + 10,
+            last: CANDIDATE_PORT + 10,
+        });
+    });
+    let streaming = std::path::PathBuf::from(bundle_fixture(STT));
+    let deployed = w
+        .coordinator
+        .deploy_with("stt", &streaming, BTreeMap::new(), None, None, true);
+    deployed.unwrap();
+    let endpoint = format!("127.0.0.1:{}", ACTIVE_PORT + 10);
+    let before = w.coordinator.status().unwrap().active.unwrap();
+    assert_eq!(before.stream_endpoint, Some(endpoint));
+
+    let (at, is_at) = std::sync::mpsc::channel();
+    let (go, gone) = std::sync::mpsc::channel::<()>();
+    let wait = move || {
+        at.send(()).unwrap();
+        let _ = gone.recv();
+    };
+    *w.worker.before_activate.lock().unwrap() = Some(Box::new(wait));
+    let during = std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets the deploy end.
+        let go = go;
+        let deploying = scope.spawn(|| w.deploy("tts", TTS));
+        is_at.recv_timeout(GRACE).unwrap();
+        let during = w.coordinator.status().unwrap().active.unwrap();
+        go.send(()).unwrap();
+        deploying.join().unwrap().unwrap();
+        during
+    });
+
+    // The outgoing worker streams, and it is not the committed deployment's.
+    assert_eq!(during.deployment_id, "tts");
+    assert_eq!(during.generation, None);
+    assert_eq!(
+        (during.stream_endpoint, during.descriptor_digest),
+        (None, None)
+    );
+    let after = w.coordinator.status().unwrap().active.unwrap();
+    assert_eq!(after.generation, Some(2));
+    assert_eq!(
+        (after.stream_endpoint, after.descriptor_digest),
+        (None, None)
+    );
 }
 
 #[test]

@@ -75,12 +75,13 @@ pub fn dispatch(
                 return Ok(refusal);
             }
             let path = PathBuf::from(&payload.bundle_path);
-            match coordinator.deploy(
+            match coordinator.deploy_with(
                 &payload.deployment_id,
                 &path,
                 payload.labels,
                 correlation.clone(),
                 payload.expected_bundle_digest.as_deref(),
+                payload.streaming,
             ) {
                 Ok(outcome) => {
                     let status = coordinator.status()?;

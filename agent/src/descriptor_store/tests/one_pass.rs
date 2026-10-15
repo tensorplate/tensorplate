@@ -826,6 +826,7 @@ fn a_start_restores_the_active_record_unless_the_serving_member_was_started_from
             descriptor_digest: active.descriptor_digest,
             configuration_digest: active.configuration_digest,
             serving_url: "http://127.0.0.1:18080".into(),
+            stream: None,
         };
         match case {
             // As an update of `stt` under its own id leaves a worker.

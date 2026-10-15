@@ -64,6 +64,75 @@ fn each_member_binds_the_http_port_of_the_first_free_pair_and_nothing_names_its_
         serving_url(&f).as_deref(),
         Some("http://127.0.0.1:41100/infer")
     );
+    assert_eq!(f.registry.serving_member().unwrap().unwrap().stream, None);
+}
+
+fn streaming(id: &str) -> CandidateRef {
+    CandidateRef {
+        streaming: true,
+        ..candidate(id)
+    }
+}
+
+/// Take `recipe` through to serving on the first pair of a range that
+/// starts at `first`, its worker bound to `host`.
+fn serve_streaming(host: &str, first: u16, recipe: &CandidateRef) -> (Fixture, Arc<Handle>) {
+    let f = fixture_with(
+        |settings| RegistrySettings {
+            bind_host: host.into(),
+            ports: ranged(first, first + 3),
+            ..settings
+        },
+        |registry| registry,
+    );
+    f.registry.prepare("tx", recipe, WARM).unwrap();
+    let handle = f.launcher.handle(1);
+    f.health(first, &recipe.deployment_id);
+    assert!(f.registry.warm("tx", recipe, WARM).unwrap().ready);
+    f.registry.promote("tx", recipe).unwrap();
+    (f, handle)
+}
+
+#[test]
+fn a_streaming_member_listens_on_the_stream_port_of_its_pair_and_is_reported_there() {
+    let recipe = streaming("stt");
+    let (f, handle) = serve_streaming("127.0.0.1", 41_100, &recipe);
+
+    assert_eq!(
+        handle.config["streaming"],
+        serde_json::json!({"enabled": true, "port": 41_101})
+    );
+    // A format 0.1 bundle names no descriptor: the Open names its manifest.
+    assert_eq!(recipe.descriptor_digest, None);
+    assert_eq!(
+        handle.config["deployment"]["descriptor_digest"],
+        serde_json::json!(recipe.bundle_digest)
+    );
+    assert_eq!(
+        f.registry.serving_member().unwrap().unwrap().stream,
+        Some(StreamTarget {
+            endpoint: "127.0.0.1:41101".into(),
+            descriptor_digest: recipe.bundle_digest.clone(),
+        })
+    );
+}
+
+#[test]
+fn an_ipv6_loopback_stream_endpoint_is_written_in_brackets() {
+    let (f, _) = serve_streaming("::1", 41_100, &streaming("stt"));
+    let serving = f.registry.serving_member().unwrap().unwrap();
+    assert_eq!(serving.stream.unwrap().endpoint, "[::1]:41101");
+}
+
+#[test]
+fn a_streaming_member_is_not_started_on_ports_that_hold_no_stream_port() {
+    let f = fixture();
+    let refused = f.registry.prepare("tx", &streaming("stt"), WARM);
+
+    assert!(matches!(refused, Err(AgentError::Config(_))), "{refused:?}");
+    assert_eq!(f.launcher.count(), 0);
+    assert_eq!(f.configs(), 0);
+    f.prepare("stt").unwrap();
 }
 
 #[test]
