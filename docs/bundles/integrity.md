@@ -152,6 +152,10 @@ since the bundle was verified cannot enter the descriptor unnoticed. The
 input is verified first: a descriptor changed after it was read fails its
 digest check and is refused instead of receiving a fresh digest, and a
 generation that is not newer is refused.
+`deployment_descriptor_stt_restamp.json` is the first fixture re-stamped
+from generation 3 to 4, written by the reference implementation. The
+restart fixture is a different case: it also stages the new generation
+under another root, so it is a derived descriptor, not a re-stamped one.
 
 What a start hashes of the staged copy depends on the path. The restore of
 the active deployment when the agent starts, and a rollback, hash every
@@ -164,10 +168,6 @@ a member compares the staged manifest's digest with the record's and
 hashes no artifact: that digest covers each artifact's digest, the copy was
 hashed when it was staged and synced to disk before a record named it, and
 the restore hashes it again at every start of the agent.
-`deployment_descriptor_stt_restamp.json` is the first fixture re-stamped
-from generation 3 to 4, written by the reference implementation. The
-restart fixture is a different case: it also stages the new generation
-under another root, so it is a derived descriptor, not a re-stamped one.
 
 ---
 
