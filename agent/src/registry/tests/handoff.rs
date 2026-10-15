@@ -35,6 +35,8 @@ struct Stepped {
     step: Step,
     /// What each of those steps did.
     steps: Mutex<Vec<Vec<MemberEvent>>>,
+    /// Runs once, as the candidate is about to replace the serving member.
+    before_promote: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Stepped {
@@ -60,6 +62,9 @@ impl WorkerControl for Stepped {
         self.f.registry.warm(tx, candidate, timeout)
     }
     fn promote(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        if let Some(hook) = self.before_promote.lock().unwrap().take() {
+            hook();
+        }
         self.f.registry.promote(tx, candidate)
     }
     fn abandon(&self, candidate: &CandidateRef) {
@@ -83,6 +88,12 @@ impl WorkerControl for Stepped {
     }
     fn stopping(&self) -> bool {
         self.f.registry.stopping()
+    }
+    fn supervise(&self) -> Vec<MemberEvent> {
+        self.f.registry.supervise()
+    }
+    fn member_failure(&self) -> Option<ErrorRecord> {
+        self.f.registry.member_failure()
     }
 }
 
@@ -127,6 +138,7 @@ fn wired_at(root: Arc<TempDir>, step: Step, configure: impl FnOnce(&mut AgentCon
         f: f.clone(),
         step,
         steps,
+        before_promote: Mutex::default(),
     });
     let coordinator = Coordinator::new(config, store.clone(), worker.clone());
     Wired {
@@ -444,4 +456,202 @@ fn a_format_0_1_transaction_killed_after_the_registry_took_its_generation_is_end
         assert_eq!(settled.next_generation, Some(taken + 2), "{rollback}");
         assert_eq!(settled.last_error, None, "{rollback}");
     }
+}
+
+/// From the moment the candidate is about to replace the serving member,
+/// every state write fails.
+fn refuse_the_commit_write(w: &Wired) {
+    let store = w.store.clone();
+    let refuse = move || store.kill_after_writes(0);
+    *w.worker.before_promote.lock().unwrap() = Some(Box::new(refuse));
+}
+
+fn roles(f: &Fixture) -> Vec<(MemberRef, MemberRole)> {
+    let live = f.registry.live_members().unwrap();
+    live.into_iter().map(|m| (m.member, m.role)).collect()
+}
+
+#[test]
+fn a_deploy_whose_commit_write_is_refused_leaves_the_serving_member_serving() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let before = w.store.snapshot().unwrap();
+    refuse_the_commit_write(&w);
+
+    let refused = w.deploy("tts", TTS).unwrap_err();
+
+    assert!(matches!(refused, AgentError::Io(_)), "{refused:?}");
+    let serving = (MemberRef::new("stt", 1), MemberRole::Serving);
+    let given_up = (MemberRef::new("tts", 2), MemberRole::Abandoned);
+    assert_eq!(roles(&w.f), [serving, given_up]);
+    assert!(w.f.launcher.handle(1).calls().is_empty());
+    let found = w.store.snapshot().unwrap();
+    assert_eq!(found.active, before.active);
+}
+
+#[test]
+fn a_rollback_whose_commit_write_is_refused_leaves_the_serving_member_serving() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    w.deploy("tts", TTS).unwrap();
+    let before = w.store.snapshot().unwrap();
+    refuse_the_commit_write(&w);
+
+    let refused = w.coordinator.rollback(None).unwrap_err();
+
+    assert!(matches!(refused, AgentError::Io(_)), "{refused:?}");
+    let serving = (MemberRef::new("tts", 2), MemberRole::Serving);
+    let given_up = (MemberRef::new("stt", 3), MemberRole::Abandoned);
+    assert_eq!(roles(&w.f), [serving, given_up]);
+    assert!(w.f.launcher.handle(2).calls().is_empty());
+    let found = w.store.snapshot().unwrap();
+    assert_eq!(found.active, before.active);
+}
+
+#[test]
+fn the_serving_member_is_asked_to_stop_only_once_the_commit_is_durable() {
+    for rollback in [false, true] {
+        let w = wired();
+        w.deploy("stt", STT).unwrap();
+        if rollback {
+            w.deploy("tts", TTS).unwrap();
+        }
+        let outgoing = w.f.launcher.handle(if rollback { 2 } else { 1 });
+        let (asked, release) = hold_stop(&outgoing);
+
+        let committed = std::thread::scope(|scope| {
+            let transaction = scope.spawn(|| {
+                if rollback {
+                    w.coordinator.rollback(None).map(|_| ())
+                } else {
+                    w.deploy("tts", TTS)
+                }
+            });
+            asked.recv().unwrap();
+            let active = w.store.snapshot().unwrap().active.unwrap();
+            release.send(()).unwrap();
+            transaction.join().unwrap().unwrap();
+            active.deployment_id
+        });
+
+        let incoming = if rollback { "stt" } else { "tts" };
+        assert_eq!(committed, incoming, "{rollback}");
+    }
+}
+
+/// The next start of `w`'s agent, its worker failing as `fail` makes it.
+fn started_failing(w: &Wired, fail: &str) -> Wired {
+    let next = wired_at(w.root.clone(), Step::BeforePrepare, |config| {
+        config.worker.warm_timeout_ms = 50;
+    });
+    match fail {
+        "spawn" => next.f.launcher.refuse.store(true, Ordering::SeqCst),
+        "ready" => next.f.probe.silent.store(true, Ordering::SeqCst),
+        _ => unreachable!(),
+    }
+    next
+}
+
+fn heal(next: &Wired) {
+    next.f.launcher.refuse.store(false, Ordering::SeqCst);
+    next.f.probe.silent.store(false, Ordering::SeqCst);
+}
+
+fn serving(id: &str, generation: u64) -> [MemberEvent; 1] {
+    let member = MemberRef::new(id, generation);
+    [MemberEvent::Serving { member }]
+}
+
+#[test]
+fn a_start_whose_restored_worker_does_not_come_up_stays_up_and_restarts_it() {
+    for fail in ["spawn", "ready"] {
+        let w = wired();
+        w.deploy("stt", STT).unwrap();
+        let next = started_failing(&w, fail);
+
+        apply_startup(&next.coordinator).unwrap();
+
+        let status = next.coordinator.status().unwrap();
+        assert_eq!(status.agent_state, AgentRunState::Degraded, "{fail}");
+        assert!(status.last_error.is_some(), "{fail}");
+        // The restore's own generation is not left running.
+        assert!(roles(&next.f).is_empty(), "{fail}");
+        heal(&next);
+        next.f.clock.advance(Duration::from_secs(1));
+        assert_eq!(next.coordinator.supervise(), restarted(3), "{fail}");
+        assert_eq!(next.coordinator.supervise(), serving("stt", 3), "{fail}");
+        let status = next.coordinator.status().unwrap();
+        let reads = (status.agent_state, status.last_error);
+        assert_eq!(reads, (AgentRunState::Ready, None), "{fail}");
+        assert_eq!(next.named(), ["stt@3", "-", "4"], "{fail}");
+    }
+}
+
+#[test]
+fn a_start_whose_restored_worker_never_comes_up_shows_the_members_failure() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let next = started_failing(&w, "spawn");
+    apply_startup(&next.coordinator).unwrap();
+
+    let mut failed = None;
+    for _ in RESTART_DELAYS {
+        next.f.clock.advance(Duration::from_secs(4));
+        for event in next.coordinator.supervise() {
+            if let MemberEvent::Failed { error, .. } = event {
+                failed = Some(error);
+            }
+        }
+    }
+
+    let failed = failed.expect("the restarts are used up");
+    let status = next.coordinator.status().unwrap();
+    assert_eq!(status.agent_state, AgentRunState::Degraded);
+    assert_eq!(status.last_error.unwrap().message, failed.message);
+    assert!(failed.message.contains("restarts inside"), "{failed:?}");
+}
+
+#[test]
+fn the_loop_never_clears_an_error_that_is_not_the_restores() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    w.f.launcher.refuse.store(true, Ordering::SeqCst);
+    w.deploy("tts", TTS).unwrap_err();
+    w.f.launcher.refuse.store(false, Ordering::SeqCst);
+    let recorded = w.store.snapshot().unwrap().last_error;
+    assert!(recorded.is_some());
+
+    w.stop(1);
+    assert_eq!(w.coordinator.supervise(), restarted(3));
+    assert_eq!(w.coordinator.supervise(), serving("stt", 3));
+
+    assert_eq!(w.store.snapshot().unwrap().last_error, recorded);
+}
+
+#[test]
+fn a_restores_error_whose_clearing_write_fails_is_kept_and_cleared_on_a_later_turn() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let next = started_failing(&w, "spawn");
+    apply_startup(&next.coordinator).unwrap();
+    heal(&next);
+    next.f.clock.advance(Duration::from_secs(1));
+    assert_eq!(next.coordinator.supervise(), restarted(3));
+    let recorded = next.store.snapshot().unwrap().last_error;
+    assert!(recorded.is_some());
+
+    next.store.kill_after_writes(0);
+    assert_eq!(next.coordinator.supervise(), serving("stt", 3));
+    assert_eq!(next.coordinator.supervise(), []);
+
+    let member = next.f.registry.serving_member().unwrap().unwrap().member;
+    assert_eq!(member, MemberRef::new("stt", 3));
+    assert_eq!(next.store.snapshot().unwrap().last_error, recorded);
+    next.store.kill_after_writes(usize::MAX);
+    assert_eq!(next.coordinator.supervise(), []);
+    let status = next.coordinator.status().unwrap();
+    assert_eq!(
+        (status.agent_state, status.last_error),
+        (AgentRunState::Ready, None)
+    );
 }

@@ -53,7 +53,9 @@ use crate::platform_admission::PlatformAdmission;
 use crate::state::StateStore;
 use crate::supervision::supervisor::{DesiredWorker, WorkerSupervisor};
 use crate::transaction::is_permitted;
-use crate::worker::{LiveMember, MemberRole, ServingMember, WorkerControl, WorkerEvent};
+use crate::worker::{
+    LiveMember, MemberEvent, MemberRole, ServingMember, WorkerControl, WorkerEvent,
+};
 
 /// Caller-supplied event sink. The coordinator emits one event per
 /// significant state transition; production sinks ship them to structured
@@ -194,6 +196,11 @@ impl Coordinator {
     #[must_use]
     pub fn worker_client(&self) -> &Arc<dyn WorkerControl> {
         &self.worker
+    }
+
+    /// One turn of the agent's loop over the serving members.
+    pub fn supervise(&self) -> Vec<MemberEvent> {
+        self.worker.supervise()
     }
 
     /// Drive a deploy transaction end-to-end.
