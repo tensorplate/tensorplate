@@ -140,8 +140,9 @@ state
 ### Re-stamping
 
 A descriptor belongs to one generation. When the same deployment starts at
-a later generation without being verified again (a restart, a recovery or a
-rollback), its descriptor is re-stamped, never derived again:
+a later generation (a restart, a recovery or a rollback), its descriptor is
+re-stamped, never derived again, whether or not its staged copy is hashed
+again first (below):
 `DeploymentDescriptor::restamp` takes a descriptor and a newer generation
 and returns the descriptor for it. The generation and `descriptor_digest`
 are new; the configuration, `configuration_digest`, `deployment_id`,
@@ -151,6 +152,17 @@ since the bundle was verified cannot enter the descriptor unnoticed. The
 input is verified first: a descriptor changed after it was read fails its
 digest check and is refused instead of receiving a fresh digest, and a
 generation that is not newer is refused.
+
+What a start hashes of the staged copy depends on the path. The restore of
+the active deployment when the agent starts, and a rollback, hash every
+artifact against the staged manifest and refuse a copy whose artifact is
+missing, truncated or replaced. A restart of a member, and the registry's
+`prepare` of a deploy's candidate, compare the staged manifest's digest
+with the record's and hash no artifact: that digest covers each artifact's
+digest, the bundle was hashed before it was staged (a format 0.2 copy again
+when its descriptor is derived), the copy was synced to disk before a
+record named it, and the restore hashes it again at every start of the
+agent.
 `deployment_descriptor_stt_restamp.json` is the first fixture re-stamped
 from generation 3 to 4, written by the reference implementation. The
 restart fixture is a different case: it also stages the new generation
