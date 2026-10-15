@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tensorplate.errors import ErrorCode, ProtocolError, TensorPlateError
+from tensorplate.errors import EndpointResolutionError, ErrorCode, ProtocolError, TensorPlateError
 
 
 class SpeechError(TensorPlateError):
@@ -113,3 +113,37 @@ class SessionClosedError(SpeechError):
     Also a session opened a second time, and one whose client or channel
     was closed.
     """
+
+
+class DiscoveryError(SpeechError, EndpointResolutionError):
+    """The agent's status named no stream target, or could not be read.
+
+    ``reason``, ``code`` and ``grpc_status`` are ``None``: no server ended a
+    call. ``admitted`` is ``False`` when no Open was sent, and the first
+    call's when the error ended an open whose first call was lost, which
+    is then this error's ``__cause__``.
+    """
+
+
+class NotStreamingError(DiscoveryError):
+    """The generation serving the active deployment does not serve streams.
+
+    It was deployed without ``--streaming``, or the agent starts no
+    deployment with streaming at all.
+    """
+
+
+class NotServingError(DiscoveryError):
+    """No generation serves the active deployment now, or nothing is deployed.
+
+    A deploy, a rollback or a restart may be between its steps; the client
+    does not wait for it, and a caller that wants to polls.
+    """
+
+
+class ResidentSetError(DiscoveryError):
+    """The agent serves more than one deployment, so it names no single stream target."""
+
+
+class RemoteAgentError(DiscoveryError):
+    """The CLI profile reaches the agent at another host: the endpoints it names are that host's."""
