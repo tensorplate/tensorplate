@@ -351,7 +351,7 @@ impl StateStore {
         }
         #[cfg(not(test))]
         let _ = index;
-        File::open(&self.state_dir).and_then(|d| d.sync_all())
+        crate::durable::sync(&self.state_dir)
     }
 
     /// Let `writes` more writes land and fail every one after them.

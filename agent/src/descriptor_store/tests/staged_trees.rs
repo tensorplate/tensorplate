@@ -326,6 +326,95 @@ fn a_deploy_that_finds_the_disk_full_as_it_stages_fails_and_leaves_every_tree_as
 }
 
 #[test]
+fn a_deploy_syncs_its_tree_and_each_directory_it_adds_to_before_a_state_write_names_it() {
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    let (state_dir, staging) = (host.state_dir(), host.td.path().join("staging"));
+    let of_staging = |path: &Path| path.starts_with(&staging) || staging.starts_with(path);
+    assert!(!staging.exists());
+    let first: (_, &[_], _) = (TTS, &["warmup/segment.txt", "warmup"], 3);
+    let second: (_, &[_], _) = (STT, &[], 1);
+
+    for (bundle, nested, above) in [first, second] {
+        drop(crate::durable::hooks::synced());
+        agent.deploy("tts", bundle).unwrap();
+        drop(agent.asked());
+
+        let synced = crate::durable::hooks::synced();
+        let tree = staged_path(&host, active);
+        let start = synced.iter().position(|path| of_staging(path)).unwrap();
+        let block = synced[start..].iter().take_while(|path| of_staging(path));
+        let block: Vec<_> = block.cloned().collect();
+        let mut expected: BTreeSet<_> = ["manifest.json", "entry.json", ""]
+            .iter()
+            .chain(nested)
+            .map(|name| tree.join(name))
+            .collect();
+        expected.extend(tree.ancestors().skip(1).take(above).map(Path::to_path_buf));
+        let blocked: BTreeSet<_> = block.iter().cloned().collect();
+        assert_eq!((blocked, block.len()), (expected.clone(), expected.len()));
+        let rest = &synced[start + block.len()..];
+        assert_eq!(rest.first(), Some(&state_dir), "{synced:?}");
+        assert!(!rest.iter().any(|path| of_staging(path)), "{synced:?}");
+    }
+}
+
+#[test]
+fn a_deploy_whose_tree_cannot_be_synced_fails_and_leaves_every_tree_as_it_was() {
+    type Picks = Box<dyn Fn(&Path, &Path) -> bool>;
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    agent.deploy("stt", STT).unwrap();
+    drop(agent.asked());
+    let id_dir = host.td.path().join("staging").join("stt");
+    let under = |name: &'static str| {
+        move |path: &Path, id: &Path| path.starts_with(id) && path.ends_with(name)
+    };
+    let picks: [(&str, Picks); 6] = [
+        ("the manifest", Box::new(under("manifest.json"))),
+        ("an artifact", Box::new(under("entry.json"))),
+        ("a nested artifact", Box::new(under("warmup/segment.txt"))),
+        ("a nested directory", Box::new(under("warmup"))),
+        ("the tree", Box::new(|path, id| path.parent() == Some(id))),
+        (
+            "the directory it is added to",
+            Box::new(|path, id| path == id),
+        ),
+    ];
+
+    for (case, picks) in picks {
+        let (view, trees) = (host.view(), host.trees("stt"));
+        let named = staged_path(&host, active);
+        let served = contents(&named);
+        let id = id_dir.clone();
+        crate::durable::hooks::fail_next_sync_of(move |path| picks(path, &id));
+        let error = agent.deploy("stt", TTS).unwrap_err();
+
+        let failed = std::io::Error::from(rustix::io::Errno::IO);
+        let says = format!("staging `{}", id_dir.join("tx-").display());
+        let message = error.to_string();
+        assert!(matches!(error, AgentError::Io(_)), "{case}: {message}");
+        let told = message.contains(&says) && message.ends_with(&failed.to_string());
+        assert!(told, "{case}: {message}");
+        assert!(agent.never_asked(), "{case}");
+        let left = (host.view(), host.trees("stt"));
+        assert_eq!(left, (view, trees), "{case}");
+        assert_eq!(contents(&named), served, "{case}");
+        let (quarantined, latest) = host.quarantined();
+        assert!(
+            quarantined.ends_with("@Verified") && latest,
+            "{case}: {quarantined}"
+        );
+        let recorded = host.last_error().unwrap();
+        let recorded = (recorded.code, recorded.message);
+        assert_eq!(recorded, (ErrorCode::Internal, message), "{case}");
+    }
+
+    agent.deploy("stt", TTS).unwrap();
+    assert_eq!(staged_digest(&agent.asked().reference), digest_of(TTS));
+}
+
+#[test]
 fn a_deploy_from_a_tree_no_record_names_stages_that_tree_s_bundle() {
     let host = host();
     let (agent, _) = host.start(Worker::default());

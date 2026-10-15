@@ -239,7 +239,7 @@ impl DescriptorStore {
             self.step(Step::Rename, || fs::rename(&unfinished, &path))?;
             // A rename that is not synced can be lost while the state that names it is kept.
             self.step(Step::SyncDirectory, || {
-                let synced = File::open(&self.dir).and_then(|dir| dir.sync_all());
+                let synced = crate::durable::sync(&self.dir);
                 synced.or_else(|e| if cfg!(unix) { Err(e) } else { Ok(()) })
             })
         };

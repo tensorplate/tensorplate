@@ -55,8 +55,10 @@ fn names_a_tree(name: &str) -> bool {
 }
 
 /// Copy `verified`'s manifest and declared artifacts into a new tree for
-/// the deploy `transaction_id` of `deployment_id`, and return the tree. A
-/// tree that is there is not written; a copy that fails removes its tree.
+/// the deploy `transaction_id` of `deployment_id`, and return the tree once
+/// it and every directory above it that gained an entry are synced. A tree
+/// that is there is not written; a copy or a sync that fails removes its
+/// tree.
 ///
 /// # Errors
 ///
@@ -78,30 +80,56 @@ pub(crate) fn stage(
         let named = format!("staging `{}`: {e}", tree.display());
         AgentError::Io(io::Error::new(e.kind(), named))
     };
-    fs::create_dir_all(staging_dir.join(deployment_id)).map_err(failed)?;
+    let id_dir = staging_dir.join(deployment_id);
+    // The nearest directory there before this stage: it gains an entry, and
+    // every directory below it is new.
+    let there = id_dir
+        .ancestors()
+        .find(|dir| dir.is_dir())
+        .map(Path::to_path_buf);
+    fs::create_dir_all(&id_dir).map_err(failed)?;
     fs::create_dir(&tree).map_err(failed)?;
-    if let Err(e) = copy(verified, &tree) {
+    let synced = || {
+        for dir in id_dir.ancestors() {
+            crate::durable::sync(dir)?;
+            if Some(dir) == there.as_deref() {
+                break;
+            }
+        }
+        Ok(())
+    };
+    if let Err(e) = copy(verified, &tree).and_then(|()| synced()) {
         let _ = fs::remove_dir_all(&tree);
         return Err(failed(e));
     }
     Ok(tree)
 }
 
+/// Copy the bundle into `tree` and sync every file and directory of it, so
+/// the state write that names the tree cannot outlive its bytes.
 fn copy(verified: &VerifiedBundle, tree: &Path) -> io::Result<()> {
     let source = &verified.root_path;
-    fs::copy(source.join("manifest.json"), tree.join("manifest.json"))?;
+    let manifest = tree.join("manifest.json");
+    fs::copy(source.join("manifest.json"), &manifest)?;
+    crate::durable::sync(&manifest)?;
     #[cfg(test)]
     if DISK_FULL.with(|full| full.replace(false)) {
         return Err(rustix::io::Errno::NOSPC.into());
     }
+    let mut directories = BTreeSet::from([tree.to_path_buf()]);
     for artifact in &verified.manifest.artifacts {
         let destination = tree.join(&artifact.path);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
+            let made = parent.ancestors().take_while(|dir| *dir != tree);
+            directories.extend(made.map(Path::to_path_buf));
         }
         fs::copy(source.join(&artifact.path), &destination)?;
+        crate::durable::sync(&destination)?;
     }
-    Ok(())
+    directories
+        .iter()
+        .try_for_each(|dir| crate::durable::sync(dir))
 }
 
 /// The staged path of every record of `state` (the singleton records, and

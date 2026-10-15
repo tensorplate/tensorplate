@@ -527,7 +527,11 @@ Each deploy copies its bundle into a tree of its own,
 transaction id (`tx-` and a UUID). The tree is created new: a deploy never
 writes into a tree that is there, and a copy that fails removes its tree,
 with an error that names it. The candidate record names the tree once the
-copy is complete, and nothing writes it again. Every reader takes the path
+copy is complete and synced to disk: every file and directory of the tree,
+and each directory above it that gained an entry, so a power loss after
+that state write cannot leave a record naming a tree whose bytes never
+reached the disk. A sync that fails fails the deploy as a copy that fails
+does. Nothing writes the tree again. Every reader takes the path
 from a record's `staged_path`: the rollback, the restore at a start, the
 registry's restart, `prepare`, the derived descriptor and status. An update
 under the same id therefore leaves the tree the earlier record names as it
@@ -1008,7 +1012,9 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   started and the member is failed at once, without using a restart, with a
   `load_failed` error that names both digests. A staged manifest that cannot
   be read counts as a restart that could not be launched. The manifest's
-  digest covers each artifact's digest; artifact bytes are not hashed again.
+  digest covers each artifact's digest; artifact bytes are not hashed again,
+  since the tree was synced before a record named it and the restore hashes
+  them at every start.
   Startup recovery and a rollback compare the two digests as well, for
   every record, whether or not it names a
   [descriptor](#deployment-descriptor-documents). A staged bundle that is
@@ -1021,7 +1027,10 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   deployed again), and `active` as the record with no `generation` and no
   `serving_url`. To recover, deploy the id again through that agent, as
   either bundle: the deploy serves it and clears the error, and the next
-  start restores it.
+  start restores it. When the two digests agree, the restore and the
+  rollback then hash every artifact of the staged copy: one that is missing,
+  truncated or replaced is `load_failed` at the restore, with the same
+  outcome, and the rollback is refused.
 - **Failure.** A member that stops with three restarts inside the last five
   minutes is failed: nothing is started for it until a deployment is
   promoted, by a deploy or a rollback. Status then reports
