@@ -793,12 +793,17 @@ fn an_exit_during_the_last_probe_outranks_the_warm_deadline() {
     let f = fixture();
     f.prepare("stt").unwrap();
     let handle = f.launcher.handle(1);
+    // The first probe begins inside it, and outlasts it.
+    let budget = Duration::from_secs(1);
     *f.probe.during.lock().unwrap() = Some(Box::new(move || {
         handle.exited.store(true, Ordering::SeqCst);
-        std::thread::sleep(WAIT_OUT * 2);
+        std::thread::sleep(budget * 2);
     }));
 
-    let err = f.warm_briefly("stt").unwrap_err();
+    let err = f
+        .registry
+        .warm("tx", &candidate("stt"), budget)
+        .unwrap_err();
     assert!(matches!(err, AgentError::WorkerExited(_)), "{err}");
 }
 

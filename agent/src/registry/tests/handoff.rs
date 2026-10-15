@@ -44,6 +44,8 @@ struct Stepped {
     on_failure: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Runs once, before the serving member is read.
     before_serving_member: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The next warm's timeout, in place of the configured one.
+    next_warm: Mutex<Option<Duration>>,
 }
 
 impl Stepped {
@@ -66,6 +68,7 @@ impl WorkerControl for Stepped {
         candidate: &CandidateRef,
         timeout: Duration,
     ) -> AgentResult<WorkerReadiness> {
+        let timeout = self.next_warm.lock().unwrap().take().unwrap_or(timeout);
         self.f.registry.warm(tx, candidate, timeout)
     }
     fn fence(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
@@ -161,6 +164,7 @@ fn wired_at(root: Arc<TempDir>, step: Step, configure: impl FnOnce(&mut AgentCon
         before_activate: Mutex::default(),
         on_failure: Mutex::default(),
         before_serving_member: Mutex::default(),
+        next_warm: Mutex::default(),
     });
     let failed = worker.clone();
     let sink: Arc<EventSink> = Arc::new(move |event: &WorkerEvent| {
@@ -352,11 +356,10 @@ fn a_restart_already_starting_when_a_deploy_takes_its_generation_is_older_and_yi
 
 #[test]
 fn a_deploy_after_one_whose_candidate_never_became_ready_takes_a_new_generation() {
-    let w = wired_with(Step::BeforePrepare, |config| {
-        config.worker.warm_timeout_ms = 40;
-    });
+    let w = wired();
     w.deploy("stt", STT).unwrap();
     w.f.probe.models.lock().unwrap().remove(&CANDIDATE_PORT);
+    *w.worker.next_warm.lock().unwrap() = Some(WAIT_OUT);
 
     let error = w.deploy("tts", TTS).unwrap_err();
 
