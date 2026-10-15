@@ -83,6 +83,8 @@ pub struct Coordinator {
     restore_check_owed: AtomicBool,
     /// A failed clearing write was logged; it is not logged on every turn.
     clear_failure_logged: AtomicBool,
+    #[cfg(test)]
+    pub(crate) restore_clear_logs: std::sync::atomic::AtomicUsize,
 }
 
 /// Result of a successful deploy/rollback.
@@ -113,6 +115,8 @@ impl Coordinator {
             platform_admission: None,
             restore_check_owed: AtomicBool::new(false),
             clear_failure_logged: AtomicBool::new(false),
+            #[cfg(test)]
+            restore_clear_logs: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -221,12 +225,11 @@ impl Coordinator {
         }
         if self.restore_check_owed.load(Ordering::SeqCst) {
             match self.clear_restore_failure() {
-                Ok(()) => {
-                    self.restore_check_owed.store(false, Ordering::SeqCst);
-                    self.clear_failure_logged.store(false, Ordering::SeqCst);
-                }
+                Ok(()) => self.restore_check_owed.store(false, Ordering::SeqCst),
                 Err(err) => {
                     if !self.clear_failure_logged.swap(true, Ordering::SeqCst) {
+                        #[cfg(test)]
+                        self.restore_clear_logs.fetch_add(1, Ordering::SeqCst);
                         eprintln!(
                             "the restored deployment serves; its error is not cleared yet: {err}"
                         );

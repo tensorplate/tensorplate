@@ -37,6 +37,8 @@ struct Stepped {
     steps: Mutex<Vec<Vec<MemberEvent>>>,
     /// Runs once, before the candidate is fenced.
     before_fence: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once, before the candidate is activated.
+    before_activate: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Stepped {
@@ -68,6 +70,9 @@ impl WorkerControl for Stepped {
         self.f.registry.fence(tx, candidate)
     }
     fn activate(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        if let Some(hook) = self.before_activate.lock().unwrap().take() {
+            hook();
+        }
         self.f.registry.activate(tx, candidate)
     }
     fn owe_restore(&self, candidate: &CandidateRef, error: ErrorRecord) -> bool {
@@ -145,6 +150,7 @@ fn wired_at(root: Arc<TempDir>, step: Step, configure: impl FnOnce(&mut AgentCon
         step,
         steps,
         before_fence: Mutex::default(),
+        before_activate: Mutex::default(),
     });
     let coordinator = Coordinator::new(config, store.clone(), worker.clone());
     Wired {
@@ -549,9 +555,17 @@ fn started_failing(w: &Wired, fail: &str) -> Wired {
     let next = wired_at(w.root.clone(), Step::BeforePrepare, |config| {
         config.worker.warm_timeout_ms = 50;
     });
+    let launcher = next.f.launcher.clone();
+    let exit_last = move || {
+        let last = launcher.launched.lock().unwrap().last().cloned();
+        last.unwrap().exited.store(true, Ordering::SeqCst);
+    };
     match fail {
         "spawn" => next.f.launcher.refuse.store(true, Ordering::SeqCst),
         "ready" => next.f.probe.silent.store(true, Ordering::SeqCst),
+        "loading" => *next.f.probe.during.lock().unwrap() = Some(Box::new(exit_last)),
+        // Ready, then gone before it would serve.
+        "fence" => *next.worker.before_fence.lock().unwrap() = Some(Box::new(exit_last)),
         _ => unreachable!(),
     }
     next
@@ -560,6 +574,7 @@ fn started_failing(w: &Wired, fail: &str) -> Wired {
 fn heal(next: &Wired) {
     next.f.launcher.refuse.store(false, Ordering::SeqCst);
     next.f.probe.silent.store(false, Ordering::SeqCst);
+    next.f.probe.during.lock().unwrap().take();
 }
 
 fn serving(id: &str, generation: u64) -> [MemberEvent; 1] {
@@ -569,7 +584,7 @@ fn serving(id: &str, generation: u64) -> [MemberEvent; 1] {
 
 #[test]
 fn a_start_whose_restored_worker_does_not_come_up_stays_up_and_restarts_it() {
-    for fail in ["spawn", "ready"] {
+    for fail in ["spawn", "ready", "loading", "fence"] {
         let w = wired();
         w.deploy("stt", STT).unwrap();
         let next = started_failing(&w, fail);
@@ -659,4 +674,101 @@ fn a_restores_error_whose_clearing_write_fails_is_kept_and_cleared_on_a_later_tu
         (status.agent_state, status.last_error),
         (AgentRunState::Ready, None)
     );
+}
+
+#[test]
+fn a_restores_error_whose_clearing_write_keeps_failing_is_logged_once() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let next = started_failing(&w, "spawn");
+    apply_startup(&next.coordinator).unwrap();
+    heal(&next);
+    next.f.clock.advance(Duration::from_secs(1));
+    next.coordinator.supervise();
+    next.store.kill_after_writes(0);
+
+    for _ in 0..3 {
+        next.coordinator.supervise();
+    }
+    let logged = || next.coordinator.restore_clear_logs.load(Ordering::SeqCst);
+    assert_eq!(logged(), 1);
+    next.store.kill_after_writes(usize::MAX);
+    next.coordinator.supervise();
+    assert_eq!(next.store.snapshot().unwrap().last_error, None);
+}
+
+#[test]
+fn a_transaction_whose_activation_a_stop_refused_is_settled_forward_at_the_next_start() {
+    for rollback in [false, true] {
+        let w = wired();
+        w.deploy("stt", STT).unwrap();
+        if rollback {
+            w.deploy("tts", TTS).unwrap();
+        }
+        let f = w.f.clone();
+        let stop = move || f.registry.shutdown();
+        *w.worker.before_activate.lock().unwrap() = Some(Box::new(stop));
+
+        let refused = if rollback {
+            w.coordinator.rollback(None).map(|_| ())
+        } else {
+            w.deploy("tts", TTS)
+        };
+
+        assert!(matches!(refused, Err(AgentError::Stopping)), "{rollback}");
+        let left = w.store.snapshot().unwrap();
+        let tx = left.in_flight_transaction.expect("in flight");
+        assert_eq!(tx.phase, DeployState::Promoted, "{rollback}");
+        let incoming = if rollback { "stt" } else { "tts" };
+        let committed = left.active.unwrap();
+        assert_eq!(committed.deployment_id, incoming, "{rollback}");
+
+        let next = w.started_again();
+        next.f.health(ACTIVE_PORT, incoming);
+        apply_startup(&next.coordinator).unwrap();
+
+        let settled = next.store.snapshot().unwrap();
+        assert!(settled.in_flight_transaction.is_none(), "{rollback}");
+        assert!(settled.quarantined.is_empty(), "{rollback}");
+        assert_eq!(settled.active.unwrap().deployment_id, incoming);
+        let member = next.f.registry.serving_member().unwrap().unwrap().member;
+        assert_eq!(member.deployment_id, incoming, "{rollback}");
+    }
+}
+
+#[test]
+fn status_withholds_the_generation_between_the_commit_and_the_activation() {
+    // The same id with another bundle, and another id.
+    for (id, bundle) in [("stt", TTS), ("tts", TTS)] {
+        let w = wired();
+        w.deploy("stt", STT).unwrap();
+        w.f.health(CANDIDATE_PORT, id);
+        let (at, is_at) = std::sync::mpsc::channel();
+        let (go, gone) = std::sync::mpsc::channel::<()>();
+        let wait = move || {
+            at.send(()).unwrap();
+            let _ = gone.recv();
+        };
+        *w.worker.before_activate.lock().unwrap() = Some(Box::new(wait));
+
+        let during = std::thread::scope(|scope| {
+            // Dropped if this closure panics, which lets the deploy end.
+            let go = go;
+            let deploying = scope.spawn(|| w.deploy(id, bundle));
+            is_at.recv().unwrap();
+            let during = w.coordinator.status().unwrap().active.unwrap();
+            go.send(()).unwrap();
+            deploying.join().unwrap().unwrap();
+            during
+        });
+
+        let committed = w.store.snapshot().unwrap().active.unwrap();
+        assert_eq!(during.deployment_id, id);
+        assert_eq!(during.bundle_digest, committed.bundle_digest, "{id}");
+        assert_eq!(during.generation, None, "{id}");
+        let outgoing = format!("http://127.0.0.1:{ACTIVE_PORT}/infer");
+        assert_eq!(during.serving_url.as_deref(), Some(outgoing.as_str()));
+        let after = w.coordinator.status().unwrap().active.unwrap();
+        assert_eq!(after.generation, Some(2), "{id}");
+    }
 }
