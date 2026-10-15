@@ -1212,6 +1212,41 @@ TEST(StreamEvents, AStopLetsASessionThatDrainsInsideTheWindowClose) {
   EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::UNAVAILABLE);
 }
 
+// A session whose drain completed waits only for the dispatch's release, and
+// the stop does not fail it: it closes as its drain does once the release
+// comes, which here is when the stop fails the session still decoding.
+TEST(StreamEvents, AStopLeavesASessionWhoseDrainCompletedToClose) {
+  Served served{true, "127.0.0.1", nullptr, std::nullopt, 2};
+  auto& dispatch = served.dispatch();
+  auto& fake = dispatch.synthetic();
+  auto drained = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  ASSERT_TRUE(drained.send_audio(kFrame));
+  dispatch.hold_cleanup_until_failed("worker_shutdown");
+  ASSERT_TRUE(drained.call->WritesDone());
+  ASSERT_NO_FATAL_FAILURE(expect_utterance(drained, wire::ENDPOINT_REASON_HALF_CLOSE, 1, kFrame,
+                                           drained.audio_sent, 0));
+  ASSERT_TRUE(dispatch.wait_until_cleanup_held());
+
+  auto decoding = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  fake.pause(Fake::Gate::InJob);
+  ASSERT_TRUE(decoding.send_audio(kFrame));
+  const auto asked = decoding.finalize();
+  ASSERT_TRUE(
+      eventually([&] { return dispatch.seen.finalizes() == std::vector<std::uint64_t>{asked}; }));
+
+  served.listener().stop(std::chrono::steady_clock::now() +
+                         2 * tensorplate::serving::kTerminalEventReserve);
+  const auto closed = closed_of(drained);
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_FALSE(closed.has_cause()) << closed.ShortDebugString();
+  EXPECT_EQ(closed.totals().utterances_completed(), 1U);
+  EXPECT_TRUE(end_of(drained).ok());
+  const auto failed = closed_of(decoding);
+  EXPECT_EQ(failed.state(), wire::SESSION_STATE_FAILED);
+  EXPECT_EQ(failed.cause().reason(), wire::FAILURE_REASON_WORKER_SHUTDOWN);
+  EXPECT_EQ(end_of(decoding).error_code(), grpc::StatusCode::UNAVAILABLE);
+}
+
 // The limit after the end is its own: a session that failed with a write in
 // flight never came to the no-progress limit of a live session.
 TEST(StreamEvents, ACallIsCancelledWhenItsSessionFailedBehindAWriteThatNeverCompletes) {

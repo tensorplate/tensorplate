@@ -462,16 +462,26 @@ line says `serves_sessions: false`.
   none left gRPC cancels them at once and a client may read the event or
   not. A session whose outcome a client `Cancel` has already fixed is not
   failed: its `SessionClosed` waits for the dispatch's release, and a call
-  still open at the window's end is cancelled without it. Tests: a session
+  still open at the window's end is cancelled without it. Neither is a
+  session whose drain has completed and which waits only for that release:
+  the dispatch reports a drain complete once the output of the session's
+  work was delivered, so it closes as its drain does, or its call is
+  cancelled at the window's end without the event if the release has not
+  come. The listener reads whether a session's drain has completed just
+  before it fails it, not in the manager's serialized section, so a drain
+  that completes in that instant is failed, as a stop a moment earlier
+  would fail it. Tests: a session
   that never drains is failed and its client, reading once the stop has
   returned, gets the event and `UNAVAILABLE`, with a window of twice the
   reserve and with a window of the reserve; a client that fell behind and
   reads again once the stop has failed its session gets the event; a
   session whose decode ends
   while the stop waits closes as a drain does (state closed, cause
-  `worker_shutdown`); a client whose window no chunk
-  fits is cancelled by the stop, with no event, before its own
-  deadline and with the listener's clock never moved; and the worker's
+  `worker_shutdown`); a session whose drain completed, its release held
+  until the stop has failed another session, closes (state closed, no
+  cause, status `OK`) after the transcript it was owed; a client whose
+  window no chunk fits is cancelled by the stop, with no event, before its
+  own deadline and with the listener's clock never moved; and the worker's
   stop case below reads the event. The listener then
   stops the dispatch and destroys the manager. Only then does it stop the
   HTTP listener and run the HTTP drain

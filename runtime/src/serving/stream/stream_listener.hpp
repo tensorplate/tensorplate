@@ -68,8 +68,9 @@ class StreamListener {
 
   /// stop_admission(), then waits for every session to close until
   /// kTerminalEventReserve before `deadline`, fails those still open with
-  /// `worker_shutdown`, waits for the calls until `deadline`, cancels those
-  /// still open, stops the dispatch and releases the manager. Safe to repeat.
+  /// `worker_shutdown` unless their drain completed, waits for the calls
+  /// until `deadline`, cancels those still open, stops the dispatch and
+  /// releases the manager. Safe to repeat.
   void stop(std::chrono::steady_clock::time_point deadline) noexcept;
 
   /// Sessions holding a slot; after stop(), those that still held one when it

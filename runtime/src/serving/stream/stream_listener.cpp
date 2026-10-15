@@ -130,6 +130,9 @@ struct CallState {
   std::uint64_t input_audio_samples = 0;
   std::uint64_t input_text_bytes = 0;
   bool cancelled = false;
+  /// The manager asked for the session's cleanup: its outcome is fixed, or
+  /// its drain completed and only the dispatch's release is awaited.
+  bool cleanup_requested = false;
   /// Outlives the reactor, which it stops calling once the call is done.
   std::shared_ptr<CallOutput> out;
 };
@@ -152,7 +155,7 @@ struct StreamListener::Impl final
 
   void on_transition(const ManagedSessionTransition& transition);
   void close_admission() noexcept;
-  /// Fails every session that has a call and whose outcome is still open,
+  /// Fails every session that has a call and whose cleanup was not asked,
   /// which queues its terminal event at once.
   void fail_open_sessions() noexcept;
   /// Ends a call that was never admitted, for `cause`.
@@ -614,6 +617,9 @@ void StreamListener::Impl::on_transition(const ManagedSessionTransition& transit
       state->input_audio_samples += state->offered.audio_samples;
       state->input_text_bytes += state->offered.text_bytes;
     }
+    if (transition.effects.contains(LogicalSessionEffect::RequestCleanup)) {
+      state->cleanup_requested = true;
+    }
     session_id = state->session_id;
     terms = state->terms;
     last_accepted_sequence = state->last_accepted_sequence;
@@ -718,18 +724,22 @@ void StreamListener::Impl::close_admission() noexcept {
 
 void StreamListener::Impl::fail_open_sessions() noexcept {
   try {
-    std::vector<std::uint64_t> keys;
+    std::vector<std::pair<std::uint64_t, std::shared_ptr<CallState>>> open;
     {
       const std::lock_guard guard(calls_mu);
-      keys.reserve(calls.size());
-      for (const auto& [key, unused] : calls) {
-        keys.push_back(key);
-      }
+      open.assign(calls.begin(), calls.end());
     }
-    // Unlocked: the sink takes calls_mu. A session whose outcome is fixed
-    // stays as it is.
-    for (const auto key : keys) {
-      (void)manager->apply(key, LogicalSessionEvent::Fail, worker_shutdown());
+    // Unlocked: the sink takes calls_mu. A session whose cleanup was asked
+    // has finished its work or has its outcome fixed, and stays as it is.
+    for (const auto& [key, state] : open) {
+      bool cleanup_requested = false;
+      {
+        const std::lock_guard guard(state->mu);
+        cleanup_requested = state->cleanup_requested;
+      }
+      if (!cleanup_requested) {
+        (void)manager->apply(key, LogicalSessionEvent::Fail, worker_shutdown());
+      }
     }
   } catch (...) {  // NOLINT(bugprone-empty-catch): the stop cancels the calls left open.
   }
