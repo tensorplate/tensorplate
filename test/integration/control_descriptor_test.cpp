@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -14,6 +15,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -33,13 +35,13 @@ constexpr const char* kDeployment = "member-under-test";
 
 /// A serving config for a member of a deployment generation: the agent
 /// controls such a worker over the socket it passes as fd 0.
-std::string member_config(std::uint16_t port) {
+std::string member_config(std::uint16_t port, bool logs = false) {
   const nlohmann::json config = {
       {"schema_version", "0.1"},
       {"bind", {{"host", "127.0.0.1"}, {"port", port}}},
       {"deployment",
        {{"use_mock_session", true}, {"endpoint", kDeployment}, {"generation", kGeneration}}},
-      {"enable_stderr_logs", false}};
+      {"enable_stderr_logs", logs}};
   return config.dump();
 }
 
@@ -61,6 +63,64 @@ nlohmann::json last_stderr_record(const std::string& text) {
     }
   }
   return nlohmann::json::parse(last, nullptr, false);
+}
+
+/// The fields of every line of `log` the worker wrote with `message`.
+std::vector<nlohmann::json> logged(const std::string& log, std::string_view message) {
+  std::vector<nlohmann::json> found;
+  std::istringstream lines(log);
+  for (std::string line; std::getline(lines, line);) {
+    const auto entry = nlohmann::json::parse(line, nullptr, false);
+    if (entry.is_object() && entry.value("message", "") == message) {
+      found.push_back(entry.value("fields", nlohmann::json::object()));
+    }
+  }
+  return found;
+}
+
+/// The agent asks this member to retire, with `drain_timeout_ms` for its
+/// drain, and reads the answer's status.
+std::optional<ipc::WorkerControlStatus> retire(int agent, std::uint64_t drain_timeout_ms) {
+  ipc::WorkerControlRequest request;
+  request.transaction_id = "tx-retire";
+  request.correlation_id = "retire-1";
+  request.op = ipc::WorkerControlOp::Retire;
+  request.member = ipc::WorkerMember{kDeployment, kGeneration};
+  request.drain_timeout_ms = drain_timeout_ms;
+  std::string reply;
+  if (!testing::send_frame(agent, ipc::encode_worker_control_request(request).value()) ||
+      testing::read_frame(agent, 10s, reply) != testing::FrameRead::Frame) {
+    return std::nullopt;
+  }
+  const auto response = ipc::decode_worker_control_response(reply);
+  if (!response || !ipc::worker_control_answers(*response, request)) {
+    return std::nullopt;
+  }
+  return response->status;
+}
+
+/// A member that serves on `port`, started with logs.
+testing::ChildProcess serving_member(std::uint16_t port, testing::ControlSocketPair& pair,
+                                     const std::filesystem::path& dir) {
+  auto worker = testing::ChildProcess::spawn(
+      {TP_SERVING_WORKER_BINARY, "--config-json", member_config(port, true)}, pair.worker.get(),
+      dir / "stderr.txt");
+  pair.worker.reset();
+  const auto give_up = std::chrono::steady_clock::now() + 10s;
+  while (!testing::loopback_port_listening(port) && std::chrono::steady_clock::now() < give_up) {
+    std::this_thread::sleep_for(10ms);
+  }
+  return worker;
+}
+
+/// What a worker that stopped by itself logged of its stop: one request for
+/// it, for the retire, and its end.
+void expect_stopped_for_the_retire(const std::string& log) {
+  const auto requested = logged(log, "shutdown requested");
+  ASSERT_EQ(requested.size(), 1U) << log;
+  EXPECT_EQ(requested.front().value("reason", ""), "deployment retired");
+  EXPECT_EQ(logged(log, "deployment retiring").size(), 1U) << log;
+  EXPECT_EQ(logged(log, "shutdown complete").size(), 1U) << log;
 }
 
 TEST(ControlDescriptor, MemberWithoutItsControlSocketFailsToStartAndNeverListens) {
@@ -106,6 +166,111 @@ TEST(ControlDescriptor, MemberWhoseAgentEndIsAlreadyClosedFailsToStart) {
   EXPECT_EQ(record["fields"].value("code", ""), "unavailable");
   std::filesystem::remove_all(dir);
 }
+
+// Nothing but the retire asks for the stop: the worker's wait sees it stop
+// serving within a second and stops it.
+TEST(ControlDescriptor, ARetiredMemberStopsItselfAndExitsWithSuccess) {
+  const auto dir = scratch_dir("retired");
+  const auto port = testing::unused_loopback_port();
+  auto pair = testing::ControlSocketPair::create();
+  auto worker = serving_member(port, pair, dir);
+  ASSERT_TRUE(testing::loopback_port_listening(port)) << worker.stderr_text();
+
+  EXPECT_EQ(retire(pair.agent.get(), 30'000), ipc::WorkerControlStatus::Ok) << worker.stderr_text();
+  const auto status = worker.wait_exit(30s);
+  const auto log = worker.stderr_text();
+  ASSERT_TRUE(status.has_value()) << "the retired worker kept running\n" << log;
+  EXPECT_EQ(*status, static_cast<int>(ServingExitCode::Ok)) << log;
+  ASSERT_NO_FATAL_FAILURE(expect_stopped_for_the_retire(log));
+  EXPECT_TRUE(logged(log, "retirement drain capped").empty()) << log;
+  std::filesystem::remove_all(dir);
+}
+
+// The signal comes while the retire's drain has begun: the stop keeps the
+// retire's reason, cause and window, which the agent's ten minutes were cut
+// to thirty seconds for.
+TEST(ControlDescriptor, ASigtermAfterARetireKeepsTheRetiresReasonAndWindow) {
+  const auto dir = scratch_dir("retired-signalled");
+  const auto port = testing::unused_loopback_port();
+  auto pair = testing::ControlSocketPair::create();
+  auto worker = serving_member(port, pair, dir);
+  ASSERT_TRUE(testing::loopback_port_listening(port)) << worker.stderr_text();
+
+  EXPECT_EQ(retire(pair.agent.get(), 600'000), ipc::WorkerControlStatus::Ok)
+      << worker.stderr_text();
+  ASSERT_EQ(::kill(worker.pid(), SIGTERM), 0);
+  const auto status = worker.wait_exit(30s);
+  const auto log = worker.stderr_text();
+  ASSERT_TRUE(status.has_value()) << log;
+  EXPECT_EQ(*status, static_cast<int>(ServingExitCode::Ok)) << log;
+  ASSERT_NO_FATAL_FAILURE(expect_stopped_for_the_retire(log));
+  const auto retiring = logged(log, "deployment retiring");
+  const auto capped = logged(log, "retirement drain capped");
+  const auto draining = logged(log, "draining requests");
+  ASSERT_EQ(capped.size(), 1U) << log;
+  EXPECT_EQ(capped.front().value("asked_ms", 0), 600'000);
+  EXPECT_EQ(capped.front().value("window_ms", 0), 30'000);
+  ASSERT_EQ(draining.size(), 1U) << log;
+  EXPECT_EQ(retiring.front().value("window_ms", 0), 30'000);
+  EXPECT_EQ(retiring.front().value("cause", ""), "deployment_retired");
+  EXPECT_EQ(draining.front().value("cause", ""), "deployment_retired");
+  EXPECT_EQ(draining.front().value("drain_ends_ns", std::int64_t{0}),
+            retiring.front().value("drain_ends_ns", std::int64_t{-1}));
+  std::filesystem::remove_all(dir);
+}
+
+#if TP_ENABLE_PYTHON_PYTORCH_SIDECAR
+// The sidecar's load waits until the test lets it go
+// (test/mocks/worker_signal_sidecar.py): the retire comes while it waits, and
+// the built worker stops without opening a port.
+TEST(ControlDescriptor, AMemberRetiredWhileItLoadsExitsWithoutServing) {
+  const auto dir = scratch_dir("retired-loading");
+  const auto wrapper = dir / "sidecar";
+  std::ofstream(wrapper)
+      << "#!/bin/sh\nexec \"${TP_TEST_PYTHON:-python3}\" \"$TP_SIGNAL_SIDECAR\" \"$@\"\n";
+  std::filesystem::permissions(wrapper, std::filesystem::perms::owner_all);
+  // The stop's unload goes on at once.
+  std::ofstream{dir / "unload-release"};
+  const nlohmann::json config = {{"schema_version", "0.1"},
+                                 {"bind", {{"host", "127.0.0.1"}, {"port", 0}}},
+                                 {"enable_stderr_logs", true},
+                                 {"deployment",
+                                  {{"use_mock_session", false},
+                                   {"endpoint", kDeployment},
+                                   {"generation", kGeneration},
+                                   {"backend", "python_pytorch"},
+                                   {"model",
+                                    {{"model_id", "retired-loading"},
+                                     {"model_class", "custom"},
+                                     {"artifact_path", "/dev/null"},
+                                     {"backend_hint", "python_pytorch"}}}}}};
+  auto pair = testing::ControlSocketPair::create();
+  auto worker = testing::ChildProcess::spawn(
+      {TP_SERVING_WORKER_BINARY, "--config-json", config.dump()}, pair.worker.get(),
+      dir / "stderr.txt",
+      {"TP_PYTHON_PYTORCH_EXECUTABLE=" + wrapper.string(),
+       "TP_SIGNAL_SIDECAR=" +
+           (std::filesystem::path{TP_SOURCE_DIR} / "test/mocks/worker_signal_sidecar.py").string(),
+       "TP_SIGNAL_TEST_DIR=" + dir.string()});
+  pair.worker.reset();
+  const auto give_up = std::chrono::steady_clock::now() + 30s;
+  while (!std::filesystem::exists(dir / "load") && std::chrono::steady_clock::now() < give_up &&
+         !worker.wait_exit(10ms).has_value()) {
+  }
+  ASSERT_TRUE(std::filesystem::exists(dir / "load")) << worker.stderr_text();
+
+  EXPECT_EQ(retire(pair.agent.get(), 30'000), ipc::WorkerControlStatus::Ok) << worker.stderr_text();
+  std::ofstream{dir / "load-release"};
+  const auto status = worker.wait_exit(30s);
+  const auto log = worker.stderr_text();
+  ASSERT_TRUE(status.has_value()) << log;
+  EXPECT_EQ(*status, static_cast<int>(ServingExitCode::Ok)) << log;
+  EXPECT_TRUE(logged(log, "http server bound").empty()) << "a retired worker opened its port\n"
+                                                        << log;
+  ASSERT_NO_FATAL_FAILURE(expect_stopped_for_the_retire(log));
+  std::filesystem::remove_all(dir);
+}
+#endif
 
 #if defined(__linux__)
 

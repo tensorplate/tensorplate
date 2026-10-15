@@ -34,6 +34,7 @@
 
 #include "serving/control_channel.hpp"
 #include "serving/drain_window.hpp"
+#include "serving/member_control.hpp"
 #include "serving/mock_session.hpp"
 #if TP_ENABLE_STREAMING_GRPC
 #include "serving/session/speech_dispatch.hpp"
@@ -63,11 +64,19 @@ void log_stderr(const ServingConfig& cfg, std::string_view level, std::string_vi
 }
 
 /// When the drain window ends, on the clock and in the unit of a line's
-/// `ts_ns`.
-nlohmann::json drain_end_fields(std::chrono::steady_clock::time_point end) {
+/// `ts_ns`, and the cause its sessions end with.
+nlohmann::json drain_end_fields(std::chrono::steady_clock::time_point end,
+                                serving::DrainCause cause) {
   return {{"drain_ends_ns",
-           std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count()}};
+           std::chrono::duration_cast<std::chrono::nanoseconds>(end.time_since_epoch()).count()},
+          {"cause", cause == serving::DrainCause::DeploymentRetired ? "deployment_retired"
+                                                                    : "worker_shutdown"}};
 }
+
+#if TP_ENABLE_STREAMING_GRPC
+/// One stream session at a time.
+constexpr std::uint32_t kStreamSessions = 1;
+#endif
 
 class SchedulerHealthSink final : public SchedulerEventSink {
  public:
@@ -147,13 +156,24 @@ struct ServingWorker::Impl {
   /// The drain of streams and of HTTP requests share it; it begins with
   /// whichever is asked first.
   serving::DrainWindow drain_window;
-  // Declared last: the control thread stops before anything it could reach.
-  serving::UnimplementedControlTarget control_target;
+  /// Held by every write of `health`, so that a retire's write never lands
+  /// after a stop has moved the state on.
+  std::mutex state_mu;
+  // After everything a retire reaches, and before the channel, whose thread
+  // stops first. The stream listener's admission check, which reads both,
+  // goes with its manager in stop(), which the destructor always runs.
+  serving::MemberControlTarget control_target{
+      [this](std::chrono::milliseconds window, std::chrono::milliseconds asked) {
+        begin_retirement(window, asked);
+      }};
   std::unique_ptr<serving::ControlChannel> control;
 
   Result<void> attach_control();
   Result<void> create_session(const ModelSpec& model, const ExecutionSessionRuntimeHooks& hooks);
   Result<void> build();
+  void publish_built_state();
+  void set_serving_state(ServingState state) noexcept;
+  [[nodiscard]] std::uint32_t stream_session_ceiling() const noexcept;
   Result<void> start_listener();
   Result<void> start_stream_listener();
 #if TP_ENABLE_STREAMING_GRPC
@@ -165,6 +185,7 @@ struct ServingWorker::Impl {
   void stop_stream_admission() noexcept;
   void stop_stream_listener() noexcept;
   void on_speech_stall(const Error& cause) noexcept;
+  void begin_retirement(std::chrono::milliseconds window, std::chrono::milliseconds asked) noexcept;
   // Dispatcher / evictor only call into the owned `unique_ptr` members, so
   // they could be marked const; we keep them non-const so future hooks
   // (e.g. recording dispatcher state on Impl) do not require an API change.
@@ -397,8 +418,36 @@ Result<void> ServingWorker::Impl::build() {
                       config.deployment.model.has_value()
                           ? std::optional<std::string>{config.deployment.model->model_id()}
                           : std::nullopt);
-  health.set_state(session->is_ready() ? ServingState::Ready : ServingState::Degraded);
+  // A fence or a retire that came during the load applies from here.
+  control_target.set_session_ceiling(stream_session_ceiling());
+  control_target.bind_router(*router);
+  publish_built_state();
   return Result<void>{};
+}
+
+/// Ready, or Degraded for a session that is not, unless a retire during the
+/// load already asked for the stop.
+void ServingWorker::Impl::publish_built_state() {
+  const std::lock_guard guard(state_mu);
+  if (!shutdown.is_stopping()) {
+    health.set_state(session->is_ready() ? ServingState::Ready : ServingState::Degraded);
+  }
+}
+
+void ServingWorker::Impl::set_serving_state(ServingState state) noexcept {
+  const std::lock_guard guard(state_mu);
+  health.set_state(state);
+}
+
+/// The stream sessions the worker serves at one time: none without a dispatch.
+// NOLINTNEXTLINE(readability-convert-member-functions-to-static): members with the feature only.
+std::uint32_t ServingWorker::Impl::stream_session_ceiling() const noexcept {
+#if TP_ENABLE_STREAMING_GRPC
+  if (speech_dispatch != nullptr) {
+    return kStreamSessions;
+  }
+#endif
+  return 0;
 }
 
 Result<void> ServingWorker::Impl::start_listener() {
@@ -485,10 +534,9 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
     return Result<void>{};
   }
   const auto defaults = serving::SessionLimits::defaults();
-  // One stream session at a time.
-  auto limits =
-      serving::SessionLimits::create(defaults.idle_timeout(), defaults.heartbeat_interval(),
-                                     defaults.liveness_timeout(), defaults.max_duration(), 1);
+  auto limits = serving::SessionLimits::create(
+      defaults.idle_timeout(), defaults.heartbeat_interval(), defaults.liveness_timeout(),
+      defaults.max_duration(), kStreamSessions);
   if (!limits) {
     return unexpected(limits.error());
   }
@@ -500,6 +548,10 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
   options.generation = config.deployment.generation.value_or(0);
   options.descriptor_digest = config.deployment.descriptor_digest.value_or("");
   options.limits = *limits;
+  if (control != nullptr) {
+    // Asked under the session manager's lock; it reads atomics only.
+    options.admission_check = [this] { return control_target.admit_session(*control); };
+  }
   // Without a dispatch the listener refuses every Open.
   auto listener = serving::StreamListener::start(std::move(options), speech_dispatch.get(), *clock);
   if (!listener) {
@@ -529,7 +581,7 @@ void ServingWorker::Impl::stop_stream_admission() noexcept {
 #if TP_ENABLE_STREAMING_GRPC
   if (auto* listener = stream_listener(); listener != nullptr) {
     (void)drain_window.begin(std::chrono::steady_clock::now(), config.shutdown.drain_deadline);
-    listener->stop_admission();
+    listener->stop_admission(drain_window.cause());
   }
 #endif
 }
@@ -541,11 +593,12 @@ void ServingWorker::Impl::stop_stream_listener() noexcept {
     // Sessions drain inside the window that began when shutdown was asked.
     const auto end =
         drain_window.begin(std::chrono::steady_clock::now(), config.shutdown.drain_deadline);
+    const auto cause = drain_window.cause();
     try {
-      log_stderr(config, "info", "stream listener stopping", drain_end_fields(end));
+      log_stderr(config, "info", "stream listener stopping", drain_end_fields(end, cause));
     } catch (...) {  // NOLINT(bugprone-empty-catch): the stop continues without the line.
     }
-    listener->stop(end);
+    listener->stop(end, cause);
     if (speech_dispatch != nullptr) {
       try {
         const auto stats = speech_dispatch->stats();
@@ -587,7 +640,37 @@ void ServingWorker::Impl::on_speech_stall(const Error& cause) noexcept {
     shutdown.request("speech backend stalled");
   } catch (...) {  // NOLINT(bugprone-empty-catch): the state below still stops the binary.
   }
-  health.set_state(ServingState::Failed);
+  set_serving_state(ServingState::Failed);
+}
+
+// On the control thread, for the first retire. It records the drain and asks
+// for the stop, which the thread that waits for shutdown runs: it neither
+// stops anything itself nor takes a lock a stop holds while it waits.
+void ServingWorker::Impl::begin_retirement(std::chrono::milliseconds window,
+                                           std::chrono::milliseconds asked) noexcept {
+  const std::lock_guard guard(state_mu);
+  // A stop asked first keeps its drain window, cause and reason, whether or
+  // not its window has begun, and a stopped worker keeps its state.
+  if (shutdown.is_stopping()) {
+    return;
+  }
+  const auto end = drain_window.begin(std::chrono::steady_clock::now(), window,
+                                      serving::DrainCause::DeploymentRetired);
+  try {
+    auto fields = drain_end_fields(end, drain_window.cause());
+    fields["asked_ms"] = asked.count();
+    fields["window_ms"] = window.count();
+    log_stderr(config, "info", "deployment retiring", fields);
+    if (asked > window) {
+      log_stderr(config, "warn", "retirement drain capped",
+                 {{"asked_ms", asked.count()}, {"window_ms", window.count()}});
+    }
+    metrics.increment_shutdown_started();
+    log_stderr(config, "info", "shutdown requested", {{"reason", "deployment retired"}});
+  } catch (...) {  // NOLINT(bugprone-empty-catch): the stop is asked without the lines.
+  }
+  shutdown.request("deployment retired");
+  health.set_state(ServingState::Stopping);
 }
 
 // Dispatcher / evictor only reach `Impl` members through their
@@ -615,7 +698,7 @@ void ServingWorker::Impl::evictor_loop() {
 
 void ServingWorker::Impl::run_drain() {
   shutdown.enter_draining();
-  health.set_state(ServingState::Draining);
+  set_serving_state(ServingState::Draining);
   if (config.shutdown.cancel_queued_immediately) {
     (void)scheduler->shutdown();
     async_store->cancel_all();
@@ -624,7 +707,7 @@ void ServingWorker::Impl::run_drain() {
   // stream drain before this one has used part of it.
   const auto deadline =
       drain_window.begin(std::chrono::steady_clock::now(), config.shutdown.drain_deadline);
-  log_stderr(config, "info", "draining requests", drain_end_fields(deadline));
+  log_stderr(config, "info", "draining requests", drain_end_fields(deadline, drain_window.cause()));
   while (std::chrono::steady_clock::now() < deadline) {
     const auto m = scheduler->metrics();
     if (m.queue_depth == 0 && m.in_flight == 0) {
@@ -647,7 +730,7 @@ void ServingWorker::Impl::run_drain() {
     (void)session->unload();
   }
   shutdown.enter_stopped();
-  health.set_state(ServingState::Stopped);
+  set_serving_state(ServingState::Stopped);
   metrics.increment_shutdown_completed();
 }
 
@@ -773,7 +856,7 @@ void ServingWorker::shutdown(std::string_view reason) noexcept {
       impl_->pipeline->set_stopping(true);
     }
     impl_->stop_stream_admission();
-    impl_->health.set_state(ServingState::Stopping);
+    impl_->set_serving_state(ServingState::Stopping);
   } catch (...) {  // NOLINT(bugprone-empty-catch): noexcept shutdown is fire-and-forget.
   }
 }
@@ -796,7 +879,7 @@ ServingExitCode ServingWorker::stop() {
   if (impl_->pipeline != nullptr) {
     impl_->pipeline->set_stopping(true);
   }
-  impl_->health.set_state(ServingState::Stopping);
+  impl_->set_serving_state(ServingState::Stopping);
   // The stream sessions drain first: the HTTP stop waits for its handlers
   // with no deadline of its own. The router already refuses new requests.
   impl_->stop_stream_listener();

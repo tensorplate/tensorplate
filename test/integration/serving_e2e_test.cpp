@@ -22,8 +22,10 @@
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -37,7 +39,9 @@
 #include "tensorplate/ipc/worker_control.hpp"
 #include "tensorplate/scheduler/scheduler.hpp"
 #include "tensorplate/serving/config.hpp"
+#include "tensorplate/serving/health.hpp"
 #include "tensorplate/serving/metrics.hpp"
+#include "tensorplate/serving/router.hpp"
 #include "tensorplate/serving/serialization.hpp"
 #include "tensorplate/serving/worker.hpp"
 
@@ -583,6 +587,302 @@ TEST(ServingE2E, MemberWhoseControlChannelEndsWhileItLoadsDoesNotStartServing) {
   EXPECT_EQ(started.error().code, Error::Code::Unavailable);
   EXPECT_EQ(started.error().context, "control_channel_closed");
   EXPECT_EQ(worker->bound_port(), 0);
+}
+
+/// Sends the agent's `op` for `member` on `agent`, a retire with
+/// `drain_timeout_ms`, and returns the answer.
+ipc::WorkerControlResponse ask_member(int agent, ipc::WorkerControlOp op,
+                                      const ipc::WorkerMember& member,
+                                      std::uint64_t drain_timeout_ms = 30'000) {
+  ipc::WorkerControlRequest request;
+  const bool runtime = op == ipc::WorkerControlOp::LedgerStatus;
+  request.transaction_id = runtime ? "runtime" : "tx-1";
+  request.correlation_id = std::string{"ask-"} + std::to_string(static_cast<int>(op));
+  request.op = op;
+  request.member = member;
+  if (op == ipc::WorkerControlOp::Retire) {
+    request.drain_timeout_ms = drain_timeout_ms;
+  }
+  EXPECT_TRUE(send_frame(agent, ipc::encode_worker_control_request(request).value()));
+  std::string reply;
+  EXPECT_EQ(read_frame(agent, std::chrono::seconds{10}, reply), FrameRead::Frame);
+  const auto response = ipc::decode_worker_control_response(reply);
+  EXPECT_TRUE(response.has_value()) << reply;
+  EXPECT_TRUE(response && ipc::worker_control_answers(*response, request).has_value());
+  return response.value_or(ipc::WorkerControlResponse{});
+}
+
+/// The fields of every line of `log` the worker wrote with `message`.
+std::vector<nlohmann::json> logged(const std::string& log, std::string_view message) {
+  std::vector<nlohmann::json> found;
+  std::istringstream lines(log);
+  for (std::string line; std::getline(lines, line);) {
+    const auto entry = nlohmann::json::parse(line, nullptr, false);
+    if (entry.is_object() && entry.value("message", "") == message) {
+      found.push_back(entry.value("fields", nlohmann::json::object()));
+    }
+  }
+  return found;
+}
+
+/// Whether an HTTP answer is the refusal of a member whose admission is
+/// closed for `cause`.
+bool admission_closed_for(const HttpClientResponse& resp, const std::string& cause) {
+  const auto body = nlohmann::json::parse(resp.body, nullptr, false);
+  if (resp.status != 503 || !body.is_object()) {
+    return false;
+  }
+  const auto error = body.value("error", nlohmann::json::object());
+  return error.value("code", "") == "not_ready" &&
+         error.value("context", "") == "admission_closed" &&
+         error.value("message", "").find(cause) != std::string::npos;
+}
+
+TEST(ServingE2E, AFencedMemberRefusesInferWith503UntilActivated) {
+  auto cfg = default_test_config();
+  cfg.deployment.endpoint = "fenced-member";
+  cfg.deployment.generation = 5;
+  const ipc::WorkerMember member{"fenced-member", 5};
+  auto pair = ControlSocketPair::create();
+  const StdinReplaced as_the_agent_passes_it(pair.worker.get());
+  pair.worker.reset();
+  auto h = ServingHarness::start(std::move(cfg));
+  HttpClient client("127.0.0.1", h.port);
+  ASSERT_EQ(client.post("/infer", make_infer_body("before")).status, 200);
+
+  EXPECT_EQ(ask_member(pair.agent.get(), ipc::WorkerControlOp::AdmissionFence, member).status,
+            ipc::WorkerControlStatus::Ok);
+  const auto infer = client.post("/infer", make_infer_body("fenced"));
+  EXPECT_TRUE(admission_closed_for(infer, "fenced")) << infer.status << " " << infer.body;
+  const auto policy = client.post("/policy/infer", make_infer_body("fenced-async"));
+  EXPECT_TRUE(admission_closed_for(policy, "fenced")) << policy.status << " " << policy.body;
+  EXPECT_EQ(h.worker->health().state(), ServingState::Ready) << "a fence does not stop it";
+
+  // A mock session serves no stream session.
+  const auto activated = ask_member(pair.agent.get(), ipc::WorkerControlOp::Activate, member);
+  EXPECT_EQ(activated.status, ipc::WorkerControlStatus::Ok);
+  EXPECT_EQ(activated.quota, ipc::WorkerQuota{});
+  const auto after = client.post("/infer", make_infer_body("activated"));
+  EXPECT_EQ(after.status, 200) << after.body;
+}
+
+// The retire asks for the stop and returns: the stop, whose HTTP drain waits
+// for the job, is the main thread's to run.
+TEST(ServingE2E, ARetireIsAnsweredWhileABackendJobBlocks) {
+  auto gate = std::make_shared<InferGate>();
+  BackendRegistry registry;
+  auto capability = BackendCapability::create("gated", {PrecisionHint::Auto});
+  ASSERT_TRUE(capability.has_value()) << capability.error().message;
+  ASSERT_TRUE(registry
+                  .register_backend(BackendEntry{
+                      "gated",
+                      capability.value(),
+                      [gate](ExecutionSessionRuntimeHooks hooks)
+                          -> Result<std::unique_ptr<ExecutionSession>> {
+                        return std::unique_ptr<ExecutionSession>(new GatedSession(hooks, gate));
+                      },
+                  })
+                  .has_value());
+  auto cfg = default_test_config();
+  cfg.deployment.use_mock_session = false;
+  cfg.deployment.backend = "gated";
+  cfg.deployment.endpoint = "retired-member";
+  cfg.deployment.generation = 8;
+  cfg.deployment.model =
+      ModelSpec::create("gated-model", ModelClass::Custom, "fixture://gated", "gated").value();
+  const ipc::WorkerMember member{"retired-member", 8};
+  auto pair = ControlSocketPair::create();
+  const StdinReplaced as_the_agent_passes_it(pair.worker.get());
+  pair.worker.reset();
+  auto h = ServingHarness::start(std::move(cfg), registry);
+
+  std::thread caller([port = h.port] {
+    HttpClient c("127.0.0.1", port);
+    (void)c.post("/infer", make_infer_body("held"));
+  });
+  struct OpenAndJoin {
+    InferGate& gate;
+    std::thread& caller;
+    ~OpenAndJoin() {
+      gate.release();
+      if (caller.joinable()) {
+        caller.join();
+      }
+    }
+  } open_and_join{*gate, caller};
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    ASSERT_TRUE(gate->cv.wait_for(lock, std::chrono::seconds{10}, [&] { return gate->entered; }));
+  }
+
+  EXPECT_EQ(ask_member(pair.agent.get(), ipc::WorkerControlOp::Retire, member).status,
+            ipc::WorkerControlStatus::Ok);
+  EXPECT_EQ(h.worker->health().state(), ServingState::Stopping);
+  HttpClient client("127.0.0.1", h.port);
+  const auto refused = client.post("/infer", make_infer_body("after-retire"));
+  EXPECT_TRUE(admission_closed_for(refused, "retiring")) << refused.status << " " << refused.body;
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    EXPECT_FALSE(gate->open);
+  }
+}
+
+// The retire came while the model loaded: the worker is built stopping, and
+// serve_forever() stops it at once.
+TEST(ServingE2E, ARetireDuringTheLoadLeavesTheBuiltWorkerStopping) {
+  auto gate = std::make_shared<InferGate>();
+  BackendRegistry registry;
+  auto capability = BackendCapability::create("slow_load", {PrecisionHint::Auto});
+  ASSERT_TRUE(capability.has_value()) << capability.error().message;
+  ASSERT_TRUE(registry
+                  .register_backend(BackendEntry{
+                      "slow_load",
+                      capability.value(),
+                      [gate](ExecutionSessionRuntimeHooks hooks)
+                          -> Result<std::unique_ptr<ExecutionSession>> {
+                        return std::unique_ptr<ExecutionSession>(new SlowLoadSession(hooks, gate));
+                      },
+                  })
+                  .has_value());
+  auto cfg = default_test_config();
+  cfg.deployment.use_mock_session = false;
+  cfg.deployment.backend = "slow_load";
+  cfg.deployment.endpoint = "retired-loading";
+  cfg.deployment.generation = 3;
+  cfg.deployment.model =
+      ModelSpec::create("slow-model", ModelClass::Custom, "fixture://slow", "slow_load").value();
+  const ipc::WorkerMember member{"retired-loading", 3};
+  auto pair = ControlSocketPair::create();
+  const StdinReplaced as_the_agent_passes_it(pair.worker.get());
+  pair.worker.reset();
+
+  std::unique_ptr<ServingWorker> worker;
+  std::thread creator([&] {
+    auto created = ServingWorker::create(std::move(cfg), registry);
+    if (created) {
+      worker = std::move(created).value();
+    }
+  });
+  struct OpenAndJoin {
+    InferGate& gate;
+    std::thread& creator;
+    ~OpenAndJoin() {
+      gate.release();
+      if (creator.joinable()) {
+        creator.join();
+      }
+    }
+  } open_and_join{*gate, creator};
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    ASSERT_TRUE(gate->cv.wait_for(lock, std::chrono::seconds{10}, [&] { return gate->entered; }));
+  }
+  EXPECT_EQ(ask_member(pair.agent.get(), ipc::WorkerControlOp::Retire, member).status,
+            ipc::WorkerControlStatus::Ok);
+  gate->release();
+  creator.join();
+  ASSERT_NE(worker, nullptr);
+
+  EXPECT_EQ(worker->health().state(), ServingState::Stopping);
+  http::Request request;
+  request.correlation_id = "built-retiring";
+  const auto refused = worker->router().handle_infer(request);
+  EXPECT_EQ(refused.status, 503);
+  EXPECT_NE(refused.body.find("serving worker admission closed: retiring"), std::string::npos)
+      << refused.body;
+  EXPECT_EQ(worker->serve_forever(), ServingExitCode::Ok);
+  EXPECT_EQ(worker->health().state(), ServingState::Stopped);
+}
+
+TEST(ServingE2E, ARetireAfterTheStopAnswersOkAndTheWorkerStaysStopped) {
+  auto cfg = default_test_config();
+  cfg.deployment.endpoint = "stopped-member";
+  cfg.deployment.generation = 2;
+  const ipc::WorkerMember member{"stopped-member", 2};
+  auto pair = ControlSocketPair::create();
+  const StdinReplaced as_the_agent_passes_it(pair.worker.get());
+  pair.worker.reset();
+  auto h = ServingHarness::start(std::move(cfg));
+  ASSERT_EQ(h.worker->stop(), ServingExitCode::Ok);
+  ASSERT_EQ(h.worker->health().state(), ServingState::Stopped);
+
+  EXPECT_EQ(ask_member(pair.agent.get(), ipc::WorkerControlOp::Retire, member).status,
+            ipc::WorkerControlStatus::Ok);
+  EXPECT_EQ(h.worker->health().state(), ServingState::Stopped);
+  EXPECT_EQ(h.worker->metrics().snapshot().shutdown_started, 0U)
+      << "the retire asked a stopped worker for its stop";
+}
+
+// Without streams the window begins at the HTTP drain, after the listener's
+// stop waits for a held request; a retire before it leaves the stop's window.
+TEST(ServingE2E, ARetireAfterAShutdownLeavesTheShutdownsDrainWindowAndCause) {
+  auto gate = std::make_shared<InferGate>();
+  BackendRegistry registry;
+  auto capability = BackendCapability::create("gated", {PrecisionHint::Auto});
+  ASSERT_TRUE(capability.has_value()) << capability.error().message;
+  ASSERT_TRUE(registry
+                  .register_backend(BackendEntry{
+                      "gated",
+                      capability.value(),
+                      [gate](ExecutionSessionRuntimeHooks hooks)
+                          -> Result<std::unique_ptr<ExecutionSession>> {
+                        return std::unique_ptr<ExecutionSession>(new GatedSession(hooks, gate));
+                      },
+                  })
+                  .has_value());
+  auto cfg = default_test_config();
+  cfg.enable_stderr_logs = true;
+  cfg.deployment.use_mock_session = false;
+  cfg.deployment.backend = "gated";
+  cfg.deployment.endpoint = "signalled-member";
+  cfg.deployment.generation = 9;
+  cfg.deployment.model =
+      ModelSpec::create("gated-model", ModelClass::Custom, "fixture://gated", "gated").value();
+  const ipc::WorkerMember member{"signalled-member", 9};
+  auto pair = ControlSocketPair::create();
+  const StdinReplaced as_the_agent_passes_it(pair.worker.get());
+  pair.worker.reset();
+  auto h = ServingHarness::start(std::move(cfg), registry);
+
+  std::thread caller([port = h.port] {
+    HttpClient c("127.0.0.1", port);
+    (void)c.post("/infer", make_infer_body("held"));
+  });
+  std::thread stopper;
+  struct OpenAndJoin {
+    InferGate& gate;
+    std::thread& caller;
+    std::thread& stopper;
+    ~OpenAndJoin() {
+      gate.release();
+      for (auto* thread : {&caller, &stopper}) {
+        if (thread->joinable()) {
+          thread->join();
+        }
+      }
+    }
+  } open_and_join{*gate, caller, stopper};
+  {
+    std::unique_lock<std::mutex> lock(gate->mutex);
+    ASSERT_TRUE(gate->cv.wait_for(lock, std::chrono::seconds{10}, [&] { return gate->entered; }));
+  }
+
+  ::testing::internal::CaptureStderr();
+  h.worker->shutdown("SIGTERM");
+  ServingExitCode stopped_with = ServingExitCode::Internal;
+  stopper = std::thread([&] { stopped_with = h.worker->stop(); });
+  EXPECT_EQ(ask_member(pair.agent.get(), ipc::WorkerControlOp::Retire, member, 600'000).status,
+            ipc::WorkerControlStatus::Ok);
+  gate->release();
+  caller.join();
+  stopper.join();
+  const auto log = ::testing::internal::GetCapturedStderr();
+  EXPECT_EQ(stopped_with, ServingExitCode::Ok);
+  EXPECT_TRUE(logged(log, "deployment retiring").empty()) << log;
+  EXPECT_TRUE(logged(log, "retirement drain capped").empty()) << log;
+  const auto draining = logged(log, "draining requests");
+  ASSERT_EQ(draining.size(), 1U) << log;
+  EXPECT_EQ(draining.front().value("cause", ""), "worker_shutdown");
 }
 
 TEST(ServingE2E, ReservedSchedulerPolicyIsRefusedWhenTheWorkerIsBuilt) {

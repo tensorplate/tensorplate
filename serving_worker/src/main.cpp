@@ -159,14 +159,21 @@ void report_startup_failure(const tensorplate::Error& error) noexcept {
   }
 }
 
-/// How often the wait for a signal also looks whether the worker failed.
+/// How often the wait for a signal also looks whether the worker still serves.
 constexpr int kFailureCheckMs = 1000;
+
+/// False once the worker failed or a retire asked for its stop.
+bool serving(tensorplate::ServingWorker& worker) {
+  const auto state = worker.health().state();
+  return state == tensorplate::ServingState::Ready || state == tensorplate::ServingState::Degraded;
+}
 
 tensorplate::ServingExitCode run_until_signal(tensorplate::ServingWorker& worker,
                                               const SignalWakeup& signals) {
-  // A signal received during load must not be lost or publish a new listener.
+  // A signal received during load must not be lost or publish a new listener,
+  // and neither must a retire.
   auto signal = signals.wait(0);
-  if (signal && *signal == 0) {
+  if (signal && *signal == 0 && serving(worker)) {
     if (auto started = worker.start(); !started) {
       // Stopped first: the stop logs, and the record must be the last line.
       (void)worker.stop();
@@ -175,15 +182,15 @@ tensorplate::ServingExitCode run_until_signal(tensorplate::ServingWorker& worker
                  ? tensorplate::ServingExitCode::ConfigError
                  : tensorplate::ServingExitCode::ServeError;
     }
-    // A worker that failed while serving (a stalled backend) stops as on a
-    // signal; its stop() gives the exit code.
+    // A worker that failed while serving (a stalled backend), or that a
+    // retire stopped, stops as on a signal; its stop() gives the exit code.
     do {
       signal = signals.wait(kFailureCheckMs);
-    } while (signal && *signal == 0 &&
-             worker.health().state() != tensorplate::ServingState::Failed);
+    } while (signal && *signal == 0 && serving(worker));
   }
   const char* reason = "signal wait failed";
   if (signal) {
+    // Without a signal the worker has already asked for its stop.
     reason = *signal == SIGINT ? "SIGINT" : (*signal == SIGTERM ? "SIGTERM" : "worker failed");
   }
   worker.shutdown(reason);

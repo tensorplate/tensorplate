@@ -11,15 +11,22 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
+
+#include "tensorplate/http/http_message.hpp"
+#include "tensorplate/serving/router.hpp"
 
 #include "control_socket_harness.hpp"
 #include "recording_control_target.hpp"
+#include "serving/member_control.hpp"
 
 namespace tensorplate::serving {
 namespace {
@@ -323,6 +330,283 @@ TEST(ControlChannel, MemberTheProtocolCannotNameIsRefusedAtStart) {
     EXPECT_EQ(channel.error().code, Error::Code::ConfigInvalid);
     EXPECT_EQ(channel.error().context, "invalid_control_member");
   }
+}
+
+/// A member's target behind a channel, with a router that has no
+/// dependencies: one that admits a request answers it 415 for its missing
+/// content type, before it would reach a pipeline.
+struct Member {
+  explicit Member(std::chrono::milliseconds contact_timeout = 10s, bool bind = true)
+      : under_test(target, contact_timeout) {
+    if (bind) {
+      target.bind_router(router);
+    }
+  }
+
+  [[nodiscard]] ipc::WorkerControlResponse ask(ipc::WorkerControlOp op) const {
+    return under_test.ask(request_for(op, "c-" + std::to_string(++asked)));
+  }
+
+  [[nodiscard]] ipc::WorkerControlResponse retire(std::uint64_t drain_timeout_ms) const {
+    auto request = request_for(ipc::WorkerControlOp::Retire, "r-" + std::to_string(++asked));
+    request.drain_timeout_ms = drain_timeout_ms;
+    return under_test.ask(request);
+  }
+
+  /// The message a stream Open is refused with; empty when it is admitted.
+  [[nodiscard]] std::string session_refusal() const {
+    const auto admitted = target.admit_session(*under_test.channel);
+    if (admitted) {
+      return {};
+    }
+    EXPECT_EQ(admitted.error().code, Error::Code::NotReady);
+    EXPECT_EQ(admitted.error().context, "admission_closed");
+    return admitted.error().message;
+  }
+
+  /// What /infer answers: 415 once admitted, else the refusal's status and
+  /// message.
+  [[nodiscard]] std::pair<int, std::string> infer() {
+    const auto response = router.handle_infer(http::Request{});
+    return {response.status, response.status == 415 ? std::string{} : response.body};
+  }
+
+  /// The windows and the asked drains of the retires that reached the worker.
+  [[nodiscard]] std::vector<std::pair<std::chrono::milliseconds, std::chrono::milliseconds>>
+  retires() const {
+    const std::lock_guard guard(mu);
+    return retired;
+  }
+
+  mutable std::mutex mu;
+  std::vector<std::pair<std::chrono::milliseconds, std::chrono::milliseconds>> retired;
+  mutable int asked = 0;
+  RequestRouter router{{}};
+  MemberControlTarget target{
+      [this](std::chrono::milliseconds window, std::chrono::milliseconds asked_for) {
+        const std::lock_guard guard(mu);
+        retired.emplace_back(window, asked_for);
+      }};
+  ChannelUnderTest under_test;
+};
+
+bool refused_because(const std::pair<int, std::string>& answer, const std::string& cause) {
+  return answer.first == 503 && answer.second.find("\"admission_closed\"") != std::string::npos &&
+         answer.second.find("serving worker admission closed: " + cause) != std::string::npos;
+}
+
+using Op = ipc::WorkerControlOp;
+using Status = ipc::WorkerControlStatus;
+
+TEST(MemberControl, AFenceClosesAdmissionAndAnActivateReopensIt) {
+  Member member;
+  member.target.set_session_ceiling(1);
+  EXPECT_EQ(member.session_refusal(), "");
+  EXPECT_EQ(member.infer().first, 415);
+
+  EXPECT_EQ(member.ask(Op::AdmissionFence).status, Status::Ok);
+  EXPECT_EQ(member.session_refusal(), "session admission is closed: fenced");
+  EXPECT_TRUE(refused_because(member.infer(), "fenced")) << member.infer().second;
+
+  const auto activated = member.ask(Op::Activate);
+  EXPECT_EQ(activated.status, Status::Ok);
+  EXPECT_TRUE(activated.quota.has_value());
+  EXPECT_EQ(member.session_refusal(), "");
+  EXPECT_EQ(member.infer().first, 415);
+  EXPECT_TRUE(member.retires().empty());
+}
+
+TEST(MemberControl, RepeatedFencesAndActivatesAnswerOkAndChangeNothing) {
+  Member member;
+  member.target.set_session_ceiling(1);
+  for (int round = 0; round < 2; ++round) {
+    EXPECT_EQ(member.ask(Op::AdmissionFence).status, Status::Ok);
+    EXPECT_EQ(member.ask(Op::AdmissionFence).status, Status::Ok);
+    EXPECT_EQ(member.session_refusal(), "session admission is closed: fenced");
+    const auto first = member.ask(Op::Activate);
+    const auto second = member.ask(Op::Activate);
+    EXPECT_EQ(first.status, Status::Ok);
+    EXPECT_EQ(second.status, Status::Ok);
+    EXPECT_EQ(first.quota, second.quota);
+    EXPECT_EQ(member.session_refusal(), "");
+  }
+}
+
+TEST(MemberControl, ARetireAsksForTheStopOnceAndARepeatOnlyAnswersOk) {
+  Member member;
+  EXPECT_EQ(member.ask(Op::Retire).status, Status::Ok);
+  EXPECT_EQ(member.retires().size(), 1U);
+  EXPECT_EQ(member.session_refusal(), "session admission is closed: retiring");
+  EXPECT_TRUE(refused_because(member.infer(), "retiring")) << member.infer().second;
+
+  EXPECT_EQ(member.retire(5'000).status, Status::Ok);
+  // A fence does not turn a retiring member back into a fenced one.
+  EXPECT_EQ(member.ask(Op::AdmissionFence).status, Status::Ok);
+  EXPECT_EQ(member.retires().size(), 1U);
+  EXPECT_EQ(member.session_refusal(), "session admission is closed: retiring");
+  EXPECT_TRUE(refused_because(member.infer(), "retiring")) << member.infer().second;
+}
+
+TEST(MemberControl, AnActivateAfterARetireIsAnErrorAndAdmissionStaysClosed) {
+  Member member;
+  member.target.set_session_ceiling(1);
+  EXPECT_EQ(member.ask(Op::Retire).status, Status::Ok);
+  const auto activated = member.ask(Op::Activate);
+  EXPECT_EQ(activated.status, Status::Error);
+  EXPECT_FALSE(activated.quota.has_value());
+  ASSERT_TRUE(activated.error.has_value());
+  EXPECT_EQ(activated.error->code, Error::Code::Unavailable);
+  EXPECT_EQ(activated.error->context, "member_retiring");
+  EXPECT_EQ(member.session_refusal(), "session admission is closed: retiring");
+  EXPECT_TRUE(refused_because(member.infer(), "retiring")) << member.infer().second;
+}
+
+TEST(MemberControl, ARetireDrainsForWhatItAsksUpToThirtySeconds) {
+  const Member brief;
+  EXPECT_EQ(brief.retire(300).status, Status::Ok);
+  ASSERT_EQ(brief.retires().size(), 1U);
+  EXPECT_EQ(brief.retires().front(), std::pair(300ms, 300ms));
+
+  const Member patient;
+  EXPECT_EQ(patient.retire(600'000).status, Status::Ok);
+  ASSERT_EQ(patient.retires().size(), 1U);
+  EXPECT_EQ(patient.retires().front(), std::pair(30'000ms, 600'000ms));
+  EXPECT_EQ(MemberControlTarget::retirement_window(30'000ms), 30'000ms);
+  EXPECT_EQ(MemberControlTarget::retirement_window(30'001ms), 30'000ms);
+}
+
+TEST(MemberControl, TheLargestDrainARetireCanNameWaitsThirtySeconds) {
+  const Member member;
+  EXPECT_EQ(member.retire(std::numeric_limits<std::uint64_t>::max()).status, Status::Ok);
+  ASSERT_EQ(member.retires().size(), 1U);
+  EXPECT_EQ(member.retires().front().first, 30'000ms);
+  EXPECT_EQ(member.retires().front().second, std::chrono::milliseconds::max());
+}
+
+TEST(MemberControl, ARouterBoundAfterAFenceRefusesFromTheStart) {
+  Member member{10s, false};
+  EXPECT_EQ(member.ask(Op::AdmissionFence).status, Status::Ok);
+  EXPECT_EQ(member.infer().first, 415) << "no router was bound";
+  member.target.bind_router(member.router);
+  EXPECT_TRUE(refused_because(member.infer(), "fenced")) << member.infer().second;
+}
+
+TEST(MemberControl, AnOpenIsRefusedWhileContactIsLostAndInferIsNot) {
+  Member member{400ms};
+  member.target.set_session_ceiling(1);
+  ASSERT_TRUE(member.under_test.admission_becomes("control_contact_lost"));
+  EXPECT_EQ(member.session_refusal(), "session admission is closed: lost contact with the agent");
+  EXPECT_EQ(member.infer().first, 415);
+
+  // The agent's next request is contact again.
+  EXPECT_EQ(member.ask(Op::LedgerStatus).status, Status::Ok);
+  EXPECT_EQ(member.session_refusal(), "");
+  // A fenced member says so, whether or not the agent is in contact.
+  EXPECT_EQ(member.ask(Op::AdmissionFence).status, Status::Ok);
+  ASSERT_TRUE(member.under_test.admission_becomes("control_contact_lost"));
+  EXPECT_EQ(member.session_refusal(), "session admission is closed: fenced");
+  EXPECT_EQ(member.ask(Op::Activate).status, Status::Ok);
+  EXPECT_EQ(member.session_refusal(), "");
+
+  // A channel that ended refuses Opens for good.
+  member.under_test.pair.agent.reset();
+  ASSERT_TRUE(member.under_test.admission_becomes("control_channel_closed"));
+  EXPECT_EQ(member.session_refusal(), "session admission is closed: lost contact with the agent");
+  EXPECT_EQ(member.infer().first, 415);
+}
+
+TEST(MemberControl, ActivateBeforeTheWorkerIsBuiltIsNotReady) {
+  Member member;
+  EXPECT_EQ(member.ask(Op::AdmissionFence).status, Status::Ok);
+  const auto early = member.ask(Op::Activate);
+  EXPECT_EQ(early.status, Status::NotReady);
+  ASSERT_TRUE(early.error.has_value());
+  EXPECT_EQ(early.error->context, "member_loading");
+  EXPECT_EQ(member.session_refusal(), "session admission is closed: fenced");
+
+  member.target.set_session_ceiling(1);
+  EXPECT_EQ(member.ask(Op::Activate).status, Status::Ok);
+  EXPECT_EQ(member.session_refusal(), "");
+}
+
+// The answers come over the channel, which answers `error` for a quota the
+// wire format refuses.
+TEST(MemberControl, ActivateAnswersTheStreamSessionCeilingAsTheQuota) {
+  Member unary;
+  unary.target.set_session_ceiling(0);
+  const auto none = unary.ask(Op::Activate);
+  EXPECT_EQ(none.status, Status::Ok);
+  EXPECT_EQ(none.quota, ipc::WorkerQuota{});
+
+  Member streaming;
+  streaming.target.set_session_ceiling(1);
+  const auto one = streaming.ask(Op::Activate);
+  EXPECT_EQ(one.status, Status::Ok);
+  ipc::WorkerQuota expected;
+  expected.session_count = 1;
+  expected.domain_bytes.guest_ram = 0;
+  EXPECT_EQ(one.quota, expected);
+}
+
+TEST(MemberControl, QuotaAndPressureStayUnsupportedAndTheLedgerEmpty) {
+  const Member member;
+  const auto ledger = member.ask(Op::LedgerStatus);
+  EXPECT_EQ(ledger.status, Status::Ok);
+  EXPECT_EQ(ledger.ledger, ipc::WorkerLedger{});
+  for (const auto op : {Op::QuotaAssign, Op::PressureDirective}) {
+    const auto response = member.ask(op);
+    EXPECT_EQ(response.status, Status::Unsupported);
+    ASSERT_TRUE(response.error.has_value());
+    EXPECT_EQ(response.error->context, "control_operation_unsupported");
+  }
+}
+
+// Every thread waits at one gate, so that ThreadSanitizer sees the reads of
+// the admission and the operations that change it run together.
+TEST(MemberControl, ControlCallsAndAdmissionReadsOnOtherThreadsDoNotRace) {
+  Member member{10s, false};
+  std::mutex gate_mu;
+  std::condition_variable gate_cv;
+  bool open = false;
+  std::atomic<bool> done{false};
+  const auto wait_for_gate = [&] {
+    std::unique_lock lock(gate_mu);
+    gate_cv.wait(lock, [&] { return open; });
+  };
+  std::vector<std::thread> readers;
+  readers.emplace_back([&] {
+    wait_for_gate();
+    while (!done.load()) {
+      (void)member.target.admit_session(*member.under_test.channel);
+    }
+  });
+  readers.emplace_back([&] {
+    wait_for_gate();
+    while (!done.load()) {
+      (void)member.router.handle_infer(http::Request{});
+    }
+  });
+  readers.emplace_back([&] {
+    wait_for_gate();
+    member.target.set_session_ceiling(1);
+    member.target.bind_router(member.router);
+  });
+  {
+    const std::lock_guard guard(gate_mu);
+    open = true;
+  }
+  gate_cv.notify_all();
+  for (int round = 0; round < 20; ++round) {
+    EXPECT_EQ(member.ask(Op::AdmissionFence).status, Status::Ok);
+    (void)member.ask(Op::Activate);
+  }
+  EXPECT_EQ(member.ask(Op::Retire).status, Status::Ok);
+  done.store(true);
+  for (auto& reader : readers) {
+    reader.join();
+  }
+  EXPECT_EQ(member.session_refusal(), "session admission is closed: retiring");
+  EXPECT_TRUE(refused_because(member.infer(), "retiring")) << member.infer().second;
 }
 
 using testing::StdinReplaced;

@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <string>
@@ -81,6 +82,13 @@ ipc::WorkerControlStatus status_of(const Error& error) noexcept {
 void refuse(ipc::WorkerControlResponse& response, const Error& error) {
   response.status = status_of(error);
   response.error = error;
+}
+
+/// `ms` milliseconds, or the most a duration holds: the wire allows more.
+std::chrono::milliseconds saturated_ms(std::uint64_t ms) noexcept {
+  constexpr auto kLongest = static_cast<std::uint64_t>(std::chrono::milliseconds::max().count());
+  return std::chrono::milliseconds{
+      static_cast<std::chrono::milliseconds::rep>(std::min(ms, kLongest))};
 }
 }  // namespace
 
@@ -338,7 +346,7 @@ void ControlChannel::perform(const ipc::WorkerControlRequest& request,
       finish_quota(target_.activate());
       break;
     case ipc::WorkerControlOp::Retire:
-      finish(target_.retire(std::chrono::milliseconds{request.drain_timeout_ms.value_or(0)}));
+      finish(target_.retire(saturated_ms(request.drain_timeout_ms.value_or(0))));
       break;
     case ipc::WorkerControlOp::QuotaAssign:
       finish_quota(target_.assign_quota(request.quota.value_or(ipc::WorkerQuota{})));
