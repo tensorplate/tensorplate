@@ -161,6 +161,35 @@ fn a_copy_that_fails_removes_its_tree_and_names_it() {
 }
 
 #[test]
+fn each_directory_a_stage_makes_in_its_tree_is_synced_however_deep() {
+    let d = dirs();
+    let mut bundle = verified(&repo(FIXTURE));
+    let source = d.staging.parent().unwrap().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::copy(
+        repo(FIXTURE).join("manifest.json"),
+        source.join("manifest.json"),
+    )
+    .unwrap();
+    for artifact in &mut bundle.manifest.artifacts {
+        let from = repo(FIXTURE).join(&artifact.path);
+        artifact.path = format!("a/b/c/{}", artifact.path);
+        let to = source.join(&artifact.path);
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::copy(from, to).unwrap();
+    }
+    bundle.root_path = source;
+    drop(crate::durable::hooks::synced());
+
+    let tree = stage(&d.staging, "stt", &new_transaction_id(), &bundle).unwrap();
+
+    let synced = crate::durable::hooks::synced();
+    for dir in ["a", "a/b", "a/b/c", "a/b/c/assets"] {
+        assert!(synced.contains(&tree.join(dir)), "{dir}: {synced:?}");
+    }
+}
+
+#[test]
 fn a_stage_that_fails_leaves_no_directory_it_made_so_the_next_one_makes_and_syncs_them() {
     let bundle = verified(&repo(FIXTURE));
     let cases = [
