@@ -271,6 +271,13 @@ def checker_cases(work: Path) -> dict:
         honest=True,
     )
     mutate(
+        "a without-streaming run that started a stream listener is refused",
+        lambda r: r["sides"]["without_streaming"]["runs"][1].update(stream_listener="started"),
+        2,
+        "without_streaming run 2: the stream listener was started",
+        honest=True,
+    )
+    mutate(
         "a run that does not say whether the listener started is refused",
         lambda r: r["sides"]["with_streaming"]["runs"][0].pop("stream_listener"),
         2,
@@ -568,6 +575,26 @@ def harness_cases(work: Path) -> None:
         "-DSTREAM_MIB=1",
     )
     off = compile_worker(work, "worker-off")
+    enabled = '{"streaming": {"enabled": true, "port": 0}}\n'
+    enabled_config = work / "streaming-enabled.json"
+    enabled_config.write_text(enabled)
+    try:
+        refused = subprocess.run(
+            [str(off), "--bind-port", "0", "--config", str(enabled_config)],
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        exit_code, stderr = refused.returncode, refused.stderr
+    except subprocess.TimeoutExpired:
+        exit_code, stderr = None, "still running after 10 s"
+    check(
+        "the fake built without streaming refuses streaming.enabled at start, as the worker does",
+        exit_code == 64
+        and "streaming.enabled requires TP_ENABLE_STREAMING_GRPC" in stderr
+        and "worker startup failed" in stderr,
+        f"exit {exit_code}; {stderr}",
+    )
     heavy = compile_worker(work, "worker-heavy", "-DSTREAMING", "-DIDLE_MIB=70")
     exits = compile_worker(work, "worker-exits", "-DEXIT_AT_START")
     degraded = compile_worker(work, "worker-degraded", "-DSTREAMING", "-DNEVER_READY")
@@ -638,6 +665,22 @@ def harness_cases(work: Path) -> None:
         == ["tensorplate-serving 0.0.0-fake", "protocol 0.1", "bundle-format 0.1"]
         and record.get("provenance") == "synthetic",
         json.dumps(side.get("package")) + str(side.get("version_output")),
+    )
+    old_captures = work / "old-captures"
+    shutil.copytree(out / "captures", old_captures)
+    (old_captures / "with_streaming" / "run-1" / "stream-listener.txt").unlink()
+    old_record = work / "old-record.json"
+    result = run_cli(
+        "assemble", "--captures", str(old_captures), "--out", str(old_record),
+        "--provenance", "synthetic",
+    )
+    check(
+        "captures without the listener's file, as the earlier harness left them, assemble no record",
+        result.returncode == 2
+        and "cannot assemble a record" in result.stderr
+        and "stream-listener.txt" in result.stderr
+        and not old_record.exists(),
+        f"exit {result.returncode}; {result.stderr}",
     )
     listeners = {
         name: [run.get("stream_listener") for run in sides.get("runs", [])]
@@ -730,15 +773,17 @@ def harness_cases(work: Path) -> None:
     )
 
     out = work / "mislabeled"
-    enabled = '{"streaming": {"enabled": true, "port": 0}}\n'
     mislabeled_pkg = build_package(work, "mislabeled", on, config=enabled)
     result = run_harness(out, on_pkg, mislabeled_pkg, "--stream-driver", str(driver))
     record = json.loads((out / "record.json").read_text()) if (out / "record.json").exists() else {}
     check(
-        "a without-streaming package whose own config starts a listener is recorded as such",
+        "a without-streaming package whose own config starts a listener is recorded as such,"
+        " and the check refuses the record",
         [run.get("stream_listener") for run in record.get("sides", {})
-         .get("without_streaming", {}).get("runs", [])] == ["started"] * 3,
-        result.stdout + result.stderr,
+         .get("without_streaming", {}).get("runs", [])] == ["started"] * 3
+        and result.returncode == 2
+        and "without_streaming run 1: the stream listener was started" in result.stdout + result.stderr,
+        f"exit {result.returncode}; " + result.stdout + result.stderr,
     )
 
     out = work / "unlistened"

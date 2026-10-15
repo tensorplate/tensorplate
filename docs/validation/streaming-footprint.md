@@ -100,7 +100,9 @@ is bound, so after `ready` the harness waits for the worker's
 the worker settle. Each run records whether the listener started. A
 with-streaming run in which it did not start leaves the idle and steady
 budgets incomplete, because those budgets are defined with the listener
-running.
+running. The check refuses a record in which a without-streaming run started
+it: such a run contradicts its side, and a worker built without the feature
+cannot start one.
 
 The exit status is the verdict: 0 when every budget is complete and within
 its limit, 1 when every budget is complete and one is over, 2 when there is

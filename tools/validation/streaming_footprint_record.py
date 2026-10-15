@@ -198,6 +198,8 @@ def check_record(record: Any, thresholds_path: Path = THRESHOLDS_PATH) -> tuple[
         for position, run in enumerate(runs, start=1):
             if run["index"] != position:
                 return "invalid", f"{side}: run {position} carries index {run['index']}"
+            if side == "without_streaming" and run["stream_listener"] == "started":
+                return "invalid", f"{side} run {position}: the stream listener was started"
             steady = run["steady"]
             if steady["status"] == "measured":
                 if steady["reason"] is not None:
