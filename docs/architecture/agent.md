@@ -4,7 +4,7 @@
 running `tensorplate-serving` process into a device appliance. It owns the
 durable desired-state store, the deploy transaction state machine, bundle
 verification, rollback to the previous active deployment, and the
-prepare/warm/promote handoff with the V01-E07 serving worker.
+prepare/warm/fence/activate handoff with the V01-E07 serving worker.
 
 This document records the V01-E08 architecture decisions. It is the
 single source of truth for the cross-component contracts the CLI
@@ -388,6 +388,12 @@ depends on the write that failed:
   `in_flight: phase=promoted`. The start clears the transaction, makes no
   quarantine entry and starts the committed deployment again.
 
+This run treats a commit write that fails at or after its rename
+(`StateIndeterminate`) as one refused before it: the candidate is given up
+and the member that served goes on serving. The next start reads
+whichever state the rename left, and settles the transaction forward when
+it was committed.
+
 A transaction in flight never carries a `failure`: the write that records
 why a transaction failed is the one that clears it, so this agent never
 sets `in_flight_transaction.failure` in status. The failure is read from
@@ -665,7 +671,7 @@ start does when the restore cannot be made:
 | a descriptor document that is missing, is not a regular file, does not verify, is another identity's or describes another bundle | the same |
 | a re-stamp of the descriptor that is refused | the same |
 | a state write of its own that fails, or a descriptor document it cannot write | ends with exit code `5` |
-| a worker that cannot be started, exits while loading, is not ready within `worker.warm_timeout_ms` or exits before it is promoted | comes up with the reason in `last_error`, and the [member registry](#member-registry) starts the record again as it restarts a serving member that stopped; `last_error` is cleared once a restart serves, and when the restarts are used up status reports the member's failure. A worker control that restarts nothing (`worker.mode = "mock"`) ends the start with exit code `5` |
+| a worker that cannot be started, exits while loading, is not ready within `worker.warm_timeout_ms` or exits before it is promoted | comes up with the reason in `last_error`, and the [member registry](#member-registry) starts the record again as it restarts a serving member that stopped; `last_error`, whose `context` is `startup_restore`, is cleared once a restart serves the record (no error of another context is), and when the restarts are used up status reports the member's failure. A worker control that restarts nothing (`worker.mode = "mock"`) ends the start with exit code `5` |
 
 The refusals in the first five rows are decided by the staged copy and
 the descriptor document, so the agent stays up for `deploy` and
@@ -954,8 +960,11 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   written the candidate takes the serving slot even if it exited since,
   and the supervision step restarts it; the member it replaces is sent
   its stop only after the commit.
-- **Supervision.** The agent's loop runs the registry's supervision step
-  (`WorkerControl::supervise`) every 100 ms and logs what it did. The step
+- **Supervision.** The agent's loop runs the coordinator's turn
+  (`Coordinator::supervise`) every 100 ms and logs what it did: the
+  registry's supervision step (`WorkerControl::supervise`), then, once a
+  member serves the active record, the clearing of a restore's
+  `last_error`. The step
   takes the serving generation out of service when its process has exited,
   when its control channel has failed (10 seconds without an answered
   ledger poll), or, for a generation started by a restart, when it is not
@@ -1109,15 +1118,16 @@ reading, and the status with it. The generation is attached only when the
 member serving is the recorded active deployment: the same id, started from
 the same bundle and, when the record names a descriptor, from the
 descriptor whose descriptor and configuration digests the record carries. A
-worker is promoted before the record that names it is written, and the
-worker it replaces is stopped in between, so for up to the stop deadline
-(ten seconds) the member serving is not the recorded one; `active` then
-carries the new worker's URL and no generation. A record that names no
-descriptor, which is every record of a format 0.1 bundle, cannot tell a
-redeploy of its own bundle under its own id from the deployment it
-records: for the stop of the replaced worker `active` then carries the new
-worker's generation and URL beside the replaced deployment's promotion
-time. Both are absent
+transaction writes the record that names its worker before that worker is
+activated, so between the commit and the activation the member serving is
+the outgoing one; `active` then carries the committed deployment with the
+outgoing worker's URL and no generation. From the activation on, the
+record and the member serving agree, through the outgoing worker's stop
+too. A record that names no descriptor, which is every record of a format
+0.1 bundle, cannot tell a redeploy of its own bundle under its own id from
+the deployment it records: between the commit and the activation `active`
+then carries the outgoing worker's generation and URL beside the new
+promotion time. Both are absent
 while nothing serves: the worker stopped, a restart is waiting or loading,
 or the member is failed. `candidate.generation` is
 the generation a deploy has prepared and not promoted; a worker an earlier
@@ -1128,10 +1138,9 @@ deploy, a rollback, a restore and the
 [restart stamp](#deployment-descriptor-documents) each write the generation
 they start into the record. `active.generation` is still read from the
 registry, and only while the member serving is the one the record names. A
-restart, a restore and a rollback write the record before the new
-generation serves, and a deploy writes it after its worker was promoted, so
-the field is absent in between and is the record's generation once both
-are true.
+restart, a restore, a deploy and a rollback write the record before the
+new generation serves, so the field is absent in between and is the
+record's generation once both are true.
 `previous_active.generation` is the retained record's own, the generation
 that deployment was last started as, since nothing runs for a retained
 deployment; it is absent for a record that names no descriptor.

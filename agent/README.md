@@ -51,9 +51,9 @@ Architecture and on-the-wire details live in
 - The agent never mutates the serving worker's data plane directly; it
   stages a verified bundle and asks the worker to prepare, warm and fence
   the candidate through the typed `WorkerControl` trait, writes the
-  commit, and only then activates it in place of the serving member. `worker.mode=mock` uses the
-  deterministic test implementation; `worker.mode=process` spawns and
-  health-checks `tensorplate-serving`.
+  commit, and only then activates it in place of the serving member.
+  `worker.mode=mock` uses the deterministic test implementation;
+  `worker.mode=process` spawns and health-checks `tensorplate-serving`.
 - Bundle verification rejects unknown / unavailable backends; the runtime
   never falls back heuristically.
 - Failed candidates are quarantined; the active deployment is preserved.

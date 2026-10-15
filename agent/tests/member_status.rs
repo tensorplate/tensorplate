@@ -161,8 +161,8 @@ fn the_generation_is_withheld_while_another_deployment_serves_than_the_recorded_
     agent.deploy_member(&h);
     let recorded = h.store.snapshot().expect("state").active.expect("active");
 
-    // A worker is promoted before the record that names it is written:
-    // the registry as it stands between the two.
+    // Another deployment serves than the recorded one, as the outgoing
+    // member does between a transaction's commit and its activation.
     let other = staged_as("another", &recorded);
     agent.registry.prepare("tx", &other, HELD).expect("prepare");
     assert!(agent.registry.warm("tx", &other, HELD).expect("warm").ready);

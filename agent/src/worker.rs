@@ -146,7 +146,8 @@ pub trait WorkerControl: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`AgentError::WorkerNotReady`] when no candidate is held, the
+    /// Returns [`AgentError::Stopping`] once [`Self::shutdown`] has begun,
+    /// [`AgentError::WorkerNotReady`] when no candidate is held, the
     /// candidate's own failure when it exited, and
     /// [`AgentError::WorkerControl`] for adapter/IPC failures.
     fn fence(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()>;
