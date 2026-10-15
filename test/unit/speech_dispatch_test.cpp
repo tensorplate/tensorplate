@@ -1400,6 +1400,40 @@ TEST(SpeechJobDispatch, WhatArrivesAfterABoundFellDueDoesNotPutItsCheckOff) {
   EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
 }
 
+// A step that outlasts what was left of a bound leaves it due when the thread
+// next waits: it is checked then, with no notice that the clock moved.
+TEST(SpeechJobDispatch, ABoundDueWhenAStepEndsIsCheckedWithoutANotice) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  speech.hold_jobs();
+  one_utterance(binding, key);
+  ASSERT_TRUE(binding.settle());
+  // The dispatch's thread waits in the bridge, releasing the cancelled session.
+  speech.bridge->hold_next_release();
+  const std::unique_ptr<CountingJobBridge, void (*)(CountingJobBridge*)> let_go{
+      speech.bridge.get(), [](CountingJobBridge* bridge) { bridge->let_release_go(); }};
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(speech.bridge->release_held(Binding::kPatience));
+  // Exactly onto the job's deadline, 1 s and 10 ms after its submit.
+  binding.clock.advance(1010ms);
+  speech.bridge->let_release_go();
+  // The check is a step of its own after the release's: settle() may return
+  // between the two, so the count is read until it moves.
+  const auto give_up = std::chrono::steady_clock::now() + Binding::kPatience;
+  while (speech.strategy->stats().jobs_past_deadline == 0 &&
+         std::chrono::steady_clock::now() < give_up) {
+    std::this_thread::sleep_for(1ms);
+  }
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 2s - 1ns));
+  EXPECT_TRUE(speech.stalls().empty());
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  EXPECT_EQ(speech.stalls().size(), 1U);
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(key, State::Closed));
+}
+
 /// Moved by hand, and counts how often it is read.
 class CountedClock final : public SchedulerClock {
  public:
@@ -1466,6 +1500,8 @@ TEST(SpeechJobDispatch, AClockMovedByHandIsReadNoMoreOftenThanItsNextBoundAllows
   const auto [near, near_waited] = reads_over_a_while(clock);
   EXPECT_EQ(speech.strategy->stats().steps, steps);
   EXPECT_LE(near, 3 * (near_waited + 2));
+  // One wake at least in 200 ms, where a 1 ms floor gives about 200.
+  EXPECT_GE(near, 2U);
   EXPECT_TRUE(speech.stalls().empty());
   ASSERT_TRUE(move(1ns));
   EXPECT_EQ(speech.stalls().size(), 1U);
