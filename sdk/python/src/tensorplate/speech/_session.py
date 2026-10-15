@@ -469,15 +469,17 @@ class Session(Generic[EventT]):
         try:
             await self._send(pb.ClientEvent(open=opening))
             await self._until(lambda: self._ready is not None)
+            return
         except SpeechError:
             if self._lost is None:
                 raise
-            # `_lost` is cleared once the new call exists, so a closed channel ends the session.
-            self._call = self._connected()
-            self._lost, self._reopened = None, True
-            self._write_failed, self._sent = False, 0
-            await self._send(pb.ClientEvent(open=opening))
-            await self._until(lambda: self._ready is not None)
+        # Outside the handler, so that the second call's error has no context.
+        # `_lost` is cleared once the new call exists, so a closed channel ends the session.
+        self._call = self._connected()
+        self._lost, self._reopened = None, True
+        self._write_failed, self._sent = False, 0
+        await self._send(pb.ClientEvent(open=opening))
+        await self._until(lambda: self._ready is not None)
 
     async def _drain(self) -> None:
         async with self._write_lock:

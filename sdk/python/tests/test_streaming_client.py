@@ -793,6 +793,8 @@ def test_an_open_is_sent_at_most_twice() -> None:
         with pytest.raises(speech.ServiceUnavailableError) as caught:
             await session.open()
         assert caught.value.admitted is None
+        # Not raised while the first loss was handled, which a traceback would show.
+        assert caught.value.__context__ is None
         assert (relay.resets, relay.connections, relay.calls) == (2, 2, 3)
 
     relayed(scenario)
