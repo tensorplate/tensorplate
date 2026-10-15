@@ -169,14 +169,28 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A deadline for the speech job in flight and a bound on the wait for a
+  session's release, so that a backend that never ends a job no longer
+  holds the serving worker's one stream session for good. Both are
+  provisional, sized by arithmetic on one short clip's latency, and no
+  configuration key sets them. A job still running 10 s plus 0.5 s for
+  each second of its audio after its submit (a synthesis counts the 30 s
+  a segment may yield) fails its live session with `timeout`
+  (`deadline_missed`). A release not acknowledged 10 s after its request,
+  or after its job's deadline when that is later, stops the worker: it
+  logs `speech backend stalled`, its health reads `failed`, and it exits
+  70 through its ordinary stop, whose unload ends the sidecar, so the
+  agent starts it again. No failure reason, error code or mapping was
+  added. (V030-E04-F03-T02)
+
 - Speech dispatch over the job bridge (internal, provisional): the serving
   runtime can run a stream session's input as backend jobs. An utterance
   ended by a Finalize, a half-close or the 30-second limit is one decode
   whose text becomes the final transcript; a text segment is one synthesis
   whose audio is cut into 20 ms chunks under the output queue's
-  backpressure. One job is in flight at a time, and no deadline covers
-  it. A session fails with `resource_exhausted`, which a stream reports
-  as `internal`, when a fourth utterance ends, by the limit or by a
+  backpressure. One job is in flight at a time. A session fails with
+  `resource_exhausted`, which a stream reports as `internal`, when a
+  fourth utterance ends, by the limit or by a
   Finalize, before the first of three has its final, or when its
   segments since the last Finalize yield more audio than it was granted.
   The serving worker constructs it for a speech deployment (see
