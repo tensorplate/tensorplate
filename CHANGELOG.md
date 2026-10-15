@@ -32,7 +32,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   syncs every file and directory of the tree it copies a bundle into, and
   each directory above the tree that gained an entry, before the state
   write that names the tree; a sync that fails fails the deploy as a copy
-  that fails does, removing the tree with an error that names it.
+  that fails does, removing the tree and each directory the deploy made
+  for it, with an error that names the tree.
   `docs/bundles/integrity.md` no longer says that a recovery or a rollback
   starts a deployment without verifying it again: the restore at the
   agent's start and a rollback hash every staged artifact, and a member's

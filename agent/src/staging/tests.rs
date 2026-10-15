@@ -161,6 +161,37 @@ fn a_copy_that_fails_removes_its_tree_and_names_it() {
 }
 
 #[test]
+fn a_stage_that_fails_leaves_no_directory_it_made_so_the_next_one_makes_and_syncs_them() {
+    let bundle = verified(&repo(FIXTURE));
+    let cases = [
+        ("the manifest", None),
+        ("the id directory", Some("staging/stt")),
+        ("staging_dir", Some("staging")),
+        ("the directory that was there", Some("")),
+    ];
+    for (case, at) in cases {
+        let d = dirs();
+        let top = d.staging.parent().unwrap().to_path_buf();
+        let picked = at.map(|at| top.join(at));
+        crate::durable::hooks::fail_next_sync_of(move |path| match &picked {
+            Some(picked) => path == picked,
+            None => path.ends_with("manifest.json"),
+        });
+
+        let failed = stage(&d.staging, "stt", &new_transaction_id(), &bundle);
+
+        assert!(failed.is_err(), "{case}");
+        assert!(!d.staging.exists(), "{case}");
+        drop(crate::durable::hooks::synced());
+        let tree = stage(&d.staging, "stt", &new_transaction_id(), &bundle).unwrap();
+        let synced = crate::durable::hooks::synced();
+        let above: Vec<_> = synced.iter().filter(|dir| tree.starts_with(dir)).collect();
+        let made = [&tree, &d.staging.join("stt"), &d.staging, &top];
+        assert_eq!(above, made, "{case}");
+    }
+}
+
+#[test]
 fn nothing_is_staged_for_an_id_or_a_transaction_that_cannot_name_a_tree() {
     let d = dirs();
     let bundle = verified(&repo(FIXTURE));

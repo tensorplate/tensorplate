@@ -58,7 +58,7 @@ fn names_a_tree(name: &str) -> bool {
 /// the deploy `transaction_id` of `deployment_id`, and return the tree once
 /// it and every directory above it that gained an entry are synced. A tree
 /// that is there is not written; a copy or a sync that fails removes its
-/// tree.
+/// tree and every directory it made.
 ///
 /// # Errors
 ///
@@ -87,19 +87,28 @@ pub(crate) fn stage(
         .ancestors()
         .find(|dir| dir.is_dir())
         .map(Path::to_path_buf);
-    fs::create_dir_all(&id_dir).map_err(failed)?;
-    fs::create_dir(&tree).map_err(failed)?;
-    let synced = || {
-        for dir in id_dir.ancestors() {
-            crate::durable::sync(dir)?;
-            if Some(dir) == there.as_deref() {
-                break;
-            }
-        }
-        Ok(())
+    let made = || {
+        id_dir
+            .ancestors()
+            .take_while(|dir| Some(*dir) != there.as_deref())
     };
-    if let Err(e) = copy(verified, &tree).and_then(|()| synced()) {
-        let _ = fs::remove_dir_all(&tree);
+    let synced = || {
+        made().try_for_each(crate::durable::sync)?;
+        there.as_deref().map_or(Ok(()), crate::durable::sync)
+    };
+    let staged = fs::create_dir_all(&id_dir).and_then(|()| fs::create_dir(&tree));
+    let staged = staged.and_then(|()| {
+        let copied = copy(verified, &tree).and_then(|()| synced());
+        if copied.is_err() {
+            let _ = fs::remove_dir_all(&tree);
+        }
+        copied
+    });
+    if let Err(e) = staged {
+        // A directory left here would be there, unsynced, for the next stage.
+        for dir in made() {
+            let _ = fs::remove_dir(dir);
+        }
         return Err(failed(e));
     }
     Ok(tree)

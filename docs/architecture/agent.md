@@ -525,9 +525,10 @@ listens.
 Each deploy copies its bundle into a tree of its own,
 `<staging_dir>/<deployment_id>/<transaction id>/`, named by the deploy's
 transaction id (`tx-` and a UUID). The tree is created new: a deploy never
-writes into a tree that is there, and a copy that fails removes its tree,
-with an error that names it. The candidate record names the tree once the
-copy is complete and synced to disk: every file and directory of the tree,
+writes into a tree that is there, and a copy that fails removes its tree
+and each directory it made above it, with an error that names the tree.
+The candidate record names the tree once the copy is complete and synced
+to disk: every file and directory of the tree,
 and each directory above it that gained an entry, so a power loss after
 that state write cannot leave a record naming a tree whose bytes never
 reached the disk. A sync that fails fails the deploy as a copy that fails
