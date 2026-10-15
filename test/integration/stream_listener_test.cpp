@@ -59,6 +59,7 @@ using tensorplate::testing::stream_listener::kDeployment;
 using tensorplate::testing::stream_listener::open_event;
 using tensorplate::testing::stream_listener::Seen;
 using tensorplate::testing::stream_listener::Served;
+using tensorplate::testing::stream_listener::ServedGeneration;
 namespace wire = tensorplate::stream::v1;
 
 std::size_t thread_count() {
@@ -318,6 +319,13 @@ TEST(StreamListener, RefusedOpensEndTheCallWithTheirStatus) {
        grpc::StatusCode::FAILED_PRECONDITION, "FAILURE_REASON_TARGET_MISMATCH"},
       {"a generation", [](auto& e) { e.mutable_open()->mutable_resolved()->set_generation(7); },
        grpc::StatusCode::FAILED_PRECONDITION, "FAILURE_REASON_STALE_GENERATION"},
+      {"a generation and a descriptor digest",
+       [](auto& e) {
+         e.mutable_open()->mutable_resolved()->set_generation(7);
+         e.mutable_open()->mutable_resolved()->set_descriptor_digest("sha256:" +
+                                                                     std::string(64, '0'));
+       },
+       grpc::StatusCode::FAILED_PRECONDITION, "FAILURE_REASON_STALE_GENERATION"},
       {"no target", [](auto& e) { e.mutable_open()->clear_target(); },
        grpc::StatusCode::INVALID_ARGUMENT, "FAILURE_REASON_INVALID_EVENT"},
       {"a malformed deployment id",
@@ -351,6 +359,48 @@ TEST(StreamListener, RefusedOpensEndTheCallWithTheirStatus) {
     EXPECT_TRUE(status.error_details().empty());
   }
   EXPECT_EQ(served.listener().live_sessions(), 0U);
+}
+
+TEST(StreamListener, AServedGenerationIsNamedByReadyAndChecksTheOpen) {
+  const ServedGeneration seven{7, "sha256:" + std::string(64, 'a')};
+  const ServedGeneration older{6, seven.descriptor_digest};
+  const std::string other_digest = "sha256:" + std::string(64, 'b');
+  const ServedGeneration older_elsewhere{6, other_digest};
+  Served served{true, "127.0.0.1", nullptr, std::nullopt, 1, {}, seven};
+  struct Case {
+    const char* name;
+    const char* deployment;
+    ServedGeneration target;
+    const char* reason;
+  };
+  const std::vector<Case> cases{
+      {"another deployment", "dep-b", seven, "FAILURE_REASON_TARGET_MISMATCH"},
+      {"an older generation", kDeployment, older, "FAILURE_REASON_STALE_GENERATION"},
+      {"an older generation and another digest", kDeployment, older_elsewhere,
+       "FAILURE_REASON_STALE_GENERATION"},
+      {"no generation and no digest", kDeployment, {}, "FAILURE_REASON_STALE_GENERATION"},
+      {"another digest", kDeployment, {7, other_digest}, "FAILURE_REASON_TARGET_MISMATCH"},
+      {"no digest", kDeployment, {7, ""}, "FAILURE_REASON_TARGET_MISMATCH"},
+  };
+  for (const auto& entry : cases) {
+    SCOPED_TRACE(entry.name);
+    auto open = open_event(wire::SESSION_MODE_STT_STREAMING, entry.target);
+    open.mutable_open()->mutable_resolved()->set_deployment_id(entry.deployment);
+    const auto status = served.refused(open);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    EXPECT_NE(status.error_message().find(entry.reason), std::string::npos)
+        << status.error_message();
+  }
+  EXPECT_EQ(served.listener().live_sessions(), 0U);
+
+  wire::Ready ready;
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING, &ready);
+  EXPECT_EQ(ready.generation(), 7U);
+  EXPECT_EQ(ready.descriptor_digest(), seven.descriptor_digest);
+  ASSERT_TRUE(client.call->WritesDone());
+  ASSERT_NO_FATAL_FAILURE(
+      expect_closed(client.read(), wire::SESSION_STATE_CLOSED, wire::FAILURE_REASON_UNSPECIFIED));
+  EXPECT_TRUE(end_of(client).ok());
 }
 
 TEST(StreamListener, WithoutADispatchEveryOpenIsRefusedAsUnsupported) {

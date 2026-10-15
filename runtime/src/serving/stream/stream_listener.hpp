@@ -37,9 +37,12 @@ struct StreamListenerOptions {
   /// 0 requests an ephemeral port.
   std::uint16_t port = 0;
   bool allow_non_loopback = false;
-  /// The deployment an Open must name; the listener serves no generation and
-  /// no descriptor digest.
+  /// The deployment an Open must name.
   std::string deployment_id;
+  /// The generation and descriptor digest an Open must name, and Ready names;
+  /// 0 and empty on a worker that serves no generation.
+  std::uint64_t generation = 0;
+  std::string descriptor_digest;
   /// Session timers and the session count; the worker serves one at a time.
   SessionLimits limits = SessionLimits::defaults();
   /// Places for refused calls that are not done; the listener's own 4,096

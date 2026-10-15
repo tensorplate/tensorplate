@@ -527,15 +527,17 @@ Result<void> check_target(const wire::Open& open, const ServedTarget& served) {
   if (target.generation() > kMaxWireInteger) {
     return unexpected(invalid_event("Open generation is above 2^53 - 1"));
   }
-  if (target.deployment_id() != served.deployment_id || !target.descriptor_digest().empty()) {
-    return unexpected(Error::make(Error::Code::NotReady,
-                                  "Open names a deployment or descriptor not served here",
+  if (target.deployment_id() != served.deployment_id) {
+    return unexpected(Error::make(Error::Code::NotReady, "Open names a deployment not served here",
                                   "target_mismatch"));
   }
-  if (target.generation() != 0) {
-    return unexpected(Error::make(Error::Code::NotReady,
-                                  "Open names a generation; this worker serves none",
+  if (target.generation() != served.generation) {
+    return unexpected(Error::make(Error::Code::NotReady, "Open names a generation not served here",
                                   "stale_generation"));
+  }
+  if (target.descriptor_digest() != served.descriptor_digest) {
+    return unexpected(Error::make(Error::Code::NotReady, "Open names a descriptor not served here",
+                                  "target_mismatch"));
   }
   return {};
 }

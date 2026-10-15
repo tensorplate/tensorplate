@@ -55,13 +55,21 @@ std::uint32_t whole_ms(std::chrono::nanoseconds duration) noexcept {
   return static_cast<std::uint32_t>(std::clamp<std::int64_t>(ms, 0, UINT32_MAX));
 }
 
+/// The generation the manager binds sessions to.
+std::uint64_t binding_generation(const StreamListenerOptions& options) noexcept {
+  return options.generation != 0 ? options.generation : kUnversionedBinding;
+}
+
 /// The Ready of a session granted `terms`, with the status of the transition
 /// that admitted it.
-ServerEvent ready_event(const SessionLimits& session_limits, const std::string& session_id,
+ServerEvent ready_event(const StreamListenerOptions& options, const std::string& session_id,
                         const SessionTerms& terms, const ManagedSessionTransition& transition) {
+  const auto& session_limits = options.limits;
   ServerEvent event;
   auto& ready = *event.mutable_ready();
   ready.set_session_id(session_id);
+  ready.set_generation(options.generation);
+  ready.set_descriptor_digest(options.descriptor_digest);
   auto& limits = *ready.mutable_limits();
   limits.set_idle_timeout_ms(whole_ms(session_limits.idle_timeout()));
   limits.set_heartbeat_interval_ms(whole_ms(session_limits.heartbeat_interval()));
@@ -434,7 +442,9 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
     }
     const auto& open = event.open();
     if (auto target =
-            stream::check_target(open, stream::ServedTarget{listener_.options.deployment_id});
+            stream::check_target(open, stream::ServedTarget{listener_.options.deployment_id,
+                                                            listener_.options.generation,
+                                                            listener_.options.descriptor_digest});
         !target) {
       refuse(target.error());
       return false;
@@ -465,7 +475,7 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
       const std::lock_guard guard(state_->mu);
       state_->terms = *terms;
     }
-    const auto opened = listener_.manager->open(kUnversionedBinding, *budgets,
+    const auto opened = listener_.manager->open(binding_generation(listener_.options), *budgets,
                                                 [&](std::uint64_t key) -> Result<void> {
                                                   {
                                                     const std::lock_guard guard(state_->mu);
@@ -654,7 +664,7 @@ void StreamListener::Impl::on_transition(const ManagedSessionTransition& transit
           offer(std::move(event));
           break;
         case LogicalSessionEffect::EmitReady:
-          offer(ready_event(options.limits, session_id, terms, transition));
+          offer(ready_event(options, session_id, terms, transition));
           break;
         case LogicalSessionEffect::AcceptInput:
           offer_accepted();
@@ -848,7 +858,7 @@ Result<std::unique_ptr<StreamListener>> StreamListener::start(StreamListenerOpti
   auto impl = std::make_unique<Impl>(std::move(options), dispatch, clock);
   Impl* raw = impl.get();
   auto manager = SessionManager::create(
-      raw->options.limits, kUnversionedBinding, clock,
+      raw->options.limits, binding_generation(raw->options), clock,
       [raw](const ManagedSessionTransition& transition) { raw->on_transition(transition); });
   if (!manager) {
     return unexpected(manager.error());

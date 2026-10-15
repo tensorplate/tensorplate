@@ -40,11 +40,20 @@ namespace wire = ::tensorplate::stream::v1;
 inline constexpr const char* kDeployment = "dep-a";
 using Call = grpc::ClientReaderWriter<wire::ClientEvent, wire::ServerEvent>;
 
-inline wire::ClientEvent open_event(wire::SessionMode mode) {
+/// The generation and descriptor digest a listener serves; none by default.
+struct ServedGeneration {
+  std::uint64_t generation = 0;
+  std::string descriptor_digest;
+};
+
+/// An Open of `mode` that names kDeployment and `served`.
+inline wire::ClientEvent open_event(wire::SessionMode mode, const ServedGeneration& served = {}) {
   wire::ClientEvent event;
   event.set_sequence(1);
   auto& open = *event.mutable_open();
   open.mutable_resolved()->set_deployment_id(kDeployment);
+  open.mutable_resolved()->set_generation(served.generation);
+  open.mutable_resolved()->set_descriptor_digest(served.descriptor_digest);
   open.set_mode(mode);
   open.set_language("en");
   if (mode == wire::SESSION_MODE_STT_STREAMING) {
@@ -458,14 +467,17 @@ class Served {
   explicit Served(bool with_dispatch = true, const std::string& host = "127.0.0.1",
                   const SchedulerClock* clock = nullptr,
                   std::optional<std::size_t> max_refused_calls = std::nullopt,
-                  std::uint32_t max_sessions = 1, ConnectionLimits connection_limits = {})
-      : clock_(clock != nullptr ? *clock : system_clock_) {
+                  std::uint32_t max_sessions = 1, ConnectionLimits connection_limits = {},
+                  ServedGeneration generation = {})
+      : clock_(clock != nullptr ? *clock : system_clock_), generation_(std::move(generation)) {
     if (with_dispatch) {
       dispatch_ = std::make_unique<SteeredDispatch>(clock_);
     }
     serving::StreamListenerOptions options;
     options.host = host;
     options.deployment_id = kDeployment;
+    options.generation = generation_.generation;
+    options.descriptor_digest = generation_.descriptor_digest;
     options.max_refused_calls = max_refused_calls;
     options.max_connection_idle = connection_limits.idle;
     options.max_connections = connection_limits.connections;
@@ -515,7 +527,7 @@ class Served {
   Client ready(wire::SessionMode mode, wire::Ready* ready_out = nullptr,
                std::chrono::milliseconds deadline = std::chrono::seconds{20}) {
     auto client = connect(deadline);
-    EXPECT_TRUE(client.call->Write(open_event(mode)));
+    EXPECT_TRUE(client.call->Write(open_event(mode, generation_)));
     const auto ready = client.read();
     EXPECT_TRUE(ready && ready->has_ready());
     if (ready && ready->has_ready()) {
@@ -545,6 +557,7 @@ class Served {
  private:
   SystemSchedulerClock system_clock_;
   const SchedulerClock& clock_;
+  ServedGeneration generation_;
   std::unique_ptr<SteeredDispatch> dispatch_;
   std::unique_ptr<serving::StreamListener> listener_;
   std::shared_ptr<grpc::Channel> channel_;
