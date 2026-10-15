@@ -977,9 +977,9 @@ fn a_two_member_set_projects_every_member_and_no_singleton() {
         assert_eq!(member.unary_endpoint, entry.unary_endpoint);
         // No source exists for these yet, so nothing is invented.
         assert_eq!(member.stream_api_version, None);
-        assert_eq!(member.effective_quota, None);
         assert_eq!(member.staged_bytes, None);
         // The committed record says nothing of a process.
+        assert_eq!(member.effective_quota, None);
         assert_eq!(member.contact, None);
         assert_eq!(member.process, None);
         assert_eq!(member.readiness, None);

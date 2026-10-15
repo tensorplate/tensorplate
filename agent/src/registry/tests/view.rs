@@ -21,7 +21,8 @@ fn view(f: &Fixture) -> Vec<LiveMember> {
         .expect("the registry reports its members")
 }
 
-/// A member that runs, is ready and in contact on a single port.
+/// A member that runs, is ready and in contact on a single port, and has
+/// the quota its worker answered an activate with when it serves.
 fn live(id: &str, generation: u64, role: MemberRole, http_port: u16) -> LiveMember {
     LiveMember {
         member: MemberRef::new(id, generation),
@@ -31,6 +32,7 @@ fn live(id: &str, generation: u64, role: MemberRole, http_port: u16) -> LiveMemb
         in_contact: Some(true),
         http_port,
         stream_port: None,
+        effective_quota: (role == MemberRole::Serving).then(|| MemberTarget::quota(0)),
     }
 }
 
@@ -288,6 +290,7 @@ fn a_member_that_exited_is_not_running_then_gone_and_its_successor_is_ready_only
         view(&f),
         [LiveMember {
             ready: false,
+            effective_quota: None,
             ..successor.clone()
         }]
     );
@@ -295,6 +298,7 @@ fn a_member_that_exited_is_not_running_then_gone_and_its_successor_is_ready_only
 
     f.probe.silent.store(false, Ordering::SeqCst);
     step(&f, Duration::from_secs(1));
+    activations_answered(&f);
     assert_eq!(view(&f), [successor]);
     assert_eq!(
         f.registry.serving_member().unwrap().map(|s| s.member),
@@ -342,10 +346,14 @@ fn a_member_promoted_over_is_draining_until_it_has_been_reaped() {
             .recv_timeout(GRACE)
             .expect("the old member is asked to stop");
 
+        // Asked to stop before the new member is activated.
         assert_eq!(
             view(&f),
             [
-                live("tts", 2, MemberRole::Serving, CANDIDATE_PORT),
+                LiveMember {
+                    effective_quota: None,
+                    ..live("tts", 2, MemberRole::Serving, CANDIDATE_PORT)
+                },
                 LiveMember {
                     in_contact: None,
                     ..live("stt", 1, MemberRole::Draining, ACTIVE_PORT)
@@ -463,6 +471,9 @@ impl MemberProcess for ListedAtDrop {
     fn control(&self) -> ControlContact {
         ControlContact::Pending
     }
+    fn control_caller(&self) -> Box<dyn RuntimeCall> {
+        Answering::boxed(MemberRef::new("m", 1))
+    }
     fn terminate(&mut self) {}
     fn kill(&mut self) {}
 }
@@ -497,6 +508,7 @@ fn a_draining_member_is_listed_until_its_process_has_been_dropped_and_not_after(
         recipe: candidate("stt"),
         ports: pool.lease().unwrap(),
         outside: None,
+        control: Arc::default(),
     });
     let recorded = set.listed();
     assert_eq!(recorded.len(), 1);

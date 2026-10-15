@@ -6,6 +6,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod common;
+#[path = "support/member_target.rs"]
+mod member_target;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -15,8 +17,9 @@ use std::time::{Duration, Instant};
 
 use common::Harness;
 use tensorplate_agent::control::dispatch;
+use tensorplate_agent::control_channel::{RuntimeCall, RuntimeCommand};
 use tensorplate_agent::coordinator::Coordinator;
-use tensorplate_agent::error::{AgentError, AgentResult};
+use tensorplate_agent::error::{AgentError, AgentResult, ControlChannelError};
 use tensorplate_agent::recovery;
 use tensorplate_agent::registry::{
     durable_generations, ControlContact, HealthProbe, LaunchSpec, MemberPorts, MemberProcess,
@@ -31,12 +34,42 @@ use tensorplate_protocol::agent_control::{
 };
 use tensorplate_protocol::agent_state::TransactionKind;
 use tensorplate_protocol::deploy_transaction::DeployState;
+use tensorplate_protocol::worker_control::{MemberRef, WorkerControlResponse};
 use tensorplate_protocol::ErrorCode;
+use tensorplate_protocol::ValidatePayload;
+
+use member_target::MemberTarget;
 
 const HELD: Duration = Duration::from_secs(10);
 
 struct Process {
     exited: Arc<AtomicBool>,
+    channel: Channel,
+}
+
+/// A process's control channel, closed once the process exited.
+#[derive(Clone)]
+struct Channel {
+    member: MemberRef,
+    exited: Arc<AtomicBool>,
+    target: Arc<Mutex<MemberTarget>>,
+}
+
+impl RuntimeCall for Channel {
+    fn call(
+        &self,
+        command: RuntimeCommand,
+        _budget: Duration,
+    ) -> Result<WorkerControlResponse, ControlChannelError> {
+        if self.exited.load(Ordering::SeqCst) {
+            return Err(ControlChannelError::Closed);
+        }
+        let request = command
+            .request(self.member.clone(), "ctl-1".into())
+            .validate_payload()
+            .map_err(|_| ControlChannelError::InvalidRequest)?;
+        Ok(self.target.lock().unwrap().answer(&request))
+    }
 }
 
 impl MemberProcess for Process {
@@ -48,6 +81,9 @@ impl MemberProcess for Process {
     }
     fn control(&self) -> ControlContact {
         ControlContact::Reporting
+    }
+    fn control_caller(&self) -> Box<dyn RuntimeCall> {
+        Box::new(self.channel.clone())
     }
     fn terminate(&mut self) {
         self.exited.store(true, Ordering::SeqCst);
@@ -100,7 +136,12 @@ impl ProcessLauncher for Launcher {
         }
         let exited = Arc::new(AtomicBool::new(false));
         self.launched.lock().unwrap().push(exited.clone());
-        Ok(Box::new(Process { exited }))
+        let channel = Channel {
+            member: spec.member.clone(),
+            exited: exited.clone(),
+            target: Arc::new(Mutex::new(MemberTarget::built(0))),
+        };
+        Ok(Box::new(Process { exited, channel }))
     }
 }
 

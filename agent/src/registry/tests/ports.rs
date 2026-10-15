@@ -282,6 +282,9 @@ impl MemberProcess for DroppedProcess {
     fn control(&self) -> ControlContact {
         ControlContact::Pending
     }
+    fn control_caller(&self) -> Box<dyn RuntimeCall> {
+        Answering::boxed(MemberRef::new("m", 1))
+    }
     fn terminate(&mut self) {}
     fn kill(&mut self) {}
 }
@@ -314,6 +317,7 @@ fn a_member_dropped_while_its_process_runs_holds_its_ports_until_the_process_is_
         recipe: candidate("stt"),
         ports: pool.lease().unwrap(),
         outside: None,
+        control: Arc::default(),
     };
 
     drop(member);

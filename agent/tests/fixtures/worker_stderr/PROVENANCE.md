@@ -39,7 +39,9 @@ here.
 `control-responder.py` is not a recording. It is a stand-in, written by
 hand, for a worker's control thread: it answers ledger polls in the shape of
 `protocol/rust/tests/fixtures/worker_control_ledger_status.jsonl` with an
-empty ledger. `stub-worker.sh` runs it with `python3`, which these tests
+empty ledger, and `admission_fence`, `activate` and `retire` by the rules a
+serving worker with a deployment generation keeps (see
+`docs/architecture/serving-worker.md`, "Control channel"). `stub-worker.sh` runs it with `python3`, which these tests
 need on `PATH`.
 
 `pid-recording-worker.sh` is not a recording either. It writes its process

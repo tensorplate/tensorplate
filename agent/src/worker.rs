@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use tensorplate_protocol::agent_state::ErrorRecord;
 use tensorplate_protocol::worker_control::{CandidateRef, MemberRef};
-use tensorplate_protocol::ErrorCode;
+use tensorplate_protocol::{ErrorCode, MemberQuota};
 
 use crate::config::{AgentConfig, WorkerControlMode};
 use crate::error::{AgentError, AgentResult};
@@ -140,9 +140,11 @@ pub trait WorkerControl: Send + Sync {
     ) -> AgentResult<WorkerReadiness>;
 
     /// Before the transaction's commit is written: the prepared candidate
-    /// still runs, keeps its control channel and was not given up. Nothing
-    /// is stopped or moved; the serving member is not told to stop
-    /// admitting, since the agent does not send `admission_fence` yet.
+    /// still runs, keeps its control channel and was not given up; then the
+    /// serving member is told to stop admitting work (`admission_fence`)
+    /// and must answer `ok`. A serving member that exited or whose control
+    /// channel failed admits nothing and is not told. Nothing is stopped or
+    /// moved.
     ///
     /// # Errors
     ///
@@ -150,12 +152,17 @@ pub trait WorkerControl: Send + Sync {
     /// [`AgentError::WorkerNotReady`] when no candidate is held, the
     /// candidate's own failure when it exited, and
     /// [`AgentError::WorkerControl`] when its control channel failed and for
-    /// adapter/IPC failures.
+    /// adapter/IPC failures. For the serving member's fence:
+    /// [`AgentError::WorkerTimeout`] when it gave no answer in time and
+    /// [`AgentError::WorkerControl`] when it answered otherwise or its
+    /// channel failed during the fence.
     fn fence(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()>;
 
-    /// Once the commit is durable: the candidate takes the serving slot, then
-    /// the member it replaces is asked to stop and reaped. A candidate that
-    /// exited since [`Self::fence`] takes the slot as a member that stopped.
+    /// Once the commit is durable: the candidate takes the serving slot and
+    /// is told so (`activate`), then the member it replaces is asked to stop
+    /// and reaped. A candidate that exited since [`Self::fence`] takes the
+    /// slot as a member that stopped; one that does not answer `activate`
+    /// with `ok` keeps the slot, and that is logged.
     ///
     /// # Errors
     ///
@@ -183,7 +190,8 @@ pub trait WorkerControl: Send + Sync {
 
     /// The transaction that prepared `candidate` ended without promoting
     /// it: the candidate no longer keeps the serving member from being
-    /// restarted.
+    /// restarted, and a serving member the transaction fenced is activated
+    /// again, best effort.
     fn abandon(&self, _candidate: &CandidateRef) {}
 
     /// Start no generation by itself until [`Self::release`], as while
@@ -306,6 +314,9 @@ pub struct LiveMember {
     pub http_port: u16,
     /// Held for the generation's stream listener; nothing listens on it.
     pub stream_port: Option<u16>,
+    /// The quota the generation's worker answered its last `activate` with;
+    /// none for a draining one.
+    pub effective_quota: Option<MemberQuota>,
 }
 
 /// What one supervision step did about the serving member.
