@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -1398,27 +1400,178 @@ TEST(SpeechJobDispatch, WhatArrivesAfterABoundFellDueDoesNotPutItsCheckOff) {
   EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
 }
 
-// A clock moved by hand reaches a bound by its notice: while it stands short
-// of one, the thread does not keep timing out and turning.
-TEST(SpeechJobDispatch, WhileAClockMovedByHandStandsShortOfABoundTheThreadWaits) {
+// A step that outlasts what was left of a bound leaves it due when the thread
+// next waits: it is checked then, with no notice that the clock moved.
+TEST(SpeechJobDispatch, ABoundDueWhenAStepEndsIsCheckedWithoutANotice) {
   Binding binding(&speech_dispatch_with_short_bounds);
   SpeechUnderTest& speech = speech_of(binding);
   const auto key = binding.open_audio();
   speech.hold_jobs();
   one_utterance(binding, key);
   ASSERT_TRUE(binding.settle());
+  // The dispatch's thread waits in the bridge, releasing the cancelled session.
+  speech.bridge->hold_next_release();
+  const std::unique_ptr<CountingJobBridge, void (*)(CountingJobBridge*)> let_go{
+      speech.bridge.get(), [](CountingJobBridge* bridge) { bridge->let_release_go(); }};
   ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
-  ASSERT_TRUE(binding.settle());
-  // The release's bound is 3 s and 10 ms away: the clock stops 1 ns short.
-  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 3010ms - 1ns));
-  const auto steps = speech.strategy->stats().steps;
-  std::this_thread::sleep_for(200ms);
-  EXPECT_EQ(speech.strategy->stats().steps, steps);
+  ASSERT_TRUE(speech.bridge->release_held(Binding::kPatience));
+  // Exactly onto the job's deadline, 1 s and 10 ms after its submit.
+  binding.clock.advance(1010ms);
+  speech.bridge->let_release_go();
+  // The check is a step of its own after the release's: settle() may return
+  // between the two, so the count is read until it moves.
+  const auto give_up = std::chrono::steady_clock::now() + Binding::kPatience;
+  while (speech.strategy->stats().jobs_past_deadline == 0 &&
+         std::chrono::steady_clock::now() < give_up) {
+    std::this_thread::sleep_for(1ms);
+  }
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 2s - 1ns));
   EXPECT_TRUE(speech.stalls().empty());
   ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
   EXPECT_EQ(speech.stalls().size(), 1U);
   speech.release_jobs();
   ASSERT_TRUE(binding.ends_as(key, State::Closed));
+}
+
+/// Moved by hand, and counts how often it is read.
+class CountedClock final : public SchedulerClock {
+ public:
+  [[nodiscard]] TimePoint now() const noexcept override {
+    reads_.fetch_add(1);
+    return moved.now();
+  }
+  [[nodiscard]] std::uint64_t reads() const noexcept { return reads_.load(); }
+
+  FakeSchedulerClock moved;
+
+ private:
+  mutable std::atomic<std::uint64_t> reads_{0};
+};
+
+CountedClock& counted_clock() {
+  static CountedClock clock;
+  return clock;
+}
+
+/// The short bounds, on `counted_clock()`: the manager keeps the binding's.
+std::unique_ptr<DispatchUnderTest> speech_dispatch_on_a_counted_clock(
+    const SchedulerClock& /*clock*/) {
+  return speech_dispatch_with_short_bounds(counted_clock());
+}
+
+/// Reads of `clock` over 200 ms, and the milliseconds measured around them.
+/// The reads are counted inside the time measured, so a pause of the calling
+/// thread cannot add wakes that the time leaves out.
+std::pair<std::uint64_t, std::uint64_t> reads_over_a_while(const CountedClock& clock) {
+  const auto from = std::chrono::steady_clock::now();
+  const std::uint64_t before = clock.reads();
+  std::this_thread::sleep_for(200ms);
+  const std::uint64_t read = clock.reads() - before;
+  const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - from);
+  return {read, static_cast<std::uint64_t>(waited.count())};
+}
+
+// The thread waits for its next bound until it is due, and 1 ms at least: a
+// clock moved by hand is read twice a wake, and no more often than that allows.
+TEST(SpeechJobDispatch, AClockMovedByHandIsReadNoMoreOftenThanItsNextBoundAllows) {
+  Binding binding(&speech_dispatch_on_a_counted_clock);
+  SpeechUnderTest& speech = speech_of(binding);
+  CountedClock& clock = counted_clock();
+  const auto move = [&](SchedulerClock::Duration by) {
+    clock.moved.advance(by);
+    speech.strategy->notify_clock_advanced();
+    return binding.settle();
+  };
+  const auto key = binding.open_audio();
+  speech.hold_jobs();
+  one_utterance(binding, key);
+  ASSERT_TRUE(binding.settle());
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  // The job's deadline is 1 s and 10 ms away: a wake each 1010 ms at most.
+  const auto [far, far_waited] = reads_over_a_while(clock);
+  EXPECT_LE(far, 2 * (far_waited / 1010 + 1));
+  // The release's bound is 3 s and 10 ms away: the clock stops 1 ns short,
+  // and the thread wakes each 1 ms at most, without a step.
+  ASSERT_TRUE(move(3010ms - 1ns));
+  const auto steps = speech.strategy->stats().steps;
+  const auto [near, near_waited] = reads_over_a_while(clock);
+  EXPECT_EQ(speech.strategy->stats().steps, steps);
+  EXPECT_LE(near, 3 * (near_waited + 2));
+  // One wake at least in 200 ms, where a 1 ms floor gives about 200.
+  EXPECT_GE(near, 2U);
+  EXPECT_TRUE(speech.stalls().empty());
+  ASSERT_TRUE(move(1ns));
+  EXPECT_EQ(speech.stalls().size(), 1U);
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(key, State::Closed));
+}
+
+/// Half as fast as the steady clock: a timed wait for one of its points ends
+/// short of it, as on any clock that runs slow.
+class HalfSpeedClock final : public SchedulerClock {
+ public:
+  [[nodiscard]] TimePoint now() const noexcept override {
+    return origin_ + (std::chrono::steady_clock::now() - origin_) / 2;
+  }
+
+ private:
+  TimePoint origin_ = std::chrono::steady_clock::now();
+};
+
+/// A job's deadline is 20 ms and 0.5 s per second of its audio, a release's
+/// bound 20 ms, on a clock that nobody moves and that gives no notice.
+std::unique_ptr<DispatchUnderTest> speech_dispatch_on_a_half_speed_clock(
+    const SchedulerClock& /*clock*/) {
+  static const HalfSpeedClock clock;
+  SpeechDispatchOptions options;
+  options.job_deadline_base = 20ms;
+  options.release_bound = 20ms;
+  return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{}, result_following_input,
+                                           BufferManagerConfig{}, std::move(options));
+}
+
+TEST(SpeechJobDispatch, OnAClockSlowerThanItsWaitsTheThreadStillReachesEachBound) {
+  Binding binding(&speech_dispatch_on_a_half_speed_clock);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  speech.hold_jobs();
+  one_utterance(binding, key);
+  ASSERT_TRUE(speech.stalled(30s));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Failed);
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
+  EXPECT_EQ(speech.strategy->stats().releases_past_bound, 1U);
+  EXPECT_EQ(speech.stalls().front().context, "release_bound_exceeded");
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "deadline_missed");
+}
+
+// The bound of a release counts from the deadline of the job its own session
+// owns: here not the first session opened, so its key is not the job's id.
+TEST(SpeechJobDispatch, AReleaseIsBoundFromTheDeadlineOfTheJobItsSessionOwns) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  (void)binding.open_text();
+  const auto owner = binding.open_text();
+  speech.hold_jobs();
+  binding.text(owner, 1, "hello");
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(speech.bridge->submitted().size(), 1U);
+  ASSERT_NE(speech.bridge->submitted().front().identity().job_id, owner);
+  ASSERT_TRUE(binding.manager->apply(owner, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  // The synthesis's deadline is 16 s away, so the bound 18 s.
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 18s - 1ns));
+  EXPECT_TRUE(speech.stalls().empty());
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  EXPECT_EQ(speech.stalls().size(), 1U);
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(owner, State::Closed));
 }
 
 TEST(SpeechJobDispatch, ADecodesDeadlineGrowsWithItsAudio) {

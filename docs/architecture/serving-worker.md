@@ -561,7 +561,7 @@ listener is opened. The binary's exit codes are:
 | 64   | Configuration parse / validation failure. |
 | 65   | Component build / session load failure. |
 | 66   | Listener bind / accept failure. |
-| 70   | Internal error, and a worker that stopped itself because its speech backend stalled ([A stalled speech backend](#a-stalled-speech-backend)). |
+| 70   | Internal error, and a worker that stopped itself because its speech backend stalled ([A stalled speech backend](#a-stalled-speech-backend)), also when the stall came during a stop it was asked for. |
 
 A worker that exits with 64 or 65 ends its stderr with one JSON line, the
 startup failure record, written whether or not `enable_stderr_logs` is
@@ -1444,9 +1444,12 @@ long input will resize them.
   worker then performs ([A stalled speech backend](#a-stalled-speech-backend)).
 - The bounds are read on the manager's clock. The thread waits for the
   next command or the next bound; a test that moves the clock by hand
-  calls `notify_clock_advanced()`, and once a timed wait has ended short of
-  its bound, which only such a clock causes, the thread waits for the
-  notice alone. Once a bound is due, the commands queued by then are
+  calls `notify_clock_advanced()`. A timed wait that ends short of its
+  bound, on a clock slower than the steady clock or one moved by hand, is
+  waited again for what is left, 1 ms at the least: a slow clock still
+  reaches every bound with no notice, and a clock that stands just short
+  of one wakes the thread at most once a millisecond, without a step.
+  Once a bound is due, the commands queued by then are
   handled ahead of its check and none that arrive later: a job's end
   already queued is not taken for a deadline missed, and a stream of
   commands cannot put the check off. `stats()` counts `jobs_past_deadline`
@@ -1536,9 +1539,16 @@ release a session, the buffer accounting of every path, and the job's
 deadline and the release's bound on the fake clock, each one nanosecond
 before and at its instant; a job's end queued as its deadline passes is
 taken first, one queued after the check fell due is not, and a release
-whose job ends before the backend acknowledges it keeps its bound (the
-dispatch's thread held by a gate in the manager's sink or in the bridge
-double, which can also hold acknowledgements back).
+whose job ends before the backend acknowledges it keeps its bound, which
+counts from the deadline of its own session's job also when that session's
+key is not the job's id (the dispatch's thread held by a gate in the
+manager's sink or in the bridge double, which can also hold
+acknowledgements back). On a clock at half the
+steady clock's speed, which nothing moves and no notice follows, the
+deadline and then the bound still pass; a clock moved by hand is read
+twice a wake and no more often than its next bound allows: once in 1010 ms
+while that bound is 1010 ms away, once a millisecond while the clock stands
+1 ns short of it.
 
 ### The speech dispatch in the worker
 
@@ -1671,6 +1681,29 @@ restart's delay, the successor's load and prime, a client's next job, the
 job's deadline and the bound, the stop). A longer cycle restarts the member
 after every stall and never fails it. A worker started by hand exits 70
 and nothing starts another.
+
+A bound can also pass during a stop the worker was asked for, because the
+dispatch runs until the stream listener has stopped, which takes up to the
+drain window (`shutdown.drain_deadline`): the bound of a release that had
+less of it left than that, and, with a window longer than the release bound
+(10 s; the member registry gives its members 5 s), the bound of a job that
+misses its deadline inside the window. The stall is then recorded
+and logged as above, without a second `shutdown requested` line, and that
+stop returns 70 instead of 0. The agent's member registry reaps a member it
+asked to stop without reading its exit status, and kills it if it has not
+exited 10 s after the request, so such a 70 changes nothing the agent
+records; the worker's `speech backend stalled` line, which the agent
+forwards to its own log, is what shows it.
+
+**Known, not changed here: a stopped worker's sidecar can outlive it.** A
+member whose backend does not end the job it holds when the registry asks
+it to stop does not exit within the registry's 10 s: its drain window is 5 s, and its
+unload then waits up to 15 s behind the job. The registry kills the worker
+alone, and the sidecar, whose runner returns only once its backend call
+does, keeps running without its parent, with what its backend loaded
+(seen with a backend that never ends a job: the sidecar was still running
+30 s after the kill). A later change makes the runner exit once its parent
+is gone.
 
 The worst case a client sees, end to end: its own session ends at the
 job's deadline (`deadline_missed`; for audio input usually

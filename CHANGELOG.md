@@ -202,6 +202,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   of the clang-tidy and adapter-shell jobs, which named a path vcpkg never
   wrote and so never saved anything.
 
+- The speech dispatch now reaches a job's deadline and a release's bound on
+  a clock that runs slower than the steady clock. A timed wait that ended
+  before its bound was taken for a clock moved by hand, after which the
+  dispatch's thread waited only for a notice that such a clock never
+  sends, so a backend that kept a job would have held the stream session
+  without the worker stopping. The thread now waits again for what is left
+  of the bound, at least 1 ms at a time. The serving worker's clock is the
+  steady clock, whose timed waits do not end short, so a deployment is
+  unchanged but for a bound less than 1 ms away when a wait begins, which is
+  now acted on up to 1 ms after it. (V030-E04-F03-T02)
+
 ### Added
 
 - A deadline for the speech job in flight and a bound on the wait for a

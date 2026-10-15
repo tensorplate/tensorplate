@@ -1486,6 +1486,9 @@ TEST_F(SpeechWorkerRunner, AWorkerProcessWhoseBackendKeepsACancelledJobExitsAsFa
   EXPECT_EQ(stalled.front().value("reason", ""), "release_bound_exceeded");
   const auto requested = logged(log, "shutdown requested");
   ASSERT_EQ(requested.size(), 1U) << log;
+  // Health read `failed` before the stall asked for the shutdown would let the
+  // main thread ask first ("worker failed"); its once-a-second read does not
+  // land between the two in practice, so a swap of them goes uncaught.
   EXPECT_EQ(requested.front().value("reason", ""), "speech backend stalled");
   const auto stopped = logged(log, "speech dispatch stopped");
   ASSERT_EQ(stopped.size(), 1U) << log;
