@@ -325,8 +325,8 @@ def test_a_segment_is_refused_before_it_is_sent_when_the_server_would_refuse_it(
     async def scenario(fake: StreamServer, session: speech.TextToSpeechSession) -> None:
         async with session:
             reader = asyncio.create_task(taken(session))
-            for text in ("", " \t\n", "\u00a0\u3000"):
-                with pytest.raises(ValueError, match="not only whitespace"):
+            for text in ("", " \t\n", "\v\f\r"):
+                with pytest.raises(ValueError, match="not only ASCII whitespace"):
                     await session.send_text(text)
             # The bound is on bytes of UTF-8: 257 characters here, 514 bytes.
             for text in ("x" * 513, "\u00e9" * 257):
@@ -357,6 +357,19 @@ def test_a_segment_is_refused_before_it_is_sent_when_the_server_would_refuse_it(
         ]
 
     play(scenario, StreamServer(max_synthesis_text_bytes=700))
+
+
+def test_a_segment_of_whitespace_beyond_ascii_is_sent_as_the_server_serves_it() -> None:
+    async def scenario(fake: StreamServer, session: speech.TextToSpeechSession) -> None:
+        async with session:
+            reader = asyncio.create_task(taken(session))
+            assert await session.send_text("\u00a0\u3000") == 1
+            totals = await session.close()
+        await reader
+        assert (totals.input_text_bytes, totals.segments_completed) == (5, 1)
+        assert fake.bodies() == ["open", "text_segment"]
+
+    play(scenario)
 
 
 def test_text_no_session_would_send_is_refused_at_once_behind_an_unanswered_finalize() -> None:

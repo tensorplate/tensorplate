@@ -709,10 +709,11 @@ async def play_audio(
   text and segments whose synthesis has not started (the worker lets two
   wait), and both return as a segment's synthesis starts, which the server
   reports behind the audio it sent first. Text that is not a `str` raises
-  `TypeError`; text that is empty, only whitespace or not encodable as
-  UTF-8, and a `turn_id` that is not at most 64 printable ASCII characters,
-  raise `ValueError`. Those are raised at once, before any wait and
-  whatever the state of the session. Once the segment's turn has come, text
+  `TypeError`; text that is empty, only ASCII whitespace (the server
+  refuses that, and serves other whitespace) or not encodable as UTF-8, and
+  a `turn_id` that is not at most 64 printable ASCII characters, raise
+  `ValueError`. Those are raised at once, before any wait and whatever the
+  state of the session. Once the segment's turn has come, text
   above a bound of `session.limits.text_to_speech` (`max_segment_text_bytes`
   for one segment, `max_synthesis_text_bytes` for the segments between two
   `finalize()` calls, both in bytes of UTF-8) and a segment larger than the
