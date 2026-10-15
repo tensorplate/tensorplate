@@ -1117,7 +1117,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   told to admit again, when the worker does not answer `ok` within 3
   seconds: `timeout` when it does not answer, and `inference_failed`, naming
   the worker's answer, when it refuses or its channel fails during the
-  fence. A serving worker that exited or whose control channel failed is not
+  fence. A serving worker that does not answer `ok` when told to admit
+  again is told again by the agent's supervision, at most once a status poll
+  interval, until it does, it leaves service, or another deploy fences it. A
+  serving worker that exited or whose control channel failed is not
   told. After the commit the new serving worker is sent `activate`, as is a
   restored worker at the agent's start and a restarted one once it is judged
   ready (from a thread of its own, so supervision does not wait). An

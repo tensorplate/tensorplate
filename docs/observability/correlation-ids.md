@@ -42,7 +42,9 @@ it gave. The agent never repeats a request under its first id: a fence or
 an activate not answered before the channel's next ledger poll is sent
 again after that poll, as a new request with a new `correlation_id` and
 the same `transaction_id`, until 3 seconds have passed since the first
-attempt. The worker keeps no record of
+attempt. The activate a failed transaction owes a worker that did not
+answer it `ok` is sent again later, in calls of its own, with that
+transaction's `transaction_id`. The worker keeps no record of
 the latest request: a repeat of an applied `admission_fence`, `activate`
 or `retire` gets the same answer because each depends only on the
 member's admission state, and the operations whose repeat would act

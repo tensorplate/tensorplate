@@ -1065,13 +1065,19 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   candidate passes the fence's checks and before the commit write; the
   fence is recorded before it is sent, and a transaction that ends without
   promoting its candidate sends `activate` to the worker it fenced, with
-  its own transaction id, so it admits again. After the commit the new
+  its own transaction id, so it admits again. One that does not answer
+  that `ok` stays fenced in the registry, and the supervision step sends
+  it the same activate again, from a thread of its own and at most once a
+  `worker.status_poll_interval_ms`, until it answers `ok`, it leaves
+  service, or another transaction fences it; the agent logs when it begins
+  sending it again and when it is answered. After the commit the new
   serving worker is sent `activate`. A restarted generation is sent
   `activate`, with a transaction id of its own, once the supervision step
   judges it ready; it is sent from a thread of its own, so the step does
   not wait for the answer, and not at all while a transaction has fenced
   that generation. An `activate` waits at most 3 seconds for its answer;
-  one not answered `ok` is logged and changes nothing else. The quota an
+  one after a commit or a restart not answered `ok` is logged and changes
+  nothing else. The quota an
   `ok` carries is the member's `effective_quota` in status. Operations to
   one worker are sent one at a time, and a restart's activate is not sent
   while a transaction's fence is in force. Each

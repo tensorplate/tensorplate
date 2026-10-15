@@ -14,7 +14,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
@@ -294,11 +294,38 @@ struct Member {
 /// shared with a thread that sends it one.
 #[derive(Default)]
 struct ControlState {
-    /// The transaction that fenced the member. Held while an operation is
-    /// sent, so operations reach the member in the order they were decided.
-    fenced_by: Mutex<Option<String>>,
+    /// The fence in force. Held while an operation is sent, so operations
+    /// reach the member in the order they were decided.
+    fenced_by: Mutex<Option<Fence>>,
     /// What the member's worker answered its last `activate` with.
     quota: Mutex<Option<MemberQuota>>,
+}
+
+impl ControlState {
+    /// Whether the activate a failed transaction owes the member is due at
+    /// `now`; if so it is next due at `next`. An operation being sent is
+    /// not waited for.
+    fn reopen_due(&self, now: Instant, next: Instant) -> bool {
+        let mut fenced_by = match self.fenced_by.try_lock() {
+            Ok(fenced_by) => fenced_by,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        match fenced_by.as_mut().map(|fence| &mut fence.reopen_at) {
+            Some(Some(at)) if now >= *at => {
+                *at = next;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+struct Fence {
+    transaction_id: String,
+    /// Set once the transaction failed and its activate was not answered
+    /// `ok`: when the supervision step sends that activate again.
+    reopen_at: Option<Instant>,
 }
 
 /// One member's control, taken out of the registry's lock to send it an
@@ -325,7 +352,10 @@ impl Reach {
     /// member whose answer was lost.
     fn fence(&self, transaction_id: &str) -> Result<WorkerControlResponse, ControlChannelError> {
         let mut fenced_by = lock(&self.control.fenced_by);
-        *fenced_by = Some(transaction_id.to_owned());
+        *fenced_by = Some(Fence {
+            transaction_id: transaction_id.to_owned(),
+            reopen_at: None,
+        });
         let command = RuntimeCommand::AdmissionFence {
             transaction_id: transaction_id.to_owned(),
         };
@@ -338,29 +368,62 @@ impl Reach {
         if unless_fenced && fenced_by.is_some() {
             return;
         }
-        self.send_activate(transaction_id);
-    }
-
-    /// Re-activate the member a transaction fenced and did not commit.
-    fn reopen(&self) {
-        let mut fenced_by = lock(&self.control.fenced_by);
-        if let Some(transaction_id) = fenced_by.take() {
-            self.send_activate(&transaction_id);
+        if let Err(why) = self.send_activate(transaction_id) {
+            eprintln!("{}: activate {why}", self.name);
         }
     }
 
-    /// An answer other than `ok` is logged, not returned: an activate
+    /// Re-activate the member a transaction fenced and did not commit. One
+    /// not answered `ok` stays fenced, owed the activate from `now` on.
+    fn reopen(&self, now: Instant) {
+        let mut fenced_by = lock(&self.control.fenced_by);
+        let Some(fence) = fenced_by.as_mut() else {
+            return;
+        };
+        let transaction_id = fence.transaction_id.clone();
+        match self.send_activate(&transaction_id) {
+            Ok(()) => *fenced_by = None,
+            Err(why) => {
+                if fence.reopen_at.replace(now).is_none() {
+                    eprintln!(
+                        "{}: activate after failed transaction `{transaction_id}` {why}; sent again until it is answered ok",
+                        self.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// Send again the activate a failed transaction owes the member, unless
+    /// it was answered `ok` or another transaction fenced the member since.
+    fn retry_reopen(&self) {
+        let mut fenced_by = lock(&self.control.fenced_by);
+        let owed = fenced_by.as_ref().filter(|fence| fence.reopen_at.is_some());
+        let Some(transaction_id) = owed.map(|fence| fence.transaction_id.clone()) else {
+            return;
+        };
+        if self.send_activate(&transaction_id).is_ok() {
+            *fenced_by = None;
+            eprintln!(
+                "{}: activate after failed transaction `{transaction_id}` answered ok",
+                self.name
+            );
+        }
+    }
+
+    /// Why an answer was not `ok`, for the caller to log: an activate
     /// follows a commit or a failure that it cannot undo.
-    fn send_activate(&self, transaction_id: &str) {
+    fn send_activate(&self, transaction_id: &str) -> Result<(), String> {
         let command = RuntimeCommand::Activate {
             transaction_id: transaction_id.to_owned(),
         };
         match self.caller.call(command, CONTROL_BUDGET) {
             Ok(answer) if answer.status == WorkerStatusOutcome::Ok => {
                 *lock(&self.control.quota) = answer.quota;
+                Ok(())
             }
-            Ok(answer) => eprintln!("{}: activate refused: {}", self.name, refusal(&answer)),
-            Err(err) => eprintln!("{}: activate not answered: {err}", self.name),
+            Ok(answer) => Err(format!("refused: {}", refusal(&answer))),
+            Err(err) => Err(format!("not answered: {err}")),
         }
     }
 }
@@ -556,7 +619,7 @@ pub struct MemberRegistry {
     /// Runs once, just before a restart reads the staged manifest.
     #[cfg(test)]
     before_staged_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    /// The threads that sent a restarted generation's activate.
+    /// The threads the supervision step sent an activate from.
     #[cfg(test)]
     activations: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
@@ -1213,15 +1276,40 @@ impl MemberRegistry {
         }
     }
 
-    /// A restarted generation's activate, on a thread of its own: the
-    /// supervision step does not wait for the answer.
-    #[cfg_attr(not(test), allow(clippy::unused_self))]
     fn activate_restarted(&self, reach: Reach) {
         let transaction_id = format!("tx-{}", uuid::Uuid::new_v4());
+        self.activate_on_thread(reach, move |reach| reach.activate(&transaction_id, true));
+    }
+
+    /// Send the serving member again the activate a failed transaction
+    /// owes it, at most once a poll interval.
+    fn retry_reopen(&self, now: Instant) {
+        let reach = {
+            let Ok(members) = self.members() else {
+                return;
+            };
+            let serving = members.serving;
+            let serving = serving.and_then(|generation| members.by_generation.get(&generation));
+            let Some(member) = serving else {
+                return;
+            };
+            let next = later(now, self.settings.status_poll_interval);
+            if !member.control.reopen_due(now, next) {
+                return;
+            }
+            Reach::of(member)
+        };
+        self.activate_on_thread(reach, Reach::retry_reopen);
+    }
+
+    /// An activate from the supervision step, on a thread of its own: the
+    /// step does not wait for the answer.
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    fn activate_on_thread(&self, reach: Reach, send: impl FnOnce(&Reach) + Send + 'static) {
         let name = reach.name.clone();
         let spawned = std::thread::Builder::new()
             .name("member-activate".into())
-            .spawn(move || reach.activate(&transaction_id, true));
+            .spawn(move || send(&reach));
         match spawned {
             #[cfg(test)]
             Ok(thread) => lock(&self.activations).push(thread),
@@ -1732,7 +1820,7 @@ impl WorkerControl for MemberRegistry {
                 .map(Reach::of)
         };
         if let Some(reach) = serving {
-            reach.reopen();
+            reach.reopen(self.clock.now());
         }
     }
 
@@ -1830,6 +1918,7 @@ impl WorkerControl for MemberRegistry {
         let mut events = Vec::new();
         let now = self.clock.now();
         self.watch_serving(now, &mut events);
+        self.retry_reopen(now);
         self.start_owed_restart(now, &mut events);
         events
     }

@@ -34,6 +34,26 @@ fn control_of(f: &Fixture, generation: u64) -> Arc<ControlState> {
     members.by_generation[&generation].control.clone()
 }
 
+/// The transaction a member's fence names, and whether its activate is owed.
+fn fence_of(control: &ControlState) -> Option<(String, bool)> {
+    let fenced_by = control.fenced_by.lock().unwrap();
+    let fence = fenced_by.as_ref();
+    fence.map(|fence| (fence.transaction_id.clone(), fence.reopen_at.is_some()))
+}
+
+/// `stt` serving as generation 1, fenced by `tx-2` and owed its activate
+/// after that transaction failed and its first activate was not answered.
+fn owed_a_reopen(f: &Fixture) -> Arc<Handle> {
+    let serving = f.serve("stt");
+    ready_candidate(f, "tts");
+    f.registry.fence("tx-2", &candidate("tts")).unwrap();
+    serving.reply(Reply::Unanswered);
+    f.registry.abandon(&candidate("tts"));
+    serving.reply(Reply::Answered);
+    assert_eq!(fence_of(&control_of(f, 1)), Some(("tx-2".into(), true)));
+    serving
+}
+
 fn step(f: &Fixture) -> Vec<MemberEvent> {
     f.clock.advance(Duration::from_secs(1));
     f.registry.supervise()
@@ -192,7 +212,7 @@ fn the_fencing_transaction_holds_the_members_operations_until_its_fence_is_answe
         fence.join().unwrap().unwrap();
     });
 
-    assert_eq!(*control.fenced_by.lock().unwrap(), Some("tx-2".to_owned()));
+    assert_eq!(fence_of(&control), Some(("tx-2".into(), false)));
 }
 
 #[test]
@@ -348,14 +368,166 @@ fn a_reopen_holds_the_members_operations_until_it_is_answered() {
 }
 
 #[test]
-fn a_loading_restart_a_transaction_fenced_is_reopened_by_its_own_activate_once_ready() {
+fn a_reopen_not_answered_ok_is_sent_again_from_the_supervision_step_until_it_is() {
+    for case in ["unanswered", "broken", "loading"] {
+        let f = fixture();
+        let serving = f.serve("stt");
+        ready_candidate(&f, "tts");
+        f.registry.fence("tx-2", &candidate("tts")).unwrap();
+        let refuse = |refused: bool| match case {
+            "unanswered" if refused => serving.reply(Reply::Unanswered),
+            "broken" if refused => serving.reply(Reply::Broken),
+            "loading" => serving.target.lock().unwrap().ceiling = (!refused).then_some(0),
+            _ => serving.reply(Reply::Answered),
+        };
+        refuse(true);
+
+        f.registry.abandon(&candidate("tts"));
+        step(&f);
+        activations_answered(&f);
+        assert_eq!(serving.admission(), Admission::Fenced, "{case}");
+        refuse(false);
+        step(&f);
+        activations_answered(&f);
+        step(&f);
+        activations_answered(&f);
+
+        assert_eq!(serving.admission(), Admission::Open, "{case}");
+        assert_eq!(fence_of(&control_of(&f, 1)), None, "{case}");
+        let reopened = [
+            sent(ACTIVATE, "tx"),
+            sent(FENCE, "tx-2"),
+            sent(ACTIVATE, "tx-2"),
+            sent(ACTIVATE, "tx-2"),
+            sent(ACTIVATE, "tx-2"),
+        ];
+        assert_eq!(serving.ops(), reopened, "{case}");
+        assert_eq!(quota_of(&f, 1), Some(MemberTarget::quota(0)), "{case}");
+    }
+}
+
+#[test]
+fn a_reopen_is_sent_again_at_most_once_a_poll_interval() {
+    let f = fixture_with(
+        |settings| RegistrySettings {
+            status_poll_interval: Duration::from_secs(5),
+            ..settings
+        },
+        |registry| registry,
+    );
+    let serving = owed_a_reopen(&f);
+    serving.reply(Reply::Unanswered);
+    let reopen = sent(ACTIVATE, "tx-2");
+    let reopens = || serving.ops().iter().filter(|op| **op == reopen).count();
+
+    f.registry.supervise();
+    activations_answered(&f);
+    f.registry.supervise();
+    activations_answered(&f);
+    assert_eq!(reopens(), 2);
+    f.clock.advance(Duration::from_secs(4));
+    f.registry.supervise();
+    activations_answered(&f);
+    assert_eq!(reopens(), 2);
+    f.clock.advance(Duration::from_secs(1));
+    f.registry.supervise();
+    activations_answered(&f);
+    assert_eq!(reopens(), 3);
+}
+
+#[test]
+fn a_transaction_that_fences_a_member_owed_a_reopen_takes_it_over() {
+    let f = fixture();
+    let serving = owed_a_reopen(&f);
+    ready_candidate(&f, "tts");
+    serving.target.lock().unwrap().ceiling = None;
+    let (asked, answer) = serving.hold_call();
+    let control = control_of(&f, 1);
+
+    step(&f);
+    asked.recv_timeout(GRACE).unwrap();
+    std::thread::scope(|scope| {
+        let answer = answer;
+        let fence = scope.spawn(|| f.registry.fence("tx-4", &candidate("tts")));
+        assert!(control.fenced_by.try_lock().is_err());
+        answer.send(()).unwrap();
+        fence.join().unwrap().unwrap();
+    });
+    activations_answered(&f);
+    assert_eq!(fence_of(&control), Some(("tx-4".into(), false)));
+    serving.target.lock().unwrap().ceiling = Some(0);
+    step(&f);
+    activations_answered(&f);
+    f.registry.activate("tx-4", &candidate("tts")).unwrap();
+    step(&f);
+    activations_answered(&f);
+
+    let ops = serving.ops();
+    let taken_over = [sent(ACTIVATE, "tx-2"), sent(FENCE, "tx-4")];
+    assert_eq!(ops[ops.len() - 2..], taken_over, "{ops:?}");
+    let served = f.registry.active_deployment_id().unwrap();
+    assert_eq!(served.as_deref(), Some("tts"));
+}
+
+#[test]
+fn a_reopen_sent_again_once_another_transaction_fenced_the_member_sends_nothing() {
+    let f = fixture();
+    let serving = owed_a_reopen(&f);
+    ready_candidate(&f, "tts");
+    let reach = {
+        let members = f.registry.members().unwrap();
+        Reach::of(&members.by_generation[&1], "serving")
+    };
+    f.registry.fence("tx-4", &candidate("tts")).unwrap();
+
+    reach.retry_reopen();
+
+    assert_eq!(serving.ops().last(), Some(&sent(FENCE, "tx-4")));
+    assert_eq!(serving.admission(), Admission::Fenced);
+}
+
+#[test]
+fn the_supervision_step_does_not_wait_for_an_operation_being_sent() {
+    let f = fixture();
+    let serving = owed_a_reopen(&f);
+    ready_candidate(&f, "tts");
+    let (asked, answer) = serving.hold_call();
+
+    std::thread::scope(|scope| {
+        let answer = answer;
+        let fence = scope.spawn(|| f.registry.fence("tx-4", &candidate("tts")));
+        asked.recv_timeout(GRACE).unwrap();
+        step(&f);
+        answer.send(()).unwrap();
+        fence.join().unwrap().unwrap();
+    });
+}
+
+#[test]
+fn a_member_owed_a_reopen_that_exits_is_sent_it_no_more() {
+    let f = fixture();
+    let serving = owed_a_reopen(&f);
+    serving.exited.store(true, Ordering::SeqCst);
+
+    step(&f);
+    step(&f);
+    activations_answered(&f);
+
+    let ops = serving.ops();
+    assert_eq!(ops.last(), Some(&sent(ACTIVATE, "tx-2")), "{ops:?}");
+    assert_eq!(ops.len(), 3, "{ops:?}");
+}
+
+#[test]
+fn a_loading_restart_a_transaction_fenced_is_reopened_by_the_step_once_its_worker_admits() {
     let f = fixture();
     let successor = restarted(&f);
     successor.target.lock().unwrap().ceiling = None;
     ready_candidate(&f, "tts");
     f.registry.fence("tx-3", &candidate("tts")).unwrap();
 
-    // Refused `not_ready`: the worker stays fenced, the record does not.
+    // Refused `not_ready`: the worker stays fenced, and so does the record,
+    // which holds back the restart's own activate.
     f.registry.abandon(&candidate("tts"));
     assert_eq!(successor.admission(), Admission::Fenced);
     successor.target.lock().unwrap().ceiling = Some(0);
@@ -364,10 +536,12 @@ fn a_loading_restart_a_transaction_fenced_is_reopened_by_its_own_activate_once_r
     activations_answered(&f);
 
     assert_eq!(successor.admission(), Admission::Open);
-    let ops = successor.ops();
-    assert_eq!(ops[..2], [sent(FENCE, "tx-3"), sent(ACTIVATE, "tx-3")]);
-    assert_eq!(ops.len(), 3, "{ops:?}");
-    assert_eq!(ops[2].0, ACTIVATE);
+    let reopened = [
+        sent(FENCE, "tx-3"),
+        sent(ACTIVATE, "tx-3"),
+        sent(ACTIVATE, "tx-3"),
+    ];
+    assert_eq!(successor.ops(), reopened);
 }
 
 #[test]
