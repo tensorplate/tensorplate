@@ -1,0 +1,91 @@
+name: TensorRT SDK
+
+on:
+  pull_request:
+    paths:
+      - 'runtime/**'
+      - 'serving_worker/**'
+      - 'include/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'vcpkg.json'
+      - 'test/**'
+      - 'tools/ci/*tensorrt*'
+      - '.github/workflows/tensorrt-sdk.yml'
+  push:
+    branches: [main, develop]
+
+concurrency:
+  group: tensorrt-sdk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_GENERATOR: Ninja
+  VCPKG_BINARY_SOURCES: clear
+
+# Keep this path-filtered workflow optional in branch protection: a skipped
+# required workflow would block unrelated pull requests.
+jobs:
+  tensorrt-sdk:
+    name: TensorRT SDK (amd64, no GPU)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      CC: clang
+      CXX: clang++
+      CMAKE_BUILD_PARALLEL_LEVEL: '4'
+      VCPKG_MAX_CONCURRENCY: '4'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          tools/ci/apt-get.sh update
+          tools/ci/apt-get.sh install -y --no-install-recommends ninja-build ca-certificates
+          tools/ci/select-clang.sh
+
+      - name: Install pinned TensorRT and CUDA development packages
+        run: tools/ci/install-tensorrt-sdk.sh
+
+      - name: Check out vcpkg at the manifest's baseline
+        run: tools/ci/checkout-vcpkg.sh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python sidecar backend
+        run: python -m pip install -e backends/python_pytorch
+
+      - name: Configure with the required TensorRT SDK
+        run: |
+          cmake -S . -B build-tensorrt \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DTP_WARNINGS_AS_ERRORS=ON \
+            -DTP_ENABLE_SANITIZERS=OFF \
+            -DTP_ENABLE_TENSORRT=ON \
+            -DTP_REQUIRE_TENSORRT_SDK=ON \
+            -DTP_ENABLE_STREAMING_GRPC=OFF \
+            -DCUDAToolkit_ROOT="$CUDAToolkit_ROOT" \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_CHAINLOAD_TOOLCHAIN_FILE="$PWD/cmake/toolchains/x86_64-linux-gnu.cmake"
+
+      - name: Build worker and tests
+        run: cmake --build build-tensorrt --parallel 4
+
+      - name: Verify worker linkage and loader resolution
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          worker=build-tensorrt/serving_worker/tensorplate-serving
+          readelf -d "$worker" > build-tensorrt/worker-dynamic.txt
+          grep -E 'NEEDED.*\[libnvinfer\.so\.' build-tensorrt/worker-dynamic.txt
+          grep -E 'NEEDED.*\[libcudart\.so\.' build-tensorrt/worker-dynamic.txt
+          ldd "$worker" | tee build-tensorrt/worker-ldd.txt
+          if grep -q 'not found' build-tensorrt/worker-ldd.txt; then exit 1; fi
+          "$worker" --version
+
+      - name: Device-free T1, T2 and T3 tests
+        env:
+          TP_TEST_PYTHON: python
+        run: ctest --test-dir build-tensorrt --output-on-failure --no-tests=error -L 'T[123]'

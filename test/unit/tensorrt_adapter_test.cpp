@@ -3,8 +3,8 @@
 // V01-E05-F02 unit tests for the TensorRT adapter.
 //
 // These tests are compiled only when `TP_ENABLE_TENSORRT=1`. They
-// exercise the registration / capability path and the no-SDK behavior
-// of `do_load`. Real engine load + inference is gated by the
+// exercise registration, capabilities, invalid-engine failures and the
+// no-SDK behavior of `do_load`. Real engine load + inference is gated by the
 // `TP_HAS_TENSORRT_SDK` define and exercised by the V01-E05-F02-T03
 // vision-golden fixture and the V01-E05-F06 hardware-in-loop tier.
 
@@ -16,7 +16,13 @@ TEST(TensorRTAdapter, FeatureFlagDisabled) {
 }
 #else
 
+#include <cstdio>
+#include <memory>
 #include <string>
+
+#if TP_HAS_TENSORRT_SDK
+#include <cuda_runtime_api.h>
+#endif
 
 #include "tensorplate/backend/capability.hpp"
 #include "tensorplate/backend/registry.hpp"
@@ -70,15 +76,45 @@ TEST(TensorRTAdapter, LoadWithoutSdkReportsUnsupported) {
   auto spec = ModelSpec::create("trt-vision", ModelClass::Vision, "/dev/null", "tensorrt").value();
   auto r = session.value()->load(spec);
 #if TP_HAS_TENSORRT_SDK
-  // With SDK present, `/dev/null` is either parseable (unlikely) or
-  // returns LoadFailed. Either way the call should not return
-  // Unsupported.
-  if (!r.has_value()) {
-    EXPECT_NE(r.error().code, Error::Code::Unsupported);
-  }
+  // An empty file fails before TensorRT runtime creation.
+  ASSERT_FALSE(r.has_value());
+  EXPECT_EQ(r.error().code, Error::Code::LoadFailed);
 #else
   ASSERT_FALSE(r.has_value());
   EXPECT_EQ(r.error().code, Error::Code::Unsupported);
+#endif
+}
+
+TEST(TensorRTAdapter, NonEmptyInvalidEngineReportsLoadFailed) {
+#if TP_HAS_TENSORRT_SDK
+  int device_count = 0;
+  if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "TensorRT runtime needs a usable driver and device to get past "
+                    "createInferRuntime";
+  }
+
+  const std::unique_ptr<std::FILE, decltype(&std::fclose)> engine(std::tmpfile(), &std::fclose);
+  ASSERT_NE(engine, nullptr);
+  ASSERT_GE(std::fputs("not a TensorRT engine", engine.get()), 0);
+  ASSERT_EQ(std::fflush(engine.get()), 0);
+  const auto path = "/proc/self/fd/" + std::to_string(::fileno(engine.get()));
+
+  BackendRegistry reg;
+  ASSERT_TRUE(register_tensorrt_backend(reg).has_value());
+  auto session = reg.create_session("tensorrt");
+  ASSERT_TRUE(session.has_value());
+  auto spec = ModelSpec::create("invalid-engine", ModelClass::Vision, path, "tensorrt").value();
+  const auto result = session.value()->load(spec);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.error().code, Error::Code::LoadFailed);
+  // Both errors follow createInferRuntime; an early file-read failure is not enough.
+  EXPECT_TRUE(result.error().message == "createInferRuntime returned null" ||
+              result.error().message ==
+                  "TensorRT engine deserialization failed (architecture mismatch?)")
+      << result.error().message;
+  EXPECT_FALSE(session.value()->is_ready());
+#else
+  GTEST_SKIP() << "TensorRT SDK is required to reject a non-empty engine";
 #endif
 }
 

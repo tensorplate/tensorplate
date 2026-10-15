@@ -5079,9 +5079,10 @@ class HostedCompilerTests(unittest.TestCase):
                 selecting[path.name, name] = selected
         self.assertEqual(sorted(selecting), [
             ("apt-lifecycle.yml", "cpu-only-smoke"), ("cpp.yml", "adapter-shells"),
-            ("cpp.yml", "build-test"), ("cpp.yml", "tensorrt-sdk"), ("cpp.yml", "tidy"),
+            ("cpp.yml", "build-test"), ("cpp.yml", "tidy"),
             ("release-dependencies.yml", "restore"), ("release-dependencies.yml", "warm"),
-            ("release.yml", "build_packages_amd64"), ("supply-chain.yml", "native")])
+            ("release.yml", "build_packages_amd64"), ("supply-chain.yml", "native"),
+            ("tensorrt-sdk.yml", "tensorrt-sdk")])
 
 
 class NativeClosureScanTests(unittest.TestCase):
@@ -5614,8 +5615,57 @@ class CheckoutVcpkgTests(unittest.TestCase):
         self.assertEqual(self.exported(), "")
 
 
+class TensorRTKeyringTests(unittest.TestCase):
+    """The repository trust anchor fails closed even when errexit is suppressed."""
+
+    def check_failure(self, stage, message):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            scripts = root / "tools/ci"
+            scripts.mkdir(parents=True)
+            installer = REPO_ROOT / "tools/ci/install-tensorrt-sdk.sh"
+            shutil.copy2(installer, scripts / installer.name)
+            keyring = b"test keyring bytes\n"
+            digest = hashlib.sha256(keyring).hexdigest() if stage != "checksum" else "0" * 64
+            (scripts / "tensorrt-sdk-versions.sh").write_text(
+                "NVIDIA_APT_URL=https://example.invalid\nNVIDIA_KEYRING_VERSION=1\n"
+                f"NVIDIA_KEYRING_SHA256={digest}\n")
+            write_executable(scripts / "apt-get.sh", "#!/bin/sh\necho UNEXPECTED_APT\nexit 1\n")
+            bins = root / "bin"
+            bins.mkdir()
+            write_executable(bins / "id", "#!/bin/sh\necho 0\n")
+            write_executable(bins / "curl", (
+                "#!/bin/bash\n"
+                + ("exit 22\n" if stage == "download" else
+                   "printf 'test keyring bytes\\n' > \"${!#}\"\n")))
+            write_executable(bins / "dpkg", (
+                "#!/bin/sh\n"
+                'if [ "$1" = --print-architecture ]; then echo amd64; exit 0; fi\n'
+                "echo DPKG_INSTALL\nexit 1\n"))
+            # Sourcing in an if disables Bash's implicit errexit protection.
+            result = subprocess.run(
+                ["bash", "-c", 'if source "$0"; then exit 0; fi',
+                 "tools/ci/install-tensorrt-sdk.sh"],
+                cwd=root, env={**os.environ, "PATH": f"{bins}:{os.environ['PATH']}"},
+                text=True, capture_output=True)
+            output = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 1, output)
+            self.assertIn(message, output)
+            self.assertNotIn("UNEXPECTED_APT", output)
+            self.assertEqual("DPKG_INSTALL" in output, stage == "install", output)
+
+    def test_failed_keyring_download_stops_before_install(self):
+        self.check_failure("download", "NVIDIA keyring download failed")
+
+    def test_bad_keyring_hash_stops_before_install(self):
+        self.check_failure("checksum", "NVIDIA keyring checksum verification failed")
+
+    def test_failed_keyring_install_stops_before_apt(self):
+        self.check_failure("install", "NVIDIA keyring installation failed")
+
+
 class CppWorkflowVcpkgTests(unittest.TestCase):
-    """Where the C++ workflow gets its vcpkg, and what its dependency cache key names."""
+    """Where C++ workflows get vcpkg, and what the dependency cache key names."""
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -5629,9 +5679,11 @@ class CppWorkflowVcpkgTests(unittest.TestCase):
     def test_every_job_that_configures_through_vcpkg_checks_it_out_first(self):
         users = {name for name, job in self.jobs.items()
                  if "scripts/buildsystems/vcpkg.cmake" in json.dumps(job)}
-        self.assertEqual(users, {"build-test", "adapter-shells", "tensorrt-sdk", "tidy"})
-        for name in users:
-            steps = self.jobs[name]["steps"]
+        self.assertEqual(users, {"build-test", "adapter-shells", "tidy"})
+        sdk_jobs = yaml.safe_load((WORKFLOWS / "tensorrt-sdk.yml").read_text())["jobs"]
+        jobs = {name: self.jobs[name] for name in users} | sdk_jobs
+        for name, job in jobs.items():
+            steps = job["steps"]
             checkouts = [i for i, step in enumerate(steps)
                          if "tools/ci/checkout-vcpkg.sh" in (step.get("run") or "")]
             self.assertEqual(len(checkouts), 1, name)

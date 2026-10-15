@@ -216,15 +216,26 @@ pytest -q
 
 ## Continuous Integration
 
-Two workflows live under `.github/workflows/`:
+The CI workflows live under `.github/workflows/`:
 
 - `cpp.yml` builds the C++ targets and runs the T1, T2 and T3 labels on
   Ubuntu 22.04. Jobs: `build-test` (release, ASAN/UBSAN and TSAN matrix),
   `adapter-shells` (the TensorRT and LibTorch adapter shells built without
-  their SDKs, T1), `tensorrt-sdk` (the required TensorRT/CUDA SDK on amd64,
-  worker linkage/startup and device-free T1/T2/T3), `format` (clang-format
-  --dry-run -Werror over all tracked C++ files), and `tidy` (clang-tidy on runtime and serving worker
-  translation units against the configured `compile_commands.json`).
+  their SDKs, T1), `format` (clang-format --dry-run -Werror over all tracked
+  C++ files), and `tidy` (clang-tidy on runtime and serving worker translation
+  units against the configured `compile_commands.json`).
+- `tensorrt-sdk.yml` builds with the required TensorRT/CUDA SDK on amd64,
+  checks worker linkage and loader resolution with `--version`, and runs
+  device-free T1/T2/T3. `--version` returns before worker initialization;
+  it proves only that the loader resolves the libraries. The junk-engine
+  case skips without a usable CUDA driver/device, so the hosted runner does
+  not verify `createInferRuntime` without a driver. This optional workflow
+  runs on pushes to main/develop and on pull requests touching
+  `runtime/`, `serving_worker/`, `include/`, `cmake/`, `CMakeLists.txt`,
+  `vcpkg.json`, `test/`, `tools/ci/*tensorrt*`, or the workflow itself.
+  Changes outside those paths that break the SDK build are caught only
+  on the develop push. Do not make it required: a path-filtered required
+  workflow can block unrelated pull requests when skipped.
 - `rust.yml` runs `cargo fmt --all -- --check`, `cargo clippy --workspace
   --all-targets -- -D warnings`, and `cargo test --workspace`. The pinned
   toolchain in `rust-toolchain.toml` is materialized via `rustup toolchain
@@ -250,13 +261,13 @@ Two workflows live under `.github/workflows/`:
   vcpkg finds unchanged in the previous tree are kept. The clang-tidy and
   adapter-shell jobs build their two small dependencies each run. The
   release jobs keep a separate cache (`.github/actions/release-vcpkg`).
-- The `tensorrt-sdk` job caches NVIDIA apt package archives under an exact
-  key derived from `tools/ci/tensorrt-sdk-versions.sh` and its installer.
-  That file is the single source for SDK versions, including NVIDIA dependencies.
-  APT checks archives against signed repository metadata; no fallback key
-  mixes SDK versions. The job summary records cache hit/miss, archive bytes,
-  download/check time and install time. Cache transfer timing is in the
-  Actions cache steps. See the
+- The `tensorrt-sdk.yml` job does not cache SDK package archives. Each
+  installation uses a fresh temporary archive directory, removed on exit.
+  APT verifies the signed repository index and checks each downloaded
+  package's hash; existing archives cannot be trusted by size alone.
+  `tools/ci/tensorrt-sdk-versions.sh` records the exact SDK and dependency
+  versions. The job summary records APT's download bytes/time and total
+  download/install time. See the
   [SDK build notes](docs/contributing/local-validation.md#tensorrt-sdk-build-without-a-gpu).
 - Every hosted job compiles with Clang 14, the runner image's default, which
   `tools/ci/select-clang.sh` selects and checks. The devcontainer's Clang 15 is
@@ -275,7 +286,7 @@ Two workflows live under `.github/workflows/`:
 | `cpp.yml / build-test (asan-ubsan)` | Yes | PR + push to main, develop |
 | `cpp.yml / build-test (tsan)` | Not yet; runs on every PR | PR + push to main, develop |
 | `cpp.yml / adapter-shells` | Yes | PR + push to main, develop |
-| `cpp.yml / tensorrt-sdk` | Runs on every PR; branch protection unchanged | PR + push to main, develop |
+| `tensorrt-sdk.yml / tensorrt-sdk` | No; keep optional | Path-filtered PR + every push to main, develop |
 | `cpp.yml / format` | Yes | PR + push to main, develop |
 | `cpp.yml / tidy` | Yes | PR + push to main, develop |
 | `rust.yml / fmt + clippy + test` | Yes | PR + push to main, develop |
