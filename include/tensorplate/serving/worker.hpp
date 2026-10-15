@@ -101,6 +101,7 @@ class ServingWorker {
 
   /// Open the HTTP listener and start serving. Idempotent: a second
   /// call returns Ok if the worker is already serving.
+  /// After `stop()` it opens nothing and returns `Unavailable` (`worker_shutdown`).
   [[nodiscard]] Result<void> start();
 
   /// Block until shutdown is requested and drained.
