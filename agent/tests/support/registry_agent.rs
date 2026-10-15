@@ -233,6 +233,15 @@ impl RegistryAgent {
         Self::start_on(h, config, ports)
     }
 
+    /// As [`Self::start`], configured as a packaged agent is: `process`
+    /// mode and no range, so its workers hold no stream port.
+    pub fn start_packaged(h: &Harness) -> Self {
+        let mut config = h.config.clone();
+        config.worker.mode = WorkerControlMode::Process;
+        let ports = PORTS.map(|http| MemberPorts { http, stream: None });
+        Self::start_on(h, config, ports.to_vec())
+    }
+
     fn start_on(h: &Harness, config: AgentConfig, ports: Vec<MemberPorts>) -> Self {
         let workers = Arc::new(Workers::default());
         let clock = Arc::new(FakeClock::new());

@@ -176,7 +176,7 @@ fn streaming_is_refused_before_staging_for_a_bundle_that_is_not_speech() {
 #[test]
 fn streaming_is_refused_before_staging_by_an_agent_with_no_stream_ports() {
     let h = Harness::new();
-    let agent = RegistryAgent::start(&h);
+    let agent = RegistryAgent::start_packaged(&h);
     let refused = deploy(&agent, "stt", &speech_bundle(h.td.path(), "stt"), true);
 
     refused_as_config_invalid(refused);
@@ -192,6 +192,10 @@ fn the_agent_lists_streaming_only_where_its_configuration_gives_stream_ports() {
     assert_eq!(
         features(RegistryAgent::start_with_stream_ports(&h)),
         [FEATURE_DEPLOY_STREAMING]
+    );
+    assert_eq!(
+        features(RegistryAgent::start_packaged(&h)),
+        Vec::<String>::new()
     );
     assert_eq!(features(RegistryAgent::start(&h)), Vec::<String>::new());
 }

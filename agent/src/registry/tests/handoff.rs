@@ -5,7 +5,7 @@
 //! member.
 
 use super::*;
-use tensorplate_protocol::agent_control::AgentRunState;
+use tensorplate_protocol::agent_control::{AgentRunState, DeploymentSummary};
 use tensorplate_protocol::agent_state::{AgentState, DeploymentRecord};
 use tensorplate_protocol::bundle_profile::BundleRuleCode;
 use tensorplate_protocol::deploy_transaction::DeployState;
@@ -166,6 +166,21 @@ fn with_stream_ports(settings: RegistrySettings, streams: bool) -> RegistrySetti
     }
 }
 
+/// The configuration of an agent that starts its workers with stream ports.
+fn streams(config: &mut AgentConfig) {
+    config.worker.mode = crate::config::WorkerControlMode::Process;
+    config.worker.serving_port_range = Some(crate::config::PortRange {
+        first: ACTIVE_PORT + 10,
+        last: CANDIDATE_PORT + 10,
+    });
+}
+
+/// `active` as status reports it, and as the state records it.
+fn active_of(w: &Wired) -> (DeploymentSummary, DeploymentRecord) {
+    let reported = w.coordinator.status().unwrap().active.unwrap();
+    (reported, w.store.snapshot().unwrap().active.unwrap())
+}
+
 fn wired_with(step: Step, configure: impl FnOnce(&mut AgentConfig)) -> Wired {
     wired_at(Arc::new(TempDir::new().unwrap()), step, configure)
 }
@@ -232,6 +247,13 @@ impl Wired {
         let bundle = std::path::PathBuf::from(bundle_fixture(bundle));
         let labels = BTreeMap::new();
         let deployed = self.coordinator.deploy(id, &bundle, labels, None, None);
+        deployed.map(|_| ())
+    }
+    fn deploy_streaming(&self, id: &str, bundle: &str) -> AgentResult<()> {
+        let bundle = std::path::PathBuf::from(bundle_fixture(bundle));
+        let deployed = self
+            .coordinator
+            .deploy_with(id, &bundle, BTreeMap::new(), None, None, true);
         deployed.map(|_| ())
     }
     /// The serving generation exits and its restart comes due.
@@ -1141,18 +1163,8 @@ fn a_transaction_whose_activation_a_stop_refused_is_settled_forward_at_the_next_
 
 #[test]
 fn status_withholds_the_stream_endpoint_between_the_commit_and_the_activation() {
-    let w = wired_with(Step::BeforePrepare, |config| {
-        config.worker.mode = crate::config::WorkerControlMode::Process;
-        config.worker.serving_port_range = Some(crate::config::PortRange {
-            first: ACTIVE_PORT + 10,
-            last: CANDIDATE_PORT + 10,
-        });
-    });
-    let streaming = std::path::PathBuf::from(bundle_fixture(STT));
-    let deployed = w
-        .coordinator
-        .deploy_with("stt", &streaming, BTreeMap::new(), None, None, true);
-    deployed.unwrap();
+    let w = wired_with(Step::BeforePrepare, streams);
+    w.deploy_streaming("stt", STT).unwrap();
     let endpoint = format!("127.0.0.1:{}", ACTIVE_PORT + 10);
     let before = w.coordinator.status().unwrap().active.unwrap();
     assert_eq!(before.stream_endpoint, Some(endpoint));
@@ -1188,6 +1200,45 @@ fn status_withholds_the_stream_endpoint_between_the_commit_and_the_activation() 
         (after.stream_endpoint, after.descriptor_digest),
         (None, None)
     );
+}
+
+#[test]
+fn a_described_streaming_deployment_streams_again_after_the_next_start_restores_it() {
+    let w = wired_with(Step::BeforePrepare, streams);
+    w.deploy_streaming("stt", STT).unwrap();
+    let (_, first) = active_of(&w);
+
+    let next = wired_at(w.root.clone(), Step::BeforePrepare, streams);
+    apply_startup(&next.coordinator).unwrap();
+
+    let (reported, restored) = active_of(&next);
+    assert!(restored.streaming);
+    assert_eq!(restored.generation, Some(2));
+    assert_ne!(restored.descriptor_digest, first.descriptor_digest);
+    assert_eq!(reported.generation, restored.generation);
+    assert_eq!(reported.descriptor_digest, restored.descriptor_digest);
+    let endpoint = format!("127.0.0.1:{}", ACTIVE_PORT + 10);
+    assert_eq!(reported.stream_endpoint, Some(endpoint));
+}
+
+#[test]
+fn a_rollback_to_a_described_streaming_deployment_streams_with_its_re_stamped_descriptor() {
+    let w = wired_with(Step::BeforePrepare, streams);
+    w.deploy_streaming("stt", STT).unwrap();
+    let (_, first) = active_of(&w);
+    w.deploy("tts", TTS).unwrap();
+
+    w.coordinator.rollback(None).unwrap();
+
+    let (reported, back) = active_of(&w);
+    assert_eq!(back.deployment_id, "stt");
+    assert!(back.streaming);
+    assert_eq!(back.generation, Some(3));
+    assert_ne!(back.descriptor_digest, first.descriptor_digest);
+    assert_eq!(reported.generation, back.generation);
+    assert_eq!(reported.descriptor_digest, back.descriptor_digest);
+    let endpoint = format!("127.0.0.1:{}", ACTIVE_PORT + 10);
+    assert_eq!(reported.stream_endpoint, Some(endpoint));
 }
 
 #[test]
