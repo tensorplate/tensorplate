@@ -18,6 +18,8 @@ Threads
     admitted job waits in one FIFO for the calling thread, so its calls
     never overlap and run in arrival order. At most 8 jobs and 8 unary
     requests wait; one more is refused with ``resource_exhausted``.
+    :func:`watch_parent`'s thread ends the process once the serving worker
+    that started it is gone.
 
 Writes
     A frame is written whole, under one lock. A write that fails, or makes no
@@ -53,6 +55,7 @@ import socket
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -80,6 +83,14 @@ CAPABILITIES: Final[tuple[str, ...]] = (protocol.CAPABILITY_SPEECH_JOBS_V1,)
 WRITE_STALL_TIMEOUT_S: float = 5.0
 #: How long the reader waits for bytes before it looks again at whether the connection ended.
 READ_POLL_S: float = 1.0
+
+#: How often the runner looks whether the process that started it is gone.
+PARENT_POLL_S: float = 1.0
+#: How long the runner waits for its parent-gone line to be written before it exits anyway.
+PARENT_GONE_LOG_WAIT_S: float = 1.0
+
+#: The exit status of a runner whose parent, the serving worker, is gone.
+EXIT_PARENT_GONE: Final[int] = 4
 _JOB_KINDS: Final[frozenset[str]] = frozenset(
     {protocol.KIND_JOB_SUBMIT, protocol.KIND_JOB_CANCEL, protocol.KIND_SESSION_RELEASE}
 )
@@ -562,6 +573,46 @@ class SidecarRunner:
 # ----------------------------------------------------------------------
 
 
+def watch_parent(
+    *,
+    poll_s: float = PARENT_POLL_S,
+    getppid: Callable[[], int] = os.getppid,
+    sleep: Callable[[float], object] = time.sleep,
+    join: Callable[[threading.Thread, float], object] = threading.Thread.join,
+    exit_process: Callable[[int], object] = os._exit,
+) -> threading.Thread:
+    """Start a daemon thread that ends the process once its parent changes.
+
+    A runner whose serving worker was killed is adopted by another process,
+    and would hold what its backend holds. The exit skips cleanup, since a
+    backend call may be in progress on another thread.
+    """
+    parent = getppid()
+
+    def watch() -> None:
+        while getppid() == parent:
+            sleep(poll_s)
+        # The line gets a bounded wait, since a full stderr pipe blocks its write,
+        # and the exit runs even when the line's thread cannot start.
+        try:
+            line = threading.Thread(
+                target=logger.error,
+                args=(
+                    "tensorplate sidecar: the serving worker that started this runner is gone;"
+                    " exiting",
+                ),
+                name="sidecar-parent-gone-line",
+            )
+            line.start()
+            join(line, PARENT_GONE_LOG_WAIT_S)
+        finally:
+            exit_process(EXIT_PARENT_GONE)
+
+    thread = threading.Thread(target=watch, name="sidecar-parent-watch", daemon=True)
+    thread.start()
+    return thread
+
+
 def _connect_socket(socket_path: str, *, timeout_s: float) -> socket.socket:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout_s)
@@ -598,6 +649,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     sanitize.configure_process_logging(args.log_level)
+    watch_parent()
 
     try:
         sock = _connect_socket(args.socket, timeout_s=args.connect_timeout_s)
@@ -619,8 +671,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
+    "EXIT_PARENT_GONE",
     "RunnerState",
     "SidecarRunner",
     "default_backend_factories",
     "main",
+    "watch_parent",
 ]

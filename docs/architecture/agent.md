@@ -956,8 +956,11 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   sessions for 5 seconds (`shutdown.drain_deadline_ms`), so its own drain
   ends before the registry would kill it. The signal goes to the worker's
   process id only: a worker that has to be killed leaves its sidecar to
-  exit when it sees its peer closed. Every member is stopped this way when
-  the agent itself is told to stop.
+  exit when it sees the worker's socket close or, while a backend call
+  holds it, within about two seconds of the kill, once it sees its parent
+  change (status 4; see
+  [the speech dispatch](serving-worker.md#the-speech-dispatch-in-the-worker)).
+  Every member is stopped this way when the agent itself is told to stop.
 - **Promotion.** A candidate that exited after it was warmed is refused
   by the fence, before the commit write: the deploy fails with the
   worker's failure and the serving member stays. Once the commit is

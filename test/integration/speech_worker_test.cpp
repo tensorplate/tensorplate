@@ -20,11 +20,16 @@ TEST(SpeechWorker, FeatureFlagDisabled) {
 #include <grpcpp/grpcpp.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -1400,23 +1405,32 @@ TEST_F(SpeechWorkerRunner, OneSegmentIsSynthesized) {
 }
 
 #ifdef TP_SERVING_WORKER_BINARY
-// The worker binary over the runner with a fixture backend that never ends a
-// job (test/mocks/worker_held_job_sidecar.py). A session cancelled under its
-// job holds its place until its release passes the bound (the job's deadline,
-// 10 s and 50 ms, then 10 s); the worker then stops by itself, its unload
-// gives up on the job after the adapter's 15 s and ends the sidecar, and the
-// process exits as an internal error. The case waits that long.
-TEST_F(SpeechWorkerRunner, AWorkerProcessWhoseBackendKeepsACancelledJobExitsAsFailed) {
-  std::string pattern = (std::filesystem::temp_directory_path() / "tp-stall-XXXXXX").string();
-  ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
-  const std::filesystem::path dir = pattern;
-  struct Removed {
+/// The worker binary over the runner with a fixture backend that never ends a
+/// job (test/mocks/worker_held_job_sidecar.py), with one stream session whose
+/// utterance the backend took. Declared in the order it is torn down from the
+/// end: the session, the worker, then its directory.
+struct HeldJob {
+  struct Scratch {
     std::filesystem::path dir;
-    ~Removed() {
+    ~Scratch() {
       std::error_code ignored;
       std::filesystem::remove_all(dir, ignored);
     }
-  } removed{dir};
+  } scratch;
+  std::optional<tensorplate::testing::ChildProcess> worker;
+  std::unique_ptr<wire::SessionService::Stub> stub;
+  Client client;
+
+  [[nodiscard]] std::string log() const { return worker->stderr_text(); }
+};
+
+/// Starts the worker of `held`, opens its session and waits until the
+/// backend holds the session's job.
+void hold_a_job(HeldJob& held) {
+  std::string pattern = (std::filesystem::temp_directory_path() / "tp-stall-XXXXXX").string();
+  ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
+  held.scratch.dir = pattern;
+  const auto& dir = held.scratch.dir;
   const auto wrapper = dir / "sidecar";
   std::ofstream(wrapper)
       << "#!/bin/sh\nexec \"${TP_TEST_PYTHON:-python3}\" \"$TP_HELD_JOB_SIDECAR\" \"$@\"\n";
@@ -1436,30 +1450,30 @@ TEST_F(SpeechWorkerRunner, AWorkerProcessWhoseBackendKeepsACancelledJobExitsAsFa
                        {"shutdown", {{"drain_deadline_ms", 300}}},
                        {"enable_stderr_logs", true}};
   const tensorplate::testing::OwnedFd null_input{::open("/dev/null", O_RDONLY)};
-  auto worker = tensorplate::testing::ChildProcess::spawn(
+  held.worker.emplace(tensorplate::testing::ChildProcess::spawn(
       {TP_SERVING_WORKER_BINARY, "--config-json", config.dump()}, null_input.get(),
       dir / "stderr.txt",
       {"TP_PYTHON_PYTORCH_EXECUTABLE=" + wrapper.string(),
        "TP_HELD_JOB_SIDECAR=" +
            (std::filesystem::path{TP_SOURCE_DIR} / "test/mocks/worker_held_job_sidecar.py")
                .string(),
-       "TP_HELD_JOB_TEST_DIR=" + dir.string()});
+       "TP_HELD_JOB_TEST_DIR=" + dir.string()}));
   std::vector<Json> bound;
   const auto loading = std::chrono::steady_clock::now() + 60s;
   while (bound.empty() && std::chrono::steady_clock::now() < loading) {
     std::this_thread::sleep_for(20ms);
-    bound = logged(worker.stderr_text(), "stream listener bound");
+    bound = logged(held.log(), "stream listener bound");
   }
-  ASSERT_EQ(bound.size(), 1U) << worker.stderr_text();
-  const auto stub = wire::SessionService::NewStub(
+  ASSERT_EQ(bound.size(), 1U) << held.log();
+  held.stub = wire::SessionService::NewStub(
       grpc::CreateChannel("127.0.0.1:" + std::to_string(bound.front().at("port").get<int>()),
                           grpc::InsecureChannelCredentials()));
-  Client client;
+  Client& client = held.client;
   client.context->set_deadline(std::chrono::system_clock::now() + 180s);
-  client.call = stub->Session(client.context.get());
+  client.call = held.stub->Session(client.context.get());
   ASSERT_TRUE(client.call->Write(open_event(wire::SESSION_MODE_STT_STREAMING)));
   const auto ready = client.read();
-  ASSERT_TRUE(ready.has_value() && ready->has_ready()) << worker.stderr_text();
+  ASSERT_TRUE(ready.has_value() && ready->has_ready()) << held.log();
   client.took(ready->ready());
   ASSERT_TRUE(client.send_audio(kFrame));
   (void)client.finalize();
@@ -1469,7 +1483,18 @@ TEST_F(SpeechWorkerRunner, AWorkerProcessWhoseBackendKeepsACancelledJobExitsAsFa
   while (!std::filesystem::exists(dir / "job") && std::chrono::steady_clock::now() < taking) {
     std::this_thread::sleep_for(20ms);
   }
-  ASSERT_TRUE(std::filesystem::exists(dir / "job")) << worker.stderr_text();
+  ASSERT_TRUE(std::filesystem::exists(dir / "job")) << held.log();
+}
+
+// A session cancelled under the held job holds its place until its release
+// passes the bound (the job's deadline, 10 s and 50 ms, then 10 s); the worker
+// then stops by itself, its unload gives up on the job after the adapter's
+// 15 s and ends the sidecar, and the process exits as an internal error. The
+// case waits that long.
+TEST_F(SpeechWorkerRunner, AWorkerProcessWhoseBackendKeepsACancelledJobExitsAsFailed) {
+  HeldJob held;
+  ASSERT_NO_FATAL_FAILURE(hold_a_job(held));
+  Client& client = held.client;
   wire::ClientEvent cancel;
   cancel.mutable_cancel();
   ASSERT_TRUE(client.send(cancel));
@@ -1477,8 +1502,8 @@ TEST_F(SpeechWorkerRunner, AWorkerProcessWhoseBackendKeepsACancelledJobExitsAsFa
   ASSERT_TRUE(accepted.has_value());
   EXPECT_TRUE(accepted->has_cancel_accepted()) << accepted->ShortDebugString();
 
-  const auto status = worker.wait_exit(180s);
-  const auto log = worker.stderr_text();
+  const auto status = held.worker->wait_exit(180s);
+  const auto log = held.log();
   ASSERT_TRUE(status.has_value()) << log;
   EXPECT_EQ(*status, static_cast<int>(tensorplate::ServingExitCode::Internal)) << log;
   const auto stalled = logged(log, "speech backend stalled");
@@ -1496,6 +1521,47 @@ TEST_F(SpeechWorkerRunner, AWorkerProcessWhoseBackendKeepsACancelledJobExitsAsFa
   EXPECT_EQ(stopped.front().value("releases_past_bound", 0), 1);
   EXPECT_EQ(logged(log, "shutdown complete").size(), 1U) << log;
 }
+
+#if defined(__linux__)
+// Killed while its backend holds a job, as the agent's member registry kills a
+// worker that outlives its stop deadline, the worker leaves its runner to
+// whichever process adopts it: here the test, so that its exit status can be
+// read. The runner sees its parent change and ends itself.
+TEST_F(SpeechWorkerRunner, ARunnerWhoseWorkerIsKilledEndsItself) {
+  HeldJob held;
+  ASSERT_NO_FATAL_FAILURE(hold_a_job(held));
+  pid_t runner = 0;
+  std::ifstream(held.scratch.dir / "job") >> runner;
+  ASSERT_GT(runner, 0) << "the runner wrote no process id";
+  ASSERT_EQ(::prctl(PR_SET_CHILD_SUBREAPER, 1), 0);
+  struct Reaping {
+    ~Reaping() { (void)::prctl(PR_SET_CHILD_SUBREAPER, 0); }
+  } reaping;
+
+  ASSERT_EQ(::kill(held.worker->pid(), SIGKILL), 0);
+  ASSERT_EQ(held.worker->wait_exit(60s), 128 + SIGKILL);
+  int status = 0;
+  pid_t reaped = 0;
+  const auto give_up = std::chrono::steady_clock::now() + 60s;
+  for (;;) {
+    reaped = ::waitpid(runner, &status, WNOHANG);
+    if (reaped != 0 || std::chrono::steady_clock::now() >= give_up) {
+      break;
+    }
+    std::this_thread::sleep_for(20ms);
+  }
+  if (reaped != runner) {
+    (void)::kill(runner, SIGKILL);
+    (void)::waitpid(runner, nullptr, 0);
+  }
+  ASSERT_EQ(reaped, runner) << "the runner outlived its worker\n" << held.log();
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), 4);
+  EXPECT_NE(held.log().find("the serving worker that started this runner is gone"),
+            std::string::npos)
+      << held.log();
+}
+#endif
 #endif
 
 }  // namespace

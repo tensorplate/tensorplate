@@ -8,6 +8,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- A speech sidecar's runner now ends itself once the serving worker that
+  started it is gone. A worker killed while its backend held a job, as the
+  agent's member registry kills a worker whose stop has not ended it within
+  10 s (its unload waits up to 15 s behind the job), left the runner
+  running with what its backend had loaded. The runner now looks at its
+  parent about once a second and, once the parent has changed, logs one
+  line and exits with status 4 without waiting for the backend call; a
+  call that holds Python's interpreter lock delays that exit until it
+  returns. A runner with no backend call in progress still ends when the
+  worker's socket closes. A wrapper script named by
+  `TP_PYTHON_PYTORCH_EXECUTABLE` must `exec` the interpreter.
+  (V030-E04-F03-T02)
+
 - A serving worker that was stopped now refuses a later `start()` with
   `unavailable` (`worker_shutdown`) and opens no listener. Before, a start
   after a served worker's stop returned success; a start after a stop that
