@@ -503,11 +503,13 @@ under the same id therefore leaves the tree the earlier record names as it
 was: a rollback to that record starts the earlier bundle, and a start after
 an update that did not complete restores the deployment that was serving.
 
-A tree that no record of either state file names (`active`,
-`previous_active`, `candidate`, and a resident set's members with the
-generations they retain) is removed whole at two moments: when the agent
-starts, after the unnamed [descriptor
-documents](#deployment-descriptor-documents) and before recovery, and when
+A tree that nothing in either state file names (the staged path of
+`active`, `previous_active`, `candidate`, and a resident set's members with
+the generations they retain, and the bundle path of the transaction in
+flight, since a deploy can take its bundle from a tree no record names) is
+removed whole at two moments: when the agent starts, after the unnamed
+[descriptor documents](#deployment-descriptor-documents) and before
+recovery, and when
 a deploy begins, before it copies its bundle (no other deploy stages while
 its transaction is in flight). A removal that fails is printed on the
 agent's standard error and neither stops the start nor fails the deploy.
@@ -515,10 +517,11 @@ Nothing is removed while what a state file holds cannot be told (it cannot
 be read, or is at a state version this agent does not read), and only a
 directory named as a transaction id, under a directory named as a
 deployment id, is ever removed. A tree is matched by where its path
-resolves, so a `staging_dir` spelled another way than the records spell it
-(through a link, or with `..`) removes nothing a record names; a record
-whose path does not resolve, other than because nothing is there, stops the
-removal before anything goes. An entry that cannot be read or removed is
+resolves, and is kept when a path named there resolves to it or into it,
+so a `staging_dir` spelled another way than the records spell it (through
+a link, or with `..`) removes nothing a record names; a named path that
+does not resolve, other than because nothing is there, stops the removal
+before anything goes. An entry that cannot be read or removed is
 left, the removal goes on to the others in name order, and the first such
 failure is printed. So the tree of a record a commit dropped from
 `previous_active`, and the tree of a deploy that failed, stay until the

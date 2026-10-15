@@ -324,3 +324,34 @@ fn a_deploy_that_finds_the_disk_full_as_it_stages_fails_and_leaves_every_tree_as
     agent.deploy("stt", TTS).unwrap();
     assert_eq!(staged_digest(&agent.asked().reference), digest_of(TTS));
 }
+
+#[test]
+fn a_deploy_from_a_tree_no_record_names_stages_that_tree_s_bundle() {
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    for bundle in [STT, TTS, STT] {
+        agent.deploy("stt", bundle).unwrap();
+        drop(agent.asked());
+    }
+    let named = [active, previous].map(|slot| staged_path(&host, slot));
+    let staging = host.td.path().join("staging").join("stt");
+    let trees = host.trees("stt").into_iter().map(|name| staging.join(name));
+    let unnamed = trees
+        .into_iter()
+        .find(|tree| !named.contains(tree))
+        .unwrap();
+    let earlier = contents(&unnamed);
+
+    let deployed = agent
+        .coordinator
+        .deploy("stt", &unnamed, BTreeMap::new(), None, None);
+
+    deployed.unwrap();
+    assert_eq!(staged_digest(&agent.asked().reference), digest_of(STT));
+    assert_eq!(contents(&staged_path(&host, active)), earlier);
+    assert_eq!(contents(&unnamed), earlier);
+    // Once no transaction reads it, the next deploy removes it.
+    agent.deploy("stt", TTS).unwrap();
+    drop(agent.asked());
+    assert!(!unnamed.exists());
+}

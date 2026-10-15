@@ -102,8 +102,9 @@ fn copy(verified: &VerifiedBundle, tree: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// The staged path of every record of `state`: the singleton records, and
-/// the resident set's members with the generations they retain.
+/// The staged path of every record of `state` (the singleton records, and
+/// the resident set's members with the generations they retain), and the
+/// bundle an in-flight transaction reads, which can be a tree no record names.
 fn named_by(state: &AgentState) -> impl Iterator<Item = PathBuf> + '_ {
     let records = [&state.active, &state.previous_active, &state.candidate];
     let records = records.into_iter().flatten().map(|r| &r.staged_path);
@@ -112,21 +113,24 @@ fn named_by(state: &AgentState) -> impl Iterator<Item = PathBuf> + '_ {
         let retained = member.previous.iter().map(|p| &p.staged_path);
         iter::once(&member.staged_path).chain(retained)
     });
-    records.chain(members).map(PathBuf::from)
+    let transaction = state.in_flight_transaction.iter();
+    let source = transaction.filter_map(|tx| tx.bundle_path.as_ref());
+    records.chain(members).chain(source).map(PathBuf::from)
 }
 
 /// Remove every tree under `staging_dir` that no record of either state
 /// file names, and return how many were removed. A tree is matched by where
-/// its path resolves, so the records may spell `staging_dir` another way.
-/// Only a directory a deploy named, under a directory a deployment id names,
-/// is removed: a tree of the layout before this one,
+/// its path resolves, so the records may spell `staging_dir` another way,
+/// and is kept when a path they name is in it. Only a directory a deploy
+/// named, under a directory a deployment id names, is removed: a tree of the
+/// layout before this one,
 /// `staging_dir/<deployment_id>/` itself, is never. No other deploy may
 /// stage meanwhile.
 ///
 /// # Errors
 ///
 /// As [`StateStore::files`], when what a state file holds cannot be told,
-/// and [`AgentError::Io`] when a record's path cannot be resolved or
+/// and [`AgentError::Io`] when a path they name cannot be resolved or
 /// `staging_dir` cannot be read: then nothing is removed. Otherwise the
 /// first [`AgentError::Io`] of an entry that could not be read or removed,
 /// once every other entry has been seen to.
@@ -165,7 +169,7 @@ fn resolved(path: &Path) -> io::Result<Option<PathBuf>> {
         Ok(resolved) => Ok(Some(resolved)),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => {
-            let unresolved = format!("staged path `{}` does not resolve: {e}", path.display());
+            let unresolved = format!("named path `{}` does not resolve: {e}", path.display());
             Err(io::Error::new(e.kind(), unresolved))
         }
     }
@@ -180,14 +184,15 @@ fn trees_of(id: &DirEntry) -> io::Result<Vec<io::Result<DirEntry>>> {
     }
 }
 
-/// Remove `tree` when it is a tree no path in `named` resolves to, and say
-/// whether it was removed.
+/// Remove `tree` when it is a tree that no path in `named` resolves to or
+/// into, and say whether it was removed.
 fn remove_unnamed(tree: &DirEntry, named: &BTreeSet<PathBuf>) -> io::Result<bool> {
     if !is_directory(tree, names_a_tree)? {
         return Ok(false);
     }
     let path = tree.path();
-    if named.contains(&fs::canonicalize(&path).map_err(|e| at(&path, &e))?) {
+    let resolved = fs::canonicalize(&path).map_err(|e| at(&path, &e))?;
+    if named.iter().any(|named| named.starts_with(&resolved)) {
         return Ok(false);
     }
     fs::remove_dir_all(&path).map_err(|e| at(&path, &e))?;

@@ -4,7 +4,10 @@
 
 use super::*;
 use tempfile::TempDir;
-use tensorplate_protocol::agent_state::{decode_agent_state, DeploymentRecord};
+use tensorplate_protocol::agent_state::{
+    decode_agent_state, DeploymentRecord, TransactionKind, TransactionRecord,
+};
+use tensorplate_protocol::deploy_transaction::DeployState;
 
 use crate::coordinator::new_transaction_id;
 
@@ -373,7 +376,7 @@ fn nothing_is_removed_while_a_record_s_path_does_not_resolve_and_a_missing_one_n
 
     let error = prune(&d.staging, &d.store).unwrap_err().to_string();
 
-    let says = format!("staged path `{}` does not resolve: ", looping.display());
+    let says = format!("named path `{}` does not resolve: ", looping.display());
     assert!(error.contains(&says), "{error}");
     assert!(unnamed.is_dir());
     let missing = d.staging.join("stt").join(new_transaction_id());
@@ -481,4 +484,55 @@ fn an_id_directory_that_is_a_link_is_not_followed() {
 
     assert!(tree.is_dir());
     assert!(d.staging.join("stt").symlink_metadata().is_ok());
+}
+
+/// A deploy in flight that reads its bundle from `bundle_path`.
+fn reading(bundle_path: &Path) -> TransactionRecord {
+    TransactionRecord {
+        transaction_id: new_transaction_id(),
+        deployment_id: "stt".into(),
+        phase: DeployState::Received,
+        kind: TransactionKind::Deploy,
+        bundle_digest: None,
+        generation: None,
+        descriptor_digest: None,
+        configuration_digest: None,
+        bundle_path: Some(bundle_path.display().to_string()),
+        correlation_id: None,
+        started_monotonic_ns: None,
+        last_transition_monotonic_ns: None,
+        failure: None,
+    }
+}
+
+#[test]
+fn a_tree_the_transaction_in_flight_reads_its_bundle_from_or_from_within_is_kept() {
+    let d = dirs();
+    let read_from = |bundle: Option<PathBuf>| {
+        move |state: &mut AgentState| {
+            state.in_flight_transaction = bundle.as_deref().map(reading);
+            Ok(())
+        }
+    };
+    let [within, unnamed] = ["stt", "tts"].map(|id| tree(&d.staging, id));
+    d.store
+        .update(read_from(Some(within.join("warmup"))))
+        .unwrap();
+
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
+    assert!(within.is_dir() && !unnamed.exists());
+
+    // Spelled another way, as a record may spell it.
+    let source = tree(&d.staging, "stt");
+    let spelled = d
+        .staging
+        .join("tts/../stt")
+        .join(source.file_name().unwrap());
+    d.store.update(read_from(Some(spelled))).unwrap();
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
+    assert!(source.is_dir() && !within.exists());
+
+    d.store.update(read_from(None)).unwrap();
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
+    assert!(!source.exists());
 }
