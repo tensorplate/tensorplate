@@ -1397,38 +1397,59 @@ impl WorkerControl for MemberRegistry {
         }
     }
 
-    fn promote(&self, _transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
+    fn fence(&self, _transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        let mut members = self.members()?;
+        if members.stopping {
+            return Err(AgentError::Stopping);
+        }
+        if members.candidate_abandoned {
+            return Err(AgentError::WorkerNotReady);
+        }
+        let Some(prepared) = members
+            .candidate
+            .and_then(|generation| members.by_generation.get_mut(&generation))
+        else {
+            return Err(AgentError::WorkerNotReady);
+        };
+        if prepared.deployment_id != candidate.deployment_id {
+            let err = AgentError::WorkerControl(format!(
+                "prepared candidate `{}` does not match promote request `{}`",
+                prepared.deployment_id, candidate.deployment_id
+            ));
+            let prepared = members.take_candidate().map(|(_, m)| members.stopping(m));
+            drop(members);
+            self.retire(prepared.into_iter().collect());
+            return Err(err);
+        }
+        // A candidate that exited after it was warmed replaces nothing.
+        let exited = prepared.process.exited();
+        if matches!(exited, Ok(false)) {
+            return Ok(());
+        }
+        let Some((_, mut prepared)) = members.take_candidate() else {
+            return Err(AgentError::WorkerNotReady);
+        };
+        drop(members);
+        let _ = fs::remove_file(&prepared.config_path);
+        Err(exited
+            .err()
+            .unwrap_or_else(|| prepared.process.startup_failure()))
+    }
+
+    fn activate(&self, _transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
         let retired = {
             let mut members = self.members()?;
             if members.stopping {
                 return Err(AgentError::Stopping);
             }
-            if members.candidate_abandoned {
+            if !members.names(members.candidate, &candidate.deployment_id) {
                 return Err(AgentError::WorkerNotReady);
             }
-            let Some((generation, mut prepared)) = members.take_candidate() else {
+            let Some((generation, prepared)) = members.take_candidate() else {
                 return Err(AgentError::WorkerNotReady);
             };
-            if prepared.deployment_id != candidate.deployment_id {
-                let err = AgentError::WorkerControl(format!(
-                    "prepared candidate `{}` does not match promote request `{}`",
-                    prepared.deployment_id, candidate.deployment_id
-                ));
-                let prepared = members.stopping(prepared);
-                drop(members);
-                self.retire(vec![prepared]);
-                return Err(err);
-            }
-            // A candidate that exited after it was warmed replaces nothing:
-            // the serving member stays.
-            let exited = prepared.process.exited();
-            if !matches!(exited, Ok(false)) {
-                drop(members);
-                let _ = fs::remove_file(&prepared.config_path);
-                return Err(exited
-                    .err()
-                    .unwrap_or_else(|| prepared.process.startup_failure()));
-            }
+            // One that exited since the fence is found by the next
+            // supervision step, as a serving member that stopped.
             let old = members.take_serving();
             members.admit(generation, prepared);
             members.serving = Some(generation);
@@ -1437,6 +1458,56 @@ impl WorkerControl for MemberRegistry {
         };
         self.retire(retired.into_iter().collect());
         Ok(())
+    }
+
+    fn owe_restore(&self, candidate: &CandidateRef, error: ErrorRecord) -> bool {
+        let now = self.clock.now();
+        let restored = {
+            let Ok(mut members) = self.members() else {
+                return false;
+            };
+            if members.stopping || members.serving.is_some() || members.held_by_a_deploy() {
+                return false;
+            }
+            if !matches!(members.restart, Restart::Idle) {
+                return false;
+            }
+            let held = if members.names(members.candidate, &candidate.deployment_id) {
+                members.take_candidate()
+            } else {
+                None
+            };
+            let owed = match &held {
+                Some((generation, member)) => Owed {
+                    recipe: member.recipe.clone(),
+                    ports: member.ports.clone(),
+                    stamped: *generation,
+                },
+                None => {
+                    let Some(ports) = self.ports.lease() else {
+                        return false;
+                    };
+                    let named = descriptor_store::identity_of(candidate).ok().flatten();
+                    Owed {
+                        recipe: candidate.clone(),
+                        ports,
+                        stamped: named.map_or(0, |named| named.generation),
+                    }
+                }
+            };
+            members.restart = Restart::InHand {
+                deployment_id: candidate.deployment_id.clone(),
+            };
+            let _ = owe_restart(&mut members, owed, error, now);
+            held
+        };
+        // Held only after its warm timed out: it would not hear a request to
+        // drain.
+        if let Some((_, mut member)) = restored {
+            member.process.kill();
+            let _ = fs::remove_file(&member.config_path);
+        }
+        true
     }
 
     fn abandon(&self, candidate: &CandidateRef) {

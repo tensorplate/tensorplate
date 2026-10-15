@@ -11,6 +11,7 @@ use tempfile::TempDir;
 use crate::supervision::FakeClock;
 use crate::worker::MemberEvent;
 
+mod activation;
 mod descriptors;
 mod handoff;
 mod ports;
@@ -71,9 +72,10 @@ impl MemberProcess for FakeProcess {
     }
     fn startup_failure(&mut self) -> AgentError {
         let held = self.0.hold_failure.lock().unwrap().take();
+        // A case that failed before its gate has dropped both ends.
         if let Some((started, release)) = held {
-            started.send(()).unwrap();
-            release.recv().unwrap();
+            let _ = started.send(());
+            let _ = release.recv();
         }
         AgentError::WorkerExited(format!("generation {}", self.0.spec.member.generation))
     }
@@ -83,9 +85,10 @@ impl MemberProcess for FakeProcess {
     fn terminate(&mut self) {
         self.0.calls.lock().unwrap().push("terminate");
         let held = self.0.hold_terminate.lock().unwrap().take();
+        // A case that failed before its gate has dropped both ends.
         if let Some((started, release)) = held {
-            started.send(()).unwrap();
-            release.recv().unwrap();
+            let _ = started.send(());
+            let _ = release.recv();
         }
         if self.0.obeys_terminate.load(Ordering::SeqCst) {
             self.0.exited.store(true, Ordering::SeqCst);
@@ -128,9 +131,10 @@ impl ProcessLauncher for FakeLauncher {
             return Err(AgentError::WorkerControl("spawn refused".into()));
         }
         let held = self.hold_first.lock().unwrap().take();
+        // A case that failed before its gate has dropped both ends.
         if let Some((started, release)) = held {
-            started.send(()).unwrap();
-            release.recv().unwrap();
+            let _ = started.send(());
+            let _ = release.recv();
         }
         let config = serde_json::from_slice(&std::fs::read(&spec.config_path).unwrap()).unwrap();
         let handle = Arc::new(Handle {
@@ -474,16 +478,16 @@ fn a_second_prepare_retires_the_candidate_it_displaces() {
 }
 
 #[test]
-fn promoting_another_deployment_than_the_prepared_one_retires_the_candidate() {
+fn fencing_another_deployment_than_the_prepared_one_retires_the_candidate() {
     let f = fixture();
     f.prepare("stt").unwrap();
     assert!(matches!(
-        f.registry.promote("tx", &candidate("tts")),
+        f.registry.fence("tx", &candidate("tts")),
         Err(AgentError::WorkerControl(_))
     ));
     assert_eq!(f.launcher.handle(1).calls(), ["terminate"]);
     assert!(matches!(
-        f.registry.promote("tx", &candidate("stt")),
+        f.registry.fence("tx", &candidate("stt")),
         Err(AgentError::WorkerNotReady)
     ));
 }
@@ -739,7 +743,7 @@ fn the_worker_is_told_a_drain_that_ends_before_the_registry_would_kill_it() {
 }
 
 #[test]
-fn a_candidate_that_exits_after_it_was_warmed_is_not_promoted_and_the_serving_member_stays() {
+fn a_candidate_that_exits_after_it_was_warmed_is_not_fenced_and_the_serving_member_stays() {
     let f = fixture();
     let serving = f.serve("stt");
     f.prepare("tts").unwrap();
@@ -747,7 +751,7 @@ fn a_candidate_that_exits_after_it_was_warmed_is_not_promoted_and_the_serving_me
     assert!(f.warm("tts").unwrap().ready);
     f.launcher.handle(2).exited.store(true, Ordering::SeqCst);
 
-    let err = f.registry.promote("tx", &candidate("tts")).unwrap_err();
+    let err = f.registry.fence("tx", &candidate("tts")).unwrap_err();
     assert!(
         matches!(err, AgentError::WorkerExited(ref s) if s == "generation 2"),
         "{err}"
@@ -758,7 +762,7 @@ fn a_candidate_that_exits_after_it_was_warmed_is_not_promoted_and_the_serving_me
         Some("stt")
     );
     assert!(matches!(
-        f.registry.promote("tx", &candidate("tts")),
+        f.registry.fence("tx", &candidate("tts")),
         Err(AgentError::WorkerNotReady)
     ));
     assert_eq!(f.configs(), 1);

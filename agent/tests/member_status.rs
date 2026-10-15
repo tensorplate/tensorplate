@@ -161,8 +161,8 @@ fn the_generation_is_withheld_while_another_deployment_serves_than_the_recorded_
     agent.deploy_member(&h);
     let recorded = h.store.snapshot().expect("state").active.expect("active");
 
-    // A worker is promoted before the record that names it is written:
-    // the registry as it stands between the two.
+    // Another deployment serves than the recorded one, as the outgoing
+    // member does between a transaction's commit and its activation.
     let other = staged_as("another", &recorded);
     agent.registry.prepare("tx", &other, HELD).expect("prepare");
     assert!(agent.registry.warm("tx", &other, HELD).expect("warm").ready);
@@ -175,7 +175,7 @@ fn the_generation_is_withheld_while_another_deployment_serves_than_the_recorded_
 }
 
 #[test]
-fn the_generation_is_withheld_while_another_bundle_serves_under_the_recorded_id() {
+fn a_same_id_update_is_recorded_before_the_replaced_worker_is_asked_to_stop() {
     let h = Harness::new();
     let agent = RegistryAgent::start(&h);
     agent
@@ -201,11 +201,10 @@ fn the_generation_is_withheld_while_another_bundle_serves_under_the_recorded_id(
             .recv_timeout(HELD)
             .expect("the replaced worker is asked to stop");
 
-        // Generation 2 serves the replacement; the record is the first
-        // bundle's until the replaced worker has stopped.
+        // The commit is written before the replaced worker hears of it.
         let during = active(&agent);
-        assert_eq!(during.bundle_digest, first.bundle_digest);
-        assert_eq!(during.generation, None);
+        assert_ne!(during.bundle_digest, first.bundle_digest);
+        assert_eq!(during.generation, Some(2));
         assert_eq!(during.serving_url, Some(url(PORTS[1])));
 
         release.send(()).unwrap();
@@ -236,10 +235,10 @@ fn a_redeploy_of_the_recorded_bundle_under_its_id_reads_as_the_recorded_deployme
             .recv_timeout(HELD)
             .expect("the replaced worker is asked to stop");
 
-        // The record is still the first deploy's, and nothing in it tells
-        // the worker that serves now from the one it was written for.
+        // The record is the second deploy's, written before the replaced
+        // worker hears of it.
         let during = active(&agent);
-        assert_eq!(during.promoted_monotonic_ns, first.promoted_monotonic_ns);
+        assert_ne!(during.promoted_monotonic_ns, first.promoted_monotonic_ns);
         assert_eq!(during.generation, Some(2));
         assert_eq!(during.serving_url, Some(url(PORTS[1])));
 

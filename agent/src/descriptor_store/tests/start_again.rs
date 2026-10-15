@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::recovery::RESTORE_FAILURE;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -204,8 +205,11 @@ impl WorkerControl for Worker {
             ready,
         })
     }
-    fn promote(&self, _: &str, _: &CandidateRef) -> AgentResult<()> {
+    fn fence(&self, _: &str, _: &CandidateRef) -> AgentResult<()> {
         self.fails("promote")
+    }
+    fn activate(&self, _: &str, _: &CandidateRef) -> AgentResult<()> {
+        Ok(())
     }
     fn unload(&self, _: &str) {}
     fn active_deployment_id(&self) -> AgentResult<Option<String>> {
@@ -622,6 +626,7 @@ fn a_restore_whose_document_cannot_be_written_ends_the_start_with_the_error_reco
 
 #[test]
 fn a_restore_whose_worker_does_not_come_up_ends_the_start_and_the_next_start_restores() {
+    // This worker control restarts nothing by itself.
     // `recorded`: whether the write that records why lands.
     let calls = ["prepare", "warm", "ready", "promote"];
     for (call, recorded) in calls
@@ -636,7 +641,7 @@ fn a_restore_whose_worker_does_not_come_up_ends_the_start_and_the_next_start_res
 
         let error = apply_startup(&agent.coordinator).unwrap_err();
 
-        let why = recorded.then(|| error.to_record());
+        let why = recorded.then(|| error.to_record().with_context(RESTORE_FAILURE));
         assert_eq!(
             matches!(error, AgentError::Io(_)),
             !recorded,

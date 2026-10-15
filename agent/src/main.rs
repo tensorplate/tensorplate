@@ -935,7 +935,7 @@ fn run_until_stopped(
 ) {
     let worker = server.coordinator().worker_client().clone();
     while !stop.load(Ordering::Relaxed) {
-        for event in worker.supervise() {
+        for event in server.coordinator().supervise() {
             log_member_event(&event);
         }
         if let Some(supervisor) = supervisor {
@@ -2140,7 +2140,8 @@ mod tests {
     }
 
     /// Records what the agent's loop asks of its worker control, and sets
-    /// the loop's stop flag at the third supervision step.
+    /// the loop's stop flag at the third supervision step. The first step
+    /// reports a member serving, so the coordinator then reads what serves.
     struct RecordingWorkers {
         inner: tensorplate_agent::MockWorkerControl,
         calls: std::sync::Mutex<Vec<&'static str>>,
@@ -2164,12 +2165,19 @@ mod tests {
         ) -> tensorplate_agent::AgentResult<tensorplate_agent::worker::WorkerReadiness> {
             self.inner.warm(tx, candidate, timeout)
         }
-        fn promote(
+        fn fence(
             &self,
             tx: &str,
             candidate: &tensorplate_protocol::worker_control::CandidateRef,
         ) -> tensorplate_agent::AgentResult<()> {
-            self.inner.promote(tx, candidate)
+            self.inner.fence(tx, candidate)
+        }
+        fn activate(
+            &self,
+            tx: &str,
+            candidate: &tensorplate_protocol::worker_control::CandidateRef,
+        ) -> tensorplate_agent::AgentResult<()> {
+            self.inner.activate(tx, candidate)
         }
         fn hold(&self) {
             self.inner.hold();
@@ -2186,10 +2194,20 @@ mod tests {
         fn supervise(&self) -> Vec<tensorplate_agent::worker::MemberEvent> {
             let mut calls = self.calls.lock().expect("calls");
             calls.push("supervise");
-            if calls.len() == 3 {
+            let steps = calls.iter().filter(|call| **call == "supervise").count();
+            if steps == 3 {
                 self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            Vec::new()
+            let member = tensorplate_protocol::worker_control::MemberRef::new("d", 1);
+            let serving = tensorplate_agent::worker::MemberEvent::Serving { member };
+            [serving].into_iter().filter(|_| steps == 1).collect()
+        }
+        fn serving_member(
+            &self,
+        ) -> tensorplate_agent::AgentResult<Option<tensorplate_agent::worker::ServingMember>>
+        {
+            self.calls.lock().expect("calls").push("serving_member");
+            Ok(None)
         }
         fn shutdown(&self) {
             self.calls.lock().expect("calls").push("shutdown");
@@ -2233,7 +2251,13 @@ mod tests {
 
         assert_eq!(
             *workers.calls.lock().expect("calls"),
-            ["supervise", "supervise", "supervise", "shutdown"]
+            [
+                "supervise",
+                "serving_member",
+                "supervise",
+                "supervise",
+                "shutdown"
+            ]
         );
     }
 }

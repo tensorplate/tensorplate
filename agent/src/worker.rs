@@ -105,8 +105,9 @@ pub struct WorkerReadiness {
 
 /// Narrow agent -> worker control surface. `prepare` stages and loads the
 /// candidate; `warm` blocks until the candidate reports ready or the
-/// timeout expires; `promote` flips the worker's active deployment to the
-/// candidate; `unload` releases a previous active when policy requires.
+/// timeout expires; `fence` and `activate` hand the serving slot to the
+/// candidate on either side of the transaction's commit; `unload` releases a
+/// previous active when policy requires.
 pub trait WorkerControl: Send + Sync {
     /// Prepare/load the candidate. Returns Ok when the worker has
     /// accepted the candidate and started loading.
@@ -138,12 +139,46 @@ pub trait WorkerControl: Send + Sync {
         timeout: Duration,
     ) -> AgentResult<WorkerReadiness>;
 
-    /// Promote the previously-prepared candidate to active.
+    /// Before the transaction's commit is written: the prepared candidate
+    /// still runs and was not given up. Nothing is stopped or moved; the
+    /// serving member is not told to stop admitting, since no worker
+    /// implements that operation yet.
     ///
     /// # Errors
     ///
-    /// Returns [`AgentError::WorkerControl`] for adapter/IPC failures.
-    fn promote(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()>;
+    /// Returns [`AgentError::Stopping`] once [`Self::shutdown`] has begun,
+    /// [`AgentError::WorkerNotReady`] when no candidate is held, the
+    /// candidate's own failure when it exited, and
+    /// [`AgentError::WorkerControl`] for adapter/IPC failures.
+    fn fence(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()>;
+
+    /// Once the commit is durable: the candidate takes the serving slot, then
+    /// the member it replaces is asked to stop and reaped. A candidate that
+    /// exited since [`Self::fence`] takes the slot as a member that stopped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::Stopping`] once [`Self::shutdown`] has begun, and
+    /// [`AgentError::WorkerNotReady`] when the candidate is no longer held.
+    fn activate(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()>;
+
+    /// [`Self::fence`] then [`Self::activate`], where there is no commit to
+    /// write between them.
+    ///
+    /// # Errors
+    ///
+    /// As those two.
+    fn promote(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        self.fence(transaction_id, candidate)?;
+        self.activate(transaction_id, candidate)
+    }
+
+    /// A start's restore of `candidate` did not come up: start it again as a
+    /// serving member that stopped with `error` would be. False when this
+    /// control restarts nothing by itself.
+    fn owe_restore(&self, _candidate: &CandidateRef, _error: ErrorRecord) -> bool {
+        false
+    }
 
     /// The transaction that prepared `candidate` ended without promoting
     /// it: the candidate no longer keeps the serving member from being
@@ -715,7 +750,7 @@ impl WorkerControl for MockWorkerControl {
         })
     }
 
-    fn promote(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
+    fn fence(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
         let mut s = self
             .inner
             .lock()
@@ -728,6 +763,14 @@ impl WorkerControl for MockWorkerControl {
         if let Some(kind) = s.behavior.fail_promote.take() {
             return Err(kind.into_error());
         }
+        Ok(())
+    }
+
+    fn activate(&self, _transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        let mut s = self
+            .inner
+            .lock()
+            .map_err(|e| AgentError::Internal(format!("mock mutex poisoned: {e}")))?;
         s.active = Some(candidate.deployment_id.clone());
         Ok(())
     }
