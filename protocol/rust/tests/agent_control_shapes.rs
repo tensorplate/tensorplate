@@ -36,6 +36,12 @@ const MEMBER_STATUS: &str = "agent_control_member_status.jsonl";
 /// A deploy that asks for streaming and the status after it, recorded the
 /// same way from an agent whose configuration gives stream ports.
 const STREAMING: &str = "agent_control_streaming_deploy.jsonl";
+/// The status between a streaming update's commit and its activation, and
+/// the status of a deployment that does not stream, from the same agent.
+const HANDOVER: &str = "agent_control_streaming_handover.jsonl";
+const UNARY: &str = "agent_control_unary_status.jsonl";
+/// The status of the same agent before anything is deployed.
+const NOTHING: &str = "agent_control_no_deployment_status.jsonl";
 
 fn fixture(name: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -125,7 +131,7 @@ fn committed_set(fixture_name: &str) -> ResidentSet {
 
 #[test]
 fn the_recorded_exchanges_still_decode_and_reencode_byte_for_byte() {
-    for name in [GOLDEN, MEMBER_STATUS, STREAMING] {
+    for name in [GOLDEN, MEMBER_STATUS, STREAMING, HANDOVER, UNARY, NOTHING] {
         for (index, line) in fixture(name).lines().enumerate() {
             let value: Value = serde_json::from_str(line).expect("json");
             let errors = schema_error_paths(&value);
@@ -1220,6 +1226,72 @@ fn the_recorded_streaming_status_names_its_endpoint_and_the_manifest_digest() {
     // A format 0.1 bundle names no descriptor: an Open names its manifest.
     assert_eq!(active["descriptor_digest"], active["bundle_digest"]);
     assert_eq!(active["generation"], 1);
+}
+
+/// The `agent_status` of the response on the second line of `name`.
+fn recorded_status(name: &str) -> Value {
+    let recorded = fixture(name);
+    let line = recorded.lines().nth(1).expect("the status response");
+    let response: Value = serde_json::from_str(line).expect("json");
+    response["agent_status"].clone()
+}
+
+#[test]
+fn the_recorded_handover_names_the_update_without_a_generation_or_a_stream() {
+    let status = recorded_status(HANDOVER);
+    let active = status["active"].as_object().expect("active");
+    // The update is committed; the worker serving is still the outgoing one,
+    // the first generation of the streaming recording.
+    assert_eq!(active["bundle_version"], "stt-update");
+    let first = fixture(STREAMING);
+    let line = first.lines().nth(3).expect("the status after the deploy");
+    let first: Value = serde_json::from_str(line).expect("json");
+    assert_eq!(
+        active["serving_url"],
+        first["agent_status"]["active"]["serving_url"]
+    );
+    for withheld in ["generation", "stream_endpoint", "descriptor_digest"] {
+        assert!(!active.contains_key(withheld), "{withheld}");
+    }
+    assert_eq!(status["previous_active"]["bundle_version"], "stt");
+    assert_eq!(status["in_flight_transaction"]["phase"], "promoted");
+    assert_eq!(
+        status["control_features"],
+        json!([FEATURE_DEPLOY_STREAMING])
+    );
+}
+
+#[test]
+fn the_recorded_status_of_a_deployment_that_does_not_stream_names_no_stream() {
+    let status = recorded_status(UNARY);
+    let active = status["active"].as_object().expect("active");
+    assert_eq!(active["generation"], 1);
+    assert!(active.contains_key("serving_url"));
+    for absent in ["stream_endpoint", "descriptor_digest"] {
+        assert!(!active.contains_key(absent), "{absent}");
+    }
+    assert_eq!(
+        status["control_features"],
+        json!([FEATURE_DEPLOY_STREAMING])
+    );
+}
+
+#[test]
+fn the_recorded_status_before_anything_is_deployed_names_no_deployment() {
+    let status = recorded_status(NOTHING);
+    for slot in [
+        "active",
+        "previous_active",
+        "candidate",
+        "in_flight_transaction",
+        "resident_set",
+    ] {
+        assert!(status.get(slot).map_or(true, Value::is_null), "{slot}");
+    }
+    assert_eq!(
+        status["control_features"],
+        json!([FEATURE_DEPLOY_STREAMING])
+    );
 }
 
 #[test]

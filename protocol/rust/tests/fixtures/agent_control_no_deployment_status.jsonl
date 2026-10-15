@@ -1,0 +1,2 @@
+{"schema_version":"0.1","correlation_id":"ctl-000001","op":"status","status":{"include_quarantine":true}}
+{"schema_version":"0.1","correlation_id":"ctl-000001","status":"ok","agent_status":{"agent_state":"ready","recovery":{"action":"no_op","reason":"no deployment recorded"},"control_features":["deploy_streaming"]}}

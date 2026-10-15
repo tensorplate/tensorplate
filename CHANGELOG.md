@@ -313,6 +313,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Recorded control-API status exchanges for clients that discover a
+  stream endpoint from the agent's status, from an agent whose
+  configuration gives stream ports:
+  `agent_control_streaming_handover.jsonl`, between a streaming update's
+  commit and its activation (no generation, stream endpoint or digest on
+  `active`, the outgoing worker's `serving_url`);
+  `agent_control_unary_status.jsonl`, a deployment that does not stream;
+  and `agent_control_no_deployment_status.jsonl`, nothing deployed. The
+  agent's golden test records them and the protocol suite decodes them.
+  (V030-E04-F02-T03)
+
 - `tensorplate deploy --streaming`, the deploy request's `streaming`,
   starts every generation of a speech deployment with its stream listener.
   The agent renders `streaming` on the stream port the generation holds,
