@@ -32,6 +32,17 @@ pub(crate) fn fail_next_prune() {
     PRUNE_FAILS.with(|fails| fails.set(true));
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The next copy on this thread finds the disk full after the manifest.
+    static DISK_FULL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn fill_disk_at_next_copy() {
+    DISK_FULL.with(|full| full.set(true));
+}
+
 /// Whether `name` is a transaction id as
 /// [`crate::coordinator::new_transaction_id`] builds it: the only name a
 /// tree is given, and the only directory [`prune`] removes.
@@ -77,6 +88,10 @@ pub(crate) fn stage(
 fn copy(verified: &VerifiedBundle, tree: &Path) -> io::Result<()> {
     let source = &verified.root_path;
     fs::copy(source.join("manifest.json"), tree.join("manifest.json"))?;
+    #[cfg(test)]
+    if DISK_FULL.with(|full| full.replace(false)) {
+        return Err(rustix::io::Errno::NOSPC.into());
+    }
     for artifact in &verified.manifest.artifacts {
         let destination = tree.join(&artifact.path);
         if let Some(parent) = destination.parent() {

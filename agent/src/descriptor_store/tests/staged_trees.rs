@@ -284,3 +284,43 @@ fn a_deploy_refused_as_busy_removes_no_tree() {
     );
     assert!(copy.is_dir() && agent.never_asked());
 }
+
+#[test]
+fn a_deploy_that_finds_the_disk_full_as_it_stages_fails_and_leaves_every_tree_as_it_was() {
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    agent.deploy("stt", STT).unwrap();
+    drop(agent.asked());
+    let (view, trees) = (host.view(), host.trees("stt"));
+    let named = staged_path(&host, active);
+    let served = contents(&named);
+
+    crate::staging::fill_disk_at_next_copy();
+    let error = agent.deploy("stt", TTS).unwrap_err();
+
+    let full = std::io::Error::from(rustix::io::Errno::NOSPC);
+    let staging = host.td.path().join("staging").join("stt").join("tx-");
+    let says = format!("staging `{}", staging.display());
+    let message = error.to_string();
+    assert!(matches!(error, AgentError::Io(_)), "{message}");
+    assert!(
+        message.contains(&says) && message.ends_with(&full.to_string()),
+        "{message}"
+    );
+    assert!(agent.never_asked());
+    assert_eq!((host.view(), host.trees("stt")), (view, trees));
+    assert_eq!(contents(&named), served);
+    let (quarantined, latest) = host.quarantined();
+    assert!(
+        quarantined.ends_with("@Verified") && latest,
+        "{quarantined}"
+    );
+    let recorded = host.last_error().unwrap();
+    assert_eq!(
+        (recorded.code, recorded.message),
+        (ErrorCode::Internal, message)
+    );
+
+    agent.deploy("stt", TTS).unwrap();
+    assert_eq!(staged_digest(&agent.asked().reference), digest_of(TTS));
+}
