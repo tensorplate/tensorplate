@@ -1444,9 +1444,12 @@ long input will resize them.
   worker then performs ([A stalled speech backend](#a-stalled-speech-backend)).
 - The bounds are read on the manager's clock. The thread waits for the
   next command or the next bound; a test that moves the clock by hand
-  calls `notify_clock_advanced()`, and once a timed wait has ended short of
-  its bound, which only such a clock causes, the thread waits for the
-  notice alone. Once a bound is due, the commands queued by then are
+  calls `notify_clock_advanced()`. A timed wait that ends short of its
+  bound, on a clock slower than the steady clock or one moved by hand, is
+  waited again for what is left, 1 ms at the least: a slow clock still
+  reaches every bound with no notice, and a clock that stands just short
+  of one wakes the thread at most once a millisecond, without a step.
+  Once a bound is due, the commands queued by then are
   handled ahead of its check and none that arrive later: a job's end
   already queued is not taken for a deadline missed, and a stream of
   commands cannot put the check off. `stats()` counts `jobs_past_deadline`
@@ -1538,7 +1541,12 @@ before and at its instant; a job's end queued as its deadline passes is
 taken first, one queued after the check fell due is not, and a release
 whose job ends before the backend acknowledges it keeps its bound (the
 dispatch's thread held by a gate in the manager's sink or in the bridge
-double, which can also hold acknowledgements back).
+double, which can also hold acknowledgements back). On a clock at half the
+steady clock's speed, which nothing moves and no notice follows, the
+deadline and then the bound still pass; a clock moved by hand is read
+twice a wake and no more often than its next bound allows: once in 1010 ms
+while that bound is 1010 ms away, once a millisecond while the clock stands
+1 ns short of it.
 
 ### The speech dispatch in the worker
 

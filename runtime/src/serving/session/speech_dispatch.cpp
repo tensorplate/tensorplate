@@ -2,6 +2,7 @@
 #include "serving/session/speech_dispatch.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <string_view>
 #include <system_error>
@@ -30,6 +31,9 @@ constexpr std::uint16_t kNormalSpeed = 1000;
 /// being decoded and those behind it. One more fails the session.
 constexpr std::size_t kEndedUtterances = 3;
 constexpr std::uint64_t kMicrosPerSecond = 1'000'000;
+/// The shortest timed wait for a bound not yet due: a clock moved by hand can
+/// stand just short of one for as long as a test likes.
+constexpr SchedulerClock::Duration kShortestWait = std::chrono::milliseconds{1};
 
 /// A segment's interval is rounded outward: its start down, its end up.
 std::uint64_t start_micros(std::uint64_t sample, std::uint64_t rate) {
@@ -421,12 +425,13 @@ bool SpeechJobDispatch::wait_for_step(std::unique_lock<std::mutex>& lock) {
   for (;;) {
     if (waiting_.before_check) {
       // The check is due: nothing to wait for.
-    } else if (waiting_.bound && !waiting_.moved_by_hand) {
-      if (!core_->cv.wait_for(
-              lock, std::max(SchedulerClock::Duration::zero(), *waiting_.bound - clock_.now()),
-              woken) &&
-          clock_.now() < *waiting_.bound) {
-        waiting_.moved_by_hand = true;
+    } else if (waiting_.bound) {
+      // A timed wait ends short of its bound on a clock slower than the
+      // steady clock, or moved by hand: what is left is waited again.
+      const auto left = *waiting_.bound - clock_.now();
+      const auto wait = left > SchedulerClock::Duration::zero() ? std::max(left, kShortestWait)
+                                                                : SchedulerClock::Duration::zero();
+      if (!core_->cv.wait_for(lock, wait, woken) && clock_.now() < *waiting_.bound) {
         continue;
       }
     } else {

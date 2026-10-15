@@ -358,9 +358,6 @@ class SpeechJobDispatch final : public SessionDispatch {
     /// Once a bound is due: how many of the commands queued then are still
     /// to be handled ahead of the check.
     std::optional<std::size_t> before_check;
-    /// Only a clock moved by hand leaves a timed wait short of its bound;
-    /// such a clock reaches its bounds by notice, and the thread waits for it.
-    bool moved_by_hand = false;
   };
   Waiting waiting_;
   SpeechDispatchStats stats_;
