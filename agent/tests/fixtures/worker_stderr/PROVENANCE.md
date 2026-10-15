@@ -1,7 +1,8 @@
 # Serving worker stderr fixtures
 
-What `tensorplate-serving` writes to stderr when the Python sidecar refuses
-a load, replayed by `stub-worker.sh` for the agent's deploy tests.
+What `tensorplate-serving` writes to stderr when it cannot start, because
+the Python sidecar refuses a load or a listener cannot bind its port,
+replayed by `stub-worker.sh` for the agent's deploy tests.
 
 `kokoro_undeclared_voice.stderr` is **recorded**: the stderr of a
 `tensorplate-serving` built from this tree (RelWithDebInfo, the dev
@@ -20,6 +21,19 @@ and fails when the worker's last line no longer equals it.
 lines' code and message replaced by those the same profile raises when the
 model build runs out of memory (`oom_error`, "the Kokoro model could not be
 loaded"). An out-of-memory load needs an accelerator and is not recorded
+here.
+
+`http_port_taken.stderr` is **recorded**: the stderr of a
+`tensorplate-serving` built from this tree (RelWithDebInfo, the dev
+container's clang 15), started with a serving config in the shape the agent
+renders for a candidate (a mock session, generation 1, one end of a socket
+pair as fd 0) on the HTTP port of another worker of the same user, started
+by hand. The worker exited 66; the stand-in exits 65 for it, as for every
+`fail-` fixture, since the agent answers from the record and does not read
+the status when there is one. Nothing was removed or replaced: the port is
+the one the other worker was given. `test/integration/worker_bind_test.cpp`
+starts a worker on another worker's HTTP port, both by hand, and fails when
+that worker's last line, with its own port, no longer equals the last line
 here.
 
 `control-responder.py` is not a recording. It is a stand-in, written by

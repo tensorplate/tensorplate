@@ -327,6 +327,7 @@ mod tests {
             (ErrorCode::ConfigInvalid, false),
             (ErrorCode::LoadFailed, false),
             (ErrorCode::OomError, true),
+            (ErrorCode::Unavailable, true),
         ] {
             let r = AgentError::WorkerStartupFailed {
                 code,

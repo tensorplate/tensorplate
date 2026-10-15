@@ -319,6 +319,15 @@ fn oom_error_raised_at_load_reaches_the_operator() {
 }
 
 #[test]
+fn a_port_another_worker_listens_on_reaches_the_operator() {
+    assert_typed_load_failure(
+        "http_port_taken",
+        ErrorCode::Unavailable,
+        "http server: could not bind 127.0.0.1:45615: Address already in use",
+    );
+}
+
+#[test]
 fn rollback_right_after_a_failed_deploy_is_accepted() {
     let first = HealthPort::listen();
     let second = HealthPort::listen();

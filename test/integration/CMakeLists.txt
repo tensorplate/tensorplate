@@ -34,6 +34,8 @@ add_executable(tp_test_integration
   worker_signal_test.cpp
   # What --version says about streaming support, in both build flavours.
   worker_version_test.cpp
+  # A worker started by hand on a port another process listens on.
+  worker_bind_test.cpp
 )
 
 target_include_directories(tp_test_integration
@@ -62,6 +64,7 @@ if(TARGET tp_serving_worker)
     PRIVATE
       TP_SERVING_WORKER_BINARY="$<TARGET_FILE:tp_serving_worker>"
       TP_ENABLE_STREAMING_GRPC=$<BOOL:${TP_ENABLE_STREAMING_GRPC}>
+      TP_ENABLE_TSAN=$<BOOL:${TP_ENABLE_TSAN}>
   )
 endif()
 
