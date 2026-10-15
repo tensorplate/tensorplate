@@ -10,10 +10,11 @@ use tensorplate_protocol::agent_state::DeploymentRecord;
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::ErrorCode;
 
-use crate::coordinator::Coordinator;
+use crate::coordinator::{Coordinator, EventSink};
 use crate::descriptor_store::restart_stamp;
 use crate::descriptor_store::tests::{agent_config, probes};
 use crate::recovery::apply_startup;
+use crate::worker::WorkerEvent;
 
 const STT: &str = "v0_2/speech_stt_streaming";
 const TTS: &str = "v0_2/speech_tts_streaming";
@@ -39,6 +40,8 @@ struct Stepped {
     before_fence: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Runs once, before the candidate is activated.
     before_activate: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once, as a transaction reports its failure.
+    on_failure: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Stepped {
@@ -151,6 +154,15 @@ fn wired_at(root: Arc<TempDir>, step: Step, configure: impl FnOnce(&mut AgentCon
         steps,
         before_fence: Mutex::default(),
         before_activate: Mutex::default(),
+        on_failure: Mutex::default(),
+    });
+    let failed = worker.clone();
+    let sink: Arc<EventSink> = Arc::new(move |event: &WorkerEvent| {
+        if matches!(event, WorkerEvent::Failure { .. }) {
+            if let Some(hook) = failed.on_failure.lock().unwrap().take() {
+                hook();
+            }
+        }
     });
     let coordinator = Coordinator::new(config, store.clone(), worker.clone());
     Wired {
@@ -158,7 +170,9 @@ fn wired_at(root: Arc<TempDir>, step: Step, configure: impl FnOnce(&mut AgentCon
         root,
         store,
         worker,
-        coordinator: coordinator.with_backend_probes(probes()),
+        coordinator: coordinator
+            .with_backend_probes(probes())
+            .with_event_sink(sink),
     }
 }
 
@@ -470,11 +484,15 @@ fn a_format_0_1_transaction_killed_after_the_registry_took_its_generation_is_end
     }
 }
 
-/// From the fence of the candidate on, every state write fails.
+/// The commit write alone fails: writes are refused from the candidate's
+/// fence until the transaction reports its failure.
 fn refuse_the_commit_write(w: &Wired) {
     let store = w.store.clone();
     let refuse = move || store.kill_after_writes(0);
     *w.worker.before_fence.lock().unwrap() = Some(Box::new(refuse));
+    let store = w.store.clone();
+    let reopen = move || store.kill_after_writes(usize::MAX);
+    *w.worker.on_failure.lock().unwrap() = Some(Box::new(reopen));
 }
 
 fn roles(f: &Fixture) -> Vec<(MemberRef, MemberRole)> {
@@ -483,7 +501,7 @@ fn roles(f: &Fixture) -> Vec<(MemberRef, MemberRole)> {
 }
 
 #[test]
-fn a_deploy_whose_commit_write_is_refused_leaves_the_serving_member_serving() {
+fn a_deploy_whose_commit_write_is_refused_fails_and_the_serving_member_stays() {
     let w = wired();
     w.deploy("stt", STT).unwrap();
     let before = w.store.snapshot().unwrap();
@@ -498,10 +516,15 @@ fn a_deploy_whose_commit_write_is_refused_leaves_the_serving_member_serving() {
     assert!(w.f.launcher.handle(1).calls().is_empty());
     let found = w.store.snapshot().unwrap();
     assert_eq!(found.active, before.active);
+    assert!(found.in_flight_transaction.is_none());
+    let recorded = found.last_error.expect("the failure is recorded");
+    assert!(recorded.message.contains("injected"), "{recorded:?}");
+    let entry = found.quarantined.last().expect("a quarantine entry");
+    assert_eq!(entry.phase, DeployState::Warmed);
 }
 
 #[test]
-fn a_rollback_whose_commit_write_is_refused_leaves_the_serving_member_serving() {
+fn a_rollback_whose_commit_write_is_refused_fails_and_the_serving_member_stays() {
     let w = wired();
     w.deploy("stt", STT).unwrap();
     w.deploy("tts", TTS).unwrap();
@@ -517,6 +540,10 @@ fn a_rollback_whose_commit_write_is_refused_leaves_the_serving_member_serving() 
     assert!(w.f.launcher.handle(2).calls().is_empty());
     let found = w.store.snapshot().unwrap();
     assert_eq!(found.active, before.active);
+    assert!(found.in_flight_transaction.is_none());
+    let recorded = found.last_error.expect("the failure is recorded");
+    assert!(recorded.message.contains("injected"), "{recorded:?}");
+    assert_eq!(found.quarantined.len(), before.quarantined.len());
 }
 
 #[test]
