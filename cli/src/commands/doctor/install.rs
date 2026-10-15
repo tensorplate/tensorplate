@@ -668,8 +668,7 @@ fn probe_serving_binary(opts: &InstallProbeOptions) -> Vec<Finding> {
     }
 }
 
-/// The limit the descriptor reader gives a query: a worker that does not
-/// answer `--version` must not hold doctor.
+/// A worker that does not answer `--version` must not hold doctor.
 const SERVING_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn probe_serving_streaming(opts: &InstallProbeOptions) -> Vec<Finding> {
@@ -679,14 +678,76 @@ fn probe_serving_streaming(opts: &InstallProbeOptions) -> Vec<Finding> {
     )
 }
 
-fn probe_serving_streaming_with(worker: &Path, _timeout: Duration) -> Vec<Finding> {
-    let _ = worker;
-    vec![Finding::skipped(
-        FindingId::ServingStreamingSupport,
-        Severity::Info,
-        "not checked yet",
-        None,
-    )]
+/// Never `fail`: the agent renders no `streaming` block, so a worker built
+/// without the feature is a fact about the build, not a fault.
+fn probe_serving_streaming_with(worker: &Path, timeout: Duration) -> Vec<Finding> {
+    let id = FindingId::ServingStreamingSupport;
+    if !worker.is_file() {
+        return vec![Finding::skipped(
+            id,
+            Severity::Info,
+            format!(
+                "skipped: no serving worker at `{SERVING_BINARY_PATH}` (see `serving_binary_installed`)"
+            ),
+            None,
+        )];
+    }
+    let finding = match worker_streaming_support(worker, timeout) {
+        Ok(true) => Finding::ok(
+            id,
+            Severity::Info,
+            "the installed serving worker is built with streaming support (`streaming-grpc on`)",
+            None,
+        ),
+        Ok(false) => Finding::ok(
+            id,
+            Severity::Info,
+            "the installed serving worker is built without streaming support (`streaming-grpc off`): it refuses a worker config with `streaming.enabled`, so it serves no stream sessions",
+            None,
+        ),
+        Err(why) => Finding::warn(
+            id,
+            Severity::Warning,
+            format!("cannot tell whether the installed serving worker is built with streaming support: its `--version` {why}"),
+            Some(format!(
+                "run `{SERVING_BINARY_PATH} --version` to see why: a worker that cannot load its CUDA or TensorRT libraries stops before it prints (see `cuda_runtime` and `tensorrt_runtime`), and one built before the `streaming-grpc` line was added prints no such line (reinstall `tensorplate-serving`)"
+            )),
+        ),
+    };
+    vec![finding]
+}
+
+/// What the worker's `--version` says of streaming support, or why it says
+/// nothing this doctor can read.
+fn worker_streaming_support(worker: &Path, timeout: Duration) -> Result<bool, String> {
+    let output = run_bounded(Command::new(worker).arg("--version"), timeout)?;
+    if !output.status.success() {
+        // A worker the loader cannot start (a missing CUDA or TensorRT library) says why only here.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let last = stderr.lines().rev().find(|line| !line.trim().is_empty());
+        return Err(last.map_or_else(
+            || format!("exited ({})", output.status),
+            |last| {
+                format!(
+                    "exited ({}): {}",
+                    output.status,
+                    bounded_stderr(last.as_bytes())
+                )
+            },
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("streaming-grpc "))
+    {
+        Some("on") => Ok(true),
+        Some("off") => Ok(false),
+        Some(other) => Err(format!(
+            "printed `streaming-grpc {other}`, which this doctor does not recognise"
+        )),
+        None => Err("printed no `streaming-grpc` line".to_string()),
+    }
 }
 
 fn probe_systemd_units(opts: &InstallProbeOptions) -> Vec<Finding> {
