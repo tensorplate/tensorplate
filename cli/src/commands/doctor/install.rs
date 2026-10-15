@@ -7,7 +7,8 @@
 //   - filesystem layout (paths, permissions, group ownership)
 //   - config files (presence + schema_version sanity)
 //   - systemd units (agent + observability present, no serving unit)
-//   - serving binary installed under /usr/lib/tensorplate/
+//   - serving binary installed under /usr/lib/tensorplate/, and whether it
+//     was built with streaming support
 //   - CUDA / TensorRT / LibTorch presence (best-effort)
 //   - Python/PyTorch backend descriptor + runtime status (packaging)
 //
@@ -90,6 +91,7 @@ pub fn run(opts: &InstallProbeOptions) -> Vec<Finding> {
     out.extend(probe_config_files(opts));
     out.extend(probe_config_endpoints(opts));
     out.extend(probe_serving_binary(opts));
+    out.extend(probe_serving_streaming(opts));
     if any_install {
         out.extend(probe_systemd_units(opts));
         out.extend(probe_service_states(opts));
@@ -664,6 +666,27 @@ fn probe_serving_binary(opts: &InstallProbeOptions) -> Vec<Finding> {
             ),
         )]
     }
+}
+
+/// The limit the descriptor reader gives a query: a worker that does not
+/// answer `--version` must not hold doctor.
+const SERVING_VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn probe_serving_streaming(opts: &InstallProbeOptions) -> Vec<Finding> {
+    probe_serving_streaming_with(
+        &prefixed(opts, SERVING_BINARY_PATH),
+        SERVING_VERSION_TIMEOUT,
+    )
+}
+
+fn probe_serving_streaming_with(worker: &Path, _timeout: Duration) -> Vec<Finding> {
+    let _ = worker;
+    vec![Finding::skipped(
+        FindingId::ServingStreamingSupport,
+        Severity::Info,
+        "not checked yet",
+        None,
+    )]
 }
 
 fn probe_systemd_units(opts: &InstallProbeOptions) -> Vec<Finding> {
@@ -2468,8 +2491,151 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
     fn stage_serving_binary(td: &Path) {
         let p = td.join(SERVING_BINARY_PATH.trim_start_matches('/'));
         fs::create_dir_all(p.parent().unwrap()).unwrap();
-        fs::write(&p, b"#!/bin/sh\nexit 0\n").unwrap();
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o0755)).unwrap();
+        // Some cases stage the same host twice.
+        if p.symlink_metadata().is_err() {
+            super::super::test_script::stage(&p, &worker_version("streaming-grpc on"));
+        }
+    }
+
+    /// A worker that answers `--version` as the serving worker does, with
+    /// `feature` as its fourth line, and refuses any other invocation.
+    fn worker_version(feature: &str) -> String {
+        format!(
+            "[ \"$*\" = --version ] || exit 3\n\
+             printf 'tensorplate-serving 0.3.1\\nprotocol 0.1\\nbundle-format 0.1\\n{feature}\\n'"
+        )
+    }
+
+    /// The `serving_streaming_support` finding for a worker that is this
+    /// shell script.
+    fn streaming_support(body: &str, limit: Duration) -> Finding {
+        let td = TempDir::new().unwrap();
+        let worker = td.path().join("tensorplate-serving");
+        super::super::test_script::stage(&worker, body);
+        let mut findings = probe_serving_streaming_with(&worker, limit);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        findings.remove(0)
+    }
+
+    #[test]
+    fn a_worker_built_with_streaming_support_is_ok() {
+        let finding = streaming_support(
+            &worker_version("streaming-grpc on"),
+            Duration::from_secs(30),
+        );
+        assert_eq!(finding.id, FindingId::ServingStreamingSupport);
+        assert_eq!(
+            (finding.status_label(), finding.severity_label()),
+            ("ok", "info"),
+            "{finding:?}"
+        );
+        assert!(finding.message.contains("built with streaming support"));
+    }
+
+    #[test]
+    fn a_worker_built_without_streaming_support_is_ok_and_says_what_it_refuses() {
+        let finding = streaming_support(
+            &worker_version("streaming-grpc off"),
+            Duration::from_secs(30),
+        );
+        assert_eq!(
+            (finding.status_label(), finding.severity_label()),
+            ("ok", "info"),
+            "{finding:?}"
+        );
+        assert!(finding.message.contains("built without streaming support"));
+        assert!(finding.message.contains("streaming.enabled"));
+    }
+
+    #[test]
+    fn a_worker_whose_answer_cannot_be_read_is_a_warning_naming_why() {
+        let cases = [
+            ("exit 64", "exited (exit status: 64)"),
+            (
+                "echo 'an earlier line' >&2\necho 'tensorplate-serving: error while loading shared libraries: libnvinfer.so.10: \
+                 cannot open shared object file' >&2\necho >&2\nexit 127",
+                "exited (exit status: 127): tensorplate-serving: error while loading shared libraries",
+            ),
+            (
+                "printf 'tensorplate-serving 0.3.1\\nprotocol 0.1\\nbundle-format 0.1\\n'",
+                "no `streaming-grpc` line",
+            ),
+            (
+                worker_version("streaming-grpc maybe").as_str(),
+                "`streaming-grpc maybe`",
+            ),
+            (
+                worker_version("streaming-grpc on extra").as_str(),
+                "`streaming-grpc on extra`",
+            ),
+        ]
+        .map(|(body, why)| (body.to_string(), why));
+        for (body, why) in cases {
+            let finding = streaming_support(&body, Duration::from_secs(30));
+            assert_eq!(
+                (finding.status_label(), finding.severity_label()),
+                ("warning", "warning"),
+                "{body}: {finding:?}"
+            );
+            assert!(finding.message.contains(why), "{body}: {finding:?}");
+            assert!(finding.hint.is_some(), "{body}: {finding:?}");
+        }
+    }
+
+    #[test]
+    fn a_worker_that_does_not_answer_does_not_hold_doctor() {
+        let finding = streaming_support("exec sleep 30", Duration::from_millis(300));
+        assert_eq!(finding.status_label(), "warning", "{finding:?}");
+        assert!(
+            finding
+                .message
+                .contains("did not finish: no exit within 300ms"),
+            "{finding:?}"
+        );
+    }
+
+    #[test]
+    fn a_worker_that_cannot_be_started_is_a_warning() {
+        let td = TempDir::new().unwrap();
+        let worker = td.path().join("tensorplate-serving");
+        fs::write(&worker, b"not a program").unwrap();
+        fs::set_permissions(&worker, fs::Permissions::from_mode(0o0644)).unwrap();
+        let findings = probe_serving_streaming_with(&worker, Duration::from_secs(30));
+        assert_eq!(findings[0].status_label(), "warning", "{findings:?}");
+        assert!(
+            findings[0].message.contains("did not start"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn no_installed_worker_is_skipped() {
+        let td = TempDir::new().unwrap();
+        let findings = probe_serving_streaming_with(
+            &td.path().join("tensorplate-serving"),
+            Duration::from_secs(30),
+        );
+        assert_eq!(
+            (findings[0].status_label(), findings[0].severity_label()),
+            ("skipped", "info"),
+            "{findings:?}"
+        );
+        assert!(
+            findings[0].message.contains("serving_binary_installed"),
+            "{findings:?}"
+        );
+        // A directory standing at the path is no worker either.
+        fs::create_dir(td.path().join("tensorplate-serving")).unwrap();
+        let findings = probe_serving_streaming_with(
+            &td.path().join("tensorplate-serving"),
+            Duration::from_secs(30),
+        );
+        assert_eq!(findings[0].status_label(), "skipped", "{findings:?}");
+    }
+
+    #[test]
+    fn the_worker_gets_the_five_seconds_the_doctor_page_states() {
+        assert_eq!(SERVING_VERSION_TIMEOUT, Duration::from_secs(5));
     }
 
     fn stage_systemd_units(td: &Path) {
@@ -2512,6 +2678,16 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
             .find(|f| matches!(f.id, FindingId::ServingBinaryInstalled))
             .unwrap();
         assert_eq!(serving.status_label(), "ok");
+        let streaming = findings
+            .iter()
+            .position(|f| matches!(f.id, FindingId::ServingStreamingSupport))
+            .unwrap();
+        assert_eq!(findings[streaming].status_label(), "ok", "{findings:?}");
+        assert_eq!(
+            findings[streaming - 1].id,
+            FindingId::ServingBinaryInstalled,
+            "reported right after the binary it runs"
+        );
         let agent_unit = findings
             .iter()
             .find(|f| matches!(f.id, FindingId::AgentSystemdUnit))
