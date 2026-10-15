@@ -1206,6 +1206,39 @@ TEST_F(SpeechWorkerScripted, AnActivateReopensAFencedMemberWithItsCeiling) {
   (void)served.stop();
 }
 
+// The agent's poll reads the stream session's ledger: active from its
+// admission, closing while the backend keeps its cancelled job, and free once
+// the release is acknowledged.
+TEST_F(SpeechWorkerScripted, ThePollCountsASessionFromItsAdmissionUntilItsRelease) {
+  register_backend();
+  backend->hold();
+  tensorplate::testing::OwnedFd agent;
+  auto built = member(streaming_config(speech_model()), agent);
+  ASSERT_NE(built, nullptr);
+  const Serving served{std::move(built), kServed};
+  const auto ledger = [&] { return ask(agent.get(), ipc::WorkerControlOp::LedgerStatus).ledger; };
+  EXPECT_EQ(ledger(), (ipc::WorkerLedger{0, 0, 0, 1, {}}));
+  auto client = served.ready(wire::SESSION_MODE_TTS_STREAMING);
+  const auto admitted = ledger();
+  ASSERT_TRUE(admitted.has_value());
+  EXPECT_EQ(admitted->active, 1U);
+  EXPECT_EQ(admitted->admission_monotonic_ns.size(), 1U);
+  ASSERT_TRUE(client.send_text(1, "held"));
+  ASSERT_NE(running_job().value("job_id", std::uint64_t{0}), 0U);
+
+  wire::ClientEvent cancel;
+  cancel.mutable_cancel();
+  ASSERT_TRUE(client.send(cancel));
+  const auto accepted = client.next();
+  ASSERT_TRUE(accepted.has_value());
+  ASSERT_TRUE(accepted->has_cancel_accepted()) << accepted->ShortDebugString();
+  EXPECT_EQ(ledger(), (ipc::WorkerLedger{0, 0, 1, 1, {}}));
+  backend->release();
+  EXPECT_EQ(closed_of(client.next()).state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_EQ(ledger(), (ipc::WorkerLedger{0, 0, 0, 1, {}}));
+  (void)served.stop();
+}
+
 // The retire answers, asks for the stop and changes nothing else; the stop
 // main then runs, with no shutdown of its own, drains the session with the
 // retire's cause and window.
@@ -1617,6 +1650,20 @@ TEST_F(SpeechWorkerScripted, ASpeechDeploymentOnABackendWithoutJobsRefusesEveryO
   EXPECT_FALSE(served.serves_sessions);
   expect_unsupported(served.refused(wire::SESSION_MODE_STT_STREAMING));
   EXPECT_TRUE(logged(served.stop(), "speech dispatch stopped").empty());
+}
+
+// A listener without a dispatch admits no session: the ledger is the empty
+// one, as activate's quota of none says.
+TEST_F(SpeechWorkerScripted, AMemberThatServesNoSessionPollsAnEmptyLedger) {
+  register_backend(/*with_bridge=*/false);
+  tensorplate::testing::OwnedFd agent;
+  auto built = member(streaming_config(speech_model()), agent);
+  ASSERT_NE(built, nullptr);
+  const Serving served{std::move(built), kServed};
+  ASSERT_TRUE(served.listens);
+  EXPECT_FALSE(served.serves_sessions);
+  EXPECT_EQ(ask(agent.get(), ipc::WorkerControlOp::LedgerStatus).ledger, ipc::WorkerLedger{});
+  (void)served.stop();
 }
 
 TEST_F(SpeechWorkerScripted,

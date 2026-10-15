@@ -548,6 +548,11 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
     return unexpected(listener.error());
   }
   const auto port = (*listener)->bound_port();
+  // Without a dispatch no session is admitted: the ledger stays empty, as
+  // activate's quota of none says.
+  if (speech_dispatch != nullptr) {
+    control_target.bind_ledger([served = listener->get()] { return served->ledger(); });
+  }
   {
     const std::lock_guard guard(stream_mutex);
     stream = std::move(listener).value();
