@@ -42,6 +42,8 @@ struct Stepped {
     before_activate: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Runs once, as a transaction reports its failure.
     on_failure: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once, before the serving member is read.
+    before_serving_member: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Stepped {
@@ -98,6 +100,9 @@ impl WorkerControl for Stepped {
         self.f.registry.active_deployment_id()
     }
     fn serving_member(&self) -> AgentResult<Option<ServingMember>> {
+        if let Some(hook) = self.before_serving_member.lock().unwrap().take() {
+            hook();
+        }
         self.f.registry.serving_member()
     }
     fn stopping(&self) -> bool {
@@ -155,6 +160,7 @@ fn wired_at(root: Arc<TempDir>, step: Step, configure: impl FnOnce(&mut AgentCon
         before_fence: Mutex::default(),
         before_activate: Mutex::default(),
         on_failure: Mutex::default(),
+        before_serving_member: Mutex::default(),
     });
     let failed = worker.clone();
     let sink: Arc<EventSink> = Arc::new(move |event: &WorkerEvent| {
@@ -673,6 +679,73 @@ fn the_loop_never_clears_an_error_that_is_not_the_restores() {
     assert_eq!(w.coordinator.supervise(), serving("stt", 3));
 
     assert_eq!(w.store.snapshot().unwrap().last_error, recorded);
+}
+
+/// The next start of `w`'s agent: its restore failed, and the restart
+/// of the restored deployment has been launched.
+fn restarting_after_a_failed_restore(w: &Wired) -> Wired {
+    let next = started_failing(w, "spawn");
+    apply_startup(&next.coordinator).unwrap();
+    heal(&next);
+    next.f.clock.advance(Duration::from_secs(1));
+    assert_eq!(next.coordinator.supervise(), restarted(3));
+    next
+}
+
+#[test]
+fn the_loop_keeps_an_error_written_after_it_read_the_restores() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let next = restarting_after_a_failed_restore(&w);
+    let other = ErrorRecord::new(ErrorCode::Internal, "a deploy's failure");
+    let (store, written) = (next.store.clone(), other.clone());
+    // Between the loop's read of the restore's error and its clearing write.
+    let write = move || store.set_last_error(Some(written)).unwrap();
+    *next.worker.before_serving_member.lock().unwrap() = Some(Box::new(write));
+
+    assert_eq!(next.coordinator.supervise(), serving("stt", 3));
+
+    assert_eq!(next.store.snapshot().unwrap().last_error, Some(other));
+}
+
+#[test]
+fn a_restores_error_is_kept_while_the_member_serving_is_not_the_active_records() {
+    // An update under the same id, and another id.
+    for (id, bundle) in [("stt", TTS), ("tts", TTS)] {
+        let w = wired();
+        w.deploy("stt", STT).unwrap();
+        let next = restarting_after_a_failed_restore(&w);
+        next.f.health(CANDIDATE_PORT, id);
+        // The clearing write fails, so the clearing is still owed at the next turn.
+        next.store.kill_after_writes(0);
+        assert_eq!(next.coordinator.supervise(), serving("stt", 3));
+        next.store.kill_after_writes(usize::MAX);
+        let recorded = next.store.snapshot().unwrap().last_error;
+        assert!(recorded.is_some());
+        let (at, is_at) = std::sync::mpsc::channel();
+        let (go, gone) = std::sync::mpsc::channel::<()>();
+        let wait = move || {
+            at.send(()).unwrap();
+            let _ = gone.recv();
+        };
+        *next.worker.before_activate.lock().unwrap() = Some(Box::new(wait));
+
+        let during = std::thread::scope(|scope| {
+            // Dropped if this closure panics, which lets the deploy end.
+            let go = go;
+            let deploying = scope.spawn(|| next.deploy(id, bundle));
+            is_at.recv_timeout(GRACE).unwrap();
+            // A turn between the deploy's commit and its activation.
+            next.coordinator.supervise();
+            let during = next.store.snapshot().unwrap().last_error;
+            go.send(()).unwrap();
+            deploying.join().unwrap().unwrap();
+            during
+        });
+
+        assert_eq!(during, recorded, "{id}");
+        assert_eq!(next.store.snapshot().unwrap().last_error, None, "{id}");
+    }
 }
 
 #[test]
