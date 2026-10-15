@@ -1028,8 +1028,8 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   deployed again), and `active` as the record with no `generation` and no
   `serving_url`. To recover, deploy the id again through that agent, as
   either bundle: the deploy serves it and clears the error, and the next
-  start restores it. When the two digests agree, the restore and the
-  rollback then hash every artifact of the staged copy: one that is missing,
+  start restores it. The restore, once the two digests agree, and the
+  rollback also hash every artifact of the staged copy: one that is missing,
   truncated or replaced is `load_failed` at the restore, with the same
   outcome, and the rollback is refused.
 - **Failure.** A member that stops with three restarts inside the last five
