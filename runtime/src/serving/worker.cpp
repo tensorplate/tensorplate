@@ -124,6 +124,9 @@ struct ServingWorker::Impl {
   std::atomic<bool> stop_workers{false};
   std::mutex stop_mutex;
   ServingExitCode exit_code = ServingExitCode::Ok;
+  /// The speech dispatch reported a release its backend never acknowledged:
+  /// the worker stops, and its stop's unload resets the backend.
+  std::atomic<bool> backend_stalled{false};
 #if TP_ENABLE_STREAMING_GRPC
   /// The session's job bridge and the dispatch that runs stream sessions
   /// through it; both null unless a speech deployment serves streams.
@@ -161,6 +164,7 @@ struct ServingWorker::Impl {
 #endif
   void stop_stream_admission() noexcept;
   void stop_stream_listener() noexcept;
+  void on_speech_stall(const Error& cause) noexcept;
   // Dispatcher / evictor only call into the owned `unique_ptr` members, so
   // they could be marked const; we keep them non-const so future hooks
   // (e.g. recording dispatcher state on Impl) do not require an API change.
@@ -316,7 +320,10 @@ Result<void> ServingWorker::Impl::build() {
   clock = std::make_unique<SystemSchedulerClock>();
 #if TP_ENABLE_STREAMING_GRPC
   if (job_bridge != nullptr) {
-    auto dispatch = serving::SpeechJobDispatch::create(job_bridge, *buffer_manager, *clock);
+    serving::SpeechDispatchOptions options;
+    options.on_stall = [this](const Error& cause) { on_speech_stall(cause); };
+    auto dispatch =
+        serving::SpeechJobDispatch::create(job_bridge, *buffer_manager, *clock, std::move(options));
     if (!dispatch) {
       log_stderr(config, "error", "speech dispatch construction failed",
                  {{"code", std::string{to_string(dispatch.error().code)}},
@@ -544,6 +551,8 @@ void ServingWorker::Impl::stop_stream_listener() noexcept {
              {"jobs_failed", stats.jobs_failed},
              {"jobs_discarded", stats.jobs_discarded},
              {"releases_refused", stats.releases_refused},
+             {"jobs_past_deadline", stats.jobs_past_deadline},
+             {"releases_past_bound", stats.releases_past_bound},
              {"longest_release_wait_ms",
               std::chrono::duration_cast<std::chrono::milliseconds>(stats.longest_release_wait)
                   .count()}});
@@ -552,6 +561,28 @@ void ServingWorker::Impl::stop_stream_listener() noexcept {
     }
   }
 #endif
+}
+
+// On the dispatch's thread. It asks for the worker's stop and does not wait:
+// the stop runs on the thread that waits for shutdown. The request comes
+// before `failed`, which the binary's main thread answers with a shutdown of
+// its own that then finds this one.
+void ServingWorker::Impl::on_speech_stall(const Error& cause) noexcept {
+  backend_stalled.store(true);
+  health.record_error(cause);
+  try {
+    log_stderr(config, "error", "speech backend stalled",
+               {{"code", std::string{to_string(cause.code)}},
+                {"reason", cause.context.value_or("")},
+                {"message", cause.message}});
+    if (!shutdown.is_stopping()) {
+      metrics.increment_shutdown_started();
+      log_stderr(config, "info", "shutdown requested", {{"reason", "speech backend stalled"}});
+    }
+    shutdown.request("speech backend stalled");
+  } catch (...) {  // NOLINT(bugprone-empty-catch): the state below still stops the binary.
+  }
+  health.set_state(ServingState::Failed);
 }
 
 // Dispatcher / evictor only reach `Impl` members through their
@@ -758,6 +789,9 @@ ServingExitCode ServingWorker::stop() {
   impl_->run_drain();
   // Release async-store entries.
   impl_->async_store->cancel_all();
+  if (impl_->backend_stalled.load()) {
+    impl_->exit_code = ServingExitCode::Internal;
+  }
   log_stderr(impl_->config, "info", "shutdown complete", {});
   return impl_->exit_code;
 }

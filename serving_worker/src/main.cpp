@@ -28,6 +28,7 @@
 
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/serving/config.hpp"
+#include "tensorplate/serving/health.hpp"
 #include "tensorplate/serving/worker.hpp"
 #include "tensorplate/version.hpp"
 
@@ -137,6 +138,9 @@ class SignalWakeup {
   std::array<int, 2> pipe_{-1, -1};
 };
 
+/// How often the wait for a signal also looks whether the worker failed.
+constexpr int kFailureCheckMs = 1000;
+
 tensorplate::ServingExitCode run_until_signal(tensorplate::ServingWorker& worker,
                                               const SignalWakeup& signals) {
   // A signal received during load must not be lost or publish a new listener.
@@ -147,9 +151,18 @@ tensorplate::ServingExitCode run_until_signal(tensorplate::ServingWorker& worker
                  ? tensorplate::ServingExitCode::ConfigError
                  : tensorplate::ServingExitCode::ServeError;
     }
-    signal = signals.wait(-1);
+    // A worker that failed while serving (a stalled backend) stops as on a
+    // signal; its stop() gives the exit code.
+    do {
+      signal = signals.wait(kFailureCheckMs);
+    } while (signal && *signal == 0 &&
+             worker.health().state() != tensorplate::ServingState::Failed);
   }
-  worker.shutdown(!signal ? "signal wait failed" : (*signal == SIGINT ? "SIGINT" : "SIGTERM"));
+  const char* reason = "signal wait failed";
+  if (signal) {
+    reason = *signal == SIGINT ? "SIGINT" : (*signal == SIGTERM ? "SIGTERM" : "worker failed");
+  }
+  worker.shutdown(reason);
   const auto code = worker.stop();
   return signal ? code : tensorplate::ServingExitCode::Internal;
 }
