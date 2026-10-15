@@ -44,7 +44,8 @@ struct Stepped {
     on_failure: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Runs once, before the serving member is read.
     before_serving_member: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    /// The next warm's timeout, in place of the configured one.
+    /// The next warm's budget, in place of the configured timeout, and
+    /// doubled until that warm has probed.
     next_warm: Mutex<Option<Duration>>,
 }
 
@@ -68,8 +69,11 @@ impl WorkerControl for Stepped {
         candidate: &CandidateRef,
         timeout: Duration,
     ) -> AgentResult<WorkerReadiness> {
-        let timeout = self.next_warm.lock().unwrap().take().unwrap_or(timeout);
-        self.f.registry.warm(tx, candidate, timeout)
+        let next = self.next_warm.lock().unwrap().take();
+        match next {
+            Some(budget) => self.f.warm_until_probed(tx, candidate, budget),
+            None => self.f.registry.warm(tx, candidate, timeout),
+        }
     }
     fn fence(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
         if let Some(hook) = self.before_fence.lock().unwrap().take() {

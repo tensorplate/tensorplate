@@ -294,13 +294,20 @@ impl Fixture {
     fn warm(&self, id: &str) -> AgentResult<WorkerReadiness> {
         self.registry.warm("tx", &candidate(id), WARM)
     }
-    /// Warms with the short budget, doubled until a warm has probed: a warm
-    /// whose thread stalls past its deadline returns not ready without one.
     fn warm_briefly(&self, id: &str) -> AgentResult<WorkerReadiness> {
+        self.warm_until_probed("tx", &candidate(id), WAIT_OUT)
+    }
+    /// Warms with `budget`, doubled until a warm has probed: a warm whose
+    /// thread stalls past its deadline returns not ready without one.
+    fn warm_until_probed(
+        &self,
+        tx: &str,
+        candidate: &CandidateRef,
+        mut budget: Duration,
+    ) -> AgentResult<WorkerReadiness> {
         let probed = self.probe.probes.load(Ordering::SeqCst);
-        let mut budget = WAIT_OUT;
         loop {
-            let readiness = self.registry.warm("tx", &candidate(id), budget)?;
+            let readiness = self.registry.warm(tx, candidate, budget)?;
             if readiness.ready || self.probe.probes.load(Ordering::SeqCst) > probed {
                 return Ok(readiness);
             }
