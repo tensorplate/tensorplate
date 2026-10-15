@@ -139,6 +139,11 @@ struct CallState {
 
 }  // namespace
 
+ConnectionBounds connection_bounds(const StreamListenerOptions& options) noexcept {
+  return {options.max_connection_idle.value_or(kMaxConnectionIdle),
+          options.max_connections.value_or(kMaxConnections)};
+}
+
 /// The method is registered raw: gRPC hands over each message as bytes, so a
 /// message that does not parse reaches the call instead of failing its read.
 struct StreamListener::Impl final

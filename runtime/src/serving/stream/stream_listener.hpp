@@ -21,6 +21,16 @@ class SessionDispatch;
 /// last event was written.
 inline constexpr std::chrono::milliseconds kTerminalEventReserve{250};
 
+/// gRPC's idle limit for a connection with no call open. gRPC closes one to two
+/// limits after its last call, a tenth of jitter aside; a gRPC client that has
+/// made a call closes its own within 60 minutes of it, so before this.
+inline constexpr std::chrono::minutes kMaxConnectionIdle{67};
+
+/// The connections gRPC accepts at one time: half of what the soft limit of
+/// 1,024 descriptors leaves over the worker's own at idle, down to a power of
+/// two.
+inline constexpr int kMaxConnections = 256;
+
 struct StreamListenerOptions {
   /// A loopback literal unless `allow_non_loopback`, as for the HTTP bind.
   std::string host = "127.0.0.1";
@@ -35,7 +45,21 @@ struct StreamListenerOptions {
   /// Places for refused calls that are not done; the listener's own 4,096
   /// when unset, which the worker keeps. Set by tests only.
   std::optional<std::size_t> max_refused_calls;
+  /// gRPC's limit on a connection with no call open; kMaxConnectionIdle when
+  /// unset, which the worker keeps. Set by tests only.
+  std::optional<std::chrono::milliseconds> max_connection_idle;
+  /// The connections gRPC accepts at one time; kMaxConnections when unset,
+  /// which the worker keeps. Set by tests only.
+  std::optional<int> max_connections;
 };
+
+/// What the listener asks of gRPC for its connections.
+struct ConnectionBounds {
+  std::chrono::milliseconds idle;
+  int connections;
+};
+
+[[nodiscard]] ConnectionBounds connection_bounds(const StreamListenerOptions& options) noexcept;
 
 /// The gRPC SessionService of one worker: one call per logical session, each
 /// driving the SessionManager it owns and the dispatch behind it.

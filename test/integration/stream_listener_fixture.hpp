@@ -444,6 +444,12 @@ struct Client {
   std::deque<wire::ServerEvent> stashed_;
 };
 
+/// gRPC's limits on the listener's connections, where a test sets them.
+struct ConnectionLimits {
+  std::optional<std::chrono::milliseconds> idle;
+  std::optional<int> connections;
+};
+
 /// A listener with the synthetic dispatch behind it, or none.
 class Served {
  public:
@@ -452,7 +458,7 @@ class Served {
   explicit Served(bool with_dispatch = true, const std::string& host = "127.0.0.1",
                   const SchedulerClock* clock = nullptr,
                   std::optional<std::size_t> max_refused_calls = std::nullopt,
-                  std::uint32_t max_sessions = 1)
+                  std::uint32_t max_sessions = 1, ConnectionLimits connection_limits = {})
       : clock_(clock != nullptr ? *clock : system_clock_) {
     if (with_dispatch) {
       dispatch_ = std::make_unique<SteeredDispatch>(clock_);
@@ -461,6 +467,8 @@ class Served {
     options.host = host;
     options.deployment_id = kDeployment;
     options.max_refused_calls = max_refused_calls;
+    options.max_connection_idle = connection_limits.idle;
+    options.max_connections = connection_limits.connections;
     options.limits = serving::SessionLimits::create(
                          std::chrono::seconds{60}, std::chrono::seconds{10},
                          std::chrono::seconds{30}, std::chrono::minutes{60}, max_sessions)

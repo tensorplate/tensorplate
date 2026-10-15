@@ -2,8 +2,9 @@
 //
 // What the stream listener bounds before a call has a session: the wait for
 // its Open, how many calls it waits on, how many refused calls it keeps,
-// compression, and what its transport announces. Every timeout but one runs
-// on an injected clock.
+// compression, what its transport announces, and how long gRPC keeps a
+// connection with no call and how many it accepts. Every timeout of the
+// listener's own but one runs on an injected clock.
 
 #include <arpa/inet.h>
 #include <grpcpp/grpcpp.h>
@@ -18,6 +19,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -405,6 +407,157 @@ TEST(StreamBounds, TheServersPrefaceLimitsAConnectionToSixtyFourConcurrentStream
   ASSERT_TRUE(announced.complete) << "the server's preface was not read to its end";
   ASSERT_TRUE(announced.max_concurrent_streams.has_value()) << "the server announced no limit";
   EXPECT_EQ(*announced.max_concurrent_streams, 64U);
+}
+
+/// A channel with a connection of its own: channels to one address otherwise
+/// share gRPC's subchannels, and with them a connection.
+struct Connection {
+  explicit Connection(std::uint16_t port) {
+    grpc::ChannelArguments arguments;
+    arguments.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, 1);
+    channel = grpc::CreateCustomChannel("127.0.0.1:" + std::to_string(port),
+                                        grpc::InsecureChannelCredentials(), arguments);
+    stub = wire::SessionService::NewStub(channel);
+  }
+
+  /// A call that has sent nothing. With `wait_for_ready` it waits for a
+  /// connection instead of failing while the channel has none.
+  [[nodiscard]] Client call(bool wait_for_ready = false) const {
+    Client client;
+    client.context->set_deadline(std::chrono::system_clock::now() + 20s);
+    client.context->set_wait_for_ready(wait_for_ready);
+    client.call = stub->Session(client.context.get());
+    return client;
+  }
+
+  std::shared_ptr<grpc::Channel> channel;
+  std::unique_ptr<wire::SessionService::Stub> stub;
+};
+
+std::chrono::system_clock::time_point in(std::chrono::milliseconds wait) {
+  return std::chrono::system_clock::now() + wait;
+}
+
+/// Whether `client`'s Open is answered by Ready.
+bool answered_by_ready(Client& client) {
+  if (!client.call->Write(open_event(wire::SESSION_MODE_STT_STREAMING))) {
+    return false;
+  }
+  const auto ready = client.read();
+  if (!ready || !ready->has_ready()) {
+    return false;
+  }
+  client.took(ready->ready());
+  return true;
+}
+
+void close_session(Client& client) {
+  EXPECT_TRUE(client.call->WritesDone());
+  const auto closed = client.read();
+  EXPECT_TRUE(closed && closed->has_session_closed());
+  EXPECT_FALSE(client.read().has_value());
+  EXPECT_TRUE(client.call->Finish().ok());
+}
+
+/// The status of a call on a connection the server closed as it accepted it.
+grpc::Status unconnected(const Connection& connection) {
+  auto client = connection.call();
+  (void)client.call->Write(open_event(wire::SESSION_MODE_STT_STREAMING));
+  wire::ServerEvent event;
+  EXPECT_FALSE(client.call->Read(&event));
+  return client.call->Finish();
+}
+
+TEST(StreamBounds, UnsetConnectionLimitsAreTheListenersOwn) {
+  const auto own = tensorplate::serving::connection_bounds({});
+  EXPECT_EQ(own.idle, 67min);
+  EXPECT_EQ(own.connections, 256);
+  tensorplate::serving::StreamListenerOptions options;
+  options.max_connection_idle = 5ms;
+  options.max_connections = 2;
+  const auto set = tensorplate::serving::connection_bounds(options);
+  EXPECT_EQ(set.idle, 5ms);
+  EXPECT_EQ(set.connections, 2);
+}
+
+// gRPC ends a connection that has had no call open for the idle limit, and
+// the client's next call connects again by itself.
+TEST(StreamBounds, AConnectionWithNoCallOpenIsClosedAtTheIdleLimitAndTheNextCallConnectsAgain) {
+  Served served{true, "127.0.0.1", nullptr, std::nullopt, 1, {.idle = 200ms}};
+  const Connection connection{served.listener().bound_port()};
+  ASSERT_TRUE(connection.channel->WaitForConnected(in(20s)));
+  // The server's GOAWAY takes the channel off READY.
+  ASSERT_TRUE(connection.channel->WaitForStateChange(GRPC_CHANNEL_READY, in(20s)))
+      << "the connection outlived the idle limit";
+  auto client = connection.call();
+  ASSERT_TRUE(answered_by_ready(client));
+  close_session(client);
+}
+
+// The idle limit counts only time with no call open: a session held across
+// it keeps its connection.
+TEST(StreamBounds, ASessionHeldPastTheIdleLimitKeepsItsConnection) {
+  Served served{true, "127.0.0.1", nullptr, std::nullopt, 1, {.idle = 1s}};
+  const Connection connection{served.listener().bound_port()};
+  auto client = connection.call();
+  ASSERT_TRUE(answered_by_ready(client));
+  EXPECT_FALSE(connection.channel->WaitForStateChange(GRPC_CHANNEL_READY, in(3s)))
+      << "the connection of an open call was closed";
+  wire::ClientEvent ping;
+  ping.mutable_ping();
+  ASSERT_TRUE(client.send(ping));
+  const auto pong = client.read();
+  EXPECT_TRUE(pong && pong->has_pong());
+  close_session(client);
+}
+
+// gRPC accepts no more connections than the cap and closes one past it as it
+// accepts it; a connection that closes gives its place back.
+TEST(StreamBounds, ConnectionsUpToTheCapAreServedAndOnePastItIsClosedAsItIsAccepted) {
+  constexpr int kCap = 3;
+  Served served{true, "127.0.0.1", nullptr, std::nullopt, kCap, {.connections = kCap}};
+  const auto port = served.listener().bound_port();
+  std::vector<std::unique_ptr<Connection>> connections;
+  std::vector<Client> sessions;
+  for (int held = 0; held < kCap; ++held) {
+    connections.push_back(std::make_unique<Connection>(port));
+    sessions.push_back(connections.back()->call());
+    ASSERT_TRUE(answered_by_ready(sessions.back())) << "connection " << held;
+  }
+  const Connection past{port};
+  const auto refused = unconnected(past);
+  EXPECT_EQ(refused.error_code(), grpc::StatusCode::UNAVAILABLE) << refused.error_message();
+
+  close_session(sessions.front());
+  sessions.erase(sessions.begin());
+  connections.erase(connections.begin());
+  auto admitted = past.call(true);
+  ASSERT_TRUE(answered_by_ready(admitted)) << "the closed connection kept its place";
+  close_session(admitted);
+  for (auto& session : sessions) {
+    close_session(session);
+  }
+}
+
+// The listener's own cap, 256: each of that many connections is served a call
+// while all are held, and the next is closed as it is accepted.
+TEST(StreamBounds, TheListenersOwnCapServesTwoHundredFiftySixConnectionsAndClosesTheNext) {
+  constexpr int kOwnCap = 256;
+  Served served{false};
+  const auto port = served.listener().bound_port();
+  std::vector<std::unique_ptr<Connection>> held;
+  for (int connection = 0; connection < kOwnCap; ++connection) {
+    held.push_back(std::make_unique<Connection>(port));
+    auto client = held.back()->call();
+    ASSERT_TRUE(client.call->Write(open_event(wire::SESSION_MODE_STT_STREAMING)));
+    wire::ServerEvent event;
+    EXPECT_FALSE(client.call->Read(&event));
+    ASSERT_EQ(client.call->Finish().error_code(), grpc::StatusCode::FAILED_PRECONDITION)
+        << "connection " << connection;
+  }
+  const Connection past{port};
+  const auto refused = unconnected(past);
+  EXPECT_EQ(refused.error_code(), grpc::StatusCode::UNAVAILABLE) << refused.error_message();
 }
 
 }  // namespace
