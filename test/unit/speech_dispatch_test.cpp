@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -68,6 +69,14 @@ std::string refusal(const SessionDispatch& dispatch, const SessionRequest& reque
   }
   EXPECT_EQ(refused.error().code, Error::Code::Unsupported);
   return refused.error().context.value_or("");
+}
+
+SpeechDispatchOptions options_for(std::uint64_t generation, bool audio_input, bool text_input) {
+  SpeechDispatchOptions options;
+  options.generation = generation;
+  options.audio_input = audio_input;
+  options.text_input = text_input;
+  return options;
 }
 
 template <typename Value>
@@ -155,7 +164,9 @@ TEST(SpeechJobDispatch, CreateRefusesWhatItCannotServeThrough) {
   const auto buffers = BufferManager::create({}).value();
   EXPECT_EQ(context_of(SpeechJobDispatch::create(nullptr, *buffers, clock)), "job_bridge_null");
   const auto bridge = std::make_shared<FixtureJobBridge>(*buffers);
-  EXPECT_EQ(context_of(SpeechJobDispatch::create(bridge, *buffers, clock, {0})), "generation_zero");
+  EXPECT_EQ(
+      context_of(SpeechJobDispatch::create(bridge, *buffers, clock, options_for(0, true, true))),
+      "generation_zero");
   // The refusals above left the bridge its sink to give.
   const auto first = SpeechJobDispatch::create(bridge, *buffers, clock);
   ASSERT_TRUE(first.has_value());
@@ -210,12 +221,12 @@ TEST(SpeechJobDispatch, NegotiateRefusesWhatAJobRequestCouldNotCarry) {
   const FakeSchedulerClock clock;
   const auto buffers = BufferManager::create({}).value();
   const auto text_only = SpeechJobDispatch::create(std::make_shared<FixtureJobBridge>(*buffers),
-                                                   *buffers, clock, {1, false, true})
+                                                   *buffers, clock, options_for(1, false, true))
                              .value();
   EXPECT_EQ(refusal(*text_only, audio_request), "unsupported_input_kind");
   EXPECT_EQ(refusal(*text_only, text_request), "<granted>");
   const auto audio_only = SpeechJobDispatch::create(std::make_shared<FixtureJobBridge>(*buffers),
-                                                    *buffers, clock, {1, true, false})
+                                                    *buffers, clock, options_for(1, true, false))
                               .value();
   EXPECT_EQ(refusal(*audio_only, text_request), "unsupported_input_kind");
   EXPECT_EQ(refusal(*audio_only, audio_request), "<granted>");
@@ -1165,6 +1176,300 @@ TEST(SpeechJobDispatch, SpeechInABufferThatCannotBeReadFailsTheSession) {
   EXPECT_FALSE(binding.output(key)->take().has_value());
   ASSERT_TRUE(binding.settle());
   EXPECT_EQ(speech.buffers_in_use(), 0U);
+}
+
+/// Short enough for a session that sends nothing to outlive them: a job's
+/// deadline is 1 s plus 0.5 s per second of its audio, a release's bound 2 s.
+std::unique_ptr<DispatchUnderTest> speech_dispatch_with_short_bounds(const SchedulerClock& clock) {
+  SpeechDispatchOptions options;
+  options.job_deadline_base = 1s;
+  options.job_deadline_per_audio_second = 500ms;
+  options.release_bound = 2s;
+  return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{}, result_following_input,
+                                           BufferManagerConfig{}, std::move(options));
+}
+
+/// Moves the clock the manager and the dispatch share, and lets the dispatch
+/// act on it.
+void move_clock(Binding& binding, SchedulerClock::Duration by) {
+  binding.clock.advance(by);
+  speech_of(binding).strategy->notify_clock_advanced();
+  ASSERT_TRUE(binding.settle());
+}
+
+TEST(SpeechJobDispatch, TheDeadlinesAndTheBoundAreTheProvisionalFigures) {
+  const SpeechDispatchOptions options;
+  EXPECT_EQ(options.job_deadline_base, 10s);
+  EXPECT_EQ(options.job_deadline_per_audio_second, 500ms);
+  EXPECT_EQ(options.release_bound, 10s);
+  EXPECT_FALSE(options.on_stall);
+}
+
+// The runner does not interrupt a job: a cancel ends it when its work returns.
+TEST(SpeechJobDispatch, ACancelledSessionWhoseJobNeverEndsIsReportedOnceItsReleasePassesItsBound) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  speech.hold_jobs();
+  one_utterance(binding, key);
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(speech.bridge->submitted().size(), 1U);
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+
+  // The job's deadline, 1 s and 10 ms after its submit, ends nothing more.
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1010ms));
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
+  EXPECT_EQ(binding.live_state(key), State::CancelRequested);
+  // Only the bound is still due, and later: the thread waits for it.
+  const auto waiting = speech.strategy->stats().steps;
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(speech.strategy->stats().steps, waiting);
+  // The bound counts from that deadline, later than the release was asked.
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 2s - 1ns));
+  EXPECT_TRUE(speech.stalls().empty());
+  EXPECT_EQ(speech.strategy->stats().releases_past_bound, 0U);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  ASSERT_EQ(speech.stalls().size(), 1U);
+  EXPECT_EQ(speech.stalls().front().code, Error::Code::Timeout);
+  EXPECT_EQ(speech.stalls().front().context, "release_bound_exceeded");
+  EXPECT_EQ(speech.strategy->stats().releases_past_bound, 1U);
+  // Only the backend's acknowledgement frees the slot.
+  EXPECT_EQ(binding.manager->held_slots(), 1U);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1h));
+  EXPECT_EQ(speech.stalls().size(), 1U);
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
+  // Nothing is due any more: the thread waits, it does not turn.
+  const auto steps = speech.strategy->stats().steps;
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(speech.strategy->stats().steps, steps);
+
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(key, State::Closed));
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "client_cancelled");
+}
+
+TEST(SpeechJobDispatch, ASynthesisStillRunningAtItsDeadlineFailsItsSession) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_text();
+  speech.hold_jobs();
+  binding.text(key, 1, "hello");
+  ASSERT_TRUE(binding.settle());
+  // A synthesis is given the audio of the longest segment granted, 30 s.
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 16s - 1ns));
+  EXPECT_EQ(binding.live_state(key), State::Active);
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 0U);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  EXPECT_EQ(binding.live_state(key), State::Failed);
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
+  // Its release cancelled the job, which ends when its work returns.
+  EXPECT_EQ(speech.bridge->releases(key), 1U);
+  EXPECT_EQ(binding.manager->held_slots(), 1U);
+
+  // A job that ends within the bound leaves no stall, and the lane free.
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  const auto tombstone = binding.manager->tombstone(key);
+  EXPECT_EQ(tombstone->code, Error::Code::Timeout);
+  EXPECT_EQ(tombstone->reason, "deadline_missed");
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1h));
+  EXPECT_TRUE(speech.stalls().empty());
+  const auto next = binding.open_text();
+  binding.text(next, 1, "hi");
+  ASSERT_NO_FATAL_FAILURE(binding.expect_segment(next, 1, "hi"));
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
+}
+
+TEST(SpeechJobDispatch, AReleaseAskedAfterItsJobsDeadlineIsBoundFromTheRequest) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_text();
+  speech.hold_jobs();
+  binding.text(key, 1, "hello");
+  ASSERT_TRUE(binding.settle());
+  // The clock moves between the failure at the deadline and the release it asks for.
+  binding.before_next(key, Event::Fail, [&] { binding.clock.advance(5s); });
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 16s));
+  ASSERT_EQ(binding.live_state(key), State::Failed);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 2s - 1ns));
+  EXPECT_TRUE(speech.stalls().empty());
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  EXPECT_EQ(speech.stalls().size(), 1U);
+}
+
+// The job ends as its deadline passes: both reach the dispatch while its
+// thread is held, in a step for another session.
+TEST(SpeechJobDispatch, AJobsEndQueuedAsItsDeadlinePassesIsNotADeadlineMissed) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_text();
+  const auto other = binding.open_audio();
+  speech.hold_jobs();
+  binding.text(key, 1, "hello");
+  ASSERT_TRUE(binding.settle());
+  std::promise<void> entered;
+  std::promise<void> go;
+  const std::shared_future<void> gate = go.get_future().share();
+  binding.before_next(other, Event::ReleaseAcknowledged, [&entered, gate] {
+    entered.set_value();
+    gate.wait();
+  });
+  auto held = entered.get_future();
+  ASSERT_TRUE(binding.manager->apply(other, Event::Cancel).has_value());
+  ASSERT_EQ(held.wait_for(Binding::kPatience), std::future_status::ready);
+  binding.clock.advance(16s);
+  speech.strategy->notify_clock_advanced();
+  speech.release_jobs();
+  const bool ended = speech.fixture->settled(Binding::kPatience);
+  go.set_value();
+  ASSERT_TRUE(ended);
+  ASSERT_NO_FATAL_FAILURE(binding.expect_segment(key, 1, "hello"));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Active);
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 0U);
+}
+
+// A runner acknowledges a release in a frame of its own, after the session's
+// job has ended: the bound fixed at the request keeps counting from that job's
+// deadline.
+TEST(SpeechJobDispatch, AReleaseWhoseJobEndsBeforeItIsAcknowledgedKeepsItsBound) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_text();
+  speech.hold_jobs();
+  binding.text(key, 1, "hello");
+  ASSERT_TRUE(binding.settle());
+  speech.bridge->hold_acknowledgements();
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  // The job's deadline is 16 s away, so the bound 18 s.
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 5s));
+  speech.release_jobs();
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.strategy->stats().jobs_discarded, 1U) << "the cancelled job's end";
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 13s - 1ns));
+  EXPECT_TRUE(speech.stalls().empty());
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  EXPECT_EQ(speech.stalls().size(), 1U);
+  speech.bridge->let_acknowledgements_go();
+  ASSERT_TRUE(binding.ends_as(key, State::Closed));
+}
+
+// Once a bound is due, only what was queued by then goes ahead of its check,
+// so a stream of commands cannot put it off: a job's end queued later is late.
+TEST(SpeechJobDispatch, WhatArrivesAfterABoundFellDueDoesNotPutItsCheckOff) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_text();
+  const auto other = binding.open_text();
+  const auto third = binding.open_audio();
+  speech.hold_jobs();
+  binding.text(key, 1, "hello");
+  ASSERT_TRUE(binding.settle());
+  // The dispatch's thread waits in the bridge, releasing `other`.
+  speech.bridge->hold_next_release();
+  // Let go however the case ends: a hold left behind would stop the stop.
+  const std::unique_ptr<CountingJobBridge, void (*)(CountingJobBridge*)> let_go{
+      speech.bridge.get(), [](CountingJobBridge* bridge) { bridge->let_release_go(); }};
+  ASSERT_TRUE(binding.manager->apply(other, Event::Cancel).has_value());
+  ASSERT_TRUE(speech.bridge->release_held(Binding::kPatience));
+  // The deadline passes and a Finalize of `third` is queued, whose completion
+  // holds the thread again, in the manager's sink, after the check fell due.
+  binding.clock.advance(16s);
+  speech.strategy->notify_clock_advanced();
+  std::promise<void> entered;
+  std::promise<void> go;
+  const std::shared_future<void> gate = go.get_future().share();
+  binding.before_next(third, Event::FinalizeCompleted, [&entered, gate] {
+    entered.set_value();
+    gate.wait();
+  });
+  auto held = entered.get_future();
+  binding.finalize(third, 1);
+  speech.bridge->let_release_go();
+  ASSERT_EQ(held.wait_for(Binding::kPatience), std::future_status::ready);
+  speech.release_jobs();
+  const bool ended = speech.fixture->settled(Binding::kPatience);
+  go.set_value();
+  ASSERT_TRUE(ended);
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "deadline_missed");
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
+}
+
+// A clock moved by hand reaches a bound by its notice: while it stands short
+// of one, the thread does not keep timing out and turning.
+TEST(SpeechJobDispatch, WhileAClockMovedByHandStandsShortOfABoundTheThreadWaits) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  speech.hold_jobs();
+  one_utterance(binding, key);
+  ASSERT_TRUE(binding.settle());
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  // The release's bound is 3 s and 10 ms away: the clock stops 1 ns short.
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 3010ms - 1ns));
+  const auto steps = speech.strategy->stats().steps;
+  std::this_thread::sleep_for(200ms);
+  EXPECT_EQ(speech.strategy->stats().steps, steps);
+  EXPECT_TRUE(speech.stalls().empty());
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  EXPECT_EQ(speech.stalls().size(), 1U);
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(key, State::Closed));
+}
+
+TEST(SpeechJobDispatch, ADecodesDeadlineGrowsWithItsAudio) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  speech.hold_jobs();
+  // Half a second of audio: 1 s and 250 ms.
+  ASSERT_TRUE(binding.audio_in_long_frames(key, patterned_bytes(16'000, 1)));
+  binding.finalize(key, 1);
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(speech.bridge->submitted().size(), 1U);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1250ms - 1ns));
+  EXPECT_EQ(binding.live_state(key), State::Finalizing);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  EXPECT_EQ(binding.live_state(key), State::Failed);
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "deadline_missed");
+}
+
+TEST(SpeechJobDispatch, AReleaseTheBridgeRefusedIsReportedOnceItsBoundPasses) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  // Another session's job is in flight throughout, its deadline far off.
+  const auto busy = binding.open_text();
+  speech.hold_jobs();
+  binding.text(busy, 1, "hello");
+  ASSERT_TRUE(binding.settle());
+  const auto first = binding.open_audio();
+  const auto second = binding.open_text();
+  speech.bridge->refuse_next_release();
+  ASSERT_TRUE(binding.manager->apply(first, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1s));
+  speech.bridge->refuse_next_release();
+  ASSERT_TRUE(binding.manager->apply(second, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+
+  // Without its own job in flight a release's bound counts from its request.
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1s - 1ns));
+  EXPECT_TRUE(speech.stalls().empty());
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  EXPECT_EQ(speech.stalls().size(), 1U);
+  EXPECT_EQ(speech.strategy->stats().releases_past_bound, 1U);
+  // The second release passes its bound too, and is not reported again.
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1s));
+  EXPECT_EQ(speech.strategy->stats().releases_past_bound, 2U);
+  EXPECT_EQ(speech.stalls().size(), 1U);
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 0U);
+  EXPECT_EQ(binding.manager->held_slots(), 3U);
 }
 }  // namespace
 }  // namespace tensorplate::testing

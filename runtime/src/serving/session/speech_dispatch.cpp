@@ -265,6 +265,8 @@ bool SpeechJobDispatch::wait_idle(std::chrono::milliseconds patience) {
                                  [&] { return core_->commands.empty() && !core_->working; });
 }
 
+void SpeechJobDispatch::notify_clock_advanced() {}
+
 void SpeechJobDispatch::attach(SessionManager& manager) {
   {
     const std::lock_guard guard(core_->mu);
