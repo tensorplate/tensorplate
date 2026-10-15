@@ -338,10 +338,12 @@ struct Reach {
 }
 
 impl Reach {
-    fn of(member: &Member) -> Self {
+    /// `role` names the member in what is logged: `serving`, `candidate`
+    /// or `restarted`.
+    fn of(member: &Member, role: &str) -> Self {
         Self {
             name: format!(
-                "serving worker `{}` generation {}",
+                "{role} worker `{}` generation {}",
                 member.deployment_id, member.generation
             ),
             caller: member.process.control_caller(),
@@ -1173,7 +1175,7 @@ impl MemberRegistry {
         {
             return Ok(None);
         }
-        Ok(Some(Reach::of(member)))
+        Ok(Some(Reach::of(member, "serving")))
     }
 
     /// Keep the judgement that `generation` is ready, for as long as the
@@ -1273,7 +1275,7 @@ impl MemberRegistry {
                     });
                     members.by_generation.get_mut(&generation).map(|member| {
                         member.ready = true;
-                        Reach::of(member)
+                        Reach::of(member, "restarted")
                     })
                 };
                 if let Some(reach) = activated {
@@ -1304,7 +1306,7 @@ impl MemberRegistry {
             if !member.control.reopen_due(now, next) {
                 return;
             }
-            Reach::of(member)
+            Reach::of(member, "serving")
         };
         self.activate_on_thread(reach, Reach::retry_reopen);
     }
@@ -1749,7 +1751,8 @@ impl WorkerControl for MemberRegistry {
             members.admit(generation, prepared);
             members.serving = Some(generation);
             members.forget_restart();
-            let activated = members.by_generation.get(&generation).map(Reach::of);
+            let activated = members.by_generation.get(&generation);
+            let activated = activated.map(|member| Reach::of(member, "candidate"));
             (old.map(|member| members.stopping(member)), activated)
         };
         let mut retired: Vec<Stopping> = retired.into_iter().collect();
@@ -1824,7 +1827,7 @@ impl WorkerControl for MemberRegistry {
             let serving = members.serving;
             serving
                 .and_then(|generation| members.by_generation.get(&generation))
-                .map(Reach::of)
+                .map(|member| Reach::of(member, "serving"))
         };
         if let Some(reach) = serving {
             reach.reopen(self.clock.now());
