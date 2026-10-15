@@ -64,6 +64,13 @@ Error wrong_input_kind() {
 bool backend_was_reset(const Error& error) {
   return error.code == Error::Code::Unavailable && error.context == "backend_reset";
 }
+
+/// `per_second` for each second of `bytes` of audio at `bytes_per_second`.
+SchedulerClock::Duration per_audio(SchedulerClock::Duration per_second, std::uint64_t bytes,
+                                   std::uint64_t bytes_per_second) {
+  return SchedulerClock::Duration{per_second.count() * static_cast<std::int64_t>(bytes) /
+                                  static_cast<std::int64_t>(bytes_per_second)};
+}
 }  // namespace
 
 SpeechJobDispatch::HeldBuffer::HeldBuffer(HeldBuffer&& other) noexcept
@@ -212,6 +219,8 @@ struct SpeechJobDispatch::Core final : JobEventSink {
   std::map<std::uint64_t, HeldBuffer> inputs;
   bool stopping = false;
   bool working = false;
+  /// The bounds are to be checked against a clock moved by hand.
+  bool clock_advanced = false;
   SpeechDispatchStats published;
 };
 
@@ -230,7 +239,7 @@ Result<std::unique_ptr<SpeechJobDispatch>> SpeechJobDispatch::create(
   std::unique_ptr<SpeechJobDispatch> dispatch;
   try {
     dispatch = std::unique_ptr<SpeechJobDispatch>(
-        new SpeechJobDispatch(std::move(bridge), core, clock, options));
+        new SpeechJobDispatch(std::move(bridge), core, clock, std::move(options)));
   } catch (const std::system_error&) {
     return unexpected(Error::make(Error::Code::Internal, "speech dispatch thread could not start",
                                   "dispatch_thread_unavailable"));
@@ -247,7 +256,7 @@ SpeechJobDispatch::SpeechJobDispatch(std::shared_ptr<BoundedJobBridge> bridge,
     : bridge_(std::move(bridge)),
       core_(std::move(core)),
       clock_(clock),
-      options_(options),
+      options_(std::move(options)),
       thread_([this] { run(); }) {}
 
 SpeechJobDispatch::~SpeechJobDispatch() {
@@ -261,11 +270,18 @@ SpeechDispatchStats SpeechJobDispatch::stats() const {
 
 bool SpeechJobDispatch::wait_idle(std::chrono::milliseconds patience) {
   std::unique_lock lock(core_->mu);
-  return core_->idle_cv.wait_for(lock, patience,
-                                 [&] { return core_->commands.empty() && !core_->working; });
+  return core_->idle_cv.wait_for(lock, patience, [&] {
+    return core_->commands.empty() && !core_->working && !core_->clock_advanced;
+  });
 }
 
-void SpeechJobDispatch::notify_clock_advanced() {}
+void SpeechJobDispatch::notify_clock_advanced() {
+  {
+    const std::lock_guard guard(core_->mu);
+    core_->clock_advanced = true;
+  }
+  core_->cv.notify_all();
+}
 
 void SpeechJobDispatch::attach(SessionManager& manager) {
   {
@@ -368,22 +384,26 @@ void SpeechJobDispatch::output_delivered(std::uint64_t session_key, OutputKind k
   core_->post({session_key, Command::Delivered{task_output(kind)}});
 }
 
+struct SpeechJobDispatch::Step {
+  std::optional<Command> command;
+  /// No command: the bounds are to be checked.
+  bool check = false;
+};
+
 void SpeechJobDispatch::run() {
   std::unique_lock lock(core_->mu);
-  for (;;) {
-    core_->cv.wait(lock, [&] {
-      return core_->stopping || (core_->manager != nullptr && !core_->commands.empty());
-    });
-    if (core_->stopping) {
-      return;
-    }
-    Command command = std::move(core_->commands.front());
-    core_->commands.pop_front();
+  while (wait_for_step(lock)) {
+    Step step = take_step();
     SessionManager& manager = *core_->manager;
     core_->working = true;
     // The manager and the bridge are called unlocked: both call back here.
     lock.unlock();
-    handle(manager, std::move(command));
+    if (step.command) {
+      handle(manager, std::move(*step.command));
+    } else if (step.check) {
+      check_bounds(manager);
+    }
+    waiting_.bound = next_bound();
     stats_.sessions = sessions_.size();
     ++stats_.steps;
     lock.lock();
@@ -391,6 +411,52 @@ void SpeechJobDispatch::run() {
     core_->working = false;
     core_->idle_cv.notify_all();
   }
+}
+
+bool SpeechJobDispatch::wait_for_step(std::unique_lock<std::mutex>& lock) {
+  const auto woken = [&] {
+    return core_->stopping ||
+           (core_->manager != nullptr && (!core_->commands.empty() || core_->clock_advanced));
+  };
+  for (;;) {
+    if (waiting_.before_check) {
+      // The check is due: nothing to wait for.
+    } else if (waiting_.bound && !waiting_.moved_by_hand) {
+      if (!core_->cv.wait_for(
+              lock, std::max(SchedulerClock::Duration::zero(), *waiting_.bound - clock_.now()),
+              woken) &&
+          clock_.now() < *waiting_.bound) {
+        waiting_.moved_by_hand = true;
+        continue;
+      }
+    } else {
+      core_->cv.wait(lock, woken);
+    }
+    return !core_->stopping;
+  }
+}
+
+SpeechJobDispatch::Step SpeechJobDispatch::take_step() {
+  if (!waiting_.before_check &&
+      (core_->clock_advanced || (waiting_.bound && clock_.now() >= *waiting_.bound))) {
+    // A job's end already queued is not taken for a deadline missed, and what
+    // arrives from here on does not put the check off.
+    core_->clock_advanced = false;
+    waiting_.before_check = core_->commands.size();
+  }
+  Step step;
+  if (!core_->commands.empty() && waiting_.before_check.value_or(1) > 0) {
+    step.command.emplace(std::move(core_->commands.front()));
+    core_->commands.pop_front();
+    if (waiting_.before_check) {
+      --*waiting_.before_check;
+    }
+  }
+  step.check = !step.command && waiting_.before_check.has_value();
+  if (step.check) {
+    waiting_.before_check.reset();
+  }
+  return step;
 }
 
 void SpeechJobDispatch::handle(SessionManager& manager, Command command) {
@@ -492,6 +558,7 @@ void SpeechJobDispatch::release(SessionManager& manager, std::uint64_t key, Sess
   session.ended_utterances.clear();
   session.open_audio = {};
   session.release_asked = clock_.now();
+  session.release_bound_at = release_due(key, session);
   // The bridge cancels the session's unfinished job with it.
   const auto released = bridge_->release_session(key, options_.generation);
   if (released) {
@@ -563,6 +630,73 @@ void SpeechJobDispatch::job_ended(SessionManager& manager, std::uint64_t key, Jo
                    "unexpected_job_result"));
 }
 
+void SpeechJobDispatch::check_bounds(SessionManager& manager) {
+  const auto now = clock_.now();
+  if (in_flight_ && !in_flight_->past_deadline && now >= in_flight_->deadline) {
+    in_flight_->past_deadline = true;
+    ++stats_.jobs_past_deadline;
+    const std::uint64_t key = in_flight_->session_key;
+    if (const auto it = sessions_.find(key); it != sessions_.end() && !it->second.ended) {
+      fail(manager, key, it->second,
+           Error::make(Error::Code::Timeout, "the session's job did not end within its deadline",
+                       "deadline_missed"));
+    }
+  }
+  for (auto& [key, session] : sessions_) {
+    if (!session.releasing || session.past_bound || now < session.release_bound_at) {
+      continue;
+    }
+    session.past_bound = true;
+    ++stats_.releases_past_bound;
+    if (!stalled_ && options_.on_stall) {
+      stalled_ = true;
+      options_.on_stall(Error::make(Error::Code::Timeout,
+                                    "a session's release was not acknowledged within its bound",
+                                    "release_bound_exceeded"));
+    }
+  }
+}
+
+std::optional<SchedulerClock::TimePoint> SpeechJobDispatch::next_bound() const {
+  std::optional<SchedulerClock::TimePoint> next;
+  const auto consider = [&next](SchedulerClock::TimePoint at) {
+    if (!next || at < *next) {
+      next = at;
+    }
+  };
+  if (in_flight_ && !in_flight_->past_deadline) {
+    consider(in_flight_->deadline);
+  }
+  for (const auto& [key, session] : sessions_) {
+    if (session.releasing && !session.past_bound) {
+      consider(session.release_bound_at);
+    }
+  }
+  return next;
+}
+
+SchedulerClock::TimePoint SpeechJobDispatch::release_due(std::uint64_t key,
+                                                         const Session& session) const {
+  // A release cancels the session's job, which ends only when its work does.
+  const bool job_in_flight = in_flight_ && in_flight_->session_key == key;
+  return std::max(session.release_asked,
+                  job_in_flight ? in_flight_->deadline : SchedulerClock::TimePoint{}) +
+         options_.release_bound;
+}
+
+SchedulerClock::Duration SpeechJobDispatch::job_deadline(const JobRequest& request,
+                                                         const Session& session) const {
+  // A synthesis's audio is known only once it has run: its granted maximum.
+  const StreamAudioFormat& format = session.terms.audio_format;
+  const auto* audio = std::get_if<AudioFrames>(&request.payload());
+  const std::uint64_t bytes =
+      audio != nullptr ? audio->pcm.byte_size
+                       : static_cast<std::uint64_t>(session.terms.max_segment_audio.count()) *
+                             format.bytes_per_second() / 1000;
+  return options_.job_deadline_base +
+         per_audio(options_.job_deadline_per_audio_second, bytes, format.bytes_per_second());
+}
+
 void SpeechJobDispatch::want_job(std::uint64_t key, Session& session) {
   if (session.job == JobState::None) {
     session.job = JobState::Queued;
@@ -588,7 +722,7 @@ void SpeechJobDispatch::start_next(SessionManager& manager) {
     const std::uint64_t job_id = request->identity().job_id;
     // Recorded before the submit: the job's events may overtake its return.
     core_->hold_input(job_id, std::move(input));
-    in_flight_ = InFlight{job_id, key};
+    in_flight_ = InFlight{job_id, key, clock_.now() + job_deadline(*request, session)};
     session.job = JobState::Running;
     const auto submitted = bridge_->submit(std::move(request).value());
     if (!submitted) {

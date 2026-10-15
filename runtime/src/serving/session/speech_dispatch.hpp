@@ -163,6 +163,7 @@ class SpeechJobDispatch final : public SessionDispatch {
   struct Command;
   struct JobEnded;
   struct Moved;
+  struct Step;
 
   /// Releases its buffer when dropped, unless it was moved from.
   class HeldBuffer {
@@ -238,6 +239,9 @@ class SpeechJobDispatch final : public SessionDispatch {
     /// The bridge refused that release, so nothing cancelled the session's job.
     bool release_refused = false;
     SchedulerClock::TimePoint release_asked{};
+    /// Fixed when the release is asked: a job that ends before the backend
+    /// acknowledges the release does not bring it forward.
+    SchedulerClock::TimePoint release_bound_at{};
     bool past_bound = false;
     JobState job = JobState::None;
 
@@ -272,6 +276,11 @@ class SpeechJobDispatch final : public SessionDispatch {
                     const SchedulerClock& clock, SpeechDispatchOptions options);
 
   void run();
+  /// Waits until a step is due. False once the dispatch is stopping.
+  [[nodiscard]] bool wait_for_step(std::unique_lock<std::mutex>& lock);
+  /// With the lock held: the command to handle next, or the check that is
+  /// due, or nothing.
+  [[nodiscard]] Step take_step();
   void handle(SessionManager& manager, Command command);
   /// An input, a Finalize or a delivery the binding handed over.
   static void hand_over(SessionManager& manager, std::uint64_t key, Session& session,
@@ -283,8 +292,10 @@ class SpeechJobDispatch final : public SessionDispatch {
   void job_ended(SessionManager& manager, std::uint64_t key, JobEnded& ended);
   /// Acts on the deadline and the release bounds the clock has passed.
   void check_bounds(SessionManager& manager);
-  /// Until the next deadline or bound not acted on yet, by the clock.
-  [[nodiscard]] std::optional<SchedulerClock::Duration> until_next_bound() const;
+  /// The next deadline or bound not acted on yet.
+  [[nodiscard]] std::optional<SchedulerClock::TimePoint> next_bound() const;
+  /// The later of the request and the deadline of the session's job in
+  /// flight, plus the bound.
   [[nodiscard]] SchedulerClock::TimePoint release_due(std::uint64_t key,
                                                       const Session& session) const;
   [[nodiscard]] SchedulerClock::Duration job_deadline(const JobRequest& request,
@@ -339,6 +350,19 @@ class SpeechJobDispatch final : public SessionDispatch {
   std::deque<std::uint64_t> lane_;
   std::optional<InFlight> in_flight_;
   std::uint64_t next_job_id_ = 1;
+  bool stalled_ = false;
+  /// What the thread waits for between its steps.
+  struct Waiting {
+    /// The next deadline or bound not acted on yet.
+    std::optional<SchedulerClock::TimePoint> bound;
+    /// Once a bound is due: how many of the commands queued then are still
+    /// to be handled ahead of the check.
+    std::optional<std::size_t> before_check;
+    /// Only a clock moved by hand leaves a timed wait short of its bound;
+    /// such a clock reaches its bounds by notice, and the thread waits for it.
+    bool moved_by_hand = false;
+  };
+  Waiting waiting_;
   SpeechDispatchStats stats_;
   std::thread thread_;
 };
