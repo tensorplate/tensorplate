@@ -1539,9 +1539,11 @@ release a session, the buffer accounting of every path, and the job's
 deadline and the release's bound on the fake clock, each one nanosecond
 before and at its instant; a job's end queued as its deadline passes is
 taken first, one queued after the check fell due is not, and a release
-whose job ends before the backend acknowledges it keeps its bound (the
-dispatch's thread held by a gate in the manager's sink or in the bridge
-double, which can also hold acknowledgements back). On a clock at half the
+whose job ends before the backend acknowledges it keeps its bound, which
+counts from the deadline of its own session's job also when that session's
+key is not the job's id (the dispatch's thread held by a gate in the
+manager's sink or in the bridge double, which can also hold
+acknowledgements back). On a clock at half the
 steady clock's speed, which nothing moves and no notice follows, the
 deadline and then the bound still pass; a clock moved by hand is read
 twice a wake and no more often than its next bound allows: once in 1010 ms

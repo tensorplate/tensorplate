@@ -1514,6 +1514,30 @@ TEST(SpeechJobDispatch, OnAClockSlowerThanItsWaitsTheThreadStillReachesEachBound
   EXPECT_EQ(binding.manager->tombstone(key)->reason, "deadline_missed");
 }
 
+// The bound of a release counts from the deadline of the job its own session
+// owns: here not the first session opened, so its key is not the job's id.
+TEST(SpeechJobDispatch, AReleaseIsBoundFromTheDeadlineOfTheJobItsSessionOwns) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  (void)binding.open_text();
+  const auto owner = binding.open_text();
+  speech.hold_jobs();
+  binding.text(owner, 1, "hello");
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(speech.bridge->submitted().size(), 1U);
+  ASSERT_NE(speech.bridge->submitted().front().identity().job_id, owner);
+  ASSERT_TRUE(binding.manager->apply(owner, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  // The synthesis's deadline is 16 s away, so the bound 18 s.
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 18s - 1ns));
+  EXPECT_TRUE(speech.stalls().empty());
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  EXPECT_EQ(speech.stalls().size(), 1U);
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(owner, State::Closed));
+}
+
 TEST(SpeechJobDispatch, ADecodesDeadlineGrowsWithItsAudio) {
   Binding binding(&speech_dispatch_with_short_bounds);
   SpeechUnderTest& speech = speech_of(binding);
