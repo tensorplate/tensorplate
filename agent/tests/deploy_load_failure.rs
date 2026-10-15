@@ -639,14 +639,23 @@ fn deploying_the_active_id_again_leaves_it_served() {
 }
 
 /// The operations other than ledger polls that the stand-in worker recorded
-/// in `record`, each with its answer.
+/// in `record`, each with its answer. An attempt sent again after a poll
+/// because its answer came late counts once.
 fn control_ops(record: &Path) -> Vec<serde_json::Value> {
     let recorded = std::fs::read_to_string(record).unwrap_or_default();
-    recorded
+    let mut ops: Vec<serde_json::Value> = recorded
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("a recorded op"))
         .filter(|op| op["request"]["op"] != "ledger_status")
-        .collect()
+        .collect();
+    let key = |op: &serde_json::Value| {
+        (
+            op["request"]["op"].clone(),
+            op["request"]["transaction_id"].clone(),
+        )
+    };
+    ops.dedup_by(|again, first| key(again) == key(first));
+    ops
 }
 
 fn copy_dir(from: &Path, to: &Path) {

@@ -565,14 +565,20 @@ fn a_loading_restart_a_transaction_fenced_is_reopened_by_the_step_once_its_worke
     // which holds back the restart's own activate.
     f.registry.abandon(&candidate("tts"));
     assert_eq!(successor.admission(), Admission::Fenced);
-    successor.target.lock().unwrap().ceiling = Some(0);
+    // Judged ready while its worker still refuses, so the record is still
+    // there when the restart's activate reads it, whichever thread runs first.
     f.health(ACTIVE_PORT, "stt");
+    step(&f);
+    activations_answered(&f);
+    assert_eq!(successor.admission(), Admission::Fenced);
+    successor.target.lock().unwrap().ceiling = Some(0);
     step(&f);
     activations_answered(&f);
 
     assert_eq!(successor.admission(), Admission::Open);
     let reopened = [
         sent(FENCE, "tx-3"),
+        sent(ACTIVATE, "tx-3"),
         sent(ACTIVATE, "tx-3"),
         sent(ACTIVATE, "tx-3"),
     ];
