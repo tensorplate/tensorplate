@@ -95,7 +95,7 @@ jobs:
 
       - name: Install pinned toolchain (rust-toolchain.toml)
         run: |
-          rustup show active-toolchain || rustup toolchain install
+          tools/ci/install-pinned-toolchain.sh
           cargo --version
 
       - name: Install cargo-deny ${{ env.CARGO_DENY_VERSION }}

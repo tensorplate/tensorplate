@@ -200,7 +200,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          rustup show active-toolchain || rustup toolchain install
+          tools/ci/install-pinned-toolchain.sh
           cargo build --locked -p tensorplate-platform --example memory_sample
           test/validation/memory_sampling_test.py target/debug/examples/memory_sample
 
@@ -421,7 +421,7 @@ jobs:
             pkg-config \
             python3
           tools/ci/select-clang.sh
-          rustup show active-toolchain || rustup toolchain install
+          tools/ci/install-pinned-toolchain.sh
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
