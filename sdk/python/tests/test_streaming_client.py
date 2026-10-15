@@ -1199,6 +1199,7 @@ def test_the_channel_keeps_the_http2_window_fixed_and_bounds_message_size(
             "grpc.http2.bdp_probe": 0,
             "grpc.max_send_message_length": client.MAX_MESSAGE_BYTES,
             "grpc.max_receive_message_length": client.MAX_MESSAGE_BYTES,
+            "grpc.use_local_subchannel_pool": 1,
         }
     ]
     assert client.MAX_MESSAGE_BYTES == 64 * 1024

@@ -329,6 +329,7 @@ def test_a_client_from_the_agent_opens_on_the_target_it_names() -> None:
     fake = server()
 
     async def scenario(agent: Agent, stream: speech.SpeechClient, endpoint: str) -> None:
+        channel = stream._channels[0]
         for _ in range(2):
             totals = await converse(stream)
             assert totals.input_audio_samples == len(FRAME) // 2
@@ -336,6 +337,8 @@ def test_a_client_from_the_agent_opens_on_the_target_it_names() -> None:
             pass
         assert opened(fake) == [("stt", 1, RECORDED_DIGEST)] * 3
         assert agent.reads == 1
+        # Every session on the one target shares the channel the client was made with.
+        assert [known for known, _ in stream._stubs.values()] == stream._channels == [channel]
 
     following(scenario, fake)
 
@@ -395,7 +398,10 @@ def test_an_open_refused_as_stale_after_a_restart_follows_the_new_generation_on_
         ]
         assert opened(fake)[1:] == [("stt", 1, RECORDED_DIGEST), ("stt", 2, LATER_DIGEST)]
         assert (agent.reads, fake.calls) == (2, 3)
-        assert list(stream._stubs) == [endpoint]
+        # The new generation has a channel of its own, and the old one is closed.
+        assert [(known.endpoint, known.target.generation) for known in stream._stubs] == [
+            (endpoint, 2)
+        ]
         assert len(stream._channels) == 1
 
     following(scenario, fake)
@@ -576,6 +582,35 @@ def test_a_session_whose_worker_went_away_has_the_next_open_read_the_target_firs
     following(scenario, old, new)
 
 
+def test_a_worker_that_goes_away_during_a_read_leaves_the_target_to_read_again() -> None:
+    old, new = server(), server(generation=2, digest=LATER_DIGEST)
+
+    async def scenario(
+        agent: Agent, stream: speech.SpeechClient, endpoint: str, next_endpoint: str
+    ) -> None:
+        live = stream.transcribe(language="en", input_format=PCM)
+        await live.open()
+        old.admission_open = False
+        asked = await held_read(agent)
+        refused = asyncio.create_task(converse(stream))
+        await asked.wait()
+        # The read in flight began before the worker ended the live session.
+        old.end("worker_shutdown")
+        with pytest.raises(speech.ServiceUnavailableError):
+            await live.close()
+        assert agent.hold is not None
+        agent.hold.set()
+        with pytest.raises(speech.ServiceUnavailableError):
+            await refused
+        # The refused open read the old target and sent its second call there.
+        assert (agent.reads, old.calls) == (2, 3)
+        agent.hold, agent.answer = None, streaming(next_endpoint, 2, LATER_DIGEST)
+        await converse(stream)
+        assert (agent.reads, old.calls, new.calls) == (3, 3, 1)
+
+    following(scenario, old, new)
+
+
 def test_a_session_ended_for_another_reason_leaves_the_target_as_read() -> None:
     fake, other = server(), server(generation=2, digest=LATER_DIGEST)
 
@@ -648,7 +683,7 @@ def test_an_open_ended_while_it_reads_a_stale_target_sends_no_open(end: str) -> 
         assert (old.calls, new.calls) == (1, 0)
         if end == "aclose":
             # The read that ended after the close opened no channel the close missed.
-            for stub in stream._stubs.values():
+            for _, stub in stream._stubs.values():
                 with pytest.raises(grpc.aio.UsageError):
                     stub.Session()
             return
@@ -706,22 +741,138 @@ def test_opens_lost_together_read_the_target_once() -> None:
     following(scenario, old, new)
 
 
-def test_closing_the_client_closes_every_channel_it_opened() -> None:
-    old, new = server(admission_open=False), server(generation=2, digest=LATER_DIGEST)
+def held_over(old: StreamServer, new: StreamServer) -> Scenario:
+    """Open a session on `old`, then have another open follow the agent to `new`; give both."""
 
-    async def main() -> None:
-        async with old.serving() as endpoint, new.serving() as next_endpoint:
-            agent = Agent(streaming(endpoint))
-            async with agent.serving() as config:
-                stream = await speech.SpeechClient.from_agent(config_path=config)
-                agent.answer = streaming(next_endpoint, 2, LATER_DIGEST)
-                await converse(stream)
-                stubs = dict(stream._stubs)
-                assert sorted(stubs) == sorted([endpoint, next_endpoint])
-                await stream.aclose()
+    async def scenario(
+        agent: Agent, stream: speech.SpeechClient, endpoint: str, next_endpoint: str
+    ) -> Any:
+        live = stream.transcribe(language="en", input_format=PCM)
+        await live.open()
+        old.admission_open = False
+        agent.answer = streaming(next_endpoint, 2, LATER_DIGEST)
+        await converse(stream)
+        assert (old.calls, new.calls) == (2, 1)
+        return live
+
+    return scenario
+
+
+def channels(stream: speech.SpeechClient) -> dict[int, Any]:
+    """The client's stubs by the generation of their target."""
+    return {known.target.generation: stub for known, (_, stub) in stream._stubs.items()}
+
+
+def test_closing_the_client_closes_every_channel_it_opened() -> None:
+    old, new = server(), server(generation=2, digest=LATER_DIGEST)
+
+    async def scenario(
+        agent: Agent, stream: speech.SpeechClient, endpoint: str, next_endpoint: str
+    ) -> None:
+        await held_over(old, new)(agent, stream, endpoint, next_endpoint)
+        stubs = channels(stream)
+        assert sorted(stubs) == [1, 2]
+        await stream.aclose()
         for stub in stubs.values():
             with pytest.raises(grpc.aio.UsageError):
                 stub.Session()
+
+    following(scenario, old, new)
+
+
+class GatedClose:
+    """A channel whose close waits for `gate`."""
+
+    def __init__(self, channel: Any) -> None:
+        self._channel, self.gate = channel, asyncio.Event()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._channel, name)
+
+    async def close(self, grace: float | None = None) -> None:
+        await self.gate.wait()
+        await self._channel.close(grace)
+
+
+def test_closing_the_client_waits_for_the_close_of_a_channel_it_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old, new = server(admission_open=False), server(generation=2, digest=LATER_DIGEST)
+    aio = speech.SpeechClient.__init__.__globals__["grpc"].aio
+    channel = aio.insecure_channel
+    gated: list[GatedClose] = []
+
+    def first_gated(*args: Any, **options: Any) -> Any:
+        made = channel(*args, **options)
+        if gated:
+            return made
+        gated.append(GatedClose(made))
+        return gated[0]
+
+    monkeypatch.setattr(aio, "insecure_channel", first_gated)
+
+    async def scenario(
+        agent: Agent, stream: speech.SpeechClient, endpoint: str, next_endpoint: str
+    ) -> None:
+        agent.answer = streaming(next_endpoint, 2, LATER_DIGEST)
+        await converse(stream)
+        assert sorted(channels(stream)) == [2]
+        closing = asyncio.ensure_future(stream.aclose())
+        done, _ = await asyncio.wait({closing}, timeout=0.5)
+        assert not done
+        gated[0].gate.set()
+        await closing
+        assert not stream._closing
+        with pytest.raises(grpc.aio.UsageError):
+            gated[0]._channel.unary_unary("/x")(b"")
+
+    following(scenario, old, new)
+
+
+def test_a_session_open_on_an_earlier_target_keeps_its_channel_until_it_ends() -> None:
+    old, new = server(), server(generation=2, digest=LATER_DIGEST)
+
+    async def scenario(
+        agent: Agent, stream: speech.SpeechClient, endpoint: str, next_endpoint: str
+    ) -> None:
+        live = await held_over(old, new)(agent, stream, endpoint, next_endpoint)
+        earlier = channels(stream)[1]
+        await live.send_audio(FRAME)
+        totals = await live.close()
+        assert totals.input_audio_samples == len(FRAME) // 2
+        # The next open finds the earlier target unused and closes its channel.
+        await converse(stream)
+        assert sorted(channels(stream)) == [2]
+        await asyncio.gather(*stream._closing)
+        with pytest.raises(grpc.aio.UsageError):
+            earlier.Session()
+        assert (agent.reads, old.calls, new.calls) == (2, 2, 2)
+
+    following(scenario, old, new)
+
+
+def test_a_generation_on_a_port_an_earlier_one_left_is_reached_on_a_channel_of_its_own() -> None:
+    first, second = server(), server(generation=2, digest=LATER_DIGEST)
+    third = server(generation=3, digest=RECORDED_DIGEST)
+
+    async def main() -> None:
+        serving_first = contextlib.AsyncExitStack()
+        endpoint = await serving_first.enter_async_context(first.serving())
+        agent = Agent(streaming(endpoint))
+        async with agent.serving() as config:
+            stream = await speech.SpeechClient.from_agent(config_path=config)
+            async with stream:
+                await converse(stream)
+                async with second.serving() as next_endpoint:
+                    agent.answer = streaming(next_endpoint, 2, LATER_DIGEST)
+                    await serving_first.aclose()
+                    # Refused on the port the first worker left, which a channel backs off from.
+                    await converse(stream)
+                async with third.serving(int(endpoint.rsplit(":", 1)[1])) as reused:
+                    assert reused == endpoint
+                    agent.answer = streaming(endpoint, 3, RECORDED_DIGEST)
+                    await converse(stream)
+        assert (agent.reads, first.calls, second.calls, third.calls) == (3, 1, 1, 1)
 
     run(main)
 

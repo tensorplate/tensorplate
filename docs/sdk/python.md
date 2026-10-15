@@ -284,9 +284,10 @@ built with streaming support serves these sessions for a speech deployment
 when its config sets `streaming.enabled`, which the agent renders for a
 deployment made with `tensorplate deploy --streaming`; `tensorplate status`
 then prints its `stream_endpoint` and the `descriptor_digest` an Open names
-beside its generation. This client's own tests run
-against an in-process server built from the same schema, not against a
-worker.
+beside its generation. This client's default tests run
+against an in-process server built from the same schema; an opt-in case
+runs it through a real agent and a streaming worker
+([local validation](../contributing/local-validation.md)).
 
 ```python
 import asyncio
@@ -588,6 +589,11 @@ read goes stale, and a client made by `from_agent()` follows it:
   [one more Open](#streaming-speech-client) rule allows it, and otherwise
   the first call's error is raised. Either way an `open()` makes at most
   two calls, all within its `open_timeout`, which also bounds the read.
+- **Each target has a channel of its own.** A later generation may take the
+  port an earlier one left, and a channel that met the port closed is still
+  backing off from it, so the client opens a new channel for every target
+  the agent names. The channel of a target no unended session uses is
+  closed at the next open.
 
 When the status names no stream target, discovery raises a
 `DiscoveryError`, which is a `SpeechError` and an `EndpointResolutionError`,
@@ -704,10 +710,11 @@ async def play_audio(
   text and segments whose synthesis has not started (the worker lets two
   wait), and both return as a segment's synthesis starts, which the server
   reports behind the audio it sent first. Text that is not a `str` raises
-  `TypeError`; text that is empty, only whitespace or not encodable as
-  UTF-8, and a `turn_id` that is not at most 64 printable ASCII characters,
-  raise `ValueError`. Those are raised at once, before any wait and
-  whatever the state of the session. Once the segment's turn has come, text
+  `TypeError`; text that is empty, only ASCII whitespace (the server
+  refuses that, and serves other whitespace) or not encodable as UTF-8, and
+  a `turn_id` that is not at most 64 printable ASCII characters, raise
+  `ValueError`. Those are raised at once, before any wait and whatever the
+  state of the session. Once the segment's turn has come, text
   above a bound of `session.limits.text_to_speech` (`max_segment_text_bytes`
   for one segment, `max_synthesis_text_bytes` for the segments between two
   `finalize()` calls, both in bytes of UTF-8) and a segment larger than the

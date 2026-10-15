@@ -126,8 +126,10 @@ def _wire(event: Any) -> bytes:
 
 
 @contextlib.asynccontextmanager
-async def serve(session: Callable[[Any, Any], Awaitable[None]]) -> AsyncIterator[str]:
-    """Serve `session` as the schema's one method on a loopback port."""
+async def serve(
+    session: Callable[[Any, Any], Awaitable[None]], port: int = 0
+) -> AsyncIterator[str]:
+    """Serve `session` as the schema's one method on a loopback port, `port` or a free one."""
     # A fixed HTTP/2 window, so that a server that reads nothing holds a writer back.
     server = grpc.aio.server(options=[("grpc.http2.bdp_probe", 0)])
     method = grpc.stream_stream_rpc_method_handler(
@@ -135,7 +137,7 @@ async def serve(session: Callable[[Any, Any], Awaitable[None]]) -> AsyncIterator
     )
     handler = grpc.method_handlers_generic_handler(_SERVICE, {"Session": method})
     server.add_generic_rpc_handlers((handler,))
-    port = server.add_insecure_port("127.0.0.1:0")
+    port = server.add_insecure_port(f"127.0.0.1:{port}")
     await server.start()
     try:
         yield f"127.0.0.1:{port}"
@@ -346,8 +348,8 @@ class StreamServer:
     _session: _Live | None = None
     _changed: asyncio.Event = field(default_factory=asyncio.Event)
 
-    def serving(self) -> contextlib.AbstractAsyncContextManager[str]:
-        return serve(self.Session)
+    def serving(self, port: int = 0) -> contextlib.AbstractAsyncContextManager[str]:
+        return serve(self.Session, port)
 
     def bodies(self) -> list[str | None]:
         return [event.WhichOneof("body") for event in self.received]

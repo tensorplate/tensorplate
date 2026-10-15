@@ -159,13 +159,15 @@ class AgentTargets:
     def __init__(
         self,
         first: StreamTarget,
-        connector: Callable[[str], Callable[[], Any]],
+        connector: Callable[[StreamTarget], Callable[[], Any]],
         *,
         profile: str | None,
         config_path: str | None,
         timeout: float,
     ) -> None:
         self._current, self._stale = first, False
+        # Counts stale() calls, so a read that started before one does not clear it.
+        self._marks = 0
         self.connector = connector
         self._profile, self._config_path = profile, config_path
         self._timeout = timeout
@@ -192,6 +194,7 @@ class AgentTargets:
     def stale(self) -> None:
         """The worker that served the target ended its sessions: read before the next Open."""
         self._stale = True
+        self._marks += 1
 
     async def _read(self, seen: StreamTarget | None) -> StreamTarget:
         async with self._reading:
@@ -199,7 +202,9 @@ class AgentTargets:
                 return self._current
             if seen is None and not self._stale:
                 return self._current
+            marks = self._marks
             transport = _transport(self._profile, self._config_path)
             self._current = await asyncio.to_thread(_read, transport, self._timeout)
-            self._stale = False
+            if self._marks == marks:
+                self._stale = False
             return self._current

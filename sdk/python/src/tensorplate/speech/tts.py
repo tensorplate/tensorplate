@@ -147,10 +147,11 @@ class TextToSpeechSession(Session[TextToSpeechEvent]):
         ``SegmentCompleted`` events; ids grow by one from 1.
 
         Raises ``TypeError`` for text that is not a ``str``, and
-        ``ValueError`` for text that is empty, only whitespace or not
-        encodable as UTF-8 and for a `turn_id` that is not at most 64
-        printable ASCII characters. These are raised at once, before any
-        wait and whatever the state of the session.
+        ``ValueError`` for text that is empty, only ASCII whitespace (the
+        server serves other whitespace) or not encodable as UTF-8 and for a
+        `turn_id` that is not at most 64 printable ASCII characters. These
+        are raised at once, before any wait and whatever the state of the
+        session.
 
         Waits until the session's input credit admits the segment: its
         bytes, and a place among the segments whose synthesis has not
@@ -168,8 +169,8 @@ class TextToSpeechSession(Session[TextToSpeechEvent]):
         if not isinstance(text, str):
             raise TypeError(f"text is a str, not {type(text).__name__}")
         size = len(text.encode())
-        if not text.strip():
-            raise ValueError("a text segment holds text that is not only whitespace")
+        if not text.strip(" \t\n\v\f\r"):
+            raise ValueError("a text segment holds text that is not only ASCII whitespace")
         if len(turn_id) > 64 or not (turn_id.isascii() and turn_id.isprintable()):
             raise ValueError("a turn id is at most 64 printable ASCII characters")
         return await self._within(self._send_segment(text, turn_id, size), None)
