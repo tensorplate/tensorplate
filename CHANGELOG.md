@@ -329,11 +329,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   open, and an open whose first call ends before any server event reads it
   once and sends its second call to the target the agent names now, so an
   open follows a deploy, a rollback or a restart and still makes at most two
-  calls. A session already open is never moved. When the status names no
-  stream target the client raises a `DiscoveryError` (`NotStreamingError`,
-  `NotServingError`, `ResidentSetError`, `RemoteAgentError`) and does not
-  wait or fall back to a default. The SDK's test server words a refused open
-  as the stream listener does. (V030-E04-F02-T03)
+  calls. A session already open is never moved. Each target has a channel of
+  its own, so a generation that takes a port an earlier one left is not
+  reached through a channel still backing off from that port; the channel of
+  a target no open session uses is closed at the next open. When the status
+  names no stream target the client raises a `DiscoveryError`
+  (`NotStreamingError`, `NotServingError`, `ResidentSetError`,
+  `RemoteAgentError`) and does not wait or fall back to a default. The SDK's
+  test server words a refused open as the stream listener does.
+  (V030-E04-F02-T03)
+
+- An optional local test of the Python SDK's streaming client through a real
+  agent: `sdk/python/tests/test_e2e_agent_stream.py`, run when
+  `TENSORPLATE_AGENT_BIN`, `TENSORPLATE_CLI_BIN` and
+  `TENSORPLATE_STREAMING_WORKER_BIN` name the binaries, deploys with
+  `--streaming` a speech bundle the sidecar's fixture backend serves. Its
+  cases transcribe and synthesize on the target `from_agent()` reads, follow
+  two redeploys, the second onto the first generation's port, and compare
+  the client with the serving worker: the text it refuses as empty, and the
+  totals of a session ended with a cause.
+  `docs/contributing/local-validation.md` says how to build and run it.
+  (V030-E04-F02-T03)
 
 - Recorded control-API status exchanges for clients that discover a
   stream endpoint from the agent's status, from an agent whose
@@ -583,10 +599,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   which says whether the session was admitted, was not, or cannot be
   known; the client never retries. The client's own channel turns gRPC's
   bandwidth probe off so that a session that stops reading holds the
-  server back within HTTP/2's window of about 64 KiB.
-  Discovery of the stream endpoint is not in the package yet, and the
-  client has been run against an in-process server built from the schema,
-  not against a worker. (V030-E04-F02-T03)
+  server back within HTTP/2's window of about 64 KiB. Its default tests run
+  against an in-process server built from the schema. (V030-E04-F02-T03)
 
 - The Python SDK's streaming speech client opens text-to-speech sessions:
   `SpeechClient.synthesize()` returns a `TextToSpeechSession`.
@@ -605,11 +619,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   declared, out of order, or not what a completion or the closing totals
   count ends the session with `StreamProtocolError`. Text the server would
   refuse raises `ValueError` before it is sent, and text no session would
-  send (empty, only whitespace, not a `str`) at once, before any wait. The
-  default `close_timeout`, `Follow.FINALIZE_DEADLINE`, follows the server:
-  the `finalize_deadline_ms` its `Ready` declares plus 30 seconds, which is
-  150 seconds by default. Run against an in-process server only, like the
-  rest of the client. (V030-E04-F02-T03)
+  send (empty, only ASCII whitespace, not a `str`) at once, before any
+  wait. The default `close_timeout`, `Follow.FINALIZE_DEADLINE`, follows the
+  server: the `finalize_deadline_ms` its `Ready` declares plus 30 seconds,
+  which is 150 seconds by default. (V030-E04-F02-T03)
 
 - A gRPC stream listener in the serving worker that binds and refuses every
   `Open`: the worker does not serve stream sessions yet. In builds with
