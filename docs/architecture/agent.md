@@ -533,8 +533,11 @@ to disk: every file and directory of the tree; the id's directory,
 them (a deploy that was stopped may have left them unsynced); and any
 further directory above them that gained an entry. A power loss after that
 state write therefore cannot leave a record naming a tree whose bytes
-never reached the disk. A sync that fails fails the deploy as a copy that
-fails does. Nothing writes the tree again. Every reader takes the path
+never reached the disk; only a directory above the one `staging_dir` is
+in, made by a deploy that was stopped, is not synced by a later deploy.
+The agent must be able to read `staging_dir` and the directory it is in.
+A sync that fails fails the deploy as a copy that fails does. Nothing
+writes the tree again. Every reader takes the path
 from a record's `staged_path`: the rollback, the restore at a start, the
 registry's restart, `prepare`, the derived descriptor and status. An update
 under the same id therefore leaves the tree the earlier record names as it
