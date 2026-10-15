@@ -679,6 +679,31 @@ async def warm(stream: speech.SpeechClient) -> None:
         await session.send_audio(FRAME)
 
 
+async def dropped(stream: speech.SpeechClient) -> None:
+    """Wait until the client's channel has let go of the connection the relay reset.
+
+    gRPC defers that close while a write is in progress on it, and a call made meanwhile is
+    lost with it ("Delayed close due to in-progress write").
+    """
+    channel = stream._channel
+    while channel.get_state() is grpc.ChannelConnectivity.READY:
+        await channel.wait_for_state_change(grpc.ChannelConnectivity.READY)
+
+
+def conclude_once_dropped(
+    monkeypatch: pytest.MonkeyPatch, session: speech.SpeechToTextSession, stream: Any
+) -> None:
+    """Have the open's second call wait for the channel to let go of the reset connection."""
+    conclude = session._conclude
+
+    async def concluding() -> None:
+        if not session._reopened:
+            await dropped(stream)
+        await conclude()
+
+    monkeypatch.setattr(session, "_conclude", concluding)
+
+
 class LateWrite:
     """A session's first call, whose first write waits for the call to end.
 
@@ -735,6 +760,7 @@ def test_an_open_whose_connection_is_reset_before_any_answer_is_sent_once_more(
         await warm(stream)
         relay.arm(frame)
         session = stream.transcribe(TARGET, language="en", input_format=PCM)
+        conclude_once_dropped(monkeypatch, session, stream)
         if write:
             connect = session._connect
             made: list[Any] = []
@@ -785,16 +811,20 @@ def test_a_channel_closed_before_the_second_open_ends_the_session(
     relayed(scenario)
 
 
-def test_an_open_is_sent_at_most_twice() -> None:
+def test_an_open_is_sent_at_most_twice(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
         await warm(stream)
         relay.arm("data", times=3)
         session = stream.transcribe(TARGET, language="en", input_format=PCM)
+        conclude_once_dropped(monkeypatch, session, stream)
         with pytest.raises(speech.ServiceUnavailableError) as caught:
             await session.open()
         assert caught.value.admitted is None
         # Not raised while the first loss was handled, which a traceback would show.
-        assert caught.value.__context__ is None
+        context = caught.value.__context__
+        while context is not None:
+            assert not isinstance(context, speech.SpeechError)
+            context = context.__context__
         assert (relay.resets, relay.connections, relay.calls) == (2, 2, 3)
 
     relayed(scenario)
@@ -907,6 +937,7 @@ def test_an_iterator_waiting_while_the_open_holds_a_lost_call_takes_the_second_c
         for _ in range(3):
             await asyncio.sleep(0)
         assert not reading.done()
+        await dropped(stream)
         release.set()
         await opening
         await session.send_audio(FRAME)
