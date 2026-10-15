@@ -5079,7 +5079,7 @@ class HostedCompilerTests(unittest.TestCase):
                 selecting[path.name, name] = selected
         self.assertEqual(sorted(selecting), [
             ("apt-lifecycle.yml", "cpu-only-smoke"), ("cpp.yml", "adapter-shells"),
-            ("cpp.yml", "build-test"), ("cpp.yml", "tidy"),
+            ("cpp.yml", "build-test"), ("cpp.yml", "tensorrt-sdk"), ("cpp.yml", "tidy"),
             ("release-dependencies.yml", "restore"), ("release-dependencies.yml", "warm"),
             ("release.yml", "build_packages_amd64"), ("supply-chain.yml", "native")])
 
@@ -5629,7 +5629,7 @@ class CppWorkflowVcpkgTests(unittest.TestCase):
     def test_every_job_that_configures_through_vcpkg_checks_it_out_first(self):
         users = {name for name, job in self.jobs.items()
                  if "scripts/buildsystems/vcpkg.cmake" in json.dumps(job)}
-        self.assertEqual(users, {"build-test", "adapter-shells", "tidy"})
+        self.assertEqual(users, {"build-test", "adapter-shells", "tensorrt-sdk", "tidy"})
         for name in users:
             steps = self.jobs[name]["steps"]
             checkouts = [i for i, step in enumerate(steps)

@@ -170,3 +170,40 @@ the CI workflows themselves. If you want to compare a local run to CI,
 rerun the corresponding workflow job locally with
 [`act`](https://github.com/nektos/act) or read the YAML in
 [`.github/workflows/`](../../.github/workflows/).
+
+## TensorRT SDK build without a GPU
+
+The `tensorrt-sdk` job in `cpp.yml` requires the real SDK with
+`TP_ENABLE_TENSORRT=ON` and `TP_REQUIRE_TENSORRT_SDK=ON`. It builds the
+worker and tests, checks the worker's ELF dependencies on `nvinfer` and
+`cudart`, resolves all linked libraries, starts `--version`, and runs the
+T1/T2/T3 tests. These tests need no device; the TensorRT unit tests cover
+registration, capabilities and rejection before engine creation. This
+provides compile/link coverage, not engine creation or GPU inference evidence.
+The existing no-SDK and sanitizer jobs remain separate.
+
+The exact NVIDIA package pins and repository URL live in
+[`tools/ci/tensorrt-sdk-versions.sh`](../../tools/ci/tensorrt-sdk-versions.sh), including
+CUDA development dependencies. The installer uses NVIDIA's checksum-pinned
+keyring package and authenticated apt repository. It installs neither a GPU
+driver nor the full CUDA toolkit. `cuda-driver-dev` supplies link stubs, not
+a kernel driver. `nvcc` supplies the toolkit discovery metadata CMake uses;
+TensorPlate's sources still compile with the job's Clang toolchain.
+
+The x86 TensorRT packages belong to the same 10.3 API family as the
+[recorded Jetson build](../validation/sdk-e2e-validation.md#observed-evidence-yolov8n-on-jetson-orin-nano-2026-06-18).
+NVIDIA's [JetPack 6.2 stack](https://developer.nvidia.com/embedded/jetpack-sdk-62)
+pairs TensorRT 10.3 with CUDA 12.6; the x86 TensorRT packages were built for
+CUDA 12.5 and are tested here with that toolkit. The adapter uses the same
+TensorRT 10 deletion, named-tensor, shape/address and `enqueueV3` APIs on
+both architectures. Serialized engines still need to match their target GPU.
+
+To reproduce the job, use a disposable Ubuntu 22.04 amd64 container with
+CMake 3.25+, Clang 14, Ninja, curl, CA certificates, Python and vcpkg at the
+manifest baseline. The installer modifies the container's apt sources and
+installed packages. Run `tools/ci/install-tensorrt-sdk.sh /tmp/tensorrt-debs`,
+source `tools/ci/tensorrt-sdk-versions.sh`, and use the job's configure/build/test
+commands with your own build directory and `-DCUDAToolkit_ROOT="$CUDAToolkit_ROOT"`.
+It needs roughly 2.5 GB of package downloads and 6.5 GB installed SDK space,
+plus build space. The exact-pin archive cache avoids repeated SDK downloads;
+repository indexes and keyring setup still run on a cache hit.
