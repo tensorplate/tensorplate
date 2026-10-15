@@ -36,11 +36,12 @@ using namespace std::chrono_literals;
 /// Far past a worker's own start: only a worker that binds and serves waits it out.
 constexpr auto kStartWait = 60s;
 
-std::string worker_config(std::uint16_t http_port, std::optional<std::uint16_t> stream_port) {
+std::string worker_config(std::uint16_t http_port, std::optional<std::uint16_t> stream_port,
+                          bool stderr_logs = true) {
   nlohmann::json config = {{"schema_version", "0.1"},
                            {"bind", {{"host", "127.0.0.1"}, {"port", http_port}}},
                            {"deployment", {{"use_mock_session", true}, {"endpoint", "bind-test"}}},
-                           {"enable_stderr_logs", true}};
+                           {"enable_stderr_logs", stderr_logs}};
   if (stream_port) {
     config["streaming"] = {{"enabled", true}, {"port", *stream_port}};
   }
@@ -65,6 +66,28 @@ std::vector<nlohmann::json> stderr_records(const std::string& text) {
     }
   }
   return records;
+}
+
+/// A socket listening on a loopback port the kernel picked; `port` is 0
+/// when it could not listen.
+struct HeldPort {
+  testing::OwnedFd socket;
+  std::uint16_t port = 0;
+};
+
+HeldPort hold_loopback_port() {
+  HeldPort held{testing::OwnedFd{::socket(AF_INET, SOCK_STREAM, 0)}};
+  sockaddr_in address{};
+  address.sin_family = AF_INET;
+  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  socklen_t length = sizeof(address);
+  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): POSIX socket address.
+  auto* const raw = reinterpret_cast<sockaddr*>(&address);
+  if (::bind(held.socket.get(), raw, length) == 0 && ::listen(held.socket.get(), 1) == 0 &&
+      ::getsockname(held.socket.get(), raw, &length) == 0) {
+    held.port = ntohs(address.sin_port);
+  }
+  return held;
 }
 
 /// Whether this host binds the documentation address 192.0.2.1, as one
@@ -155,6 +178,28 @@ TEST(WorkerBind, AWorkerOnAnotherWorkersHttpPortExitsWithARecord) {
   std::filesystem::remove_all(dir);
 }
 
+// The record is written whether or not the config enables stderr logs.
+TEST(WorkerBind, AWorkerWithoutStderrLogsOnATakenHttpPortWritesOnlyItsRecord) {
+  const auto dir = scratch_dir("quiet");
+  const auto held = hold_loopback_port();
+  ASSERT_NE(held.port, 0) << std::strerror(errno);
+  const testing::OwnedFd null_input{::open("/dev/null", O_RDONLY)};
+  ASSERT_GE(null_input.get(), 0);
+
+  auto worker = testing::ChildProcess::spawn(
+      {TP_SERVING_WORKER_BINARY, "--config-json", worker_config(held.port, std::nullopt, false)},
+      null_input.get(), dir / "worker.txt");
+  const auto exit_status = worker.wait_exit(kStartWait);
+
+  ASSERT_TRUE(exit_status) << "the worker serves an HTTP port another socket holds";
+  EXPECT_EQ(*exit_status, static_cast<int>(ServingExitCode::ServeError));
+  EXPECT_EQ(stderr_records(worker.stderr_text()).size(), 1U) << worker.stderr_text();
+  expect_startup_record(worker.stderr_text(), "unavailable",
+                        "http server: could not bind 127.0.0.1:" + std::to_string(held.port) +
+                            ": " + std::strerror(EADDRINUSE));
+  std::filesystem::remove_all(dir);
+}
+
 // Any other start failure is reported the same way, with its own code.
 TEST(WorkerBind, AWorkerOnAnAddressTheHostLacksExitsWithARecord) {
   if (binds_documentation_address()) {
@@ -186,17 +231,9 @@ TEST(WorkerBind, AWorkerOnAnAddressTheHostLacksExitsWithARecord) {
 #if TP_ENABLE_STREAMING_GRPC && !TP_ENABLE_TSAN
 TEST(WorkerBind, AWorkerOnATakenStreamPortExitsWithARecord) {
   const auto dir = scratch_dir("stream");
-  const testing::OwnedFd taken{::socket(AF_INET, SOCK_STREAM, 0)};
-  sockaddr_in address{};
-  address.sin_family = AF_INET;
-  address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  socklen_t length = sizeof(address);
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): POSIX socket address.
-  ASSERT_EQ(::bind(taken.get(), reinterpret_cast<const sockaddr*>(&address), length), 0);
-  ASSERT_EQ(::listen(taken.get(), 1), 0);
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): POSIX socket address.
-  ASSERT_EQ(::getsockname(taken.get(), reinterpret_cast<sockaddr*>(&address), &length), 0);
-  const auto port = ntohs(address.sin_port);
+  const auto held = hold_loopback_port();
+  ASSERT_NE(held.port, 0) << std::strerror(errno);
+  const auto port = held.port;
   const testing::OwnedFd null_input{::open("/dev/null", O_RDONLY)};
   ASSERT_GE(null_input.get(), 0);
 
