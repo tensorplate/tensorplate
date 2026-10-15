@@ -744,61 +744,63 @@ TEST_F(SpeechWorkerScripted, ACancelMidSynthesisEndsTheSessionAndReleasesItsJobO
   EXPECT_EQ(served.buffers(), 0U);
 }
 
-// gRPC may report a call that was cancelled as the end of the client's stream
-// before it reports the cancellation. The open utterance is then ended as a
-// half-close ends it, and its decode is submitted ahead of the release that
-// cancels it: both orders are held here.
+/// gRPC alone orders its two reports of a cancelled call, so the case below
+/// lets a client go away this many times.
+constexpr std::size_t kClientsThatGoAway = 20;
+
+// gRPC reports a cancelled call to the listener both as a failed read and as
+// a cancellation, in either order; neither ends the open utterance as a
+// half-close would, so none of its audio is decoded.
 TEST_F(SpeechWorkerScripted, AClientThatGoesAwayMidUtteranceEndsItsSession) {
   register_backend();
   auto built = worker(streaming_config(speech_model()));
   ASSERT_NE(built, nullptr);
   const Serving served{std::move(built)};
-  {
-    auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
-    ASSERT_TRUE(client.send_audio(kFrame));
-    const auto last = client.sequence;
-    while (client.accepted.empty() || client.accepted.back().accepted_sequence() < last) {
-      ASSERT_TRUE(client.read().has_value()) << "the stream ended before the frame was accepted";
+  std::vector<std::uint64_t> lost;
+  for (std::size_t round = 1; round <= kClientsThatGoAway; ++round) {
+    SCOPED_TRACE(round);
+    {
+      auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+      ASSERT_TRUE(client.send_audio(kFrame));
+      const auto last = client.sequence;
+      while (client.accepted.empty() || client.accepted.back().accepted_sequence() < last) {
+        ASSERT_TRUE(client.read().has_value()) << "the stream ended before the frame was accepted";
+      }
+      client.context->TryCancel();
+      (void)client.call->Finish();
     }
-    client.context->TryCancel();
-    (void)client.call->Finish();
+    const auto released = sidecar.sent("session_release", round);
+    ASSERT_EQ(released.size(), round);
+    lost.push_back(released.back().value("session_key", std::uint64_t{0}));
+    // Read while the worker is up and before the next session: the release
+    // gave the audio back.
+    EXPECT_TRUE(eventually([&] { return served.buffers() == 0; }));
+    EXPECT_EQ(count_of(sidecar.sent("job_submit", 0), "job_submit", lost.back()), 0U)
+        << "the open utterance of a cancelled call was decoded";
   }
-  const auto first_release = sidecar.sent("session_release", 1);
-  ASSERT_EQ(first_release.size(), 1U);
-  const auto lost = first_release.front().value("session_key", std::uint64_t{0});
-  // Read while the worker is up and before the next session: a decode the
-  // lost session submitted has given its audio back.
-  EXPECT_TRUE(eventually([&] { return served.buffers() == 0; }));
-  // A submit of the lost session precedes its release, so none follows.
-  const auto submitted_by_the_lost_session =
-      count_of(sidecar.sent("job_submit", 0), "job_submit", lost);
-  EXPECT_LE(submitted_by_the_lost_session, 1U) << "the open utterance, in the order that ends it";
 
-  // Its place is free: the next session is served.
+  // Their places are free: the next session is served.
   ASSERT_NO_FATAL_FAILURE(transcribes_one_utterance(served));
   const auto stopped = logged(served.stop(), "speech dispatch stopped");
   ASSERT_EQ(stopped.size(), 1U);
   EXPECT_EQ(stopped.front().value("releases_refused", -1), 0);
   const auto releases = sidecar.sent("session_release", 0);
-  ASSERT_EQ(releases.size(), 2U) << "one release for each session";
+  ASSERT_EQ(releases.size(), kClientsThatGoAway + 1) << "one release for each session";
   const auto next = releases.back().value("session_key", std::uint64_t{0});
-  EXPECT_NE(next, lost);
-  EXPECT_EQ(count_of(releases, "session_release", lost), 1U);
-  EXPECT_EQ(count_of(releases, "session_release", next), 1U);
   const auto written = sidecar.written();
-  const auto submits = sidecar.sent("job_submit", 0);
-  EXPECT_EQ(count_of(submits, "job_submit", lost), submitted_by_the_lost_session);
-  EXPECT_EQ(count_of(submits, "job_submit", next), 1U);
-  EXPECT_EQ(submits.size(), submitted_by_the_lost_session + 1) << "a job of neither session";
-  for (const Json& submit : submits) {
-    const auto job_id = submit.at("job_id").get<std::uint64_t>();
-    const auto kinds = kinds_of(written, job_id);
-    EXPECT_EQ(std::count(kinds.begin(), kinds.end(), "job_released"), 1) << submit.dump();
-    // The lost session's decode may have ended before the release found it.
-    const bool of_the_lost_session = submit.value("session_key", std::uint64_t{0}) == lost;
-    EXPECT_LE(sidecar.cancel_requests(job_id), of_the_lost_session ? 1U : 0U) << submit.dump();
+  for (const auto key : lost) {
+    EXPECT_NE(next, key);
+    EXPECT_EQ(count_of(releases, "session_release", key), 1U);
+    EXPECT_EQ(count_of(written, "session_released", key), 1U);
   }
-  EXPECT_EQ(count_of(written, "session_released", lost), 1U);
+  EXPECT_EQ(count_of(releases, "session_release", next), 1U);
+  const auto submits = sidecar.sent("job_submit", 0);
+  ASSERT_EQ(submits.size(), 1U) << "a job of neither session";
+  EXPECT_EQ(count_of(submits, "job_submit", next), 1U);
+  const auto job_id = submits.front().at("job_id").get<std::uint64_t>();
+  const auto kinds = kinds_of(written, job_id);
+  EXPECT_EQ(std::count(kinds.begin(), kinds.end(), "job_released"), 1);
+  EXPECT_EQ(sidecar.cancel_requests(job_id), 0U);
   EXPECT_EQ(count_of(written, "session_released", next), 1U);
   EXPECT_EQ(job_cancels(), 0U);
   EXPECT_EQ(served.buffers(), 0U);
@@ -939,19 +941,22 @@ TEST_F(SpeechWorkerScripted, AStopAtTheEndOfTheDrainWindowLeavesTheJobToTheUnloa
   EXPECT_EQ(served.buffers(), 0U) << "the job's audio outlived the unload";
 
   // Of this session the client read Ready, its frame accepted and the status
-  // above. Nothing follows the stop but the end of the call.
+  // above. The stop failed the session before the window's end, and its
+  // terminal event is all that follows.
   ASSERT_FALSE(client.accepted.empty());
   EXPECT_EQ(client.accepted.back().accepted_sequence(), 2U);
-  // The schema promises a terminal event; the listener does not write one here yet.
-  std::vector<std::string> read_after_the_stop;
+  std::vector<wire::ServerEvent> read_after_the_stop;
   while (const auto event = client.read()) {
-    read_after_the_stop.push_back(event->ShortDebugString());
+    read_after_the_stop.push_back(*event);
   }
-  EXPECT_EQ(read_after_the_stop, std::vector<std::string>{});
-  // The server cancels the call as it shuts down; the client reads that as
-  // the server going away or as the cancellation itself.
-  const auto code = client.call->Finish().error_code();
-  EXPECT_TRUE(code == grpc::StatusCode::UNAVAILABLE || code == grpc::StatusCode::CANCELLED) << code;
+  ASSERT_EQ(read_after_the_stop.size(), 1U);
+  ASSERT_TRUE(read_after_the_stop.front().has_session_closed())
+      << read_after_the_stop.front().ShortDebugString();
+  const auto& closed = read_after_the_stop.front().session_closed();
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_FAILED);
+  EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_WORKER_SHUTDOWN);
+  EXPECT_EQ(closed.totals().utterances_completed(), 0U);
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::UNAVAILABLE);
 
   const auto written = sidecar.written();
   EXPECT_EQ(count_of(sidecar.sent("session_release", 0), "session_release", session_key), 1U);

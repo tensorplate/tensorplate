@@ -5,18 +5,25 @@
 // the dispatch yields is a function of the bytes handed over, so each test
 // that reads output also checks that the right bytes were handed over.
 
+#include <arpa/inet.h>
 #include <grpcpp/generic/generic_stub.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/impl/proto_utils.h>
 #include <grpcpp/support/byte_buffer.h>
 #include <gtest/gtest.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -955,10 +962,11 @@ std::uint64_t longest_chunk_on_the_wire() {
 /// A text session on a listener with an injected clock, or the system
 /// clock, whose client reads nothing after Ready.
 struct UnreadSession {
-  explicit UnreadSession(const grpc::ChannelArguments& arguments, bool on_the_system_clock = false)
+  explicit UnreadSession(const grpc::ChannelArguments& arguments, bool on_the_system_clock = false,
+                         std::chrono::seconds deadline = 300s)
       : served(true, "127.0.0.1", on_the_system_clock ? nullptr : &clock) {
     served.use_channel(arguments);
-    client = served.ready(wire::SESSION_MODE_TTS_STREAMING, nullptr, 300s);
+    client = served.ready(wire::SESSION_MODE_TTS_STREAMING, nullptr, deadline);
   }
 
   /// Sends one segment and returns once its chunk writes have all but filled
@@ -1129,6 +1137,116 @@ TEST(StreamEvents, ACallWhoseReaderNeverResumesIsCancelledAfterItsSessionEnded) 
   EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
 }
 
+// A reader that stopped cannot take its terminal event. A stop that outlasts
+// the drain window fails its session all the same and cancels the call at the
+// window's end, before the client's own deadline. The listener's clock never
+// moves, so no limit of the listener's ends the call.
+TEST(StreamEvents, AStopCancelsAtTheWindowsEndACallWhoseReaderStopped) {
+  UnreadSession session{with_no_room_for_a_chunk(), false, 30s};
+  session.block();
+  if (HasFatalFailure()) {
+    return;
+  }
+  auto& listener = session.served.listener();
+  listener.stop(std::chrono::steady_clock::now() + 2 * tensorplate::serving::kTerminalEventReserve);
+  EXPECT_EQ(listener.open_calls(), 0U);
+  EXPECT_EQ(session.seen().state(), LogicalSessionState::Failed);
+  EXPECT_EQ(session.seen().cause(), "worker_shutdown");
+  auto& client = session.client;
+  while (const auto event = client.read()) {
+    EXPECT_FALSE(event->has_session_closed()) << "SessionClosed passed a window it does not fit";
+  }
+  const auto code = client.call->Finish().error_code();
+  EXPECT_TRUE(code == grpc::StatusCode::CANCELLED || code == grpc::StatusCode::UNAVAILABLE) << code;
+}
+
+// A reader that fell behind and reads again once the stop has failed its
+// session still gets the terminal event: the reserve leaves the call time to
+// write what the window holds back and the event behind it.
+TEST(StreamEvents, AReaderThatCatchesUpWhileTheStopWaitsGetsTheTerminalEvent) {
+  UnreadSession session{without_the_bandwidth_probe(), false, 30s};
+  session.fill(kHttp2DefaultWindow);
+  if (HasFatalFailure()) {
+    return;
+  }
+  auto& listener = session.served.listener();
+  const std::jthread stopping([&] {
+    listener.stop(std::chrono::steady_clock::now() +
+                  2 * tensorplate::serving::kTerminalEventReserve);
+  });
+  ASSERT_TRUE(eventually([&] { return session.seen().state() == LogicalSessionState::Failed; }));
+  auto& client = session.client;
+  std::optional<wire::SessionClosed> closed;
+  while (const auto event = client.read()) {
+    if (event->has_session_closed()) {
+      closed = event->session_closed();
+    }
+  }
+  ASSERT_TRUE(closed.has_value()) << "the call was cancelled before its terminal event";
+  EXPECT_EQ(closed->state(), wire::SESSION_STATE_FAILED);
+  EXPECT_EQ(closed->cause().reason(), wire::FAILURE_REASON_WORKER_SHUTDOWN);
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::UNAVAILABLE);
+}
+
+// The stop lets a session drain until the reserve of the window is left: a
+// decode that ends inside that time closes the session as a drain does.
+TEST(StreamEvents, AStopLetsASessionThatDrainsInsideTheWindowClose) {
+  Served served;
+  auto& fake = served.dispatch().synthetic();
+  auto& seen = served.dispatch().seen;
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  fake.pause(Fake::Gate::InJob);
+  ASSERT_TRUE(client.send_audio(kFrame));
+  const auto asked = client.finalize();
+  // The decode the Finalize started is held: the stop finds it running.
+  ASSERT_TRUE(eventually([&] { return seen.finalizes() == std::vector<std::uint64_t>{asked}; }));
+  const std::jthread stopping(
+      [&] { served.listener().stop(std::chrono::steady_clock::now() + 20s); });
+  ASSERT_TRUE(eventually([&] { return seen.state() == LogicalSessionState::Draining; }));
+  fake.resume();
+  ASSERT_NO_FATAL_FAILURE(expect_utterance(client, wire::ENDPOINT_REASON_CLIENT_FINALIZE, 1, kFrame,
+                                           client.audio_sent, asked));
+  const auto closed = closed_of(client);
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_WORKER_SHUTDOWN);
+  EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::UNAVAILABLE);
+}
+
+// A session whose drain completed waits only for the dispatch's release, and
+// the stop does not fail it: it closes as its drain does once the release
+// comes, which here is when the stop fails the session still decoding.
+TEST(StreamEvents, AStopLeavesASessionWhoseDrainCompletedToClose) {
+  Served served{true, "127.0.0.1", nullptr, std::nullopt, 2};
+  auto& dispatch = served.dispatch();
+  auto& fake = dispatch.synthetic();
+  auto drained = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  ASSERT_TRUE(drained.send_audio(kFrame));
+  dispatch.hold_cleanup_until_failed("worker_shutdown");
+  ASSERT_TRUE(drained.call->WritesDone());
+  ASSERT_NO_FATAL_FAILURE(expect_utterance(drained, wire::ENDPOINT_REASON_HALF_CLOSE, 1, kFrame,
+                                           drained.audio_sent, 0));
+  ASSERT_TRUE(dispatch.wait_until_cleanup_held());
+
+  auto decoding = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  fake.pause(Fake::Gate::InJob);
+  ASSERT_TRUE(decoding.send_audio(kFrame));
+  const auto asked = decoding.finalize();
+  ASSERT_TRUE(
+      eventually([&] { return dispatch.seen.finalizes() == std::vector<std::uint64_t>{asked}; }));
+
+  served.listener().stop(std::chrono::steady_clock::now() +
+                         2 * tensorplate::serving::kTerminalEventReserve);
+  const auto closed = closed_of(drained);
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_FALSE(closed.has_cause()) << closed.ShortDebugString();
+  EXPECT_EQ(closed.totals().utterances_completed(), 1U);
+  EXPECT_TRUE(end_of(drained).ok());
+  const auto failed = closed_of(decoding);
+  EXPECT_EQ(failed.state(), wire::SESSION_STATE_FAILED);
+  EXPECT_EQ(failed.cause().reason(), wire::FAILURE_REASON_WORKER_SHUTDOWN);
+  EXPECT_EQ(end_of(decoding).error_code(), grpc::StatusCode::UNAVAILABLE);
+}
+
 // The limit after the end is its own: a session that failed with a write in
 // flight never came to the no-progress limit of a live session.
 TEST(StreamEvents, ACallIsCancelledWhenItsSessionFailedBehindAWriteThatNeverCompletes) {
@@ -1228,32 +1346,215 @@ TEST(StreamEvents, OutputTheListenerCannotSendEndsTheCallAndFailsItsSession) {
   EXPECT_FALSE(next.session_id.empty());
 }
 
-// A cancelled call aborts its session, whether or not the half-close of its
-// failed read was applied first. The held job keeps the drain from completing.
-TEST(StreamEvents, ACancelledCallAbortsItsSessionAlsoBehindTheHalfCloseOfItsFailedRead) {
-  Served served;
-  auto& fake = served.dispatch().synthetic();
-  auto& seen = served.dispatch().seen;
-  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
-  fake.pause(Fake::Gate::InJob);
-  ASSERT_TRUE(client.send_audio(kFrame));
-  ASSERT_TRUE(eventually([&] { return seen.inputs() == 1; }));
-  client.context->TryCancel();
-  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
-  ASSERT_TRUE(eventually([&] { return seen.aborts() == 1; }));
-  fake.resume();
-  ASSERT_TRUE(eventually([&] { return served.listener().live_sessions() == 0; }));
-  EXPECT_EQ(seen.cause(), "client_cancelled");
-  std::vector<LogicalSessionEvent> ending;
-  for (const auto event : seen.events()) {
-    if (event == LogicalSessionEvent::HalfClose || event == LogicalSessionEvent::Abort) {
-      ending.push_back(event);
+/// A TCP relay on loopback between one client connection and the listener,
+/// which can drop both of its sockets at once: a client that is lost, as the
+/// listener sees it, under a real client.
+class Relay {
+ public:
+  explicit Relay(std::uint16_t target) : listening_(::socket(AF_INET, SOCK_STREAM, 0)) {
+    auto address = loopback(0);
+    socklen_t size = sizeof(address);
+    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast): POSIX socket addresses.
+    if (::bind(listening_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0 ||
+        ::listen(listening_, 1) != 0 ||
+        ::getsockname(listening_, reinterpret_cast<sockaddr*>(&address), &size) != 0) {
+      return;
+    }
+    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
+    port_ = ntohs(address.sin_port);
+    relaying_ = std::thread([this, target] { relay(target); });
+  }
+  ~Relay() {
+    drop();
+    if (relaying_.joinable()) {
+      relaying_.join();
+    }
+    for (const int fd : {listening_, client_, server_}) {
+      if (fd >= 0) {
+        ::close(fd);
+      }
     }
   }
-  const std::vector<LogicalSessionEvent> aborted{LogicalSessionEvent::Abort};
-  const std::vector<LogicalSessionEvent> drained_first{LogicalSessionEvent::HalfClose,
-                                                       LogicalSessionEvent::Abort};
-  EXPECT_TRUE(ending == aborted || ending == drained_first);
+  Relay(const Relay&) = delete;
+  Relay& operator=(const Relay&) = delete;
+
+  [[nodiscard]] std::uint16_t port() const noexcept { return port_; }
+
+  /// Ends both connections without a word to either peer's gRPC.
+  void drop() {
+    const std::lock_guard guard(mu_);
+    dropped_ = true;
+    for (const int fd : {listening_, client_, server_}) {
+      if (fd >= 0) {
+        ::shutdown(fd, SHUT_RDWR);
+      }
+    }
+  }
+
+ private:
+  static sockaddr_in loopback(std::uint16_t port) {
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    address.sin_port = htons(port);
+    return address;
+  }
+
+  void relay(std::uint16_t target) {
+    const int client = ::accept(listening_, nullptr, nullptr);
+    const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+    const auto address = loopback(target);
+    {
+      const std::lock_guard guard(mu_);
+      client_ = client;
+      server_ = server;
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): POSIX socket address.
+      if (dropped_ || client < 0 || server < 0 ||
+          ::connect(server, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+        return;
+      }
+    }
+    std::array<pollfd, 2> ends{{{client, POLLIN, 0}, {server, POLLIN, 0}}};
+    std::array<char, 16'384> bytes{};
+    while (::poll(ends.data(), ends.size(), -1) > 0) {
+      for (std::size_t from = 0; from < ends.size(); ++from) {
+        if (ends.at(from).revents == 0) {
+          continue;
+        }
+        const auto got = ::read(ends.at(from).fd, bytes.data(), bytes.size());
+        if (got <= 0 || !write_all(ends.at(1 - from).fd, bytes.data(), got)) {
+          return;
+        }
+      }
+    }
+  }
+
+  /// False at the relay's end: once drop() has shut the sockets, a write fails
+  /// with EPIPE or ECONNRESET and, sent this way, raises no SIGPIPE.
+  static bool write_all(int fd, const char* data, ssize_t size) {
+    while (size > 0) {
+      const auto put = ::send(fd, data, static_cast<std::size_t>(size), MSG_NOSIGNAL);
+      if (put <= 0) {
+        return false;
+      }
+      data += put;
+      size -= put;
+    }
+    return true;
+  }
+
+  int listening_;
+  std::uint16_t port_ = 0;
+  std::mutex mu_;
+  bool dropped_ = false;
+  int client_ = -1;
+  int server_ = -1;
+  std::thread relaying_;
+};
+
+/// A call that is gone abandons its session: it is aborted for the client,
+/// and no half-close finalized the utterance its one frame opened.
+void expect_abandoned(Served& served) {
+  auto& seen = served.dispatch().seen;
+  ASSERT_TRUE(eventually([&] { return served.listener().live_sessions() == 0; }));
+  EXPECT_GE(seen.aborts(), 1);
+  EXPECT_EQ(seen.cause(), "client_cancelled");
+  EXPECT_FALSE(seen.saw(LogicalSessionEvent::HalfClose)) << "the open utterance was finalized";
+  EXPECT_TRUE(seen.finalizes().empty());
+  EXPECT_EQ(seen.inputs(), 1U);
+}
+
+/// gRPC alone orders its two reports of a call cancelled while its read
+/// waits, so each such case plays its scenario this many times.
+constexpr int kUnorderedRounds = 20;
+
+/// A client whose one frame was accepted, its utterance open. On `relay`,
+/// when given.
+Client with_an_open_utterance(Served& served, const Relay* relay = nullptr) {
+  if (relay != nullptr) {
+    served.use_channel(grpc::ChannelArguments{}, relay->port());
+  }
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  EXPECT_TRUE(client.send_audio(kFrame));
+  return client;
+}
+
+// gRPC reports a cancel to the reactor twice, unordered: as a failed read and
+// as OnCancel. Here nothing holds the listener, which reads on once it has
+// answered the frame: whichever comes first, the session is abandoned.
+TEST(StreamEvents, ACallCancelledWhileItsReadWaitsAbandonsItsOpenUtterance) {
+  for (int round = 0; round < kUnorderedRounds; ++round) {
+    SCOPED_TRACE(round);
+    Served served;
+    auto client = with_an_open_utterance(served);
+    while (client.accepted.empty()) {
+      ASSERT_TRUE(client.read().has_value());
+    }
+    client.context->TryCancel();
+    EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
+    ASSERT_NO_FATAL_FAILURE(expect_abandoned(served));
+  }
+}
+
+// The listener is held inside the frame's hand-over, with no read of the
+// call pending: OnCancel comes first, and the read that follows fails.
+TEST(StreamEvents, ACallCancelledWhileTheListenerHandsOverAFrameAbandonsItsOpenUtterance) {
+  Served served;
+  auto& dispatch = served.dispatch();
+  dispatch.hold_audio();
+  auto client = with_an_open_utterance(served);
+  ASSERT_TRUE(dispatch.wait_until_handing_audio());
+  client.context->TryCancel();
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
+  ASSERT_TRUE(eventually([&] { return dispatch.seen.aborts() == 1; }));
+  dispatch.release_audio();
+  expect_abandoned(served);
+}
+
+TEST(StreamEvents, ACallWhoseConnectionIsLostWhileItsReadWaitsAbandonsItsOpenUtterance) {
+  for (int round = 0; round < kUnorderedRounds; ++round) {
+    SCOPED_TRACE(round);
+    Served served;
+    Relay relay{served.listener().bound_port()};
+    auto client = with_an_open_utterance(served, &relay);
+    while (client.accepted.empty()) {
+      ASSERT_TRUE(client.read().has_value());
+    }
+    relay.drop();
+    EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::UNAVAILABLE);
+    ASSERT_NO_FATAL_FAILURE(expect_abandoned(served));
+  }
+}
+
+TEST(StreamEvents, ACallWhoseConnectionIsLostWhileTheListenerHandsOverAFrameAbandonsIt) {
+  Served served;
+  auto& dispatch = served.dispatch();
+  Relay relay{served.listener().bound_port()};
+  dispatch.hold_audio();
+  auto client = with_an_open_utterance(served, &relay);
+  ASSERT_TRUE(dispatch.wait_until_handing_audio());
+  relay.drop();
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::UNAVAILABLE);
+  ASSERT_TRUE(eventually([&] { return dispatch.seen.aborts() == 1; }));
+  dispatch.release_audio();
+  expect_abandoned(served);
+}
+
+// Only the end of the client's stream ends the open utterance as a half-close.
+TEST(StreamEvents, AHalfCloseFinalizesTheOpenUtteranceAndClosesTheSession) {
+  Served served;
+  auto client = with_an_open_utterance(served);
+  ASSERT_TRUE(client.call->WritesDone());
+  ASSERT_NO_FATAL_FAILURE(
+      expect_utterance(client, wire::ENDPOINT_REASON_HALF_CLOSE, 1, kFrame, client.audio_sent, 0));
+  const auto closed = closed_of(client);
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_FALSE(closed.has_cause());
+  EXPECT_EQ(closed.totals().utterances_completed(), 1U);
+  EXPECT_TRUE(end_of(client).ok());
+  auto& seen = served.dispatch().seen;
+  EXPECT_TRUE(seen.saw(LogicalSessionEvent::HalfClose));
+  EXPECT_EQ(seen.aborts(), 0);
 }
 
 }  // namespace

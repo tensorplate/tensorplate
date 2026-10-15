@@ -101,6 +101,10 @@ Error admission_closed() {
   return Error::make(Error::Code::NotReady, "session admission is closed", "admission_closed");
 }
 
+Error worker_shutdown() {
+  return Error::make(Error::Code::Unavailable, "the worker is shutting down", "worker_shutdown");
+}
+
 CallOutput::Delivered delivered_to(SessionDispatch* dispatch, std::uint64_t key) {
   if (dispatch == nullptr) {
     return {};
@@ -126,6 +130,9 @@ struct CallState {
   std::uint64_t input_audio_samples = 0;
   std::uint64_t input_text_bytes = 0;
   bool cancelled = false;
+  /// The manager asked for the session's cleanup: its outcome is fixed, or
+  /// its drain completed and only the dispatch's release is awaited.
+  bool cleanup_requested = false;
   /// Outlives the reactor, which it stops calling once the call is done.
   std::shared_ptr<CallOutput> out;
 };
@@ -148,6 +155,9 @@ struct StreamListener::Impl final
 
   void on_transition(const ManagedSessionTransition& transition);
   void close_admission() noexcept;
+  /// Fails every session that has a call and whose cleanup was not asked,
+  /// which queues its terminal event at once.
+  void fail_open_sessions() noexcept;
   /// Ends a call that was never admitted, for `cause`.
   void refuse(CallOutput& call, const Error& cause) { call.refuse(refused, refusal(cause)); }
   /// Waits for the call's first message, with `start_read` run once the wait
@@ -219,7 +229,13 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
       return;
     }
     if (!ok) {
-      half_closed();
+      // gRPC 1.81.1 marks the context cancelled before it reports a read that
+      // failed for a cancel or a lost connection, but not for the stream's end.
+      if (context_.IsCancelled()) {
+        cancelled();
+      } else {
+        half_closed();
+      }
       return;
     }
     // The parse gRPC runs for a typed method, which reports its failure as a
@@ -235,18 +251,7 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
 
   void OnWriteDone(bool ok) override { state_->out->write_done(ok); }
 
-  void OnCancel() override {
-    std::optional<std::uint64_t> key;
-    {
-      const std::lock_guard guard(state_->mu);
-      state_->cancelled = true;
-      key = state_->key;
-    }
-    if (key) {
-      abort(*key);
-    }
-    state_->out->finish(grpc::Status::CANCELLED);
-  }
+  void OnCancel() override { cancelled(); }
 
   void OnDone() override {
     state_->out->detach();
@@ -511,6 +516,21 @@ class SessionCall final : public grpc::ServerBidiReactor<grpc::ByteBuffer, grpc:
         Error::make(Error::Code::Cancelled, "the call was cancelled", "client_cancelled"));
   }
 
+  /// The call was cancelled or its connection lost: its session is abandoned,
+  /// whichever of its failed read and OnCancel tells first.
+  void cancelled() {
+    std::optional<std::uint64_t> key;
+    {
+      const std::lock_guard guard(state_->mu);
+      state_->cancelled = true;
+      key = state_->key;
+    }
+    if (key) {
+      abort(*key);
+    }
+    state_->out->finish(grpc::Status::CANCELLED);
+  }
+
   void half_closed() {
     if (const auto key = session_key()) {
       (void)listener_.manager->apply(*key, LogicalSessionEvent::HalfClose);
@@ -596,6 +616,9 @@ void StreamListener::Impl::on_transition(const ManagedSessionTransition& transit
       state->last_accepted_sequence = state->offered.sequence;
       state->input_audio_samples += state->offered.audio_samples;
       state->input_text_bytes += state->offered.text_bytes;
+    }
+    if (transition.effects.contains(LogicalSessionEffect::RequestCleanup)) {
+      state->cleanup_requested = true;
     }
     session_id = state->session_id;
     terms = state->terms;
@@ -686,8 +709,7 @@ void StreamListener::Impl::close_admission() noexcept {
     }
     admission_stopped = true;
     try {
-      (void)manager->stop_admission_and_drain(
-          Error::make(Error::Code::Unavailable, "the worker is shutting down", "worker_shutdown"));
+      (void)manager->stop_admission_and_drain(worker_shutdown());
     } catch (...) {  // NOLINT(bugprone-empty-catch): shutdown continues without the drain.
     }
   }
@@ -695,6 +717,29 @@ void StreamListener::Impl::close_admission() noexcept {
     // A call that has not sent its Open can no longer be admitted.
     for (const auto& call : handshakes.close()) {
       refuse(*call, admission_closed());
+    }
+  } catch (...) {  // NOLINT(bugprone-empty-catch): the stop cancels the calls left open.
+  }
+}
+
+void StreamListener::Impl::fail_open_sessions() noexcept {
+  try {
+    std::vector<std::pair<std::uint64_t, std::shared_ptr<CallState>>> open;
+    {
+      const std::lock_guard guard(calls_mu);
+      open.assign(calls.begin(), calls.end());
+    }
+    // Unlocked: the sink takes calls_mu. A session whose cleanup was asked
+    // has finished its work or has its outcome fixed, and stays as it is.
+    for (const auto& [key, state] : open) {
+      bool cleanup_requested = false;
+      {
+        const std::lock_guard guard(state->mu);
+        cleanup_requested = state->cleanup_requested;
+      }
+      if (!cleanup_requested) {
+        (void)manager->apply(key, LogicalSessionEvent::Fail, worker_shutdown());
+      }
     }
   } catch (...) {  // NOLINT(bugprone-empty-catch): the stop cancels the calls left open.
   }
@@ -865,10 +910,14 @@ void StreamListener::stop(std::chrono::steady_clock::time_point deadline) noexce
   }
   impl_->stopped = true;
   impl_->close_admission();
-  while (impl_->manager->held_slots() > 0 && std::chrono::steady_clock::now() < deadline) {
+  // With a window no longer than the reserve, the sessions are failed at once.
+  const auto fail_at = deadline - kTerminalEventReserve;
+  while (impl_->manager->held_slots() > 0 && std::chrono::steady_clock::now() < fail_at) {
     std::this_thread::sleep_for(std::chrono::milliseconds{10});
   }
-  // Calls still open at the deadline are cancelled, and each aborts its session.
+  impl_->fail_open_sessions();
+  // gRPC waits for the calls until the deadline, then cancels those still
+  // open: a reader that stopped never got its terminal event.
   const auto left = std::max(deadline - std::chrono::steady_clock::now(),
                              std::chrono::steady_clock::duration::zero());
   impl_->server->Shutdown(std::chrono::system_clock::now() +

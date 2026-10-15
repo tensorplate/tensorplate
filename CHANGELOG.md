@@ -22,6 +22,28 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   refused. `validation-pass.py index` now requires `--kind`, which defaulted
   to `validation`. (V030-E06-F02-T01)
 
+- A stream call that the client cancels, or whose connection is lost, no
+  longer finalizes the session's open utterance. gRPC reports such a call to
+  the listener both as a failed read and as a cancellation, in either order,
+  and the failed read was taken for the end of the client's stream: the
+  open utterance was then finalized and, in a speech worker, its decode
+  submitted for a client that was gone, holding the one job lane until it
+  ended. The listener now asks the call's server context at the failed read
+  and aborts the session (`client_cancelled`) when the call is cancelled;
+  only a failed read on a call that is not cancelled is a half-close.
+  (V030-E04-F02-T02)
+- A stop of the serving worker that outlasts the drain window now writes
+  each stream session's `SessionClosed` before gRPC cancels the call, as the
+  stream schema promises. The stream listener fails each session still open
+  when 250 ms of the window are left (`worker_shutdown`, state failed), so a
+  client that reads gets the event and status `UNAVAILABLE`; a client that
+  does not read is cancelled at the window's end as before, which still
+  bounds the stop. With a window of 250 ms or less the sessions are failed
+  at once. A session whose drain has completed and which waits only for the
+  dispatch's release is not failed: it closes as its drain does. The page
+  states why the listener puts no time limit on a refused call: with the
+  gRPC this tree builds, cancelling it would not end it sooner.
+  (V030-E04-F02-T02)
 - The hosted jobs that install the pinned Rust toolchain now remove a
   half-installed copy and retry, up to three attempts, instead of failing on
   a file conflict that every repeat of the same command met again; the

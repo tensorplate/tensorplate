@@ -177,13 +177,22 @@ line says `serves_sessions: false`.
   them together); a refused call has no time limit, so a peer that does
   not read keeps the places it took for as long as its connection lasts;
   and what gRPC itself keeps for a call that was cancelled, or for a
-  stream it refused, is gRPC's to bound. What ends such a connection is
-  not the listener's: gRPC sets the TCP user timeout on a server's
-  listening socket, 20 s unless `grpc.keepalive_timeout_ms` says
+  stream it refused, is gRPC's to bound. A time limit of the listener's
+  would not end such a call sooner. A refused call sends only its status,
+  which HTTP/2 flow control does not hold, so what holds it is a write in
+  progress on its connection that the peer does not take; and in gRPC
+  1.81.1 the sends of a cancelled call complete only after the write in
+  progress on its connection (`grpc_chttp2_complete_closure_step` defers
+  them; the experiment `schedule_cancellation_over_write`, which changes
+  that, is off by default). The bound on a refused call is therefore
+  gRPC's: that write completes, or the connection closes. What ends such a
+  connection is not the listener's: gRPC sets the TCP user timeout on a
+  server's listening socket, 20 s unless `grpc.keepalive_timeout_ms` says
   otherwise, and the listener sets neither; by that option's description
   the kernel ends a connection whose peer has acknowledged or taken no
-  bytes for that long. That is read from the source of the gRPC this tree
-  builds (1.81.1), not shown by a run here. The tests: against a writer
+  bytes for that long. The 4,096 places stay a bound on memory. All of
+  this is read from the source of the gRPC this tree builds (1.81.1), not
+  shown by a run here. The tests: against a writer
   whose calls end when the test says so, the 4,096th refused call keeps
   its status, the next is cancelled, and the place of a call that ended is
   used again; one thread ends a refused call while another refuses one,
@@ -268,18 +277,42 @@ line says `serves_sessions: false`.
   Output stops at once, and `SessionClosed` follows with
   `client_cancelled` and status `CANCELLED` when the dispatch has released
   the session.
-- **Calls that end.** A read that fails is applied as a half-close, except
-  the first read of a call that a bound has refused meanwhile, which is
-  dropped (see "Calls waiting to open"). A read
-  also fails when the call was cancelled or its transport lost, and gRPC
-  reports that cancellation in a reaction of its own, before or after the
-  failed read: a vanished client's session may have begun to drain when
-  the cancellation aborts it (`client_cancelled`). A read fails, too, once
-  the listener has ended a call itself for output it cannot send. A
-  session still live when its call is done is failed (`internal`), so that
-  it does not stay draining with no stream to deliver to. A message that
-  does not parse is not a failed read: the listener parses each message
-  itself and fails the session (see "What it serves").
+- **Calls that end.** A read fails at the end of the client's stream, and
+  also when the call was cancelled (by the client, by its deadline, or by
+  the server), or its connection lost; gRPC reports such a cancellation a
+  second time, in a reaction of its own, before or after the failed read.
+  The listener tells the two apart at the failed read: gRPC 1.81.1 marks
+  the call's server context cancelled before it reports a read that failed
+  because the call was cancelled or its connection lost, and does not for
+  the end of the client's stream (`include/grpcpp/impl/server_callback_handlers.h`
+  and `src/core/ext/transport/chttp2/transport/chttp2_transport.cc` in its
+  source); a message above the receive limit is the exception (see "Not
+  enforced yet"). A failed read on a call that is cancelled aborts the session
+  (`client_cancelled`), as the cancellation's own reaction does, whichever
+  of the two comes first: the open utterance of a client that is gone is
+  not finalized and no decode is started for it. Only a failed read on a
+  call that is not cancelled is a half-close, which finalizes the open
+  utterance, completes every accepted segment and closes the session. A
+  peer that ends its stream with a trailing HEADERS frame, which no gRPC
+  client sends, is read as cancelled too. The first read of a call that a
+  bound has refused meanwhile is dropped (see "Calls waiting to open"). A
+  read fails, too, once the listener has ended a call itself for output it
+  cannot send. A session still live when its call is done is failed
+  (`internal`), so that it does not stay draining with no stream to
+  deliver to. A message that does not parse is not a failed read: the
+  listener parses each message itself and fails the session (see "What it
+  serves"). Tests with a real client: a client that cancels, and a
+  connection dropped under a client by a relay on loopback, each with an
+  utterance open, once with nothing holding the listener (its next read
+  pending) and once with the listener held inside its hand-over of the
+  frame, so that the cancellation comes first; the session is aborted and
+  no half-close is applied in all four. Which of gRPC's two reports comes
+  first when the read is pending is gRPC's to decide, and no test forces
+  it, so each of those two cases plays its scenario twenty times, on a
+  fresh listener each time. A half-close after the frame finalizes the
+  utterance (endpoint reason `HALF_CLOSE`) and closes the session with
+  status OK. In the worker, twenty clients in turn cancel with an utterance
+  open, and none has a job submitted for it.
 - **Transport window.** A delivery is a completed write, and gRPC completes
   a write when HTTP/2 flow control lets the bytes pass, not when the
   client's application reads them. The no-progress limit and the output
@@ -371,24 +404,38 @@ line says `serves_sessions: false`.
   takes the class of the error code the failure-reason taxonomy pairs it
   with, and anything else is `INTERNAL`. A session drained by shutdown is
   therefore `SESSION_STATE_CLOSED` with cause `worker_shutdown` and status
-  `UNAVAILABLE`. The status follows the cause and not the state because a
-  session ended through the cancel path (a client `Cancel`, a timeout, a
-  slow consumer) is also `SESSION_STATE_CLOSED`.
+  `UNAVAILABLE`, and one the stop fails at the end of the drain window is
+  `SESSION_STATE_FAILED` with the same cause and status. The status
+  follows the cause and not the state because a session ended through the
+  cancel path (a client `Cancel`, a timeout, a slow consumer) is also
+  `SESSION_STATE_CLOSED`.
 - **Not enforced yet.** A refused call is counted (see "Refused calls and
-  the calls of a connection") but not timed: it keeps its place until
-  gRPC reports it done or its connection ends, and at shutdown
+  the calls of a connection") but not timed by the listener: it keeps its
+  place until gRPC reports it done or its connection ends, and at shutdown
   such a call still holds the gRPC server until the drain window ends. A
   connection that opens no call
   is neither counted nor expired, and the number of connections is not
-  limited: nothing here bounds transport state that has no call yet. A
+  limited: nothing here bounds transport state that has no call yet.
+  gRPC has a limit of its own for a connection with no call open
+  (`grpc.max_connection_idle_ms`), which the listener does not set yet. A
   client event larger than the 64 KiB the listener
   receives is rejected by the transport's own limit, below the listener's
   parse: the call ends with a transport status and no `SessionClosed`, and
   its session ends as a cancelled call's does, not failed with a typed
   reason: aborted `client_cancelled`, unless it had nothing in progress
-  and the half-close of the failed read closed it first. Failing it with a
-  typed reason would mean receiving it first, and gRPC buffers a whole
-  message before it hands it over. A text
+  and the half-close of the failed read closed it first. gRPC's message
+  size filter, not the transport, ends that read, so the call's context is
+  not cancelled yet when the read fails unless gRPC's cancel of the call
+  has already been reported: the listener can take it for a half-close,
+  which can finalize an open utterance before that cancel aborts the
+  session, and the decode it starts holds the speech lane until it ends.
+  A client that keeps the limits its `Ready` announces never sends such an
+  event to the speech dispatch: a frame is at most 320 ms of 16 kHz mono
+  16-bit PCM, 10,240 bytes, and a text segment at most 4,096 bytes, so
+  only a client that breaks those limits pays that cost. Failing it with a
+  typed reason would mean
+  receiving it first, and gRPC buffers a whole message before it hands it
+  over. A text
   segment is refused as empty when it holds nothing but ASCII whitespace;
   other Unicode whitespace is not recognized, so such a segment is accepted
   and synthesized. The listener's sources build only with the
@@ -404,11 +451,45 @@ line says `serves_sessions: false`.
   `admission_closed`, also by a worker that has no dispatch, and a call
   that has not sent its `Open` is refused at once, so it does not hold the
   gRPC server through the drain unless the transport cannot deliver its
-  status. `stop()` stops the stream listener first:
-  it waits for the
-  stream sessions to close until `shutdown.drain_deadline` after the
-  shutdown was asked, then shuts the gRPC server down with what is left of
-  that window (a call still open is cancelled, which aborts its session),
+  status. `stop()` stops the stream listener first.
+  The listener waits for the stream sessions to close until 250 ms before
+  the end of the drain window (`shutdown.drain_deadline` after the shutdown
+  was asked), and then fails each session still open with
+  `worker_shutdown`, which queues its `SessionClosed` at once. It then
+  shuts the gRPC server down with what is left of the window: gRPC waits
+  for the calls until the window's end and then cancels those still open.
+  A client that reads gets `SessionClosed` (state failed, cause
+  `worker_shutdown`) and then status `UNAVAILABLE`; one that does not read
+  cannot take the event, is cancelled at the window's end and reads no
+  `SessionClosed`. The 250 ms come out of the window, not after it: the
+  stop ends at the window's end, and sessions that drain slowly have that
+  much less of it to drain in. With a window of
+  250 ms or less the sessions are failed as soon as the listener stops,
+  and their calls have what is left of the window for the event; with
+  none left gRPC cancels them at once and a client may read the event or
+  not. A session whose outcome a client `Cancel` has already fixed is not
+  failed: its `SessionClosed` waits for the dispatch's release, and a call
+  still open at the window's end is cancelled without it. Neither is a
+  session whose drain has completed and which waits only for that release:
+  the dispatch reports a drain complete once the output of the session's
+  work was delivered, so it closes as its drain does, or its call is
+  cancelled at the window's end without the event if the release has not
+  come. The listener reads whether a session's drain has completed just
+  before it fails it, not in the manager's serialized section, so a drain
+  that completes in that instant is failed, as a stop a moment earlier
+  would fail it. Tests: a session
+  that never drains is failed and its client, reading once the stop has
+  returned, gets the event and `UNAVAILABLE`, with a window of twice the
+  reserve and with a window of the reserve; a client that fell behind and
+  reads again once the stop has failed its session gets the event; a
+  session whose decode ends
+  while the stop waits closes as a drain does (state closed, cause
+  `worker_shutdown`); a session whose drain completed, its release held
+  until the stop has failed another session, closes (state closed, no
+  cause, status `OK`) after the transcript it was owed; a client whose
+  window no chunk fits is cancelled by the stop, with no event, before its
+  own deadline and with the listener's clock never moved; and the worker's
+  stop case below reads the event. The listener then
   stops the dispatch and destroys the manager. Only then does it stop the
   HTTP listener and run the HTTP drain
   below, which waits only for what is left of the same window. One value
@@ -1658,13 +1739,14 @@ the runner cases hold that one runner process lives from the load to the
 stop and not past it; a client cancel while the backend holds the segment's job (the
 session is released once, the next session is served); a lost client while
 its utterance is decoded behind a held backend (released once, the job's
-audio given back only when the backend lets go of the job), and a lost
-client with an utterance open, in both orders described below; a job the
+audio given back only when the backend lets go of the job), and twenty
+clients in turn that cancel with an utterance open, for none of which a job
+is submitted; a job the
 backend takes and refuses, and a session of a mode the backend does not
 run; a drain that delivers the segment in flight, and a stop at the end of
 the drain window whose unload ends the job, with the job's audio still out
 while the unload waits behind the job and back when the stop returns, and
-whose client reads no `SessionClosed`; a
+whose client reads the `SessionClosed` of the session the stop failed; a
 start that could not bind and is not retried, and the same start of a
 worker without a dispatch, which is; a worker that is never started; the
 refused unary request; each row of the table above; and a session
@@ -1691,12 +1773,6 @@ outside. Step 3 is declared as the registry's header describes a pair
 destroyed in order. That the `speech dispatch stopped` line is written
 after the listener's stop, not before it, has no case either: no case moves
 a counter during that stop.
-
-A call the client cancels or loses with an utterance open can reach the
-listener as the end of the client's stream before the cancellation: the
-utterance is then ended as a half-close ends it and its decode is submitted
-ahead of the release that cancels it. The lost-client case holds both
-orders.
 
 ## Test surface
 

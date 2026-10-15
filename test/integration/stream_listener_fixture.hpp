@@ -192,10 +192,34 @@ class SteeredDispatch final : public serving::SessionDispatch {
   }
   void on_transition(const serving::ManagedSessionTransition& t) override {
     seen.transition(t);
+    std::optional<serving::ManagedSessionTransition> released;
+    {
+      const std::lock_guard guard(mu_);
+      if (cleanup_hold_ && !held_cleanup_ &&
+          t.effects.contains(serving::LogicalSessionEffect::RequestCleanup)) {
+        held_cleanup_ = t;
+        cv_.notify_all();
+        return;
+      }
+      if (held_cleanup_ && t.event == serving::LogicalSessionEvent::Fail && t.cause &&
+          t.cause->context == release_cause_) {
+        released = std::exchange(held_cleanup_, std::nullopt);
+        cleanup_hold_ = false;
+      }
+    }
     inner_.on_transition(t);
+    if (released) {
+      inner_.on_transition(*released);
+    }
   }
   void audio(std::uint64_t key, std::span<const std::byte> frame) override {
     inner_.audio(key, frame);
+    std::unique_lock lock(mu_);
+    if (hold_audio_) {
+      handing_audio_ = true;
+      cv_.notify_all();
+      cv_.wait(lock, [&] { return !hold_audio_; });
+    }
   }
   void text_segment(std::uint64_t key, std::uint64_t id, std::string text) override {
     inner_.text_segment(key, id, std::move(text));
@@ -225,6 +249,38 @@ class SteeredDispatch final : public serving::SessionDispatch {
     cv_.notify_all();
   }
 
+  /// Holds the listener inside its next hand-over of an Audio, once the
+  /// frame is with the dispatch: nothing of its call is read meanwhile.
+  void hold_audio() {
+    const std::lock_guard guard(mu_);
+    hold_audio_ = true;
+  }
+  /// False if no hand-over is held within five seconds.
+  [[nodiscard]] bool wait_until_handing_audio() {
+    std::unique_lock lock(mu_);
+    return cv_.wait_for(lock, std::chrono::seconds{5}, [&] { return handing_audio_; });
+  }
+  void release_audio() {
+    {
+      const std::lock_guard guard(mu_);
+      hold_audio_ = false;
+    }
+    cv_.notify_all();
+  }
+
+  /// Keeps the next cleanup request from the dispatch behind, so that the
+  /// session's release is not acknowledged, until a session fails for `cause`.
+  void hold_cleanup_until_failed(std::string cause) {
+    const std::lock_guard guard(mu_);
+    cleanup_hold_ = true;
+    release_cause_ = std::move(cause);
+  }
+  /// False if no cleanup request is kept within five seconds.
+  [[nodiscard]] bool wait_until_cleanup_held() {
+    std::unique_lock lock(mu_);
+    return cv_.wait_for(lock, std::chrono::seconds{5}, [&] { return held_cleanup_.has_value(); });
+  }
+
   /// The gates and the yield of the dispatch behind.
   [[nodiscard]] SyntheticSessionDispatch& synthetic() noexcept { return inner_; }
 
@@ -237,6 +293,11 @@ class SteeredDispatch final : public serving::SessionDispatch {
   mutable std::condition_variable cv_;
   mutable bool negotiating_ = false;
   bool hold_ = false;
+  bool hold_audio_ = false;
+  bool handing_audio_ = false;
+  bool cleanup_hold_ = false;
+  std::string release_cause_;
+  std::optional<serving::ManagedSessionTransition> held_cleanup_;
 };
 
 /// One call, and the accounts a client keeps of its stream: its credit from
@@ -390,7 +451,8 @@ class Served {
   /// `max_refused_calls`, the listener's places for refused calls.
   explicit Served(bool with_dispatch = true, const std::string& host = "127.0.0.1",
                   const SchedulerClock* clock = nullptr,
-                  std::optional<std::size_t> max_refused_calls = std::nullopt)
+                  std::optional<std::size_t> max_refused_calls = std::nullopt,
+                  std::uint32_t max_sessions = 1)
       : clock_(clock != nullptr ? *clock : system_clock_) {
     if (with_dispatch) {
       dispatch_ = std::make_unique<SteeredDispatch>(clock_);
@@ -399,21 +461,32 @@ class Served {
     options.host = host;
     options.deployment_id = kDeployment;
     options.max_refused_calls = max_refused_calls;
-    options.limits =
-        serving::SessionLimits::create(std::chrono::seconds{60}, std::chrono::seconds{10},
-                                       std::chrono::seconds{30}, std::chrono::minutes{60}, 1)
-            .value();
+    options.limits = serving::SessionLimits::create(
+                         std::chrono::seconds{60}, std::chrono::seconds{10},
+                         std::chrono::seconds{30}, std::chrono::minutes{60}, max_sessions)
+                         .value();
     listener_ = serving::StreamListener::start(std::move(options), dispatch_.get(), clock_).value();
     use_channel({});
   }
-  ~Served() { listener_.reset(); }
+  // A test that failed while it held the listener lets it go: the stop
+  // waits for every reaction.
+  ~Served() {
+    if (dispatch_) {
+      dispatch_->release_audio();
+      dispatch_->release_negotiation();
+    }
+    listener_.reset();
+  }
   Served(const Served&) = delete;
   Served& operator=(const Served&) = delete;
 
-  /// Calls made from now on use a new channel with `arguments`.
-  void use_channel(const grpc::ChannelArguments& arguments) {
-    channel_ = grpc::CreateCustomChannel("127.0.0.1:" + std::to_string(listener_->bound_port()),
-                                         grpc::InsecureChannelCredentials(), arguments);
+  /// Calls made from now on use a new channel with `arguments`, to `port`
+  /// on loopback or else to the listener.
+  void use_channel(const grpc::ChannelArguments& arguments,
+                   std::optional<std::uint16_t> port = std::nullopt) {
+    channel_ = grpc::CreateCustomChannel(
+        "127.0.0.1:" + std::to_string(port.value_or(listener_->bound_port())),
+        grpc::InsecureChannelCredentials(), arguments);
     stub_ = wire::SessionService::NewStub(channel_);
   }
 
