@@ -12,7 +12,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   load. gRPC defers closing a reset connection while a write is in progress
   on it, so an open's second call could go out on that connection and be
   lost with it; the tests now wait for the channel to let go of it before
-  the second call. (V030-E04-F02-T03)
+  the second call. The SDK does not change: outside the tests the second
+  call can still start on that connection and fail with it, and the Python
+  SDK page now says so instead of promising a new connection.
+  (V030-E04-F02-T03)
 
 - The serving worker writes each of its stderr log records and its newline
   in one write. Two threads logging at once, as the control thread's

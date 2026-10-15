@@ -529,7 +529,13 @@ open 60 to 147 minutes after its last call, after the client's own channel
 has closed it (30 to 60 minutes). A channel passed in that turns gRPC's
 client idle limit off, or that was connected without a call, can meet the
 worker's close. A session opened at that instant sends its Open once more,
-on a new connection.
+but that second call can meet the same connection's close: gRPC 1.81 does
+not mark a closing connection closed while a write is in progress on it, so
+when another session on the channel is writing at that moment, the second
+call starts on the closing connection too. The open then fails as
+unavailable (`ServiceUnavailableError`, or `ServerInternalError` when gRPC
+reports the Open's write as failed), with admission unknown. A later change
+sends the second call on a fresh channel.
 
 ### Finding the stream endpoint
 
