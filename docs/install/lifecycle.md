@@ -150,11 +150,20 @@ To restore, put both back together, with the services stopped:
 sudo systemctl stop tensorplate-agent tensorplate-observability
 # Set aside (or remove) what the agent wrote since the rollback, then move
 # each .bak back. If an .after-rollback directory already exists, move that
-# elsewhere first: mv would otherwise put the directory inside it.
-sudo mv /var/lib/tensorplate/state /var/lib/tensorplate/state.after-rollback
+# elsewhere first: mv would otherwise put the directory inside it. After a
+# purge, before any reinstall, there is neither state nor bundles, so
+# bundles is created first.
+if sudo test -e /var/lib/tensorplate/state; then
+  sudo mv /var/lib/tensorplate/state /var/lib/tensorplate/state.after-rollback
+fi
 sudo mv /var/lib/tensorplate/state.bak /var/lib/tensorplate/state
 if sudo test -e /var/lib/tensorplate/staging.bak; then
-  sudo mv /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/staging.after-rollback
+  if sudo test -e /var/lib/tensorplate/bundles/staging; then
+    sudo mv /var/lib/tensorplate/bundles/staging /var/lib/tensorplate/staging.after-rollback
+  fi
+  if ! sudo test -e /var/lib/tensorplate/bundles; then
+    sudo install -d -o root -g root -m 0755 /var/lib/tensorplate/bundles
+  fi
   sudo mv /var/lib/tensorplate/staging.bak /var/lib/tensorplate/bundles/staging
 fi
 sudo systemctl start tensorplate-agent tensorplate-observability
