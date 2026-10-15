@@ -8,6 +8,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- A serving worker that was stopped now refuses a later `start()` with
+  `unavailable` (`worker_shutdown`) and opens no listener. Before, a start
+  after a served worker's stop returned success; a start after a stop that
+  came before any start opened the worker's listeners over the unloaded
+  session; and a start after a stop that followed a start failed at the
+  HTTP listener opened both listeners over it. Those last two also created
+  threads that nothing joined, so destroying the worker aborted the
+  process. A `start()` and a `stop()` called on two threads at once now run
+  one after the other; before, a start could pass its checks, let the stop
+  run, and then open its listeners, with the same abort. The serving binary
+  starts its worker once, so a deployment the agent runs is unchanged.
+  (V030-E04-F03-T02)
+
 - The rolling validation comparison now sets a line only against an earlier
   line of the same kind: a validation pass against an earlier pass, an
   evidence line (a run filed publicly, such as a standalone qualification

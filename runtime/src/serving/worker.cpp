@@ -691,6 +691,14 @@ Result<void> ServingWorker::start() {
   if (!impl_) {
     return unexpected(Error::Code::Internal, "serving worker: impl null");
   }
+  // Held throughout, as stop() holds it: a stop on another thread runs
+  // wholly before this start or wholly after it.
+  const std::lock_guard guard(impl_->stop_mutex);
+  // A stop unloaded the session, and nothing loads it again.
+  if (impl_->stopped.load()) {
+    return unexpected(
+        Error::make(Error::Code::Unavailable, "the worker was stopped", "worker_shutdown"));
+  }
   if (impl_->started.exchange(true)) {
     return Result<void>{};
   }
@@ -727,8 +735,13 @@ ServingExitCode ServingWorker::serve_forever() {
     return ServingExitCode::Internal;
   }
   if (auto r = start(); !r) {
-    impl_->exit_code = r.error().code == Error::Code::ConfigInvalid ? ServingExitCode::ConfigError
-                                                                    : ServingExitCode::ServeError;
+    // Under the stop's lock: a stop in flight sets its code first, and a
+    // stopped worker keeps the code its stop returned.
+    const std::lock_guard guard(impl_->stop_mutex);
+    if (!impl_->stopped.load()) {
+      impl_->exit_code = r.error().code == Error::Code::ConfigInvalid ? ServingExitCode::ConfigError
+                                                                      : ServingExitCode::ServeError;
+    }
     return impl_->exit_code;
   }
   impl_->shutdown.wait_for_request();

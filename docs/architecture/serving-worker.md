@@ -765,6 +765,15 @@ Draining → Stopped):
 8. The controller transitions to `Stopped` and the dispatcher /
    evictor threads join.
 
+A worker is stopped once. `start()` after `stop()` returns `unavailable`
+(`worker_shutdown`) and opens no listener, whether the worker was serving,
+was never started, or failed its start. `serve_forever()` and `stop()`
+called after that return the first stop's exit code. `start()` holds the
+lock `stop()` holds for its whole run, so a `start()` and a `stop()` called
+on two threads at once run one after the other: the start serves until the
+stop, or it is refused. The binary starts its worker once, and the agent
+replaces a member by starting a new process.
+
 ASAN-clean: the buffer manager reports zero active buffers after
 shutdown in the V01-E07-F08 integration tests.
 
@@ -1570,21 +1579,22 @@ serves stream sessions answers a unary `/infer` with a failure
 **A start that fails.** When the stream listener cannot start, for example
 because its port is taken, it stops a dispatch it has attached, and a
 dispatch is attached to a listener once. `start()` returns the listener's
-error, and every later `start()` of that worker returns the same error
-without opening either listener: another stream listener would bind and
-admit sessions that nothing serves. The worker does not tell a failure
-before the attach apart; any failed start of the listener with the dispatch
-is final. A worker without a dispatch starts again as before.
+error, and every later `start()` of that worker before its `stop()`
+returns the same error without opening either listener: another stream
+listener would bind and admit sessions that nothing serves. The worker does
+not tell a failure before the attach apart; any failed start of the
+listener with the dispatch is final. A worker without a dispatch starts
+again as before.
 
-**A worker is not restarted.** `stop()` unloads the session and stops the
-dispatch, and nothing brings either back: a worker that was stopped is
-destroyed, and a new one is built to serve again. Today `start()` after a
-`stop()` returns success and opens no listener, because the flag a start
-sets is not cleared by a stop (older than the dispatch). By reading, not
-run: a `start()` that failed at the HTTP listener, then a `stop()`, then
-another `start()` would open the stream listener over the unloaded
-session. Refusing a start once the worker was stopped is a change of its
-own.
+**A worker is not restarted.** `stop()` unloads the session, and stops the
+dispatch when the stream listener ran, and nothing brings either back: a
+worker that was stopped is destroyed, and a new one is built to serve
+again. A `start()` after the `stop()` is refused before either listener
+opens (see [Graceful shutdown](#graceful-shutdown)). That covers a worker
+whose first `start()` failed at the HTTP listener: that start never reached
+the stream listener, so it left no failure of its own to return, and
+without the refusal a later `start()` would open the stream listener over
+the unloaded session.
 
 It is **provisional**, as the dispatch is. The worker serves one stream
 session at a time. It grants both input kinds whatever the model runs: its
@@ -1748,10 +1758,13 @@ the drain window whose unload ends the job, with the job's audio still out
 while the unload waits behind the job and back when the stop returns, and
 whose client reads the `SessionClosed` of the session the stop failed; a
 start that could not bind and is not retried, and the same start of a
-worker without a dispatch, which is; a worker that is never started; the
+worker without a dispatch, which is; a worker that is never started; a
+start after a stop that followed a start failed at the HTTP listener, which
+opens neither listener; the
 refused unary request; each row of the table above; and a session
 cancelled under a job the backend does not end, which fails the worker
-once its release passes the bound, in process (`stop()` returns 70) and as
+once its release passes the bound, in process (`stop()` returns 70, and
+after a refused `start()` so do `serve_forever()` and `stop()`) and as
 the worker binary over the runner with a backend that never ends a job
 (`test/mocks/worker_held_job_sidecar.py`), which exits 70 after its unload
 gave up on the job. Both wait out the provisional figures, about 20 and 36
