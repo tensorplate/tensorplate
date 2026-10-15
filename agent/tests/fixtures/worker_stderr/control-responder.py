@@ -4,7 +4,9 @@
 
 Answers ledger polls with an empty ledger and the agent's fence, activate and
 retire by the worker's admission rules; exits 70 on another member or
-operation. Asked to stop, it leaves `<endpoint>.terminated` beside the config.
+operation. Each request and its answer are appended, before the answer is
+sent, to `<endpoint>-<generation>.control.jsonl` beside the config. Asked to
+stop, it leaves `<endpoint>.terminated` beside the config.
 """
 import json
 import os
@@ -19,6 +21,10 @@ deployment = rendered["deployment"]
 member = {"deployment_id": deployment["endpoint"], "generation": deployment["generation"]}
 sessions = 1 if rendered.get("streaming", {}).get("enabled") is True else 0
 admission = "open"
+record_path = os.path.join(
+    os.path.dirname(config_path),
+    "{deployment_id}-{generation}.control.jsonl".format(**member),
+)
 
 
 def stop(*_):
@@ -67,4 +73,6 @@ for line in channel:
         admission = "retiring"
     else:
         sys.exit(70)
+    with open(record_path, "a", encoding="utf-8") as record:
+        record.write(json.dumps({"request": request, "answer": answer}) + "\n")
     channel.write(json.dumps(answer, separators=(",", ":")).encode() + b"\n")

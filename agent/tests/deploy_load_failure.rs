@@ -594,7 +594,8 @@ fn a_real_worker_is_polled_from_its_start_and_promoted_as_a_member() {
 }
 
 /// The unload of the previous active id that follows a promotion must not
-/// reach the worker just promoted when the two ids are the same.
+/// reach the worker just promoted when the two ids are the same. Each
+/// worker's own record shows the fence and activate it was sent.
 #[test]
 fn deploying_the_active_id_again_leaves_it_served() {
     let first = HealthPort::listen();
@@ -604,7 +605,28 @@ fn deploying_the_active_id_again_leaves_it_served() {
     second.serve("same-id");
 
     assert_eq!(h.deploy("same-id").status, ResponseStatus::Ok);
-    assert_eq!(h.deploy("same-id").status, ResponseStatus::Ok);
+    let replacing = h.deploy("same-id");
+    assert_eq!(replacing.status, ResponseStatus::Ok);
+
+    let tx = replacing.transaction_id.expect("transaction id");
+    let quota = serde_json::json!({"session_count": 0, "domain_bytes": {}});
+    let configs = h.td.path().join("worker-configs");
+    let first_ops = control_ops(&configs.join("same-id-1.control.jsonl"));
+    let [activated, fenced] = first_ops.as_slice() else {
+        panic!("the first worker was sent {first_ops:?}");
+    };
+    assert_eq!(activated["request"]["op"], "activate", "{first_ops:?}");
+    assert_eq!(fenced["request"]["op"], "admission_fence", "{first_ops:?}");
+    assert_eq!(fenced["request"]["transaction_id"], tx.as_str());
+    assert_eq!(fenced["answer"]["status"], "ok");
+    let second_ops = control_ops(&configs.join("same-id-2.control.jsonl"));
+    let [activated] = second_ops.as_slice() else {
+        panic!("the second worker was sent {second_ops:?}");
+    };
+    assert_eq!(activated["request"]["op"], "activate");
+    assert_eq!(activated["request"]["transaction_id"], tx.as_str());
+    assert_eq!(activated["answer"]["status"], "ok");
+    assert_eq!(activated["answer"]["quota"], quota);
 
     let active = h.coord.status().expect("status").active.expect("active");
     assert_eq!(active.deployment_id, "same-id");
@@ -612,9 +634,19 @@ fn deploying_the_active_id_again_leaves_it_served() {
         active.serving_url,
         Some(format!("http://127.0.0.1:{}/infer", second.port))
     );
-    let configs = h.td.path().join("worker-configs");
     assert!(configs.join("serving-same-id-2.json").is_file());
     assert!(!configs.join("serving-same-id-1.json").exists());
+}
+
+/// The operations other than ledger polls that the stand-in worker recorded
+/// in `record`, each with its answer.
+fn control_ops(record: &Path) -> Vec<serde_json::Value> {
+    let recorded = std::fs::read_to_string(record).unwrap_or_default();
+    recorded
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("a recorded op"))
+        .filter(|op| op["request"]["op"] != "ledger_status")
+        .collect()
 }
 
 fn copy_dir(from: &Path, to: &Path) {
