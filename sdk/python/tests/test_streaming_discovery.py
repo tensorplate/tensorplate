@@ -854,3 +854,37 @@ def test_an_open_that_ends_ok_before_any_event_is_a_protocol_error_and_reads_not
         assert (agent.reads, fake.calls) == (1, 1)
 
     following(scenario, fake)
+
+
+@pytest.mark.parametrize(
+    ("file", "error"),
+    [
+        ("no_deployment_status", speech.NotServingError),
+        ("streaming_handover", speech.NotServingError),
+        ("unary_status", speech.NotStreamingError),
+    ],
+)
+def test_a_recorded_status_that_names_no_stream_target_says_why(file: str, error: type) -> None:
+    assert type(refused(reply(file, 2))) is error
+
+
+def test_an_open_refused_in_a_handover_window_says_so_and_the_next_open_finds_the_new_target() -> (
+    None
+):
+    old, new = server(admission_open=False), server(generation=2, digest=LATER_DIGEST)
+
+    async def scenario(
+        agent: Agent, stream: speech.SpeechClient, endpoint: str, next_endpoint: str
+    ) -> None:
+        agent.answer = reply("streaming_handover", 2)
+        session = stream.transcribe(language="en", input_format=PCM)
+        with pytest.raises(speech.NotServingError) as caught:
+            await session.open()
+        assert isinstance(caught.value.__cause__, speech.ServiceUnavailableError)
+        assert caught.value.admitted is None
+        # The caller opens again once the new generation serves; that open reads first.
+        agent.answer = streaming(next_endpoint, 2, LATER_DIGEST)
+        await converse(stream)
+        assert (agent.reads, old.calls, new.calls) == (3, 1, 1)
+
+    following(scenario, old, new)
