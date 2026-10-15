@@ -491,7 +491,8 @@ fn a_format_0_1_transaction_killed_after_the_registry_took_its_generation_is_end
 }
 
 /// The commit write alone fails: writes are refused from the candidate's
-/// fence until the transaction reports its failure.
+/// fence until the transaction reports its failure, which it does before the
+/// write that records it.
 fn refuse_the_commit_write(w: &Wired) {
     let store = w.store.clone();
     let refuse = move || store.kill_after_writes(0);
@@ -712,8 +713,8 @@ fn the_loop_keeps_an_error_written_after_it_read_the_restores() {
 
 #[test]
 fn a_restores_error_is_kept_while_the_member_serving_is_not_the_active_records() {
-    // An update under the same id, and another id.
-    for (id, bundle) in [("stt", TTS), ("tts", TTS)] {
+    // An update of the id, and another id with the same bundle.
+    for (id, bundle) in [("stt", TTS), ("tts", STT)] {
         let w = wired();
         w.deploy("stt", STT).unwrap();
         let next = restarting_after_a_failed_restore(&w);
