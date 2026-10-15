@@ -43,6 +43,7 @@ class SessionTimers {
       std::optional<SchedulerClock::TimePoint> output_stalled_since = std::nullopt) const noexcept;
   [[nodiscard]] SchedulerClock::Duration duration_remaining(
       SchedulerClock::TimePoint now) const noexcept;
+  [[nodiscard]] SchedulerClock::TimePoint opened_at() const noexcept { return opened_at_; }
 
  private:
   struct Deadline {

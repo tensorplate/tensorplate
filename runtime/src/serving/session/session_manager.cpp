@@ -572,6 +572,38 @@ bool SessionManager::admission_open() const noexcept {
   return admission_open_;
 }
 
+ipc::WorkerLedger SessionManager::ledger() const {
+  ipc::WorkerLedger ledger;
+  ledger.ceiling = limits_.max_sessions();
+  const std::lock_guard guard(mu_);
+  for (const auto& [key, entry] : entries_) {
+    (void)key;
+    switch (entry.machine.state()) {
+      case LogicalSessionState::Opening:
+        ++ledger.reserved;
+        break;
+      case LogicalSessionState::Active:
+      case LogicalSessionState::Finalizing:
+        ++ledger.active;
+        break;
+      case LogicalSessionState::Draining:
+      case LogicalSessionState::CancelRequested:
+      case LogicalSessionState::Failed:
+        ++ledger.closing;
+        continue;
+      case LogicalSessionState::Closed:
+        continue;
+    }
+    ledger.admission_monotonic_ns.push_back(
+        static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       entry.timers.opened_at().time_since_epoch())
+                                       .count()));
+  }
+  // Oldest first whatever order the keys were taken in.
+  std::sort(ledger.admission_monotonic_ns.begin(), ledger.admission_monotonic_ns.end());
+  return ledger;
+}
+
 void SessionManager::emit(const ManagedSessionTransition& transition, bool announced) const {
   if (announced || !transition.effects.empty()) {
     sink_(transition);

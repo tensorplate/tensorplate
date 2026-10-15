@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "tensorplate/core/result.hpp"
+#include "tensorplate/ipc/worker_control.hpp"
 #include "tensorplate/scheduler/clock.hpp"
 #include "tensorplate/serving/session.hpp"
 
@@ -106,6 +107,12 @@ class SessionManager {
       std::uint64_t session_key) const;
   [[nodiscard]] std::size_t held_slots() const noexcept;
   [[nodiscard]] bool admission_open() const noexcept;
+  /// The ledger the control channel reports, taken under one lock: Opening is
+  /// reserved, Active and Finalizing active, and Draining, CancelRequested and
+  /// Failed closing until the release is acknowledged. Each held slot counts
+  /// once, so the counts never exceed the ceiling, max_sessions; the
+  /// admission times are sorted, oldest first.
+  [[nodiscard]] ipc::WorkerLedger ledger() const;
 
  private:
   struct Entry {

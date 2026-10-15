@@ -2,16 +2,20 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <random>
 #include <set>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "tensorplate/ipc/worker_control.hpp"
 
 #include "fake_scheduler_clock.hpp"
 #include "serving/session/session_manager.hpp"
@@ -30,12 +34,12 @@ constexpr std::uint32_t kRounds = 200;
 /// A manager with its timer thread on the fake clock, and the stream, backend
 /// and peer around it.
 struct SyntheticWorker {
-  explicit SyntheticWorker(bool start_peer = false)
+  explicit SyntheticWorker(bool start_peer = false,
+                           SessionLimits limits = SessionLimits::defaults())
       : host(clock, start_peer),
-        manager(SessionManager::create(
-                    SessionLimits::defaults(), kGeneration, clock,
-                    [this](const auto& transition) { host.on_transition(transition); })
-                    .value()) {
+        manager(SessionManager::create(limits, kGeneration, clock, [this](const auto& transition) {
+                  host.on_transition(transition);
+                }).value()) {
     host.attach(*manager);
   }
   ~SyntheticWorker() { host.stop(); }
@@ -235,6 +239,117 @@ TEST(SessionRaces, DrainOfManySessionsRacingTheirCancelsReleasesEverySlotOnce) {
     EXPECT_EQ(worker.manager->held_slots(), 0U);
     EXPECT_FALSE(worker.manager->admission_open());
   }
+}
+
+/// Whether the control channel can send `ledger` as its answer to a poll.
+bool the_wire_carries(const ipc::WorkerLedger& ledger) {
+  ipc::WorkerControlResponse response;
+  response.transaction_id = "runtime";
+  response.correlation_id = "poll";
+  response.op = ipc::WorkerControlOp::LedgerStatus;
+  response.member = ipc::WorkerMember{"speech", kGeneration};
+  response.status = ipc::WorkerControlStatus::Ok;
+  response.ledger = ledger;
+  return ipc::encode_worker_control_response(response).has_value();
+}
+
+// The control thread's poll runs while sessions open, end and are released
+// on other threads, from a full manager on: the wire carries every ledger.
+TEST(SessionRaces, EveryLedgerTakenWhileSessionsOpenAndCloseIsOneTheWireCarries) {
+  constexpr std::uint32_t kCeiling = 4;
+  constexpr int kOpeners = 4;
+  constexpr int kOpensEach = 50;
+  SyntheticWorker worker(false, SessionLimits::create(60s, 10s, 30s, 60min, kCeiling).value());
+  std::atomic<std::size_t> opened{0};
+  std::vector<std::uint64_t> first_keys;
+  for (std::uint32_t index = 0; index < kCeiling; ++index) {
+    const auto session = worker.manager->open(kGeneration, kAudioIn);
+    ASSERT_TRUE(session);
+    first_keys.push_back(session->session_key);
+    ++opened;
+  }
+  const auto full = worker.manager->ledger();
+  EXPECT_EQ(full.active, kCeiling);
+  EXPECT_TRUE(the_wire_carries(full));
+
+  std::promise<void> start;
+  const auto started = start.get_future().share();
+  std::atomic<bool> done{false};
+  std::atomic<bool> stalled{false};
+  std::optional<ipc::WorkerLedger> refused;
+  std::thread poller([&] {
+    started.wait();
+    do {
+      const auto ledger = worker.manager->ledger();
+      if (!refused && !the_wire_carries(ledger)) {
+        refused = ledger;
+      }
+    } while (!done.load());
+  });
+  std::thread ticker([&] {
+    started.wait();
+    while (!done.load()) {
+      worker.clock.advance(1ms);
+      worker.manager->notify_clock_advanced();
+      std::this_thread::yield();
+    }
+  });
+  const auto failure = Error::make(Error::Code::Unavailable, "backend failed", "backend_failed");
+  std::vector<std::thread> openers;
+  for (int opener = 0; opener < kOpeners; ++opener) {
+    openers.emplace_back([&, opener] {
+      started.wait();
+      // Until it has opened its share, so that every opener churns slots.
+      for (int opened_here = 0; opened_here < kOpensEach;) {
+        const auto session = worker.manager->open(kGeneration, kAudioIn);
+        if (!session) {
+          // Every slot is held: wait until one more session has given its slot back.
+          if (session.error().context != "session_count_limit" ||
+              !worker.host.wait_released(opened.load() - kCeiling + 1, 10s)) {
+            stalled = true;
+            return;
+          }
+          continue;
+        }
+        ++opened;
+        const auto key = session->session_key;
+        const auto ending = (opener + opened_here) % 3;
+        ++opened_here;
+        switch (ending) {
+          case 0:
+            (void)worker.manager->apply(key, Event::Cancel);
+            break;
+          case 1:
+            (void)worker.manager->apply(key, Event::Finalize);
+            (void)worker.manager->apply(key, Event::HalfClose);
+            break;
+          default:
+            (void)worker.manager->apply(key, Event::Fail, failure);
+            break;
+        }
+      }
+    });
+  }
+  std::thread canceller([&] {
+    started.wait();
+    for (const auto key : first_keys) {
+      (void)worker.manager->apply(key, Event::Cancel);
+    }
+  });
+  start.set_value();
+  canceller.join();
+  for (auto& thread : openers) {
+    thread.join();
+  }
+  const bool released = worker.host.wait_released(opened.load(), 10s);
+  done.store(true);
+  poller.join();
+  ticker.join();
+  EXPECT_FALSE(stalled.load());
+  ASSERT_TRUE(released);
+  EXPECT_FALSE(refused.has_value()) << refused->reserved << "/" << refused->active << "/"
+                                    << refused->closing << " of " << refused->ceiling;
+  EXPECT_EQ(worker.manager->ledger(), (ipc::WorkerLedger{0, 0, 0, kCeiling, {}}));
 }
 }  // namespace
 }  // namespace tensorplate::serving
