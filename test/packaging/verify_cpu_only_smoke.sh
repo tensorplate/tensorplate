@@ -98,7 +98,7 @@ repo_parent="$(dirname "$repo_root")"
 tools/release/assert-static-streaming-closure.sh \
   --deb "${repo_parent}/tensorplate-serving_${version}_${host_arch}.deb" \
   --binary build/release/tensorplate-serving --cmake-cache build/release/CMakeCache.txt ||
-  die "the worker lacks the streaming feature, or it or its package asks for a distribution gRPC library"
+  die "the worker lacks the streaming feature or its symbols, is stripped, or it or its package asks for a distribution gRPC library"
 # tensorplate-common carries the layout helpers every other package
 # Pre-Depends on, so it must be configured before the rest.
 dpkg -i "${repo_parent}/tensorplate-common_${version}_all.deb" >>"${work}/install.log" 2>&1 ||

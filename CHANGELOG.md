@@ -984,6 +984,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The Python SDK's streaming speech sessions now send their `Open` once more,
+  on a new call within the same `open_timeout`, when the call ends before any
+  server event with `UNAVAILABLE`, or with `INTERNAL` after the write of the
+  `Open` failed. That is how a connection lost as the `Open` is sent ends a
+  call (for example one the worker closes as idle at that instant), and such
+  a call carried nothing but the `Open`. A refusal with `UNAVAILABLE`
+  (admission closed), a refusal sent before the worker reads the `Open` that
+  races its write, and an endpoint that cannot be reached are therefore
+  tried twice. The session is not ended while its open makes the second
+  call, so a cancel, a client close or a timeout in between ends it with no
+  second call. Before, the session failed with `ServiceUnavailableError` or
+  `ServerInternalError`. (V030-E04-F02-T03)
 - The streaming footprint harness now runs the with-streaming worker with
   `streaming: {enabled: true, port: 0}` added to its packaged config. The
   worker therefore binds its stream listener, and the harness waits for its
@@ -1012,14 +1024,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - The serving worker's stream listener now has gRPC close a connection with
   no call open at an idle limit of 67 minutes (60 to 147 minutes after its
-  last call, as gRPC checks once a limit; a gRPC client that has made a
-  call closes its own idle connection first, 30 to 60 minutes after it),
-  and accepts at most 256 connections at one time, sized from the worker's default soft limit of
-  1,024 descriptors and the 13 it holds at idle with a speech deployment. A
-  connection past the cap is closed as it is accepted and its call reads
-  `UNAVAILABLE`; an open call is never cut by the idle limit. Before, gRPC
-  kept a connection that opened no call until its peer closed it, and
-  accepted any number. (V030-E04-F02-T02)
+  last call, as gRPC checks once a limit; a gRPC client that has made a call
+  closes its own idle connection first, 30 to 60 minutes after it), and
+  accepts at most 256 connections at one time, sized from the worker's
+  default soft limit of 1,024 descriptors and the 13 it holds at idle with a
+  speech deployment. A connection past the cap is closed as it is accepted
+  and its call reads `UNAVAILABLE`; an open call is never cut by the idle
+  limit. Before, gRPC kept a connection that opened no call until its peer
+  closed it, and accepted any number. (V030-E04-F02-T02)
 - A deploy or rollback now writes its commit before the serving member is
   asked to stop. The candidate is checked before the commit (it still runs
   and was not given up) and takes the serving slot only after it, and the

@@ -228,11 +228,13 @@ line says `serves_sessions: false`.
   its first call ends: 30 to 60 minutes after its last call. A client
   that has made a call therefore closes first, and the SDK's always has
   before its channel is idle. The known residual is a client that turns
-  its own idle limit off and a channel that connected without a call:
-  the worker may close those first, and an Open sent at the instant it
-  closes may read `UNAVAILABLE`, which the SDK does not send again. After
-  an idle close a client's next call connects again, and gRPC sends again
-  by itself a call the GOAWAY shows the server never saw. At most 256 connections are open at one time
+  its own idle limit off and a channel that connected without a call: the
+  worker may close those first. An Open sent at the instant it closes ends
+  before any server event, with `UNAVAILABLE`, or with `INTERNAL` when the
+  client's write of the Open finds the call ended; the SDK sends such an
+  Open once more on a new call. After an idle close a client's next call
+  connects again, and gRPC sends again by itself a call the GOAWAY shows
+  the server never saw. At most 256 connections are open at one time
   (`grpc.max_allowed_incoming_connections`): gRPC closes a connection past
   them as it accepts it, before reading from it, and a call on it reads
   `UNAVAILABLE` ("failed to connect to all addresses; last error:

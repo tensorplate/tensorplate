@@ -483,11 +483,12 @@ TEST(StreamBounds, UnsetConnectionLimitsAreTheListenersOwn) {
 // gRPC ends a connection that has had no call open for the idle limit, and
 // the client's next call connects again by itself.
 TEST(StreamBounds, AConnectionWithNoCallOpenIsClosedAtTheIdleLimitAndTheNextCallConnectsAgain) {
-  Served served{true, "127.0.0.1", nullptr, std::nullopt, 1, {.idle = 200ms}};
+  constexpr auto idle = 500ms;
+  Served served{true, "127.0.0.1", nullptr, std::nullopt, 1, {.idle = idle}};
   const Connection connection{served.listener().bound_port()};
   ASSERT_TRUE(connection.channel->WaitForConnected(in(20s)));
-  // The server's GOAWAY takes the channel off READY.
-  ASSERT_TRUE(connection.channel->WaitForStateChange(GRPC_CHANNEL_READY, in(20s)))
+  // The server's GOAWAY takes the channel off READY, one to two limits after it connected.
+  ASSERT_TRUE(connection.channel->WaitForStateChange(GRPC_CHANNEL_READY, in(8 * idle)))
       << "the connection outlived the idle limit";
   auto client = connection.call();
   ASSERT_TRUE(answered_by_ready(client));

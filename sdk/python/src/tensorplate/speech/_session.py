@@ -42,7 +42,8 @@ SessionT = TypeVar("SessionT", bound="Session[Any]")
 METADATA_BUFFER_BYTES = 16 * 1024
 
 # What a write raises once its call has ended. The CancelledError among them is gRPC's, for a
-# call this side cancelled: a session's own writes are never cancelled (`Session._within`).
+# call this side cancelled, or a write given up before Ready (`Session._write`): a session's
+# writing task is never cancelled (`Session._within`).
 _CALL_ENDED = (grpc.RpcError, grpc.aio.BaseError, asyncio.InvalidStateError, asyncio.CancelledError)
 
 _ERROR_OF_STATUS: dict[str, type[SpeechError]] = {
@@ -201,6 +202,10 @@ class Session(Generic[EventT]):
         self._finalizing: int | None = None
         self._answer: tuple[int, EventT] | None = None
         self._unknown_events = 0
+        # While `open()` runs, once it made its second call, and the failure of its first
+        # call while it makes the second.
+        self._opening = self._reopened = False
+        self._lost: SpeechError | None = None
 
     # --- what a subclass supplies ---------------------------------------------
 
@@ -274,6 +279,14 @@ class Session(Generic[EventT]):
         client or channel is closed. Entering the session with ``async
         with`` calls this. A caller cancelled on the turn this call fails
         gets ``CancelledError``, and the call's error is not raised.
+
+        A call that ends before any server event, with ``UNAVAILABLE`` or
+        with ``INTERNAL`` after its Open failed to be written (gRPC's status
+        for a write to a call that has ended), is made once more within the
+        same `open_timeout`. A connection lost as the Open is sent ends a
+        call that way, and the call carried nothing but the Open. The
+        session is not ended in between, so a cancel or a close then ends
+        it with no second call.
         """
         if self._call is not None or self._ended:
             raise SessionClosedError("the session was opened before, or its client is closed")
@@ -285,17 +298,17 @@ class Session(Generic[EventT]):
                 descriptor_digest=target.descriptor_digest,
             )
         )
-        try:
-            self._call = self._connect()
-        except grpc.aio.UsageError:
-            self._shut()
-            raise SessionClosedError("the client's channel is closed") from None
-        self._reader = asyncio.create_task(self._read())
+        self._call = self._connected()
+        self._opening = True
         try:
             await self._bounded(self._begin(opening), self._open_timeout, "answer to Open")
         except BaseException:
             self._call.cancel()
             raise
+        finally:
+            self._opening = False
+            if self._lost is not None:
+                self._settle(self._lost)
 
     async def close(self, *, timeout: float | None = None) -> SessionTotals:
         """Close the sending half, let the server finish what it accepted, and return the totals.
@@ -337,6 +350,8 @@ class Session(Generic[EventT]):
         if self._call is None or self._ended:
             return
         self._cancelling = True
+        if self._lost is not None:
+            self._settle(None)
         self._events.end(discard=True)
         self._changed.notify()
         bound = self._cancel_timeout if timeout is None else timeout
@@ -409,7 +424,8 @@ class Session(Generic[EventT]):
         cancellation and for nothing else, so the caller is never told that
         it was cancelled when gRPC cancelled the call, nor the reverse. Work
         left unfinished is cancelled, unless it is writing: gRPC cancels a
-        call when a write on it is cancelled, so that write runs to its end.
+        call when a write on it is cancelled, so that write runs to its end,
+        or before Ready to the end of its call (`_write`).
         """
         task = asyncio.ensure_future(work)
         try:
@@ -439,7 +455,29 @@ class Session(Generic[EventT]):
             await self._until_ended()
             raise self._end_error() from None
 
+    def _connected(self) -> grpc.aio.StreamStreamCall:
+        """A new call for the session, with a reader started for it."""
+        try:
+            call = self._connect()
+        except grpc.aio.UsageError:
+            self._shut()
+            raise SessionClosedError("the client's channel is closed") from None
+        self._reader = asyncio.create_task(self._read())
+        return call
+
     async def _begin(self, opening: pb.Open) -> None:
+        try:
+            await self._send(pb.ClientEvent(open=opening))
+            await self._until(lambda: self._ready is not None)
+            return
+        except SpeechError:
+            if self._lost is None:
+                raise
+        # Outside the handler, so that the second call's error has no context.
+        # `_lost` is cleared once the new call exists, so a closed channel ends the session.
+        self._call = self._connected()
+        self._lost, self._reopened = None, True
+        self._write_failed, self._sent = False, 0
         await self._send(pb.ClientEvent(open=opening))
         await self._until(lambda: self._ready is not None)
 
@@ -484,18 +522,52 @@ class Session(Generic[EventT]):
             self._sending(event)
             self._writer = asyncio.current_task()
             try:
-                await self._call.write(event)
+                await self._write(event)
             except _CALL_ENDED:
                 # The reader has the reason, and is let past a full buffer to reach it. The
                 # cancel is for a call that a failed write left open, if gRPC ever does.
                 self._write_failed = True
-                self._events.unbound()
+                # Before Ready nothing is held, and an open may make a second call on this buffer.
+                if self._ready is not None:
+                    self._events.unbound()
                 self._call.cancel()
                 await self._until_ended()
                 raise self._end_error() from None
             finally:
                 self._writer = None
             return sequence
+
+    async def _write(self, event: pb.ClientEvent) -> None:
+        """Write `event`; before Ready, give the write up once the call has ended.
+
+        gRPC never ends a write on a call cancelled before its first batch
+        was sent, as an open's timeout or its caller's cancellation can do.
+        A call ended before Ready is abandoned, so the write is not needed.
+        """
+        if self._ready is not None:
+            await self._call.write(event)
+            return
+
+        async def attempt() -> None:
+            try:
+                await self._call.write(event)
+            except _CALL_ENDED:
+                # In the step gRPC fails the write in, before the reader can read that
+                # INTERNAL: `_conclude` must see the write as failed.
+                self._write_failed = True
+                raise
+
+        write = asyncio.ensure_future(attempt())
+        write.add_done_callback(_retrieve)
+        ended = asyncio.ensure_future(self._until_ended())
+        try:
+            await asyncio.wait({write, ended}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            ended.cancel()
+        if not write.done():
+            write.cancel()
+        # One given up raises CancelledError, which `_send` takes as the end of the call.
+        await write
 
     def _fits(self, size: int) -> bool:
         """Whether the credit last reported, less what was sent since, admits `size` more bytes.
@@ -526,20 +598,23 @@ class Session(Generic[EventT]):
         self._finalizing, self._answer = None, (sequence, answer)
 
     async def _until(self, done: Callable[[], bool]) -> None:
-        """Wait for `done`; a session that ends first raises its error."""
-        while not done() and not self._ended:
+        """Wait for `done`; a session that ends first, or loses its open's call, raises."""
+        while not done() and not self._ended and self._lost is None:
             await self._changed.wait()
         if not done():
             raise self._end_error()
 
     async def _until_ended(self) -> None:
-        while not self._ended:
+        """Wait for the session's end, or for its open to lose its first call."""
+        while not self._ended and self._lost is None:
             await self._changed.wait()
 
     def _abort(self, error: SpeechError) -> None:
         """End the call from this side; the session's error is `error` unless one came first."""
         if self._abort_error is None:
             self._abort_error = error
+        if self._lost is not None:
+            self._settle(None)
         self._events.end()
         self._call.cancel()
 
@@ -549,6 +624,8 @@ class Session(Generic[EventT]):
         self._events.end(discard=True)
         if self._call is None:
             self._ended = True
+        elif self._lost is not None:
+            self._settle(None)
         else:
             self._call.cancel()
         self._changed.notify()
@@ -688,16 +765,34 @@ class Session(Generic[EventT]):
         if refusal is not None:
             cause = refusal.cause
             admitted = False if refusal.admission == pb.ADMISSION_NOT_ADMITTED else None
-        if self._cancelling:
-            self._failure = None
-        elif self._abort_error is not None:
-            self._failure = self._abort_error
-        elif status is not grpc.StatusCode.OK:
-            self._failure = failure_of(status, cause, admitted, write_failed=self._write_failed)
+        failure = None
+        if status is not grpc.StatusCode.OK:
+            failure = failure_of(status, cause, admitted, write_failed=self._write_failed)
         elif closed is None:
-            self._failure = self._violation("the call ended with status OK and no SessionClosed")
+            failure = self._violation("the call ended with status OK and no SessionClosed")
         elif cause is not None:
-            self._failure = self._violation("the call ended with status OK and a cause")
+            failure = self._violation("the call ended with status OK and a cause")
+        lost = failure is not None and (
+            failure.grpc_status == "UNAVAILABLE"
+            or (failure.grpc_status == "INTERNAL" and self._write_failed)
+        )
+        # A call ended so before any server event was lost with its connection, and carried
+        # only the Open: the open makes one more call, and the session is not ended meanwhile.
+        reopen = self._opening and not self._reopened and not self._received
+        if lost and reopen and not self._cancelling and self._abort_error is None:
+            self._lost = failure
+            self._changed.notify()
+            return
+        self._settle(failure)
+
+    def _settle(self, failure: SpeechError | None) -> None:
+        """End the session with `failure`, unless it was cancelled or aborted first."""
+        self._lost = None
+        if self._cancelling:
+            failure = None
+        elif self._abort_error is not None:
+            failure = self._abort_error
+        self._failure = failure
         self._ended = True
         self._stop_ping()
         self._events.end()

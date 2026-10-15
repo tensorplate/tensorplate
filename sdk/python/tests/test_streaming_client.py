@@ -15,6 +15,7 @@ import gc
 import inspect
 import os
 import re
+import time
 import typing
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from typing import Any
@@ -40,7 +41,7 @@ except MissingDependencyError as missing:
 import grpc
 import grpc.aio
 
-from stream_server import REPOSITORY, Playback, StreamServer, frames, recorded
+from stream_server import REPOSITORY, Playback, ResettingRelay, StreamServer, frames, recorded
 from tensorplate.speech import _session, client
 from tensorplate.speech._buffer import EventBuffer
 from tensorplate.stream.v1 import session_pb2 as pb
@@ -357,7 +358,7 @@ def test_a_server_event_this_session_does_not_know_is_passed_over_and_counted(fa
         (StreamServer(max_sessions=0), {}, speech.ResourceExhaustedError, "RESOURCE_EXHAUSTED"),
     ],
 )
-def test_a_refused_open_raises_the_class_of_its_status_once_and_admission_is_unknown(
+def test_a_refused_open_raises_the_class_of_its_status_and_admission_is_unknown(
     server: StreamServer, options: dict[str, Any], error: type[speech.SpeechError], status: str
 ) -> None:
     async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
@@ -371,7 +372,8 @@ def test_a_refused_open_raises_the_class_of_its_status_once_and_admission_is_unk
         assert failure.admitted is None
         with pytest.raises(error):
             await taken(session)
-        assert fake.calls == 1
+        # An open whose call ends UNAVAILABLE before any event is sent once more, refused or not.
+        assert fake.calls == (2 if status == "UNAVAILABLE" else 1)
 
     play(scenario, server, **options)
 
@@ -640,6 +642,510 @@ def test_an_endpoint_that_cannot_be_reached_is_unavailable() -> None:
             assert caught.value.admitted is None
 
     run(main)
+
+
+RelayScenario = Callable[[StreamServer, ResettingRelay, speech.SpeechClient], Awaitable[Any]]
+
+
+def relayed(scenario: RelayScenario, server: StreamServer | None = None) -> Any:
+    """Run `scenario` with a client whose connections pass through a `ResettingRelay`."""
+    fake = server or StreamServer()
+
+    async def main() -> Any:
+        async with fake.serving() as endpoint:
+            relay = ResettingRelay(endpoint)
+            async with relay.serving() as through, speech.SpeechClient(through) as stream:
+                return await scenario(fake, relay, stream)
+
+    return run(main)
+
+
+def endings(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
+    """The status and whether a write failed, of each call that ends with an error."""
+    seen: list[tuple[str, bool]] = []
+    failure_of = _session.failure_of
+
+    def recording(status: grpc.StatusCode, *arguments: Any, **options: Any) -> Any:
+        seen.append((status.name, options.get("write_failed", False)))
+        return failure_of(status, *arguments, **options)
+
+    monkeypatch.setattr(_session, "failure_of", recording)
+    return seen
+
+
+async def warm(stream: speech.SpeechClient) -> None:
+    """Run one session, so that the client's connection is established before a test resets it."""
+    async with stream.transcribe(TARGET, language="en", input_format=PCM) as session:
+        await session.send_audio(FRAME)
+
+
+class LateWrite:
+    """A session's first call, whose first write waits for the call to end.
+
+    With `internal` the call reports what gRPC does when that write is issued
+    while gRPC reads the reset (seen against a relay, and not forced there):
+    the write fails and the status is INTERNAL. gRPC sets that status as the
+    write fails; here the reader already waits for it, so it reads it on the
+    next turn, the earliest it can.
+    """
+
+    def __init__(self, call: Any, internal: bool) -> None:
+        self._call, self._internal = call, internal
+        self._asked, self._failed = asyncio.Event(), asyncio.Event()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._call, name)
+
+    async def write(self, event: Any) -> None:
+        await self._call.code()
+        if self._internal:
+            await self._asked.wait()
+            self._failed.set()
+            raise grpc.aio.AioRpcError(
+                grpc.StatusCode.INTERNAL,
+                grpc.aio.Metadata(),
+                grpc.aio.Metadata(),
+                details="Internal error from Core",
+            )
+        await self._call.write(event)
+
+    async def code(self) -> grpc.StatusCode:
+        status = await self._call.code()
+        if not self._internal:
+            return status
+        self._asked.set()
+        await self._failed.wait()
+        return grpc.StatusCode.INTERNAL
+
+
+@pytest.mark.parametrize(
+    ("frame", "write", "ending"),
+    [
+        ("data", "", ("UNAVAILABLE", False)),
+        ("headers", "after", ("UNAVAILABLE", True)),
+        ("headers", "during", ("INTERNAL", True)),
+    ],
+)
+def test_an_open_whose_connection_is_reset_before_any_answer_is_sent_once_more(
+    frame: str, write: str, ending: tuple[str, bool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ended = endings(monkeypatch)
+
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        await warm(stream)
+        relay.arm(frame)
+        session = stream.transcribe(TARGET, language="en", input_format=PCM)
+        if write:
+            connect = session._connect
+            made: list[Any] = []
+
+            def connecting() -> Any:
+                made.append(connect())
+                return LateWrite(made[0], write == "during") if len(made) == 1 else made[-1]
+
+            monkeypatch.setattr(session, "_connect", connecting)
+        await session.open()
+        # A failed write of the first call would change how the second one's INTERNAL reads,
+        # and must not lift the bound on the events the second call holds.
+        assert not session._write_failed
+        assert session._events._capacity[False] == _session.METADATA_BUFFER_BYTES
+        await session.send_audio(FRAME)
+        totals = await session.close()
+        assert totals.input_audio_samples == len(FRAME) // 2
+        events = [type(event) for event in await taken(session)]
+        assert events == [speech.EndpointDetected, speech.FinalTranscript]
+        assert ended == [ending]
+        assert (relay.resets, relay.connections, relay.calls) == (1, 2, 3)
+
+    relayed(scenario)
+
+
+def test_a_channel_closed_before_the_second_open_ends_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        await warm(stream)
+        relay.arm("data")
+        session = stream.transcribe(TARGET, language="en", input_format=PCM)
+        connect = session._connect
+        made: list[Any] = []
+
+        def connecting() -> Any:
+            if made:
+                raise grpc.aio.UsageError("Channel is closed.")
+            made.append(connect())
+            return made[0]
+
+        monkeypatch.setattr(session, "_connect", connecting)
+        with pytest.raises(speech.SessionClosedError):
+            await session.open()
+        assert session._ended
+        assert await taken(session) == []
+
+    relayed(scenario)
+
+
+def test_an_open_is_sent_at_most_twice() -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        await warm(stream)
+        relay.arm("data", times=3)
+        session = stream.transcribe(TARGET, language="en", input_format=PCM)
+        with pytest.raises(speech.ServiceUnavailableError) as caught:
+            await session.open()
+        assert caught.value.admitted is None
+        # Not raised while the first loss was handled, which a traceback would show.
+        assert caught.value.__context__ is None
+        assert (relay.resets, relay.connections, relay.calls) == (2, 2, 3)
+
+    relayed(scenario)
+
+
+@pytest.mark.parametrize(
+    ("fault", "error"),
+    [
+        ("drop_before_ready", speech.ServiceUnavailableError),
+        ("internal", speech.ServerInternalError),
+    ],
+)
+def test_an_open_answered_before_its_loss_or_ended_internal_by_the_server_is_not_sent_again(
+    fault: str, error: type[speech.SpeechError]
+) -> None:
+    async def scenario(fake: StreamServer, session: speech.SpeechToTextSession) -> None:
+        with pytest.raises(error):
+            await session.open()
+        assert fake.calls == 1
+
+    play(scenario, StreamServer(fault=fault))
+
+
+def hold_the_loss(
+    monkeypatch: pytest.MonkeyPatch, session: speech.SpeechToTextSession
+) -> tuple[asyncio.Event, asyncio.Event]:
+    """Hold the open where its first call has been lost, before it makes the second, until
+    `release` is set."""
+    held, release = asyncio.Event(), asyncio.Event()
+    until = session._until
+
+    async def holding(done: Callable[[], bool]) -> None:
+        try:
+            await until(done)
+        except speech.SpeechError:
+            if session._lost is None or held.is_set():
+                raise
+            held.set()
+            await release.wait()
+            # The open resumes on the session's state as it is now.
+            await until(done)
+
+    monkeypatch.setattr(session, "_until", holding)
+    return held, release
+
+
+@pytest.mark.parametrize("end", ["cancel", "aclose"])
+def test_a_session_cancelled_or_closed_while_its_open_holds_a_lost_call_ends_with_no_second_open(
+    end: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        await warm(stream)
+        relay.arm("data")
+        session = stream.transcribe(TARGET, language="en", input_format=PCM)
+        held, release = hold_the_loss(monkeypatch, session)
+        opening = asyncio.create_task(session.open())
+        await held.wait()
+        assert not session._ended
+        await (session.cancel() if end == "cancel" else stream.aclose())
+        assert session._ended
+        release.set()
+        with pytest.raises(speech.SessionClosedError):
+            await opening
+        assert not session._reopened
+        assert await taken(session) == []
+        assert (relay.connections, relay.calls) == (1, 2)
+
+    relayed(scenario)
+
+
+@pytest.mark.parametrize("end", ["timeout", "caller_cancelled"])
+def test_an_open_that_ends_while_it_holds_a_lost_call_ends_the_session(
+    end: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        await warm(stream)
+        relay.arm("data")
+        session = stream.transcribe(TARGET, language="en", input_format=PCM, open_timeout=0.2)
+        held, _ = hold_the_loss(monkeypatch, session)
+        opening = asyncio.create_task(session.open())
+        if end == "timeout":
+            with pytest.raises(speech.SessionTimeoutError):
+                await opening
+        else:
+            await held.wait()
+            opening.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await opening
+            # The session ends with the lost call's failure.
+            with pytest.raises(speech.ServiceUnavailableError):
+                await taken(session)
+        assert session._ended
+        assert not session._reopened
+        assert (relay.connections, relay.calls) == (1, 2)
+
+    relayed(scenario)
+
+
+def test_an_iterator_waiting_while_the_open_holds_a_lost_call_takes_the_second_calls_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        await warm(stream)
+        relay.arm("data")
+        session = stream.transcribe(TARGET, language="en", input_format=PCM)
+        reading = asyncio.create_task(taken(session))
+        held, release = hold_the_loss(monkeypatch, session)
+        opening = asyncio.create_task(session.open())
+        await held.wait()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert not reading.done()
+        release.set()
+        await opening
+        await session.send_audio(FRAME)
+        await session.close()
+        events = [type(event) for event in await reading]
+        assert events == [speech.EndpointDetected, speech.FinalTranscript]
+
+    relayed(scenario)
+
+
+class HeldEnd:
+    """A session's call whose status is given only once `release` is set."""
+
+    def __init__(self, call: Any, asked: asyncio.Event, release: asyncio.Event) -> None:
+        self._call, self._asked, self._release = call, asked, release
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._call, name)
+
+    async def code(self) -> grpc.StatusCode:
+        self._asked.set()
+        await self._release.wait()
+        status: grpc.StatusCode = await self._call.code()
+        return status
+
+
+def test_a_first_call_lost_after_its_open_returned_ends_the_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        await warm(stream)
+        relay.arm("data")
+        session = stream.transcribe(TARGET, language="en", input_format=PCM)
+        connect = session._connect
+        asked, release = asyncio.Event(), asyncio.Event()
+        monkeypatch.setattr(session, "_connect", lambda: HeldEnd(connect(), asked, release))
+        opening = asyncio.create_task(session.open())
+        # The first call has ended; the reader waits for its status.
+        await asked.wait()
+        opening.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await opening
+        release.set()
+        assert session._reader is not None
+        await session._reader
+        assert session._ended
+        assert (relay.connections, relay.calls) == (1, 2)
+
+    relayed(scenario)
+
+
+def test_a_first_call_lost_while_the_open_times_out_raises_the_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        await warm(stream)
+        relay.arm("data")
+        session = stream.transcribe(TARGET, language="en", input_format=PCM, open_timeout=0.2)
+        connect = session._connect
+        asked, release, aborted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        monkeypatch.setattr(session, "_connect", lambda: HeldEnd(connect(), asked, release))
+        abort = session._abort
+
+        def aborting(error: speech.SpeechError) -> None:
+            aborted.set()
+            abort(error)
+
+        monkeypatch.setattr(session, "_abort", aborting)
+        opening = asyncio.create_task(session.open())
+        # The first call is lost, and the open's time runs out before its status is read.
+        await asked.wait()
+        await aborted.wait()
+        release.set()
+        with pytest.raises(speech.SessionTimeoutError):
+            await opening
+        assert session._ended
+        assert (relay.connections, relay.calls) == (1, 2)
+
+    relayed(scenario)
+
+
+def test_an_open_that_times_out_as_it_makes_its_second_call_leaves_no_write_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        await warm(stream)
+        relay.arm("data")
+        session = stream.transcribe(TARGET, language="en", input_format=PCM, open_timeout=0.2)
+        loop = asyncio.get_running_loop()
+        connect = session._connect
+        asked, release = asyncio.Event(), asyncio.Event()
+        made: list[Any] = []
+
+        def connecting() -> Any:
+            made.append(connect())
+            return HeldEnd(made[0], asked, release) if len(made) == 1 else made[-1]
+
+        monkeypatch.setattr(session, "_connect", connecting)
+        deadlines: list[float] = []
+        within = session._within
+
+        def timed(work: Any, timeout: float | None) -> Any:
+            deadlines.append(loop.time() + (timeout or 0))
+            return within(work, timeout)
+
+        monkeypatch.setattr(session, "_within", timed)
+        opening = asyncio.create_task(session.open())
+        await asked.wait()
+        early: list[bool] = []
+
+        def late() -> None:
+            # The reader concludes the loss on the next turn, and the open's timer is due on
+            # it too: the open makes its second call and times out in the turn after.
+            early.append(loop.time() < deadlines[0])
+            release.set()
+            while loop.time() < deadlines[0] + 0.003:
+                time.sleep(0.001)
+
+        loop.call_at(deadlines[0] - 0.1, late)
+        with pytest.raises(speech.SessionTimeoutError):
+            await opening
+        assert early == [True]
+        assert session._reopened
+        await turns()
+        assert session._writer is None
+        assert not session._write_lock.locked()
+        assert session._ended
+        # The second call was ended before gRPC sent it.
+        assert relay.calls == 2
+
+    relayed(scenario)
+
+
+class ParkedWrite:
+    """A call whose write calls `then` once gRPC's write waits for the call's first batch."""
+
+    def __init__(self, call: Any, then: Callable[[], Any]) -> None:
+        self._call, self._then = call, then
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._call, name)
+
+    async def write(self, event: Any) -> None:
+        written = asyncio.ensure_future(self._call.write(event))
+        await asyncio.sleep(0)
+        # grpc.aio's flag for that batch: not sent, so the write waits on it.
+        assert not written.done()
+        assert not self._call._metadata_sent.is_set()
+        self._then()
+        await written
+
+
+@pytest.mark.parametrize("when", ["connect", "write"])
+def test_an_open_cancelled_as_it_makes_its_second_call_leaves_no_write_waiting(
+    when: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        await warm(stream)
+        relay.arm("data")
+        session = stream.transcribe(TARGET, language="en", input_format=PCM)
+        connect = session._connect
+        made: list[Any] = []
+
+        def connecting() -> Any:
+            made.append(connect())
+            if len(made) == 1:
+                return made[0]
+            if when == "write":
+                return ParkedWrite(made[1], opening.cancel)
+            opening.cancel()
+            return made[1]
+
+        monkeypatch.setattr(session, "_connect", connecting)
+        opening = asyncio.create_task(session.open())
+        with pytest.raises(asyncio.CancelledError):
+            await opening
+        assert session._reopened
+        # The open does not wait for its call's end; iterating does.
+        with pytest.raises(speech.SessionCancelledError):
+            await taken(session)
+        await turns()
+        assert session._writer is None
+        assert not session._write_lock.locked()
+        assert relay.calls == 2
+
+    relayed(scenario)
+
+
+def test_a_first_call_lost_while_the_session_is_cancelled_is_not_sent_again() -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        session = stream.transcribe(TARGET, language="en", input_format=PCM)
+        opening = asyncio.create_task(session.open())
+        await fake.until(lambda: len(fake.received) == 1)
+        # The server does not answer the Cancel; the connection is lost while the cancel waits.
+        cancelling = asyncio.create_task(session.cancel(timeout=30))
+        await asyncio.sleep(0)
+        assert session._cancelling
+        relay.reset()
+        await cancelling
+        with pytest.raises(speech.SessionClosedError):
+            await opening
+        assert session._ended
+        assert (relay.connections, relay.calls) == (1, 1)
+
+    relayed(scenario, StreamServer(fault="silent"))
+
+
+def test_a_session_cancelled_during_its_first_open_sends_no_second_open() -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        session = stream.transcribe(TARGET, language="en", input_format=PCM, cancel_timeout=0.05)
+        opening = asyncio.create_task(session.open())
+        await fake.until(lambda: len(fake.received) == 1)
+        await session.cancel()
+        with pytest.raises(speech.SessionClosedError):
+            await opening
+        assert (relay.connections, relay.calls) == (1, 1)
+        assert [event.WhichOneof("body") for event in fake.received] == ["open"]
+
+    relayed(scenario, StreamServer(fault="silent"))
+
+
+def test_input_before_ready_is_not_written_so_an_open_sent_again_carried_only_the_open() -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        session = stream.transcribe(TARGET, language="en", input_format=PCM, cancel_timeout=0.05)
+        opening = asyncio.create_task(session.open())
+        await fake.until(lambda: len(fake.received) == 1)
+        for offered in (session.send_audio(FRAME), session.finalize(), session.close()):
+            with pytest.raises(speech.SessionClosedError):
+                await offered
+        assert relay.data_frames == 1
+        relay.reset()
+        await fake.until(lambda: len(fake.received) == 2)
+        assert [event.WhichOneof("body") for event in fake.received] == ["open", "open"]
+        assert relay.data_frames == 2
+        await session.cancel()
+        with pytest.raises(speech.SessionClosedError):
+            await opening
+
+    relayed(scenario, StreamServer(fault="silent"))
 
 
 def test_two_tasks_sending_at_once_keep_one_order_on_the_wire() -> None:

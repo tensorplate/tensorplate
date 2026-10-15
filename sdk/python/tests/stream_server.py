@@ -27,6 +27,11 @@ capabilities, message size and compression.
 ``Playback`` serves one call from a recording instead: the recorded server
 frames, byte for byte or with a test's `changes`, each run after the client
 frames that precede it.
+
+``ResettingRelay`` stands between a client and a server and resets the
+client's connection where a test says, as a server that closes a connection
+with bytes of the client's unread does: with an RST, which can discard a
+GOAWAY sent before it.
 """
 
 from __future__ import annotations
@@ -184,6 +189,107 @@ class Playback:
                 await context.write(reply)
 
 
+_PREFACE = len(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+_FRAME_TYPES = {"data": 0, "headers": 1}
+_Pair = tuple[asyncio.WriteTransport, asyncio.WriteTransport]
+
+
+@dataclass
+class ResettingRelay:
+    """A TCP relay to `upstream` that resets client connections where a test arms it to.
+
+    ``arm(frame, times)`` resets the connection of each of the next `times`
+    client frames of that kind ("headers" or "data") on a call's stream,
+    before that frame is relayed; ``reset()`` resets every connection now.
+    """
+
+    upstream: str
+    connections: int = 0
+    resets: int = 0
+    # Calls the client started: its HEADERS frames on a call's stream, relayed or reset at. A
+    # server may never see a call reset at its DATA frame, though it read the HEADERS.
+    calls: int = 0
+    # Client DATA frames relayed on calls' streams.
+    data_frames: int = 0
+    _armed: tuple[int, int] = (-1, 0)
+    _open: set[_Pair] = field(default_factory=set)
+    # Client connections whose upstream connection is still being opened.
+    _joining: set[asyncio.WriteTransport] = field(default_factory=set)
+
+    def arm(self, frame: str, times: int = 1) -> None:
+        self._armed = (_FRAME_TYPES[frame], times)
+
+    def reset(self) -> None:
+        for transport in list(self._joining):
+            transport.abort()
+        for pair in list(self._open):
+            self._cut(pair)
+
+    @contextlib.asynccontextmanager
+    async def serving(self) -> AsyncIterator[str]:
+        relay = await asyncio.start_server(self._relay, "127.0.0.1", 0)
+        try:
+            yield f"127.0.0.1:{relay.sockets[0].getsockname()[1]}"
+        finally:
+            relay.close()
+            self.reset()
+            await relay.wait_closed()
+
+    def _cut(self, pair: _Pair) -> None:
+        self._open.discard(pair)
+        for transport in pair:
+            transport.abort()
+
+    async def _relay(self, client: asyncio.StreamReader, back: asyncio.StreamWriter) -> None:
+        self.connections += 1
+        host, port = self.upstream.rsplit(":", 1)
+        self._joining.add(back.transport)
+        try:
+            answers, server = await asyncio.open_connection(host, int(port))
+        finally:
+            self._joining.discard(back.transport)
+        if back.transport.is_closing():
+            # Reset while it was being joined: the relay's teardown does not wait for it.
+            server.transport.abort()
+            return
+        pair = (back.transport, server.transport)
+        self._open.add(pair)
+        returning = asyncio.create_task(self._copy(answers, back))
+        pending, started = b"", False
+        try:
+            while data := await client.read(65536):
+                pending += data
+                out = b""
+                if not started:
+                    if len(pending) < _PREFACE:
+                        continue
+                    out, pending, started = pending[:_PREFACE], pending[_PREFACE:], True
+                while len(pending) >= 9 + int.from_bytes(pending[:3], "big"):
+                    size = 9 + int.from_bytes(pending[:3], "big")
+                    kind, stream = pending[3], int.from_bytes(pending[5:9], "big") & 0x7FFFFFFF
+                    self.calls += bool(stream) and kind == _FRAME_TYPES["headers"]
+                    if stream and kind == self._armed[0] and self._armed[1]:
+                        self._armed = (kind, self._armed[1] - 1)
+                        self.resets += 1
+                        return
+                    self.data_frames += bool(stream) and kind == 0
+                    out, pending = out + pending[:size], pending[size:]
+                server.write(out)
+                await server.drain()
+        except ConnectionError:
+            pass
+        finally:
+            returning.cancel()
+            self._cut(pair)
+
+    @staticmethod
+    async def _copy(source: asyncio.StreamReader, sink: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(ConnectionError):
+            while data := await source.read(65536):
+                sink.write(data)
+                await sink.drain()
+
+
 class _Ends(Exception):
     """The session ends with the reason given."""
 
@@ -335,11 +441,14 @@ class StreamServer:
             opened.HasField("input_format") or not re.fullmatch(_SHORT_TEXT % 1, opened.voice)
         ):
             raise _Ends("invalid_event")
-        served = (self.deployment_id, self.descriptor_digest)
-        if (target.deployment_id, target.descriptor_digest) != served:
+        # The deployment, then the generation, then the digest: a stale generation is
+        # reported before a digest that differs.
+        if target.deployment_id != self.deployment_id:
             raise _Ends("target_mismatch")
         if target.generation != self.generation:
             raise _Ends("stale_generation")
+        if target.descriptor_digest != self.descriptor_digest:
+            raise _Ends("target_mismatch")
         audio = opened.input_format
         declared = (audio.encoding, audio.sample_rate_hz, audio.channels) in self.formats
         if speaks:
@@ -411,6 +520,7 @@ class StreamServer:
             if first is grpc.aio.EOF:
                 return
             self.received.append(first)
+            self._notify()
             ready = self._admit(first)
         except _Ends as refusal:
             reason = str(refusal)
@@ -488,6 +598,11 @@ class _Live:
             self.ready.generation += 1
         if fault == "no_credit":
             self.ready.status.ClearField("input_credit")
+        if fault == "internal":
+            await self.context.abort(Code.INTERNAL, "synthetic internal error")
+        if fault == "drop_before_ready":
+            await self.emit()
+            await self.context.abort(Code.UNAVAILABLE, "synthetic connection loss")
         await self.emit(ready=self.ready)
         if fault == "deaf_undecodable":
             await self.hearing.wait()
