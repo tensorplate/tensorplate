@@ -350,11 +350,14 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
         return store.set_last_error(None);
     };
     let mut failure = err.to_record();
-    // A manifest rule or platform reason `to_record` set stays.
+    // A typed reason `to_record` set stays.
     failure
         .context
         .get_or_insert_with(|| RESTORE_FAILURE.to_owned());
     store.set_last_error(Some(failure.clone()))?;
+    // A candidate whose process could not be inspected is still in its slot;
+    // given up, it is handed to the restarts with the rest.
+    worker.abandon(&candidate);
     if !worker.owe_restore(&candidate, failure.clone()) {
         return Err(err);
     }

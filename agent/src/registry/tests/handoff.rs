@@ -650,9 +650,10 @@ fn started_failing(w: &Wired, fail: &str) -> Wired {
         }
     });
     let launcher = next.f.launcher.clone();
-    let exit_last = move || {
-        let last = launcher.launched.lock().unwrap().last().cloned();
-        last.unwrap().exited.store(true, Ordering::SeqCst);
+    let last = move || launcher.launched.lock().unwrap().last().cloned().unwrap();
+    let exit_last = {
+        let last = last.clone();
+        move || last().exited.store(true, Ordering::SeqCst)
     };
     let probe = next.f.probe.clone();
     match fail {
@@ -669,6 +670,19 @@ fn started_failing(w: &Wired, fail: &str) -> Wired {
         }
         // Ready, then gone before it would serve.
         "fence" => *next.worker.before_fence.lock().unwrap() = Some(Box::new(exit_last)),
+        // Its process can no longer be inspected while it loads.
+        "uninspectable" => {
+            let blind = move || {
+                last().uninspectable.store(true, Ordering::SeqCst);
+                probe.silent.store(true, Ordering::SeqCst);
+            };
+            *next.f.probe.during.lock().unwrap() = Some(Box::new(blind));
+        }
+        // Ready, then its process cannot be inspected at the fence.
+        "uninspectable at the fence" => {
+            let blind = move || last().uninspectable.store(true, Ordering::SeqCst);
+            *next.worker.before_fence.lock().unwrap() = Some(Box::new(blind));
+        }
         _ => unreachable!(),
     }
     next
@@ -688,7 +702,14 @@ fn serving(id: &str, generation: u64) -> [MemberEvent; 1] {
 
 #[test]
 fn a_start_whose_restored_worker_does_not_come_up_stays_up_and_restarts_it() {
-    for fail in ["spawn", "ready", "loading", "fence"] {
+    for fail in [
+        "spawn",
+        "ready",
+        "loading",
+        "fence",
+        "uninspectable",
+        "uninspectable at the fence",
+    ] {
         let w = wired();
         w.deploy("stt", STT).unwrap();
         let next = started_failing(&w, fail);

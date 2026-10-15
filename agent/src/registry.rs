@@ -1493,8 +1493,8 @@ impl WorkerControl for MemberRegistry {
             let _ = owe_restart(&mut members, owed, error, now);
             held
         };
-        // Held only after its warm timed out: it would not hear a request to
-        // drain.
+        // Held only after its warm timed out or its process could not be
+        // inspected: it would not hear a request to drain.
         if let Some((_, mut member)) = restored {
             member.process.kill();
             let _ = fs::remove_file(&member.config_path);
