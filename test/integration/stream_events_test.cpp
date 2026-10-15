@@ -1394,9 +1394,11 @@ class Relay {
     }
   }
 
+  /// False at the relay's end: once drop() has shut the sockets, a write fails
+  /// with EPIPE or ECONNRESET and, sent this way, raises no SIGPIPE.
   static bool write_all(int fd, const char* data, ssize_t size) {
     while (size > 0) {
-      const auto put = ::write(fd, data, static_cast<std::size_t>(size));
+      const auto put = ::send(fd, data, static_cast<std::size_t>(size), MSG_NOSIGNAL);
       if (put <= 0) {
         return false;
       }
