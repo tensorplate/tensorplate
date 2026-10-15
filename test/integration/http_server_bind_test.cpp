@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -38,6 +39,19 @@ std::string read_to_eof(int fd) {
     out.append(buf.data(), static_cast<std::size_t>(n));
   }
   return out;
+}
+
+// The errno of a bind() to 127.0.0.1:port by a socket with no options, or 0.
+int plain_bind_error(std::uint16_t port) {
+  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  const int bound = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+  const int error = bound == 0 ? 0 : errno;
+  ::close(fd);
+  return error;
 }
 
 // Connect to an IPv4 loopback listener. Returns -1 on failure.
@@ -139,6 +153,89 @@ TEST(HttpServerBind, IPv4LoopbackStillBindsAndServes) {
   EXPECT_NE(resp.find("pong"), std::string::npos) << resp;
 
   server.stop();
+}
+
+// A port another server listens on is not shared, and the error says which
+// address was taken: whoever holds it may give it back.
+TEST(HttpServerBind, APortAnotherServerListensOnIsUnavailable) {
+  http::HttpServerConfig cfg;
+  cfg.bind_host = "127.0.0.1";
+  cfg.bind_port = 0;
+  http::HttpServer holder;
+  ASSERT_TRUE(holder.start(cfg).has_value());
+  cfg.bind_port = holder.bound_port();
+
+  http::HttpServer second;
+  auto started = second.start(cfg);
+  ASSERT_FALSE(started.has_value()) << "two servers listen on port " << cfg.bind_port;
+  EXPECT_EQ(started.error().code, Error::Code::Unavailable);
+  EXPECT_EQ(started.error().message,
+            "http server: could not bind 127.0.0.1:" + std::to_string(cfg.bind_port) + ": " +
+                std::strerror(EADDRINUSE));
+  holder.stop();
+}
+
+TEST(HttpServerBind, ATakenIPv6PortIsNamedInBrackets) {
+  http::HttpServerConfig cfg;
+  cfg.bind_host = "::1";
+  cfg.bind_port = 0;
+  http::HttpServer holder;
+  if (auto held = holder.start(cfg); !held) {
+    GTEST_SKIP() << "IPv6 loopback unavailable on this host: " << held.error().message;
+  }
+  cfg.bind_port = holder.bound_port();
+
+  http::HttpServer second;
+  auto started = second.start(cfg);
+  ASSERT_FALSE(started.has_value());
+  EXPECT_EQ(started.error().code, Error::Code::Unavailable);
+  EXPECT_EQ(started.error().message,
+            "http server: could not bind [::1]:" + std::to_string(cfg.bind_port) + ": " +
+                std::strerror(EADDRINUSE));
+  holder.stop();
+}
+
+// A server started again on its port binds it while a connection the first
+// one closed is still open at the client's end, as SO_REUSEADDR allows.
+TEST(HttpServerBind, AServerStartedAgainBindsItsPortBesideAClosedConnection) {
+  http::HttpServer first;
+  first.add_route("GET", "/ping",
+                  [](const http::Request&) { return http::Response::plain(200, "pong"); });
+  http::HttpServerConfig cfg;
+  cfg.bind_host = "127.0.0.1";
+  cfg.bind_port = 0;
+  ASSERT_TRUE(first.start(cfg).has_value());
+  cfg.bind_port = first.bound_port();
+  const int fd = connect_v4(cfg.bind_port);
+  ASSERT_GE(fd, 0) << std::strerror(errno);
+  // Read to the server's close; the client's end stays open.
+  EXPECT_NE(get(fd, "/ping", "127.0.0.1").find("pong"), std::string::npos);
+  first.stop();
+  ASSERT_EQ(plain_bind_error(cfg.bind_port), EADDRINUSE)
+      << "the closed connection no longer holds the port";
+
+  http::HttpServer again;
+  auto started = again.start(cfg);
+  ::close(fd);
+  ASSERT_TRUE(started.has_value()) << started.error().message;
+  again.stop();
+}
+
+// An address this host does not have is not a port someone holds.
+TEST(HttpServerBind, AnAddressThisHostLacksFailsTheLoad) {
+  http::HttpServer server;
+  http::HttpServerConfig cfg;
+  cfg.bind_host = "192.0.2.1";
+  cfg.bind_port = 0;
+  cfg.allow_non_loopback = true;
+
+  auto started = server.start(cfg);
+  if (started) {
+    GTEST_SKIP() << "this host has the documentation address 192.0.2.1";
+  }
+  EXPECT_EQ(started.error().code, Error::Code::LoadFailed);
+  EXPECT_EQ(started.error().message, std::string{"http server: could not bind 192.0.2.1:0: "} +
+                                         std::strerror(EADDRNOTAVAIL));
 }
 
 // A host string that is neither an IPv4 nor an IPv6 literal must surface

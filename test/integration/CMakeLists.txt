@@ -21,7 +21,8 @@ add_executable(tp_test_integration
   socket_sigpipe_test.cpp
   # Route dispatch releases routes_mutex before invoking handlers.
   http_route_concurrency_test.cpp
-  # HTTP server binds the loopback family the host literal names.
+  # HTTP server binds the loopback family the host literal names, and no
+  # port another listener holds.
   http_server_bind_test.cpp
   # Header-size limit is enforced before a completed header block is
   # accepted, including the read chunk that carries the terminator.
