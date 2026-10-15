@@ -519,9 +519,10 @@ resolves, so a `staging_dir` spelled another way than the records spell it
 (through a link, or with `..`) removes nothing a record names; a record
 whose path does not resolve, other than because nothing is there, stops the
 removal before anything goes. An entry that cannot be read or removed is
-left and printed, and the removal goes on to the others. So the tree of a
-record a commit dropped from `previous_active`, and the tree of a deploy
-that failed, stay until the next deploy begins or the agent starts again. A deploy that failed after
+left, the removal goes on to the others in name order, and the first such
+failure is printed. So the tree of a record a commit dropped from
+`previous_active`, and the tree of a deploy that failed, stay until the
+next deploy begins or the agent starts again. A deploy that failed after
 its candidate was prepared leaves that candidate's process running until
 the next deploy or rollback prepares a candidate, or the agent stops; the
 abandoned candidate's tree can be removed before then, and nothing reads it
@@ -545,7 +546,9 @@ goes. When the file system holding `staging_dir` is full, the copy fails:
 the deploy fails before `staged` with an `internal` error that names the
 tree and the system's reason, the partial tree is removed, and the active
 deployment keeps serving; the quarantine entry and `last_error` carry the
-error.
+error while the state directory has room to record it. When that write
+fails too, the deploy returns the write's error instead, as any failed
+deploy whose quarantine record cannot be written does.
 
 Agents before this one staged every deploy of an id into
 `<staging_dir>/<deployment_id>/` itself, overwriting in place. A record such
