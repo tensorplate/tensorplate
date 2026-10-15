@@ -590,3 +590,29 @@ fn an_id_directory_whose_manifest_cannot_be_looked_for_is_named_and_left() {
     assert!(unnamed.is_dir());
     assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
 }
+
+#[test]
+fn nothing_is_removed_while_either_state_file_is_damaged() {
+    let d = dirs();
+    let [named, unnamed] = ["stt", "stt"].map(|id| tree(&d.staging, id));
+    let name = |state: &mut AgentState| {
+        state.active = Some(record("stt", &named));
+        Ok(())
+    };
+    d.store.update(name).unwrap();
+    for damaged in ["state.json", "state.json.bak"] {
+        let path = d.store.state_dir().join(damaged);
+        let whole = fs::read(&path).unwrap();
+        fs::write(&path, "{").unwrap();
+
+        let error = prune(&d.staging, &d.store).unwrap_err();
+
+        fs::write(&path, whole).unwrap();
+        assert!(
+            matches!(error, AgentError::CorruptState(_)),
+            "{damaged}: {error}"
+        );
+        assert!(named.is_dir() && unnamed.is_dir(), "{damaged}");
+    }
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
+}

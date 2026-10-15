@@ -129,8 +129,8 @@ fn named_by(state: &AgentState) -> impl Iterator<Item = PathBuf> + '_ {
 ///
 /// # Errors
 ///
-/// As [`StateStore::files`], when what a state file holds cannot be told,
-/// and [`AgentError::Io`] when a path they name cannot be resolved or
+/// As [`StateStore::every_file`], when a state file cannot be read, and
+/// [`AgentError::Io`] when a path they name cannot be resolved or
 /// `staging_dir` cannot be read: then nothing is removed. Otherwise the
 /// first [`AgentError::Io`] of an entry that could not be read or removed,
 /// once every other entry has been seen to.
@@ -140,7 +140,7 @@ pub fn prune(staging_dir: &Path, store: &StateStore) -> AgentResult<usize> {
         return Err(io::Error::new(ErrorKind::Other, "prune stopped").into());
     }
     let mut named = BTreeSet::new();
-    for state in store.files()? {
+    for state in store.every_file()? {
         for path in named_by(&state) {
             named.extend(resolved(&path)?);
         }

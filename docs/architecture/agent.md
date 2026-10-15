@@ -514,9 +514,9 @@ a deploy begins, before it copies its bundle (no other deploy stages while
 its transaction is in flight). A removal that fails is printed on the
 agent's standard error and neither stops the start nor fails the deploy.
 Nothing is removed while what a state file holds cannot be told (it cannot
-be read, or is at a state version this agent does not read), and only a
-directory named as a transaction id, under a directory named as a
-deployment id, is ever removed. A tree is matched by where its path
+be read, is damaged, or is at a state version this agent does not read),
+and only a directory named as a transaction id, under a directory named
+as a deployment id, is ever removed. A tree is matched by where its path
 resolves, and is kept when a path named there resolves to it or into it,
 so a `staging_dir` spelled another way than the records spell it (through
 a link, or with `..`) removes nothing a record names; a named path that
