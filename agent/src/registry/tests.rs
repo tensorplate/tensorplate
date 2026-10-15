@@ -826,7 +826,7 @@ fn an_exit_during_the_last_probe_outranks_the_warm_deadline() {
     let budget = Duration::from_secs(1);
     *f.probe.during.lock().unwrap() = Some(Box::new(move || {
         handle.exited.store(true, Ordering::SeqCst);
-        std::thread::sleep(budget * 2);
+        std::thread::sleep(budget);
     }));
 
     let err = f
