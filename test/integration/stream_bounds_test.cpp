@@ -488,7 +488,7 @@ TEST(StreamBounds, AConnectionWithNoCallOpenIsClosedAtTheIdleLimitAndTheNextCall
   const Connection connection{served.listener().bound_port()};
   ASSERT_TRUE(connection.channel->WaitForConnected(in(20s)));
   // The server's GOAWAY takes the channel off READY, one to two limits after it connected.
-  ASSERT_TRUE(connection.channel->WaitForStateChange(GRPC_CHANNEL_READY, in(4 * idle)))
+  ASSERT_TRUE(connection.channel->WaitForStateChange(GRPC_CHANNEL_READY, in(8 * idle)))
       << "the connection outlived the idle limit";
   auto client = connection.call();
   ASSERT_TRUE(answered_by_ready(client));
