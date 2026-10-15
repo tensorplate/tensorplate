@@ -767,8 +767,9 @@ fn the_loop_keeps_an_error_written_after_it_read_the_restores() {
 
 #[test]
 fn a_restores_error_is_kept_while_the_member_serving_is_not_the_active_records() {
-    // An update of the id, and another id with the same bundle.
-    for (id, bundle) in [("stt", TTS), ("tts", STT)] {
+    // An update of the id, another id with the same bundle, and a redeploy
+    // of both.
+    for (id, bundle) in [("stt", TTS), ("tts", STT), ("stt", STT)] {
         let w = wired();
         w.deploy("stt", STT).unwrap();
         let next = restarting_after_a_failed_restore(&w);
