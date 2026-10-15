@@ -177,13 +177,22 @@ line says `serves_sessions: false`.
   them together); a refused call has no time limit, so a peer that does
   not read keeps the places it took for as long as its connection lasts;
   and what gRPC itself keeps for a call that was cancelled, or for a
-  stream it refused, is gRPC's to bound. What ends such a connection is
-  not the listener's: gRPC sets the TCP user timeout on a server's
-  listening socket, 20 s unless `grpc.keepalive_timeout_ms` says
+  stream it refused, is gRPC's to bound. A time limit of the listener's
+  would not end such a call sooner. A refused call sends only its status,
+  which HTTP/2 flow control does not hold, so what holds it is a write in
+  progress on its connection that the peer does not take; and in gRPC
+  1.81.1 the sends of a cancelled call complete only after the write in
+  progress on its connection (`grpc_chttp2_complete_closure_step` defers
+  them; the experiment `schedule_cancellation_over_write`, which changes
+  that, is off by default). The bound on a refused call is therefore
+  gRPC's: that write completes, or the connection closes. What ends such a
+  connection is not the listener's: gRPC sets the TCP user timeout on a
+  server's listening socket, 20 s unless `grpc.keepalive_timeout_ms` says
   otherwise, and the listener sets neither; by that option's description
   the kernel ends a connection whose peer has acknowledged or taken no
-  bytes for that long. That is read from the source of the gRPC this tree
-  builds (1.81.1), not shown by a run here. The tests: against a writer
+  bytes for that long. The 4,096 places stay a bound on memory. All of
+  this is read from the source of the gRPC this tree builds (1.81.1), not
+  shown by a run here. The tests: against a writer
   whose calls end when the test says so, the 4,096th refused call keeps
   its status, the next is cancelled, and the place of a call that ended is
   used again; one thread ends a refused call while another refuses one,
@@ -399,12 +408,14 @@ line says `serves_sessions: false`.
   cancel path (a client `Cancel`, a timeout, a slow consumer) is also
   `SESSION_STATE_CLOSED`.
 - **Not enforced yet.** A refused call is counted (see "Refused calls and
-  the calls of a connection") but not timed: it keeps its place until
-  gRPC reports it done or its connection ends, and at shutdown
+  the calls of a connection") but not timed by the listener: it keeps its
+  place until gRPC reports it done or its connection ends, and at shutdown
   such a call still holds the gRPC server until the drain window ends. A
   connection that opens no call
   is neither counted nor expired, and the number of connections is not
-  limited: nothing here bounds transport state that has no call yet. A
+  limited: nothing here bounds transport state that has no call yet.
+  gRPC has a limit of its own for a connection with no call open
+  (`grpc.max_connection_idle_ms`), which the listener does not set yet. A
   client event larger than the 64 KiB the listener
   receives is rejected by the transport's own limit, below the listener's
   parse: the call ends with a transport status and no `SessionClosed`, and

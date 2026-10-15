@@ -39,7 +39,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   client that reads gets the event and status `UNAVAILABLE`; a client that
   does not read is cancelled at the window's end as before, which still
   bounds the stop. With a window of 250 ms or less the sessions are failed
-  at once. (V030-E04-F02-T02)
+  at once. The page states why the listener puts no time limit on a refused
+  call: with the gRPC this tree builds, cancelling it would not end it
+  sooner. (V030-E04-F02-T02)
 - The hosted jobs that install the pinned Rust toolchain now remove a
   half-installed copy and retry, up to three attempts, instead of failing on
   a file conflict that every repeat of the same command met again; the
