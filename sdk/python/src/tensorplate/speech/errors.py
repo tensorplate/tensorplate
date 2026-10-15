@@ -33,7 +33,9 @@ class SpeechError(TensorPlateError):
     transport or the server ended it. None carries a retryable flag: the
     schema says only that an open that was not admitted may be sent to
     another server, and a call that was admitted, or may have been, must
-    not be sent again as if it had not run.
+    not be sent again as if it had not run. The one more Open of
+    ``Session.open`` is not such a resend: the call it replaces carried
+    only the Open, and had ended.
     """
 
     def __init__(
