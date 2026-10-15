@@ -17,9 +17,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   records `startup_restore` only when it carries none. The agent clears
   that error once a restart serves the record, unless a deploy or rollback
   has begun since, so a transaction's failure equal to the restore's is no
-  longer cleared with it. A restored worker whose process cannot be
-  inspected while it loads is handed to the restarts like any restore that
-  does not come up; before, the start ended with exit code 5.
+  longer cleared with it, and a later error equal to it is not cleared
+  either. A restored worker whose process cannot be inspected while it
+  loads or at the check before the commit is handed to the restarts like
+  any restore that does not come up; before, the start ended with exit
+  code 5. A deploy's or rollback's candidate whose process cannot be
+  inspected while it loads is now killed and refused, as it is at the
+  check before the commit; before, it was left running until the next
+  deploy.
   (V030-E03-F01-T04)
 
 - The agent's member registry tests no longer fail now and then on a loaded
