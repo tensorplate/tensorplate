@@ -576,6 +576,15 @@ fn unloading_another_deployment_leaves_the_restart_owed() {
     );
 }
 
+/// Returns once another thread's shutdown of `f`'s registry has begun.
+fn shutdown_begun(f: &Fixture) {
+    let deadline = Instant::now() + HELD_LAUNCH;
+    while !f.registry.stopping() {
+        assert!(Instant::now() < deadline, "shutdown never began");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn shutdown_waits_for_a_successor_that_was_starting_and_stops_it() {
     let f = fixture();
@@ -598,6 +607,7 @@ fn shutdown_waits_for_a_successor_that_was_starting_and_stops_it() {
             assert_eq!(stopping.launcher.handle(2).calls(), ["terminate", "kill"]);
             done.send(()).unwrap();
         });
+        shutdown_begun(&f);
         assert!(
             is_done.recv_timeout(DRAIN).is_err(),
             "shutdown returned while a worker was starting"
@@ -736,6 +746,7 @@ fn shutdown_waits_for_a_launch_that_had_begun_and_stops_it() {
             assert_eq!(stopping.launcher.handle(1).calls(), ["terminate", "kill"]);
             done.send(()).unwrap();
         });
+        shutdown_begun(&f);
         assert!(
             is_done.recv_timeout(DRAIN).is_err(),
             "shutdown returned while a worker was starting"
@@ -765,11 +776,7 @@ fn no_launch_begins_once_shutdown_has_begun() {
             .recv_timeout(HELD_LAUNCH)
             .expect("the displaced candidate is stopped");
         let stopping = scope.spawn(|| f.registry.shutdown());
-        let deadline = Instant::now() + HELD_LAUNCH;
-        while !f.registry.stopping() {
-            assert!(Instant::now() < deadline, "shutdown never began");
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        shutdown_begun(&f);
         release.send(()).unwrap();
         assert!(matches!(held.join().unwrap(), Err(AgentError::Stopping)));
         stopping.join().unwrap();
