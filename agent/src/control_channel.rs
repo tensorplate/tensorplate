@@ -157,7 +157,9 @@ struct Queued {
 /// A runtime operation sent to one member, answered or not within a budget.
 pub trait RuntimeCall: Send {
     /// Send `command` until a response pairs with it, the channel fails or
-    /// `budget` passes, and return that response whatever its status.
+    /// `budget` passes, and return that response whatever its status. Each
+    /// attempt is bounded by one poll gap, at most a second, and attempts
+    /// repeat within `budget`.
     ///
     /// # Errors
     ///
@@ -201,11 +203,11 @@ impl ControlCaller {
 }
 
 impl RuntimeCall for ControlCaller {
-    /// An attempt that is not answered before its gap ends is sent again
-    /// after the poll that ended it, so as a new request with a new
-    /// correlation id: the schema lets a repeat keep its id only while no
-    /// other request was sent since. A queued attempt is never sent once
-    /// `budget` has passed.
+    /// An attempt waits no longer than the gap before the channel's next
+    /// ledger poll. One not answered within it is sent again after the poll
+    /// that ended it, so as a new request with a new correlation id: the
+    /// schema lets a repeat keep its id only while no other request was sent
+    /// since. A queued attempt is never sent once `budget` has passed.
     fn call(&self, command: RuntimeCommand, budget: Duration) -> Result<WorkerControlResponse> {
         let start = Instant::now();
         let end = start.checked_add(budget).unwrap_or(start);
@@ -448,6 +450,8 @@ fn pause(deadline: Instant) {
     thread::sleep(IO_QUANTUM.min(deadline.saturating_duration_since(Instant::now())));
 }
 
+/// Polls the member once a [`POLL_PERIOD`] and exchanges each queued runtime
+/// operation in the gap before the next poll, bounded by that poll.
 fn run(
     stream: UnixStream,
     member: &MemberRef,
