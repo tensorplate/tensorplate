@@ -585,6 +585,41 @@ fn a_deploy_whose_candidate_lost_its_control_channel_after_its_warm_fails_before
 }
 
 #[test]
+fn a_deploy_whose_candidate_cannot_be_inspected_kills_it_and_the_serving_member_stays() {
+    for at_the_fence in [false, true] {
+        let w = wired();
+        w.deploy("stt", STT).unwrap();
+        let before = w.store.snapshot().unwrap();
+        let launcher = w.f.launcher.clone();
+        let probe = w.f.probe.clone();
+        let blind = move || {
+            launcher
+                .handle(2)
+                .uninspectable
+                .store(true, Ordering::SeqCst);
+            probe.silent.store(!at_the_fence, Ordering::SeqCst);
+        };
+        if at_the_fence {
+            *w.worker.before_fence.lock().unwrap() = Some(Box::new(blind));
+        } else {
+            *w.f.probe.during.lock().unwrap() = Some(Box::new(blind));
+        }
+
+        let refused = w.deploy("tts", TTS).unwrap_err();
+
+        let says = matches!(&refused, AgentError::WorkerControl(s) if s == "wait failed");
+        assert!(says, "{at_the_fence}: {refused:?}");
+        let serving = (MemberRef::new("stt", 1), MemberRole::Serving);
+        assert_eq!(roles(&w.f), [serving], "{at_the_fence}");
+        assert!(w.f.launcher.handle(1).calls().is_empty(), "{at_the_fence}");
+        assert_eq!(w.f.launcher.handle(2).calls(), ["kill"], "{at_the_fence}");
+        let found = w.store.snapshot().unwrap();
+        assert_eq!(found.active, before.active, "{at_the_fence}");
+        assert!(found.in_flight_transaction.is_none(), "{at_the_fence}");
+    }
+}
+
+#[test]
 fn a_rollback_whose_commit_write_is_refused_fails_and_the_serving_member_stays() {
     let w = wired();
     w.deploy("stt", STT).unwrap();

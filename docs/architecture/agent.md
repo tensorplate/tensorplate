@@ -444,8 +444,9 @@ pub trait WorkerControl: Send + Sync {
 
 `fence` and `activate` are a promotion's two halves, on either side of the
 transaction's commit write. `fence` refuses what a warm refuses before each
-probe, a candidate that exited or whose control channel failed, as well as
-one that was given up, and moves nothing; a refused fence fails the
+probe, a candidate that exited, whose control channel failed or whose
+process cannot be inspected, as well as one that was given up, and moves
+nothing; a refused fence fails the
 transaction before its commit, and the serving worker keeps serving. The
 serving worker is not told to stop admitting work, since no worker
 implements that operation yet. `activate`, once the commit is durable,
@@ -954,7 +955,8 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   deployment and its control channel has delivered a ledger. A candidate
   that exits while loading answers with its startup failure record; one
   that answers no ledger poll for 10 seconds has a failed control channel
-  and is killed and refused, whatever the warm timeout.
+  and is killed and refused, whatever the warm timeout, and so is one whose
+  process can no longer be inspected (its wait fails).
 - **Stop.** A member being replaced, displaced or unloaded is sent SIGTERM
   and is killed if it has not exited 10 seconds later; members stopped
   together share that deadline. Its serving config tells it to drain its
@@ -969,7 +971,8 @@ for framing, deadlines, ownership and loss-of-contact behavior.
 - **Promotion.** A candidate that exited after it was warmed is refused
   by the fence, before the commit write: the deploy fails with the
   worker's failure and the serving member stays. One whose control
-  channel failed since its warm is killed and refused the same way. Once
+  channel failed since its warm, or whose process can no longer be
+  inspected, is killed and refused the same way. Once
   the commit is written the candidate takes the serving slot even if it
   exited since, and the supervision step restarts it; the member it
   replaces is sent its stop only after the commit.

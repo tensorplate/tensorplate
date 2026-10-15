@@ -896,8 +896,8 @@ impl MemberRegistry {
     }
 
     /// The prepared candidate's port and control contact. A candidate that
-    /// exited or lost its control channel is removed and answered as the
-    /// failure it is.
+    /// exited, lost its control channel or cannot be inspected is removed
+    /// and answered as the failure it is.
     fn candidate_progress(
         &self,
         candidate: &CandidateRef,
@@ -919,9 +919,9 @@ impl MemberRegistry {
                     member.deployment_id, candidate.deployment_id
                 )));
             }
-            let exited = member.process.exited()?;
+            let exited = member.process.exited();
             let contact = member.process.control();
-            if !exited && contact != ControlContact::Failed {
+            if matches!(exited, Ok(false)) && contact != ControlContact::Failed {
                 return Ok((member.generation, member.ports.ports.http, contact));
             }
             let Some((generation, member)) = members.take_candidate() else {
@@ -930,8 +930,14 @@ impl MemberRegistry {
             (generation, member, exited)
         };
         let _ = fs::remove_file(&member.config_path);
-        if exited {
-            return Err(member.process.startup_failure());
+        match exited {
+            Ok(true) => return Err(member.process.startup_failure()),
+            // Not left running where nothing would look at it again.
+            Err(err) => {
+                member.process.kill();
+                return Err(err);
+            }
+            Ok(false) => {}
         }
         // A worker that stopped answering its control channel is wedged; a
         // request to drain would not reach it either.
