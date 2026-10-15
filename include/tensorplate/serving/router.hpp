@@ -91,12 +91,18 @@ class RequestRouter {
   void set_stopping(bool stopping) noexcept;
   [[nodiscard]] bool is_stopping() const noexcept;
 
+  /// Refuses /infer and /policy/infer with 503 `not_ready`, context `admission_closed`,
+  /// and a message naming `cause`, a string literal, until called with nullptr.
+  void set_admission_closed(const char* cause) noexcept;
+
   /// Endpoint label echoed back to clients.
   [[nodiscard]] std::string_view endpoint() const noexcept;
 
  private:
   RequestRouterDeps deps_;
   std::atomic<bool> stopping_{false};
+  /// Why admission is closed; null while it is open.
+  std::atomic<const char*> admission_closed_{nullptr};
 
   [[nodiscard]] http::Response make_error_response(
       int http_status, std::string_view request_id, std::string_view correlation_id,

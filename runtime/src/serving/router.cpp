@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -64,6 +65,21 @@ bool has_binary_content_type(const http::Request& req) {
   return lower == binary_type || lower.starts_with(binary_type + ";");
 }
 
+/// Why a new request is refused before it is read: the worker stops, or its
+/// admission is closed for `closed_cause`. None while requests are admitted.
+std::optional<Error> admission_refusal(bool stopping, const char* closed_cause,
+                                       std::string_view stopping_message) {
+  if (stopping) {
+    return Error::make(Error::Code::NotReady, std::string{stopping_message});
+  }
+  if (closed_cause != nullptr) {
+    return Error::make(Error::Code::NotReady,
+                       std::string{"serving worker admission closed: "} + closed_cause,
+                       "admission_closed");
+  }
+  return std::nullopt;
+}
+
 }  // namespace
 
 int http_status_for_error(Error::Code code) noexcept {
@@ -102,6 +118,9 @@ void RequestRouter::set_stopping(bool stopping) noexcept {
 bool RequestRouter::is_stopping() const noexcept {
   return stopping_.load();
 }
+void RequestRouter::set_admission_closed(const char* cause) noexcept {
+  admission_closed_.store(cause);
+}
 std::string_view RequestRouter::endpoint() const noexcept {
   return deps_.endpoint;
 }
@@ -134,9 +153,11 @@ http::Response RequestRouter::handle_infer(const http::Request& req) {
   }
   std::string correlation_id =
       req.correlation_id.empty() ? generate_correlation_id() : req.correlation_id;
-  if (stopping_.load()) {
-    return make_error_response(503, "", correlation_id, Error::Code::NotReady,
-                               "serving worker stopping; not accepting new requests");
+  if (const auto refused =
+          admission_refusal(stopping_.load(), admission_closed_.load(),
+                            "serving worker stopping; not accepting new requests")) {
+    return make_error_response(503, "", correlation_id, refused->code, refused->message,
+                               refused->context);
   }
   const bool binary_request = has_binary_content_type(req);
   if (!binary_request && !has_json_content_type(req)) {
@@ -233,9 +254,11 @@ http::Response RequestRouter::handle_policy_infer(const http::Request& req) {
   }
   std::string correlation_id =
       req.correlation_id.empty() ? generate_correlation_id() : req.correlation_id;
-  if (stopping_.load()) {
-    return make_error_response(503, "", correlation_id, Error::Code::NotReady,
-                               "serving worker stopping; not accepting new async requests");
+  if (const auto refused =
+          admission_refusal(stopping_.load(), admission_closed_.load(),
+                            "serving worker stopping; not accepting new async requests")) {
+    return make_error_response(503, "", correlation_id, refused->code, refused->message,
+                               refused->context);
   }
   if (!deps_.async_policy_supported) {
     return make_error_response(

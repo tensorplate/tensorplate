@@ -52,6 +52,7 @@ add_executable(tp_test_unit
   serving_health_metrics_test.cpp
   serving_async_store_test.cpp
   serving_error_status_test.cpp
+  serving_router_test.cpp
   session_state_machine_test.cpp
   session_limits_test.cpp
   session_timers_test.cpp
