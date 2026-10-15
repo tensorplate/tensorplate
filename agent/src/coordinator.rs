@@ -496,8 +496,8 @@ impl Coordinator {
             return self.fail(&transaction_id, deployment_id, err);
         }
         prepared.promoted = true;
-        // Refused only once the agent stops: the next start settles the
-        // committed transaction forward.
+        // Refused once the agent stops or the candidate is no longer held:
+        // the next start settles the committed transaction forward.
         self.worker.activate(&transaction_id, &candidate_ref)?;
         self.emit(&WorkerEvent::Promote {
             transaction_id: transaction_id.clone(),

@@ -543,6 +543,32 @@ fn a_deploy_whose_commit_write_is_refused_fails_and_the_serving_member_stays() {
 }
 
 #[test]
+fn a_deploy_whose_candidate_lost_its_control_channel_after_its_warm_fails_before_the_commit() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let before = w.store.snapshot().unwrap();
+    let launcher = w.f.launcher.clone();
+    let lose = move || launcher.handle(2).set_contact(ControlContact::Failed);
+    *w.worker.before_fence.lock().unwrap() = Some(Box::new(lose));
+
+    let refused = w.deploy("tts", TTS).unwrap_err();
+
+    assert!(
+        matches!(refused, AgentError::WorkerControl(_)),
+        "{refused:?}"
+    );
+    let serving = (MemberRef::new("stt", 1), MemberRole::Serving);
+    assert_eq!(roles(&w.f), [serving]);
+    assert!(w.f.launcher.handle(1).calls().is_empty());
+    assert_eq!(w.f.launcher.handle(2).calls(), ["kill"]);
+    let found = w.store.snapshot().unwrap();
+    assert_eq!(found.active, before.active);
+    assert!(found.in_flight_transaction.is_none());
+    let entry = found.quarantined.last().expect("a quarantine entry");
+    assert_eq!(entry.phase, DeployState::Warmed);
+}
+
+#[test]
 fn a_rollback_whose_commit_write_is_refused_fails_and_the_serving_member_stays() {
     let w = wired();
     w.deploy("stt", STT).unwrap();

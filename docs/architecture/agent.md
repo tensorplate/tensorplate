@@ -443,19 +443,24 @@ pub trait WorkerControl: Send + Sync {
 ```
 
 `fence` and `activate` are a promotion's two halves, on either side of the
-transaction's commit write. `fence` checks that the prepared candidate
-still runs and was not given up, and moves nothing; the serving worker is
-not told to stop admitting work, since no worker implements that operation
-yet. `activate`, once the commit is durable, gives the candidate the
-serving slot and then asks the member it replaces to stop; it is the only
-call that mutates the worker's active deployment, and is refused only once
-the agent is stopping. A candidate that exited between the two takes the
-slot all the same, and the next supervision step restarts it: after the
-commit the transaction does not fail. `promote`, fence then activate, is
-for the start's restore, which has no commit to write. `owe_restore` hands
-a restore whose worker did not come up to the worker control's restarts
-(see [Restart recovery](#restart-recovery-v01-e08-f07)); it is false by
-default, so a worker control that restarts nothing ends the start.
+transaction's commit write. `fence` refuses what a warm refuses before each
+probe, a candidate that exited or whose control channel failed, as well as
+one that was given up, and moves nothing; a refused fence fails the
+transaction before its commit, and the serving worker keeps serving. The
+serving worker is not told to stop admitting work, since no worker
+implements that operation yet. `activate`, once the commit is durable,
+gives the candidate the serving slot and then asks the member it replaces
+to stop; it is the only call that mutates the worker's active deployment.
+It is refused once the agent is stopping, or when the worker control no
+longer holds the candidate; either refusal leaves the committed
+transaction for the next start to settle forward. A candidate that exited
+between the two takes the slot all the same, and the next supervision step
+restarts it: after the commit the transaction does not fail. `promote`,
+fence then activate, is for the start's restore, which has no commit to
+write. `owe_restore` hands a restore whose worker did not come up to the
+worker control's restarts (see
+[Restart recovery](#restart-recovery-v01-e08-f07)); it is false by default,
+so a worker control that restarts nothing ends the start.
 `unload` is best-effort (failure is logged but never undoes a successful
 promotion). `abandon` tells the worker control that the transaction
 which prepared a candidate returned without promoting it; the coordinator
@@ -963,10 +968,11 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   Every member is stopped this way when the agent itself is told to stop.
 - **Promotion.** A candidate that exited after it was warmed is refused
   by the fence, before the commit write: the deploy fails with the
-  worker's failure and the serving member stays. Once the commit is
-  written the candidate takes the serving slot even if it exited since,
-  and the supervision step restarts it; the member it replaces is sent
-  its stop only after the commit.
+  worker's failure and the serving member stays. One whose control
+  channel failed since its warm is killed and refused the same way. Once
+  the commit is written the candidate takes the serving slot even if it
+  exited since, and the supervision step restarts it; the member it
+  replaces is sent its stop only after the commit.
 - **Supervision.** The agent's loop runs the coordinator's turn
   (`Coordinator::supervise`) every 100 ms and logs what it did: the
   registry's supervision step (`WorkerControl::supervise`), then, once a
