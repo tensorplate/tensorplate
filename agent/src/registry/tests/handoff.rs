@@ -564,6 +564,8 @@ fn the_serving_member_is_asked_to_stop_only_once_the_commit_is_durable() {
         let (asked, release) = hold_stop(&outgoing);
 
         let committed = std::thread::scope(|scope| {
+            // Dropped if this closure panics, which lets the stop end.
+            let release = release;
             let transaction = scope.spawn(|| {
                 if rollback {
                     w.coordinator.rollback(None).map(|_| ())
@@ -571,7 +573,7 @@ fn the_serving_member_is_asked_to_stop_only_once_the_commit_is_durable() {
                     w.deploy("tts", TTS)
                 }
             });
-            asked.recv().unwrap();
+            asked.recv_timeout(GRACE).unwrap();
             let active = w.store.snapshot().unwrap().active.unwrap();
             release.send(()).unwrap();
             transaction.join().unwrap().unwrap();
@@ -855,7 +857,7 @@ fn status_withholds_the_generation_between_the_commit_and_the_activation() {
             // Dropped if this closure panics, which lets the deploy end.
             let go = go;
             let deploying = scope.spawn(|| w.deploy(id, bundle));
-            is_at.recv().unwrap();
+            is_at.recv_timeout(GRACE).unwrap();
             let during = w.coordinator.status().unwrap().active.unwrap();
             go.send(()).unwrap();
             deploying.join().unwrap().unwrap();
