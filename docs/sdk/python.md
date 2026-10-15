@@ -278,9 +278,12 @@ It is asyncio only; there is no synchronous wrapper. It opens
 speech-to-text sessions, described first, and
 [text-to-speech sessions](#text-to-speech-sessions). Discovery of the stream
 endpoint through the agent is not in the package yet, so the caller names
-the endpoint and the deployment. The schema is a draft, and this client has
-been run against an in-process server built from the same schema, not yet
-against a worker: no worker serves speech sessions over it yet.
+the endpoint and the deployment. The schema is a draft. A serving worker
+built with streaming support serves these sessions for a speech deployment
+when its config sets `streaming.enabled`; the agent does not set it yet, so
+such a worker is started by hand from a config. This client's own tests run
+against an in-process server built from the same schema, not against a
+worker.
 
 ```python
 import asyncio

@@ -429,11 +429,14 @@ class StreamServer:
             opened.HasField("input_format") or not re.fullmatch(_SHORT_TEXT % 1, opened.voice)
         ):
             raise _Ends("invalid_event")
-        served = (self.deployment_id, self.descriptor_digest)
-        if (target.deployment_id, target.descriptor_digest) != served:
+        # The deployment, then the generation, then the digest: a stale generation is
+        # reported before a digest that differs.
+        if target.deployment_id != self.deployment_id:
             raise _Ends("target_mismatch")
         if target.generation != self.generation:
             raise _Ends("stale_generation")
+        if target.descriptor_digest != self.descriptor_digest:
+            raise _Ends("target_mismatch")
         audio = opened.input_format
         declared = (audio.encoding, audio.sample_rate_hz, audio.channels) in self.formats
         if speaks:

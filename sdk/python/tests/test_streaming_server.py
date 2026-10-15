@@ -142,10 +142,13 @@ def test_the_recorded_speech_to_text_session_is_served_frame_for_frame() -> None
     assert [event.SerializeToString() for event in got] == [encoded for _, encoded in expected]
 
 
+_OTHER_DIGEST = "sha256:" + "1" * 64
+
+
 def _open(**changes: Any) -> Any:
     opened = recorded("stt_open")
     for name, value in changes.items():
-        if name in ("deployment_id", "generation"):
+        if name in ("deployment_id", "generation", "descriptor_digest"):
             setattr(opened.open.resolved, name, value)
         elif name == "sequence":
             opened.sequence = value
@@ -177,7 +180,9 @@ def _first(event: Any) -> Any:
         ("backend_unsupported_capability", _open(language="xx"), StreamServer()),
         ("target_unresolved", recorded("open_selector"), StreamServer()),
         ("target_mismatch", _open(deployment_id="another-deployment"), StreamServer()),
+        ("target_mismatch", _open(descriptor_digest=_OTHER_DIGEST), StreamServer()),
         ("stale_generation", _open(generation=6), StreamServer()),
+        ("stale_generation", _open(generation=6, descriptor_digest=_OTHER_DIGEST), StreamServer()),
         ("admission_closed", _open(), StreamServer(admission_open=False)),
         ("session_count_limit", _open(), StreamServer(max_sessions=0)),
     ],
