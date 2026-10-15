@@ -59,7 +59,9 @@ def run_cli(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
 # --- the checker ------------------------------------------------------------------
 
 
-def synthetic_run(index: int, stripped: int, idle_kib: int, steady_kib: int) -> dict:
+def synthetic_run(
+    index: int, stripped: int, idle_kib: int, steady_kib: int, listener: str = "started"
+) -> dict:
     """One run; later runs are larger, so the pairing the delta uses is visible."""
     stripped += index * 4096
     idle_kib += index * 1000
@@ -74,6 +76,7 @@ def synthetic_run(index: int, stripped: int, idle_kib: int, steady_kib: int) -> 
             }
         ],
         "idle_rss_samples_kib": [idle_kib, idle_kib + 8, idle_kib + 4],
+        "stream_listener": listener,
         "steady": {
             "status": "measured",
             "reason": None,
@@ -104,7 +107,10 @@ def synthetic_record(thresholds: dict) -> dict:
                 "architecture": "amd64",
             },
             "version_output": [],
-            "runs": [synthetic_run(i, 10 * MIB, 30_000, 40_000) for i in range(1, runs + 1)],
+            "runs": [
+                synthetic_run(i, 10 * MIB, 30_000, 40_000, "not_started")
+                for i in range(1, runs + 1)
+            ],
         },
     }
     return {
@@ -245,6 +251,36 @@ def checker_cases(work: Path) -> dict:
         2,
         "installed_size incomplete (without_streaming run 1: no ELF file measured)",
         honest=True,
+    )
+
+    def listener_not_started(record):
+        record["sides"]["with_streaming"]["runs"][1]["stream_listener"] = "not_started"
+
+    mutate(
+        "a with-streaming run without its stream listener leaves the resident-set budgets incomplete",
+        listener_not_started,
+        2,
+        "idle_rss incomplete (with_streaming run 2: the stream listener was not started)",
+        honest=True,
+    )
+    mutate(
+        "and the size budget, which needs no running worker, is still derived",
+        listener_not_started,
+        2,
+        "installed_size within",
+        honest=True,
+    )
+    mutate(
+        "a run that does not say whether the listener started is refused",
+        lambda r: r["sides"]["with_streaming"]["runs"][0].pop("stream_listener"),
+        2,
+        "record does not match its schema",
+    )
+    mutate(
+        "a stream listener state outside the two recorded is refused",
+        lambda r: r["sides"]["with_streaming"]["runs"][0].update(stream_listener="maybe"),
+        2,
+        "record does not match its schema",
     )
 
     def steady_not_run(record):
@@ -466,6 +502,7 @@ def build_package(
     version: str = "0.0.0~fake",
     architecture: str | None = None,
     script: str | None = None,
+    config: str = "{}\n",
 ) -> Path:
     """A tensorplate-serving package shaped like the real one around the given worker."""
     tree = work / f"{name}.tree"
@@ -487,7 +524,7 @@ def build_package(
     else:
         target.write_text(script or "#!/bin/sh\nexit 0\n")
     target.chmod(0o755)
-    (tree / "etc/tensorplate/serving_worker.json").write_text("{}\n")
+    (tree / "etc/tensorplate/serving_worker.json").write_text(config)
     package = work / f"{name}.deb"
     subprocess.run(
         ["dpkg-deb", "-b", "--root-owner-group", str(tree), str(package)],
@@ -523,12 +560,21 @@ def harness_cases(work: Path) -> None:
     work.mkdir()
     driver = FAKES / "driver.sh"
     on = compile_worker(
-        work, "worker-on", "-DPAYLOAD_BYTES=2097152", "-DIDLE_MIB=8", "-DSTREAM_MIB=1"
+        work,
+        "worker-on",
+        "-DSTREAMING",
+        "-DPAYLOAD_BYTES=2097152",
+        "-DIDLE_MIB=8",
+        "-DSTREAM_MIB=1",
     )
     off = compile_worker(work, "worker-off")
-    heavy = compile_worker(work, "worker-heavy", "-DIDLE_MIB=70")
+    heavy = compile_worker(work, "worker-heavy", "-DSTREAMING", "-DIDLE_MIB=70")
     exits = compile_worker(work, "worker-exits", "-DEXIT_AT_START")
-    degraded = compile_worker(work, "worker-degraded", "-DNEVER_READY")
+    degraded = compile_worker(work, "worker-degraded", "-DSTREAMING", "-DNEVER_READY")
+    late = compile_worker(
+        work, "worker-late", "-DSTREAMING", "-DLISTENER_DELAY_MS=1000", "-DLISTENER_MIB=4"
+    )
+    unlistened = compile_worker(work, "worker-unlistened", "-DSTREAMING", "-DNO_STREAM_LISTENER")
     on_pkg = build_package(work, "with", on)
     off_pkg = build_package(work, "without", off, version="0.0.0~fake.off")
 
@@ -593,6 +639,27 @@ def harness_cases(work: Path) -> None:
         and record.get("provenance") == "synthetic",
         json.dumps(side.get("package")) + str(side.get("version_output")),
     )
+    listeners = {
+        name: [run.get("stream_listener") for run in sides.get("runs", [])]
+        for name, sides in record.get("sides", {}).items()
+    }
+    check(
+        "the with-streaming worker started its stream listener in every run, the other in none",
+        listeners
+        == {"with_streaming": ["started"] * 3, "without_streaming": ["not_started"] * 3},
+        str(listeners),
+    )
+    configs = {
+        side: json.loads(path.read_text()) if path.exists() else None
+        for side in record_mod.SIDES
+        for path in [out / "captures" / side / "serving_worker.json"]
+    }
+    check(
+        "only the with-streaming worker ran with streaming enabled; the other kept the packaged config",
+        configs == {"with_streaming": {"streaming": {"enabled": True, "port": 0}},
+                    "without_streaming": {}},
+        str(configs),
+    )
     captures = out / "captures/with_streaming/run-3"
     check(
         "raw captures are kept: health, idle and steady samples, the stream count, the worker log",
@@ -643,6 +710,54 @@ def harness_cases(work: Path) -> None:
         and "no stream driver was given" in (steady.get("reason") or "")
         and record["result"]["budgets"]["idle_rss"]["status"] == "within"
         and (out / "summary.json").exists(),
+        result.stdout + result.stderr,
+    )
+
+    out = work / "late"
+    late_pkg = build_package(work, "late", late)
+    result = run_harness(out, late_pkg, off_pkg, "--stream-driver", str(driver))
+    record = json.loads((out / "record.json").read_text()) if (out / "record.json").exists() else {}
+    runs = record.get("sides", {}).get("with_streaming", {}).get("runs", [])
+    idle_delta = record.get("result", {}).get("budgets", {}).get("idle_rss", {}).get("max_delta_bytes")
+    check(
+        "a listener logged a second after /health is ready is waited for, and the idle samples"
+        " hold the 4 MiB it touched before logging",
+        result.returncode == 0
+        and [run.get("stream_listener") for run in runs] == ["started"] * 3
+        and idle_delta is not None
+        and 4 * MIB <= idle_delta <= 6 * MIB,
+        f"delta {idle_delta}; " + result.stdout + result.stderr,
+    )
+
+    out = work / "mislabeled"
+    enabled = '{"streaming": {"enabled": true, "port": 0}}\n'
+    mislabeled_pkg = build_package(work, "mislabeled", on, config=enabled)
+    result = run_harness(out, on_pkg, mislabeled_pkg, "--stream-driver", str(driver))
+    record = json.loads((out / "record.json").read_text()) if (out / "record.json").exists() else {}
+    check(
+        "a without-streaming package whose own config starts a listener is recorded as such",
+        [run.get("stream_listener") for run in record.get("sides", {})
+         .get("without_streaming", {}).get("runs", [])] == ["started"] * 3,
+        result.stdout + result.stderr,
+    )
+
+    out = work / "unlistened"
+    unlistened_pkg = build_package(work, "unlistened", unlistened)
+    result = run_harness(
+        out, unlistened_pkg, off_pkg, "--stream-driver", str(driver), "--ready-timeout", "2"
+    )
+    record = json.loads((out / "record.json").read_text()) if (out / "record.json").exists() else {}
+    budgets = record.get("result", {}).get("budgets", {})
+    check(
+        "a with-streaming worker that never starts its listener leaves both resident-set budgets"
+        " incomplete, naming it",
+        result.returncode == 2
+        and all(
+            budgets.get(name, {}).get("status") == "incomplete"
+            and "the stream listener was not started" in (budgets[name].get("reason") or "")
+            for name in ("idle_rss", "steady_rss")
+        )
+        and budgets.get("installed_size", {}).get("status") == "within",
         result.stdout + result.stderr,
     )
 

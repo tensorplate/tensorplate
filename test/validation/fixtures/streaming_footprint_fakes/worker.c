@@ -6,6 +6,14 @@
 // to the idle resident set (IDLE_MIB touched at start) and to each held
 // stream (STREAM_MIB touched per connection), so the harness's deltas can be
 // checked against what the fakes were told to add.
+//
+// With `streaming.enabled` in its config it does what the real worker does:
+// built with STREAMING it binds a stream listener on an ephemeral port after
+// its HTTP listener and logs the real worker's line for it; built without, it
+// refuses the config at start with the real worker's error and exit status.
+// NO_STREAM_LISTENER stands for a build with the feature from before the
+// listener existed, LISTENER_DELAY_MS delays the line past /health ready, and
+// LISTENER_MIB is touched before the line, so samples taken earlier miss it.
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -59,6 +67,57 @@ static void send_all(int fd, const char *text) {
   }
 }
 
+// The real worker's config is JSON; this reads only `"streaming": {"enabled": true`.
+static int streaming_enabled(const char *path) {
+  static char text[65536];
+  FILE *file = fopen(path, "r");
+  if (file == NULL) {
+    return 0;
+  }
+  size_t got = fread(text, 1, sizeof text - 1, file);
+  fclose(file);
+  text[got] = '\0';
+  const char *at = strstr(text, "\"streaming\"");
+  at = at == NULL ? NULL : strstr(at, "\"enabled\"");
+  if (at == NULL) {
+    return 0;
+  }
+  at += strlen("\"enabled\"");
+  while (*at == ' ' || *at == ':' || *at == '\n') {
+    ++at;
+  }
+  return strncmp(at, "true", 4) == 0;
+}
+
+#if defined(STREAMING) && !defined(NO_STREAM_LISTENER)
+static void *stream_listener(void *arg) {
+  const char *host = arg;
+#ifdef LISTENER_DELAY_MS
+  usleep(LISTENER_DELAY_MS * 1000);
+#endif
+#ifdef LISTENER_MIB
+  (void)touch(LISTENER_MIB);  // never freed: it stays resident while the listener does
+#endif
+  int server = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in address;
+  memset(&address, 0, sizeof address);
+  address.sin_family = AF_INET;
+  inet_pton(AF_INET, host, &address.sin_addr);
+  socklen_t length = sizeof address;
+  if (bind(server, (struct sockaddr *)&address, sizeof address) != 0 || listen(server, 64) != 0 ||
+      getsockname(server, (struct sockaddr *)&address, &length) != 0) {
+    perror("fake worker: stream listener");
+    exit(1);
+  }
+  fprintf(stderr,
+          "{\"component\":\"serving\",\"fields\":{\"host\":\"%s\",\"port\":%d,"
+          "\"serves_sessions\":false},\"level\":\"info\",\"message\":\"stream listener bound\","
+          "\"ts_ns\":0}\n",
+          host, ntohs(address.sin_port));
+  return NULL;
+}
+#endif
+
 static void *serve(void *arg) {
   int fd = (int)(intptr_t)arg;
   char request[4096];
@@ -103,6 +162,7 @@ static void *serve(void *arg) {
 int main(int argc, char **argv) {
   int port = 0;
   const char *host = "127.0.0.1";
+  const char *config = NULL;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--version") == 0) {
       printf("tensorplate-serving 0.0.0-fake\nprotocol 0.1\nbundle-format 0.1\n");
@@ -113,9 +173,19 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[i], "--bind-host") == 0 && i + 1 < argc) {
       host = argv[++i];
     } else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
-      ++i;
+      config = argv[++i];
     }
   }
+  int streaming = config != NULL && streaming_enabled(config);
+#ifndef STREAMING
+  if (streaming) {
+    fprintf(stderr,
+            "{\"component\":\"serving\",\"fields\":{\"code\":\"unsupported\",\"message\":"
+            "\"serving config: streaming.enabled requires TP_ENABLE_STREAMING_GRPC\"},"
+            "\"level\":\"error\",\"message\":\"worker startup failed\",\"ts_ns\":0}\n");
+    return 64;
+  }
+#endif
 #ifdef EXIT_AT_START
   fprintf(stderr, "fake worker: exiting at start as built\n");
   return 3;
@@ -135,6 +205,14 @@ int main(int argc, char **argv) {
   }
   fprintf(stderr, "fake worker: listening on %s:%d, payload %d bytes, idle %d MiB, %d MiB per stream\n",
           host, port, payload[0] ? PAYLOAD_BYTES : 0, IDLE_MIB, STREAM_MIB);
+#if defined(STREAMING) && !defined(NO_STREAM_LISTENER)
+  pthread_t listener;
+  if (streaming && pthread_create(&listener, NULL, stream_listener, (void *)host) != 0) {
+    return 1;
+  }
+#else
+  (void)streaming;
+#endif
   for (;;) {
     int fd = accept(server, NULL, NULL);
     if (fd < 0) {
