@@ -1159,9 +1159,12 @@ def test_a_session_cancelled_during_its_first_open_sends_no_second_open() -> Non
     relayed(scenario, StreamServer(fault="silent"))
 
 
-def test_input_before_ready_is_not_written_so_an_open_sent_again_carried_only_the_open() -> None:
+def test_input_before_ready_is_not_written_so_an_open_sent_again_carried_only_the_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
         session = stream.transcribe(TARGET, language="en", input_format=PCM, cancel_timeout=0.05)
+        conclude_once_dropped(monkeypatch, session, stream)
         opening = asyncio.create_task(session.open())
         await fake.until(lambda: len(fake.received) == 1)
         for offered in (session.send_audio(FRAME), session.finalize(), session.close()):
