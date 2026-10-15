@@ -576,6 +576,35 @@ def test_a_session_whose_worker_went_away_has_the_next_open_read_the_target_firs
     following(scenario, old, new)
 
 
+def test_a_worker_that_goes_away_during_a_read_leaves_the_target_to_read_again() -> None:
+    old, new = server(), server(generation=2, digest=LATER_DIGEST)
+
+    async def scenario(
+        agent: Agent, stream: speech.SpeechClient, endpoint: str, next_endpoint: str
+    ) -> None:
+        live = stream.transcribe(language="en", input_format=PCM)
+        await live.open()
+        old.admission_open = False
+        asked = await held_read(agent)
+        refused = asyncio.create_task(converse(stream))
+        await asked.wait()
+        # The read in flight began before the worker ended the live session.
+        old.end("worker_shutdown")
+        with pytest.raises(speech.ServiceUnavailableError):
+            await live.close()
+        assert agent.hold is not None
+        agent.hold.set()
+        with pytest.raises(speech.ServiceUnavailableError):
+            await refused
+        # The refused open read the old target and sent its second call there.
+        assert (agent.reads, old.calls) == (2, 3)
+        agent.hold, agent.answer = None, streaming(next_endpoint, 2, LATER_DIGEST)
+        await converse(stream)
+        assert (agent.reads, old.calls, new.calls) == (3, 3, 1)
+
+    following(scenario, old, new)
+
+
 def test_a_session_ended_for_another_reason_leaves_the_target_as_read() -> None:
     fake, other = server(), server(generation=2, digest=LATER_DIGEST)
 
