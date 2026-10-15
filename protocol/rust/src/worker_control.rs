@@ -324,6 +324,15 @@ pub struct CandidateRef {
         deserialize_with = "deserialize_some"
     )]
     pub configuration_digest: Option<String>,
+    /// The worker started from this candidate serves stream sessions.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub streaming: bool,
+}
+
+// serde's `skip_serializing_if` callback receives `&T`.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl CandidateRef {
@@ -1087,6 +1096,7 @@ mod tests {
             bundle_name: Some("yolov8n".into()),
             bundle_version: Some("1.0.0".into()),
             artifact_relative_path: Some("model.engine".into()),
+            streaming: false,
         }
     }
 

@@ -158,6 +158,8 @@ mod tests {
             staged_path: None,
             promoted_monotonic_ns: Some(7),
             serving_url: None,
+            stream_endpoint: None,
+            descriptor_digest: None,
         };
         let agent_status = AgentStatus {
             resident_set: None,

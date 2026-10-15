@@ -73,6 +73,7 @@ mod tests {
             staged_path,
             promoted_monotonic_ns: Some(1),
             labels: Default::default(),
+            streaming: false,
         }
     }
 

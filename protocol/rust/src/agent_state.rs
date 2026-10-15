@@ -72,7 +72,7 @@ pub const AGENT_STATE_ROOT_KEYS: [&str; 10] = [
 /// resident-set records refuse unknown keys through serde; these records
 /// keep serde's leniency for "0.1" files, so [`decode_agent_state`] checks
 /// them by name in a "0.2" file, after requiring each to be a JSON object.
-pub const DEPLOYMENT_RECORD_KEYS: [&str; 12] = [
+pub const DEPLOYMENT_RECORD_KEYS: [&str; 13] = [
     "deployment_id",
     "bundle_digest",
     "bundle_name",
@@ -85,6 +85,7 @@ pub const DEPLOYMENT_RECORD_KEYS: [&str; 12] = [
     "generation",
     "descriptor_digest",
     "configuration_digest",
+    "streaming",
 ];
 
 /// See [`DEPLOYMENT_RECORD_KEYS`].
@@ -163,6 +164,9 @@ pub struct DeploymentRecord {
         deserialize_with = "deserialize_some"
     )]
     pub configuration_digest: Option<String>,
+    /// Every generation started from this record serves stream sessions.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub streaming: bool,
 }
 
 impl DeploymentRecord {
@@ -357,6 +361,7 @@ impl AgentState {
         if self.next_generation.is_some()
             || self.resident_set.is_some()
             || self.names_a_descriptor()
+            || self.streams()
             || !self.uses_only_legacy_vocabulary()
         {
             AGENT_STATE_SCHEMA_VERSION_RESIDENT_SET
@@ -370,6 +375,15 @@ impl AgentState {
     fn names_a_descriptor(&self) -> bool {
         self.descriptor_identities()
             .any(|(_, identity)| identity != Ok(None))
+    }
+
+    /// Whether a deployment record carries the streaming flag: an agent
+    /// through 0.2.x would drop it on its next write.
+    fn streams(&self) -> bool {
+        [&self.active, &self.previous_active, &self.candidate]
+            .into_iter()
+            .flatten()
+            .any(|record| record.streaming)
     }
 
     /// Each record that may carry a descriptor identity, with what it
@@ -609,7 +623,7 @@ pub enum AgentStateError {
     )]
     UnsupportedStateVersion(String),
     #[error(
-        "a state stamped schema_version 0.1 carries content an agent through 0.2.x cannot read (the generation counter, a resident set, a record's descriptor identity, or a newer error code, phase or transaction kind)"
+        "a state stamped schema_version 0.1 carries content an agent through 0.2.x cannot read (the generation counter, a resident set, a record's descriptor identity or streaming flag, or a newer error code, phase or transaction kind)"
     )]
     LegacyVersionCarriesNewContent,
     #[error("unknown top-level field `{0}` in a schema_version 0.2 state")]
@@ -809,6 +823,7 @@ mod tests {
             staged_path: "/var/lib/tensorplate/staging/deploy-1".into(),
             promoted_monotonic_ns: Some(123_456_789),
             labels: BTreeMap::new(),
+            streaming: false,
         }
     }
 

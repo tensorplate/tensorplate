@@ -189,6 +189,15 @@ pub struct WorkerConfig {
     pub status_poll_interval_ms: u64,
 }
 
+impl WorkerConfig {
+    /// Whether the agent starts its serving workers itself and holds a
+    /// stream port for each: what a deploy with `streaming` needs.
+    #[must_use]
+    pub fn holds_stream_ports(&self) -> bool {
+        self.mode == WorkerControlMode::Process && self.serving_port_range.is_some()
+    }
+}
+
 impl Default for WorkerConfig {
     fn default() -> Self {
         Self {

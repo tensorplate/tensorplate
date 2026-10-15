@@ -73,6 +73,7 @@ mod tests {
             staged_path: format!("/staging/{id}"),
             promoted_monotonic_ns: None,
             labels: Default::default(),
+            streaming: false,
         }
     }
 

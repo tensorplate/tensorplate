@@ -87,6 +87,10 @@
           "maxLength": 256,
           "pattern": "^[^\\x00-\\x1f\\x7f]+$",
           "description": "Operator-only. The approved evidence reference an ordinary (production) activation of a qualified configuration uses; refused in qualification mode."
+        },
+        "streaming": {
+          "type": "boolean",
+          "description": "`true` starts every generation of the deployment with its stream listener on the stream port the agent holds for that generation, and reports the endpoint in status. Absent or `false` serves unary requests only; writers omit the field when false. Refused as `config_invalid` before staging for a bundle whose model class is not `speech`, and when the agent's configuration holds no stream ports (`worker.serving_port_range`). A speech worker serving streams refuses unary `/infer`."
         }
       },
       "allOf": [
@@ -404,7 +408,7 @@
           "type": "array",
           "uniqueItems": true,
           "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
-          "description": "Control operations this agent executes beyond the singleton deploy and rollback. A client sends a request that depends on one only when the agent lists it, because an agent that predates a request field ignores it: `set_operation_add` (`deploy` with `set_operation` `add`) and `member_rollback` (`rollback` naming a `deployment_id`). Absent means none. Readers ignore names they do not know."
+          "description": "Control operations this agent executes beyond the singleton deploy and rollback. A client sends a request that depends on one only when the agent lists it, because an agent that predates a request field ignores it: `set_operation_add` (`deploy` with `set_operation` `add`), `member_rollback` (`rollback` naming a `deployment_id`) and `deploy_streaming` (`deploy` with `streaming`, listed by an agent whose configuration gives stream ports). Absent means none. Readers ignore names they do not know."
         }
       }
     },
@@ -602,7 +606,21 @@
           "type": "string",
           "pattern": "^http://(127\\.0\\.0\\.1|localhost):[0-9]+(/.*)?$",
           "description": "Loopback data-plane URL for the active worker. Present only for the active deployment: when the agent owns a concrete serving process, or, for a resident set whose only member serves, the `/infer` URL of the member's committed unary endpoint when that endpoint is `http://127.0.0.1:<port>` or `http://localhost:<port>` with no path."
+        },
+        "stream_endpoint": {
+          "type": "string",
+          "pattern": "^(127\\.0\\.0\\.1|localhost|\\[::1\\]):[0-9]+$",
+          "description": "Where the active worker serves stream sessions, as `host:port`. Present only for the active deployment, while the generation serving it was started with streaming; that generation is `generation`."
+        },
+        "descriptor_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "The digest a stream Open names for the active worker: the deployment descriptor's digest, or for a format 0.1 bundle the manifest's digest. The worker echoes it and verifies nothing. Present exactly when `stream_endpoint` is."
         }
+      },
+      "dependencies": {
+        "stream_endpoint": ["descriptor_digest", "generation"],
+        "descriptor_digest": ["stream_endpoint"]
       }
     },
     "QuarantineRecord": {

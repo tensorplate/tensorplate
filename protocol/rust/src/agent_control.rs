@@ -49,6 +49,10 @@ pub const FEATURE_SET_OPERATION_ADD: &str = "set_operation_add";
 /// `rollback` naming a `deployment_id`.
 pub const FEATURE_MEMBER_ROLLBACK: &str = "member_rollback";
 
+/// `AgentStatus::control_features` entry of an agent that executes a
+/// `deploy` with `streaming`.
+pub const FEATURE_DEPLOY_STREAMING: &str = "deploy_streaming";
+
 /// Operation discriminator.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -151,6 +155,9 @@ pub struct DeployRequest {
         deserialize_with = "deserialize_some"
     )]
     pub evidence_ref: Option<String>,
+    /// Start every generation of the deployment with its stream listener.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub streaming: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -565,6 +572,14 @@ pub struct DeploymentSummary {
     pub promoted_monotonic_ns: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub serving_url: Option<String>,
+    /// Where the active worker serves stream sessions, as `host:port`; only
+    /// while the generation serving it was started with streaming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_endpoint: Option<String>,
+    /// The digest a stream Open names; present exactly when
+    /// `stream_endpoint` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descriptor_digest: Option<String>,
 }
 
 impl DeploymentSummary {
@@ -583,6 +598,8 @@ impl DeploymentSummary {
             staged_path: Some(member.staged_path.clone()),
             promoted_monotonic_ns: member.promoted_monotonic_ns,
             serving_url,
+            stream_endpoint: None,
+            descriptor_digest: None,
         }
     }
 
@@ -600,6 +617,8 @@ impl DeploymentSummary {
             staged_path: Some(retained.staged_path.clone()),
             promoted_monotonic_ns: retained.promoted_monotonic_ns,
             serving_url: None,
+            stream_endpoint: None,
+            descriptor_digest: None,
         }
     }
 }
@@ -933,7 +952,8 @@ pub struct AgentStatus {
     pub resident_set: Option<ResidentSetStatus>,
     /// Control operations this agent executes beyond the singleton deploy
     /// and rollback ([`FEATURE_SET_OPERATION_ADD`],
-    /// [`FEATURE_MEMBER_ROLLBACK`]). A client sends a request that depends
+    /// [`FEATURE_MEMBER_ROLLBACK`], [`FEATURE_DEPLOY_STREAMING`]). A client
+    /// sends a request that depends
     /// on one only when it is listed, because an agent that predates a
     /// request field ignores it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

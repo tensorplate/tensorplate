@@ -123,6 +123,7 @@ fn a_format_0_1_deploy_names_nothing_writes_no_document_and_takes_no_hold() {
         bundle_name: Some("x86-fixture-smoke".into()),
         bundle_version: Some("0.1.0".into()),
         artifact_relative_path: Some("x86-smoke.json".into()),
+        streaming: false,
     };
     let asked = agent.asked();
     assert_eq!(asked.reference, reference);

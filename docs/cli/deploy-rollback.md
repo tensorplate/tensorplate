@@ -14,6 +14,7 @@ tensorplate deploy <bundle-path>
   [--wait-timeout-ms <n>]           # default: 120000
   [--label key=value]               # may be repeated
   [--set-operation <replace|add>]   # default: replace
+  [--streaming]
   [--output <human|json>]
 ```
 
@@ -24,6 +25,36 @@ features and, unless the agent lists `set_operation_add`, refuses locally
 with a typed `unsupported` error (exit code `3`) without sending the deploy,
 because an agent that predates the field would ignore it and replace the
 active deployment. No released agent lists it yet.
+
+`--streaming` starts every generation of the deployment with its stream
+listener, and `tensorplate status` then prints the stream endpoint and the
+digest a stream Open names. It is sent only to an agent that lists the
+`deploy_streaming` control feature, and refused locally with `unsupported`
+(exit code `3`) otherwise. An agent lists it when its configuration gives
+each worker a stream port, which no packaged configuration does: add a
+range of loopback ports holding at least two pairs to the `worker` section
+of the agent's configuration, for example
+`"serving_port_range": {"first": 18100, "last": 18103}`, and restart the
+agent (which stops every worker it runs). The agent refuses `--streaming`
+with `config_invalid` (exit code `3`) for a bundle whose class is not
+`speech`. A speech worker serving streams refuses unary `/infer` requests;
+deploy without the flag for a deployment driven over `/infer`, as
+`tensorplate infer` and the qualification recipe are.
+
+What else a streaming deployment means for an operator:
+
+- A deploy or rollback that replaces it, and an agent stop, stop its worker
+  as they stop any: SIGTERM and a 5-second drain, after which every open
+  stream session is closed with `worker_shutdown`.
+- Setting the range moves every worker's HTTP port into it, so
+  `serving_url` leaves 18080 and 18081.
+- The installed serving worker must be built with streaming support
+  (`tensorplate doctor` reports `serving_streaming_support`). One built
+  without it refuses the config at start, and the deploy fails with that
+  startup error.
+- The deployment needs the range for as long as it is kept. With the range
+  removed, its restore at a start, a rollback to it and its restarts are
+  refused with `config_invalid`.
 
 Behavior:
 

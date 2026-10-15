@@ -280,8 +280,10 @@ speech-to-text sessions, described first, and
 endpoint through the agent is not in the package yet, so the caller names
 the endpoint and the deployment. The schema is a draft. A serving worker
 built with streaming support serves these sessions for a speech deployment
-when its config sets `streaming.enabled`; the agent does not set it yet, so
-such a worker is started by hand from a config. This client's own tests run
+when its config sets `streaming.enabled`, which the agent renders for a
+deployment made with `tensorplate deploy --streaming`; `tensorplate status`
+then prints its `stream_endpoint` and the `descriptor_digest` an Open names
+beside its generation. This client's own tests run
 against an in-process server built from the same schema, not against a
 worker.
 

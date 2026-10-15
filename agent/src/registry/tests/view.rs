@@ -87,6 +87,7 @@ fn a_candidate_is_ready_once_a_warm_judged_it_and_serves_once_promoted() {
             descriptor_digest: None,
             configuration_digest: None,
             serving_url: format!("http://127.0.0.1:{ACTIVE_PORT}/infer"),
+            stream: None,
         })
     );
 }

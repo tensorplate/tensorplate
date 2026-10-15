@@ -153,12 +153,41 @@ nobody, in a set of more than one member) are refused with `config_invalid`
 first.
 
 `agent_status.control_features` lists what the agent executes beyond the
-singleton deploy and rollback: `set_operation_add` and `member_rollback`.
-This agent lists neither. An agent that predates `set_operation` or
-`rollback.deployment_id` ignores them and would act on the rest of the
-request, so a client sends `add` or a member rollback only to an agent that
-lists the matching feature; the CLI checks before sending and otherwise
-refuses locally with `unsupported`.
+singleton deploy and rollback: `set_operation_add`, `member_rollback` and
+`deploy_streaming`. This agent lists `deploy_streaming` when its
+configuration gives stream ports, and neither of the others. An agent that
+predates `set_operation`, `rollback.deployment_id` or `deploy.streaming`
+ignores them and would act on the rest of the request, so a client sends
+`add`, a member rollback or a streaming deploy only to an agent that lists
+the matching feature; the CLI checks before sending and otherwise refuses
+locally with `unsupported`.
+
+### Streaming
+
+`deploy.streaming: true` asks for a deployment whose workers serve stream
+sessions. Without it, which is what every deploy before the field meant, a
+worker serves unary requests only. A speech worker serving streams refuses
+unary `/infer`, so a deployment driven over `/infer`, as the qualification
+recipe's are, does not set it.
+
+The agent refuses `streaming` with `config_invalid` before anything is
+staged when the bundle's class is not `speech`, and when its configuration
+gives no stream ports (`worker.serving_port_range`, which no packaged
+configuration sets; see [the member registry's
+ports](#member-registry)). Otherwise the deployment record keeps the flag
+(`streaming: true`, written only when set), so a rollback to the
+deployment, the restore at the next start and a restart start it the same
+way.
+
+Each generation started with streaming is given, in its serving config,
+`streaming: {"enabled": true, "port": <stream port>}` on the stream port
+its generation holds, and `deployment.descriptor_digest`: the descriptor's
+digest, or for a format 0.1 bundle the manifest's digest; the worker echoes
+it and verifies nothing. A restart's generation names its own re-stamped
+descriptor. Status reports, on `active`, the `stream_endpoint` (a loopback
+`host:port`) and that `descriptor_digest` beside the `generation`, the three
+a stream Open names, while the generation serving the active deployment was
+started with streaming.
 
 ### Response shape
 
@@ -791,7 +820,9 @@ agent stamps the oldest state version whose readers decode the file without
 loss: `0.2` from the first generation it allocates, `0.1` until then. A
 deploy of a format 0.2 bundle takes a generation itself, so it writes a
 `0.2` file under either worker mode; with `worker.mode = "mock"` a format
-0.1 deploy takes none and the file stays `0.1`. An
+0.1 deploy takes none and the file stays `0.1`. A deployment record that
+carries the [streaming](#streaming) flag is `0.2` content too, whatever
+the generation counter says. An
 agent through 0.2.x refuses a `0.2` file with its typed unsupported-version
 error and exits instead of misreading it; nothing migrates a state file
 backwards, and a downgrade sets the state directory aside instead. The
@@ -971,7 +1002,9 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   hands the worker its control socket on fd 0 in the same launch, and starts
   the 1 Hz ledger poll at once, before it waits for the model to load. The
   config file is named for the deployment and generation and is removed with
-  the worker; files an earlier agent process left are removed at start. The
+  the worker; files an earlier agent process left are removed at start. A
+  deployment that asked for [streaming](#streaming) also gets its
+  `streaming` block and `deployment.descriptor_digest`. The
   runner profile in the config is the staged manifest's, read by `prepare`
   and before a restart. For a candidate that names a descriptor it is the
   descriptor's instead: `prepare` does not read the staged manifest, and
@@ -1110,9 +1143,12 @@ for the member's stream listener (an odd port left over is not used; the
 range must hold at least two pairs). Without a range, which is how every
 packaged configuration ships, the pool is the two ports
 `serving_bind_port` and `serving_candidate_bind_port`, one worker each, and
-no stream port is held. Only the HTTP port is rendered into a worker's
-config today: the agent renders no `streaming` block, so a range reserves
-the stream ports and nothing binds them.
+no stream port is held. A worker's stream port is rendered into its config
+only for a deployment that asked for [streaming](#streaming); for any
+other the range reserves the stream port and nothing binds it. A
+generation that is to stream and holds no stream port, as on a pool
+without a range, is not started: `prepare` or the restart refuses it with
+`config_invalid`.
 
 A restart can be stamped: a registry built with a restart stamp calls it
 for each generation a restart starts, after the staged bundle check and
@@ -1178,7 +1214,12 @@ promotion time. Both are absent
 while nothing serves: the worker stopped, a restart is waiting or loading,
 or the member is failed. `candidate.generation` is
 the generation a deploy has prepared and not promoted; a worker an earlier
-deploy abandoned is not named.
+deploy abandoned is not named. `active.stream_endpoint` and
+`active.descriptor_digest` are attached with `active.generation`, and only
+when that generation was started with [streaming](#streaming); in the
+window above where the outgoing worker's generation is attached, a
+redeploy of a format 0.1 bundle under its own id, the outgoing worker's
+endpoint and digest are too, if it streams.
 
 A singleton record that names a descriptor carries its generation: a
 deploy, a rollback, a restore and the

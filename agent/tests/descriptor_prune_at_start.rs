@@ -69,6 +69,7 @@ fn record_active(state_dir: &Path, descriptor: &DeploymentDescriptor) {
         generation: Some(descriptor.generation),
         descriptor_digest: Some(descriptor.descriptor_digest.clone()),
         configuration_digest: Some(descriptor.configuration_digest.clone()),
+        streaming: false,
     };
     let record = |state: &mut tensorplate_protocol::agent_state::AgentState| {
         assert_eq!(state.allocate_generation(1), Ok(descriptor.generation));

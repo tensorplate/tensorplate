@@ -35,6 +35,7 @@ use tensorplate_protocol::agent_control::{
     is_valid_deployment_id, singleton_slots, AgentRunState, AgentStatus, ContactState,
     DeployFailureSummary, DeployStatus, DeploymentSummary, MemberStatus, ProcessState,
     QuarantineSummary, Readiness, ResidentSetStatus, ResponseError, SupervisionStatusSummary,
+    FEATURE_DEPLOY_STREAMING,
 };
 use tensorplate_protocol::agent_state::{
     AgentState, DeploymentRecord, ErrorRecord, TransactionKind, TransactionRecord,
@@ -42,13 +43,14 @@ use tensorplate_protocol::agent_state::{
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::supervision_event::SupervisionAgentState;
 use tensorplate_protocol::worker_control::CandidateRef;
-use tensorplate_protocol::ErrorCode;
+use tensorplate_protocol::{ErrorCode, ModelClass};
 
 use std::collections::BTreeMap;
 
 use crate::backend_detection::BackendProbeReport;
 use crate::bundle::{
     capacity_check, model_artifact_relative_path, verify_before_staging, DeployFacts,
+    VerifiedBundle,
 };
 use crate::config::AgentConfig;
 use crate::error::{AgentError, AgentResult};
@@ -292,7 +294,6 @@ impl Coordinator {
     /// Returns the typed [`AgentError`] of the first phase that fails.
     /// On failure the candidate is quarantined and the active deployment
     /// is preserved.
-    #[allow(clippy::too_many_lines)]
     pub fn deploy(
         &self,
         deployment_id: &str,
@@ -300,6 +301,34 @@ impl Coordinator {
         labels: std::collections::BTreeMap<String, String>,
         correlation_id: Option<String>,
         expected_bundle_digest: Option<&str>,
+    ) -> AgentResult<DeployOutcome> {
+        self.deploy_with(
+            deployment_id,
+            bundle_path,
+            labels,
+            correlation_id,
+            expected_bundle_digest,
+            false,
+        )
+    }
+
+    /// [`Self::deploy`]; with `streaming`, every generation of the
+    /// deployment serves stream sessions.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::deploy`], and [`AgentError::Config`] before anything is
+    /// staged when `streaming` is asked of a bundle whose class is not
+    /// `speech`, or of an agent whose configuration holds no stream ports.
+    #[allow(clippy::too_many_lines)]
+    pub fn deploy_with(
+        &self,
+        deployment_id: &str,
+        bundle_path: &Path,
+        labels: std::collections::BTreeMap<String, String>,
+        correlation_id: Option<String>,
+        expected_bundle_digest: Option<&str>,
+        streaming: bool,
     ) -> AgentResult<DeployOutcome> {
         if !is_valid_deployment_id(deployment_id) {
             return Err(AgentError::Config(
@@ -376,6 +405,11 @@ impl Coordinator {
                 return self.fail(&transaction_id, deployment_id, err);
             }
         }
+        if streaming {
+            if let Err(err) = streaming_refusal(&verified, &self.config) {
+                return self.fail(&transaction_id, deployment_id, err);
+            }
+        }
         self.advance(
             &transaction_id,
             DeployState::Received,
@@ -410,6 +444,7 @@ impl Coordinator {
             staged_path: staged_path.display().to_string(),
             promoted_monotonic_ns: None,
             labels,
+            streaming,
         };
         self.store.record_candidate(candidate_record.clone())?;
         self.advance(&transaction_id, DeployState::Verified, DeployState::Staged)?;
@@ -564,8 +599,16 @@ impl Coordinator {
     ///
     /// # Errors
     ///
-    /// Returns [`AgentError::Unavailable`] when rollback is not possible,
-    /// and the typed [`AgentError`] of whichever phase fails otherwise.
+    /// Before any transaction begins: [`AgentError::Stopping`] once the
+    /// agent stops; [`AgentError::Unavailable`] when there is no previous
+    /// active deployment or its staged directory or manifest is gone;
+    /// [`AgentError::BundleIntegrity`] when an artifact of the staged copy
+    /// is missing or does not match its digest,
+    /// [`AgentError::BundleManifest`] when its manifest does not validate,
+    /// and [`AgentError::Io`], naming the copy, when a file of it cannot be
+    /// read; [`AgentError::Busy`] when another transaction is in flight, and
+    /// the state store's error when the state cannot be read or written.
+    /// Afterwards, the typed [`AgentError`] of whichever phase fails.
     #[allow(clippy::too_many_lines)]
     pub fn rollback(&self, correlation_id: Option<String>) -> AgentResult<DeployOutcome> {
         self.refuse_while_stopping()?;
@@ -755,6 +798,10 @@ impl Coordinator {
                 // the same id.
                 if serves(&serving, recorded) {
                     summary.generation = Some(serving.member.generation);
+                    if let Some(stream) = serving.stream {
+                        summary.stream_endpoint = Some(stream.endpoint);
+                        summary.descriptor_digest = Some(stream.descriptor_digest);
+                    }
                 }
                 summary.serving_url = Some(serving.serving_url);
             }
@@ -879,8 +926,14 @@ impl Coordinator {
         Ok(AgentStatus {
             resident_set,
             // This agent executes neither `set_operation` `add` nor a member
-            // rollback, so it lists no control feature.
-            control_features: Vec::new(),
+            // rollback, and a streaming deploy only on stream ports.
+            control_features: self
+                .config
+                .worker
+                .holds_stream_ports()
+                .then(|| FEATURE_DEPLOY_STREAMING.to_string())
+                .into_iter()
+                .collect(),
             agent_state,
             active,
             previous_active: previous,
@@ -1088,6 +1141,24 @@ fn report_process(member: &mut MemberStatus, live: &[LiveMember]) {
         });
 }
 
+/// Why a deploy that asks for streaming cannot have it: only a speech
+/// worker serves stream sessions, on a port the configuration gives it.
+fn streaming_refusal(verified: &VerifiedBundle, config: &AgentConfig) -> AgentResult<()> {
+    let class = verified.manifest.model_class;
+    if class != ModelClass::Speech {
+        return Err(AgentError::Config(format!(
+            "`streaming` is for a speech deployment; the bundle's class is `{}`",
+            class.as_str()
+        )));
+    }
+    if !config.worker.holds_stream_ports() {
+        return Err(AgentError::Config(
+            "`streaming` needs the agent to start its serving workers (`worker.mode` `process`) with a stream port for each (`worker.serving_port_range`), and its configuration gives none".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// The status summary of a singleton deployment record, without a serving
 /// URL.
 fn deployment_summary(d: &DeploymentRecord) -> DeploymentSummary {
@@ -1102,6 +1173,8 @@ fn deployment_summary(d: &DeploymentRecord) -> DeploymentSummary {
         staged_path: Some(d.staged_path.clone()),
         promoted_monotonic_ns: d.promoted_monotonic_ns,
         serving_url: None,
+        stream_endpoint: None,
+        descriptor_digest: None,
     }
 }
 
@@ -1204,6 +1277,7 @@ mod tests {
             descriptor_digest: descriptor.map(Into::into),
             configuration_digest: configuration.map(Into::into),
             serving_url: String::new(),
+            stream: None,
         };
         let other = "sha256:0000";
 

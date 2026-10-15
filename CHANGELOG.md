@@ -313,6 +313,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `tensorplate deploy --streaming`, the deploy request's `streaming`,
+  starts every generation of a speech deployment with its stream listener.
+  The agent renders `streaming` on the stream port the generation holds,
+  and `deployment.descriptor_digest`: the descriptor's digest, or for a
+  format 0.1 bundle the manifest's, which the worker echoes and verifies
+  nothing of. The deployment record keeps the flag, so a rollback to the
+  deployment, the next start's restore and a restart start it the same
+  way. Status reports `active.stream_endpoint` and
+  `active.descriptor_digest` while the serving generation streams, and
+  `tensorplate status` prints both. The agent refuses the flag with
+  `config_invalid` before staging for a bundle whose class is not `speech`,
+  and when its configuration gives no stream ports
+  (`worker.serving_port_range`, which no packaged configuration sets). It
+  lists the `deploy_streaming` control feature when it has stream ports,
+  and the CLI otherwise refuses `--streaming` locally with `unsupported`. A
+  deploy without the flag is unchanged; a speech worker serving streams
+  refuses unary `/infer`. (V030-E03-F01-T03)
+
 - `tensorplate doctor` reports `serving_streaming_support`: it runs the
   installed serving worker's `--version`, stopped after 5 s, and reads its
   `streaming-grpc` line. `on` is `ok`; `off` is `ok` with a message that the

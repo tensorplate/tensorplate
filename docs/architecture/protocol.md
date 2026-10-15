@@ -120,8 +120,8 @@ this). A client sends a non-default value only to an agent that lists the
 matching `control_features` entry, since an older agent would act on the
 rest of the request. A new operation needs no such check: an older agent
 refuses an unknown `op`. `set_operation`, `admission_mode`, `test_count`,
-`evidence_ref`, `rollback.deployment_id`, `undeploy` and `recover` follow
-this rule, which retires with the response exception.
+`evidence_ref`, `rollback.deployment_id`, `deploy.streaming`, `undeploy`
+and `recover` follow this rule, which retires with the response exception.
 
 A second narrow pre-1.0 exception covers the shared closed enums: a value
 may be appended under `0.1` to the error-code enum (`error.json` and every
@@ -255,13 +255,14 @@ agent reads every state version it knows and refuses a newer one.
 Its `schema_version` is a state version: `"0.1"` is the singleton layout
 every agent through 0.2.x reads, and `"0.2"` adds the deployment generation
 counter, the resident set and the descriptor identity a singleton record or
-the in-flight transaction may carry. The agent decodes it with
+the in-flight transaction may carry, and a singleton record's streaming
+flag. The agent decodes it with
 `tensorplate_protocol::decode_agent_state`, which accepts exactly those
 versions and rejects any other with the same typed unsupported-version
 error; `decode_with_version_check` and every other payload stay at the
 protocol version. The agent writes the oldest state version whose readers
 decode the file without loss, so an agent that never allocates a generation
-keeps writing `"0.1"`, and an older agent meeting a `"0.2"` file refuses it
+and records no streaming deployment keeps writing `"0.1"`, and an older agent meeting a `"0.2"` file refuses it
 rather than misreading it.
 
 ## Bindings

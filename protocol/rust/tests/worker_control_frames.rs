@@ -1596,3 +1596,34 @@ fn a_candidate_names_its_descriptor_whole_or_not_at_all() {
         );
     }
 }
+
+#[test]
+fn a_candidate_carries_its_streaming_flag_only_when_true() {
+    let named = candidate_document(CANDIDATE_NAMED);
+    let mut streams = named.clone();
+    streams["candidate"]["streaming"] = json!(true);
+    assert!(schema_error_paths(&streams).is_empty());
+    let request = decode_request(&streams).expect("decodes");
+    assert!(request.candidate.as_ref().expect("candidate").streaming);
+    assert_eq!(serde_json::to_value(&request).expect("encode"), streams);
+
+    let mut unary = named.clone();
+    unary["candidate"]["streaming"] = json!(false);
+    let request = decode_request(&unary).expect("decodes");
+    assert_eq!(
+        serde_json::to_value(request).expect("encode"),
+        named,
+        "`false` is written as an absent field"
+    );
+
+    let mut wrong = named;
+    wrong["candidate"]["streaming"] = json!(1);
+    assert_eq!(
+        schema_error_paths(&wrong),
+        BTreeSet::from(["/candidate/streaming".to_string()])
+    );
+    assert!(matches!(
+        decode_request(&wrong),
+        Err(DecodeError::Malformed(_))
+    ));
+}

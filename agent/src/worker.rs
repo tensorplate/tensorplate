@@ -261,6 +261,19 @@ pub struct ServingMember {
     pub descriptor_digest: Option<String>,
     pub configuration_digest: Option<String>,
     pub serving_url: String,
+    /// Where this generation serves stream sessions; none when it was
+    /// started without streaming.
+    pub stream: Option<StreamTarget>,
+}
+
+/// The stream listener of a generation started with streaming.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamTarget {
+    /// `host:port`, an IPv6 host in brackets.
+    pub endpoint: String,
+    /// The digest an Open names: the descriptor's, or for a format 0.1
+    /// bundle the manifest's. The worker echoes it and verifies nothing.
+    pub descriptor_digest: String,
 }
 
 /// What a worker process the agent holds is there for.
@@ -825,6 +838,7 @@ mod tests {
             bundle_name: Some("m".into()),
             bundle_version: Some("1".into()),
             artifact_relative_path: Some("model.bin".into()),
+            streaming: false,
         }
     }
 

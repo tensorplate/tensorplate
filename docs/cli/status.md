@@ -25,7 +25,12 @@ tensorplate status [--observability-snapshot <path>] [--no-quarantine] [--output
   `previous_active` and `candidate` always carry a `generation` key, `null`
   when the agent did not name one. `previous_active.generation` is the
   generation a retained deployment was last started as, for a deployment
-  whose record names a deployment descriptor. Not done yet: `severity` does not judge
+  whose record names a deployment descriptor. For a deployment started with
+  `deploy --streaming`, human output adds `stream_endpoint=` and
+  `descriptor_digest=` under `active:`, the endpoint and digest a stream
+  Open names with the generation; in JSON, `active`, `previous_active` and
+  `candidate` always carry both keys, non-null only on `active` while its
+  serving generation streams. Not done yet: `severity` does not judge
   `process` or `readiness`. It judges `contact`, and a member whose process
   is `stopped` or draining reports none, so a `serving` member whose process
   is `stopped` does not lower it.
@@ -102,6 +107,8 @@ worker from its actual state.
       "generation": 4,
       "backend": "tensorrt",
       "serving_url": "http://127.0.0.1:18081/infer",
+      "stream_endpoint": null,
+      "descriptor_digest": null,
       …
     },
     "previous_active": null,

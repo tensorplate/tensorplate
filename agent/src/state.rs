@@ -810,6 +810,7 @@ mod tests {
             staged_path: format!("/tmp/{id}"),
             promoted_monotonic_ns: None,
             labels: Default::default(),
+            streaming: false,
         }
     }
 

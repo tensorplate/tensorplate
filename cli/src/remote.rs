@@ -1042,6 +1042,9 @@ pub fn route_deploy<O: Write, E: Write>(
         args.push("--set-operation".to_string());
         args.push("add".to_string());
     }
+    if opts.streaming {
+        args.push("--streaming".to_string());
+    }
     let ctx = RemoteCtx {
         runner,
         entry,
@@ -1621,6 +1624,7 @@ mod tests {
             wait: true,
             wait_timeout_ms: 1000,
             labels: vec![],
+            streaming: false,
         });
         assert!(matches!(
             build_remote_args(&deploy),
@@ -1642,6 +1646,7 @@ mod tests {
             wait: false,
             wait_timeout_ms: 1000,
             labels: vec![],
+            streaming: false,
         };
         let runner = MockRunner::new(
             0,
@@ -1685,12 +1690,13 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--deployment-id", "yolo-1"]));
         assert!(args.contains(&"--no-wait".to_string()));
         // The default `replace` is not forwarded, so older device CLIs
-        // accept the argv.
+        // accept the argv; nor is a deploy that does not ask for streaming.
         assert!(!args.contains(&"--set-operation".to_string()));
+        assert!(!args.contains(&"--streaming".to_string()));
     }
 
     #[test]
-    fn route_deploy_forwards_set_operation_add() {
+    fn route_deploy_forwards_set_operation_add_and_streaming() {
         let td = tempfile::TempDir::new().unwrap();
         let bundle = td.path().join("bundle");
         std::fs::create_dir_all(&bundle).unwrap();
@@ -1703,6 +1709,7 @@ mod tests {
             wait: false,
             wait_timeout_ms: 1000,
             labels: vec![],
+            streaming: true,
         };
         let runner = MockRunner::new(
             0,
@@ -1728,6 +1735,7 @@ mod tests {
         .unwrap();
         let args = runner.last_args();
         assert!(args.windows(2).any(|w| w == ["--set-operation", "add"]));
+        assert!(args.contains(&"--streaming".to_string()));
     }
 
     #[test]
@@ -1792,6 +1800,7 @@ mod tests {
             wait: true,
             wait_timeout_ms: 1000,
             labels: vec![],
+            streaming: false,
         };
         let runner = MockRunner::new(0, "");
         let copier = MockCopier {

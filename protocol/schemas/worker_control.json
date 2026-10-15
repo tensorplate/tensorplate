@@ -152,7 +152,11 @@
         "artifact_relative_path": {"type": "string"},
         "generation": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
         "descriptor_digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"},
-        "configuration_digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"}
+        "configuration_digest": {"type": "string", "pattern": "^[a-z0-9-]+:[A-Fa-f0-9]+$"},
+        "streaming": {
+          "type": "boolean",
+          "description": "The worker started from this candidate serves stream sessions on the stream port its generation holds. Written only when true."
+        }
       },
       "dependencies": {
         "generation": ["descriptor_digest", "configuration_digest"],

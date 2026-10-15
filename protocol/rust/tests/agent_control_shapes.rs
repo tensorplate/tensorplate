@@ -26,12 +26,16 @@ use tensorplate_protocol::agent_state::decode_agent_state;
 use tensorplate_protocol::resident_set::{MemberState, ResidentSet};
 use tensorplate_protocol::{
     decode_with_version_check, AdmissionMode, ContactState, DecodeError, ProcessState, Readiness,
-    FEATURE_MEMBER_ROLLBACK, FEATURE_SET_OPERATION_ADD, MAX_MEMBER_SESSIONS,
+    FEATURE_DEPLOY_STREAMING, FEATURE_MEMBER_ROLLBACK, FEATURE_SET_OPERATION_ADD,
+    MAX_MEMBER_SESSIONS,
 };
 
 const GOLDEN: &str = "agent_control_singleton_lifecycle.jsonl";
 /// Status exchanges recorded from an agent that runs the member registry.
 const MEMBER_STATUS: &str = "agent_control_member_status.jsonl";
+/// A deploy that asks for streaming and the status after it, recorded the
+/// same way from an agent whose configuration gives stream ports.
+const STREAMING: &str = "agent_control_streaming_deploy.jsonl";
 
 fn fixture(name: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -121,7 +125,7 @@ fn committed_set(fixture_name: &str) -> ResidentSet {
 
 #[test]
 fn the_recorded_exchanges_still_decode_and_reencode_byte_for_byte() {
-    for name in [GOLDEN, MEMBER_STATUS] {
+    for name in [GOLDEN, MEMBER_STATUS, STREAMING] {
         for (index, line) in fixture(name).lines().enumerate() {
             let value: Value = serde_json::from_str(line).expect("json");
             let errors = schema_error_paths(&value);
@@ -366,7 +370,11 @@ fn the_control_features_are_spelled_as_the_schema_allows() {
         ["description"]
         .as_str()
         .expect("description");
-    for feature in [FEATURE_SET_OPERATION_ADD, FEATURE_MEMBER_ROLLBACK] {
+    for feature in [
+        FEATURE_SET_OPERATION_ADD,
+        FEATURE_MEMBER_ROLLBACK,
+        FEATURE_DEPLOY_STREAMING,
+    ] {
         assert!(
             description.contains(&format!("`{feature}`")),
             "{feature} undocumented"
@@ -570,6 +578,12 @@ fn refused_requests() -> Vec<Refusal> {
             |v| v["deploy"]["set_operation"] = json!("merge"),
             "/deploy/set_operation",
             "unknown variant `merge`",
+        ),
+        refusal(
+            "a streaming flag that is not a boolean",
+            |v| v["deploy"]["streaming"] = json!("yes"),
+            "/deploy/streaming",
+            "invalid type: string",
         ),
         refusal(
             "a null admission mode",
@@ -830,6 +844,12 @@ fn requests_both_readers_accept() {
             v["deploy"]["set_operation"] = json!("replace");
         }),
         ("an add", |v| v["deploy"]["set_operation"] = json!("add")),
+        ("a streaming deploy", |v| {
+            v["deploy"]["streaming"] = json!(true);
+        }),
+        ("a deploy that asks for no streaming", |v| {
+            v["deploy"]["streaming"] = json!(false);
+        }),
         ("qualification with a test count", |v| {
             v["deploy"]["admission_mode"] = json!("qualification");
             v["deploy"]["test_count"] = json!(4);
@@ -900,6 +920,15 @@ fn defaults_are_omitted_on_the_wire() {
         serde_json::to_value(&decoded).expect("encode"),
         deploy_base(),
         "`replace` is written as an absent field"
+    );
+    let mut request = deploy_base();
+    request["deploy"]["streaming"] = json!(false);
+    let decoded = decode_request(&request).expect("decodes");
+    assert!(!decoded.deploy.as_ref().expect("deploy").streaming);
+    assert_eq!(
+        serde_json::to_value(&decoded).expect("encode"),
+        deploy_base(),
+        "`false` is written as an absent field"
     );
     let built = ControlRequest::undeploy(
         None,
@@ -1167,4 +1196,115 @@ fn a_status_reader_passes_over_a_key_it_does_not_know() {
     let decoded: ControlResponse =
         decode_with_version_check(&response.to_string()).expect("unknown keys are passed over");
     assert_eq!(decoded.agent_status, known);
+}
+
+// ---- The active worker's stream endpoint -------------------------------------
+
+/// The recorded status of a set of one, with a stream endpoint and the
+/// digest an Open names on its `active`.
+fn status_with_a_stream_endpoint() -> Value {
+    let mut response = status_with_the_process_fields();
+    let active = &mut response["agent_status"]["active"];
+    active["stream_endpoint"] = json!("127.0.0.1:18105");
+    active["descriptor_digest"] = json!(format!("sha256:{}", "5e".repeat(32)));
+    response
+}
+
+#[test]
+fn the_recorded_streaming_status_names_its_endpoint_and_the_manifest_digest() {
+    let recorded = fixture(STREAMING);
+    let line = recorded.lines().nth(3).expect("the status response");
+    let response: Value = serde_json::from_str(line).expect("json");
+    let active = &response["agent_status"]["active"];
+    assert_eq!(active["stream_endpoint"], "127.0.0.1:41285");
+    // A format 0.1 bundle names no descriptor: an Open names its manifest.
+    assert_eq!(active["descriptor_digest"], active["bundle_digest"]);
+    assert_eq!(active["generation"], 1);
+}
+
+#[test]
+fn the_active_stream_endpoint_and_its_digest_are_spelled_as_the_schema_allows() {
+    let response = status_with_a_stream_endpoint();
+    assert!(schema_error_paths(&response).is_empty());
+    let decoded: ControlResponse =
+        decode_with_version_check(&response.to_string()).expect("decodes");
+    let active = decoded
+        .agent_status
+        .as_ref()
+        .and_then(|status| status.active.as_ref())
+        .expect("active");
+    assert_eq!(active.stream_endpoint.as_deref(), Some("127.0.0.1:18105"));
+    assert_eq!(
+        active.descriptor_digest.as_deref(),
+        response["agent_status"]["active"]["descriptor_digest"].as_str()
+    );
+    assert_eq!(serde_json::to_value(&decoded).expect("encode"), response);
+
+    for endpoint in ["localhost:18105", "[::1]:18105"] {
+        let mut other = response.clone();
+        other["agent_status"]["active"]["stream_endpoint"] = json!(endpoint);
+        assert!(schema_error_paths(&other).is_empty(), "{endpoint}");
+    }
+}
+
+#[test]
+fn the_schema_refuses_a_stream_endpoint_off_loopback_or_apart_from_its_digest() {
+    const ACTIVE: &str = "/agent_status/active";
+    let cases: [(&str, Edit, &str); 8] = [
+        (
+            "a host off loopback",
+            |v| v["agent_status"]["active"]["stream_endpoint"] = json!("192.0.2.1:18105"),
+            "/agent_status/active/stream_endpoint",
+        ),
+        (
+            "a URL",
+            |v| v["agent_status"]["active"]["stream_endpoint"] = json!("http://127.0.0.1:18105"),
+            "/agent_status/active/stream_endpoint",
+        ),
+        (
+            "an IPv6 loopback without brackets",
+            |v| v["agent_status"]["active"]["stream_endpoint"] = json!("::1:18105"),
+            "/agent_status/active/stream_endpoint",
+        ),
+        (
+            "a digest in upper case",
+            |v| {
+                v["agent_status"]["active"]["descriptor_digest"] =
+                    json!(format!("sha256:{}", "5E".repeat(32)));
+            },
+            "/agent_status/active/descriptor_digest",
+        ),
+        (
+            "a digest of another algorithm",
+            |v| {
+                v["agent_status"]["active"]["descriptor_digest"] =
+                    json!(format!("sha512:{}", "5e".repeat(32)));
+            },
+            "/agent_status/active/descriptor_digest",
+        ),
+        (
+            "an endpoint without its digest",
+            |v| remove(&mut v["agent_status"]["active"], "descriptor_digest"),
+            ACTIVE,
+        ),
+        (
+            "a digest without its endpoint",
+            |v| remove(&mut v["agent_status"]["active"], "stream_endpoint"),
+            ACTIVE,
+        ),
+        (
+            "an endpoint without its generation",
+            |v| remove(&mut v["agent_status"]["active"], "generation"),
+            ACTIVE,
+        ),
+    ];
+    for (label, edit, at) in cases {
+        let mut response = status_with_a_stream_endpoint();
+        edit(&mut response);
+        assert_eq!(
+            schema_error_paths(&response),
+            BTreeSet::from([at.to_string()]),
+            "{label}"
+        );
+    }
 }
