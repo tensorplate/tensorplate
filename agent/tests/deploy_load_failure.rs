@@ -16,7 +16,7 @@
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -59,7 +59,7 @@ struct HealthPort {
 
 impl HealthPort {
     fn listen() -> Self {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let listener = fresh_listener();
         let port = listener.local_addr().expect("addr").port();
         let serving = Arc::new(Mutex::new(String::new()));
         let answer = serving.clone();
@@ -103,12 +103,33 @@ fn read_request_head(stream: &mut TcpStream) {
     }
 }
 
+/// A listener on a port no case of this binary was given before. A port is
+/// released once a case has it, and the kernel may offer it again: a case's
+/// worker that does not listen would then reach another case's health stub.
+fn fresh_listener() -> TcpListener {
+    static GIVEN: Mutex<BTreeSet<u16>> = Mutex::new(BTreeSet::new());
+    let mut given = GIVEN.lock().expect("lock");
+    fresh_from(&mut given, || bind_port(0))
+}
+
+fn fresh_from(given: &mut BTreeSet<u16>, mut bind: impl FnMut() -> TcpListener) -> TcpListener {
+    // Held until a fresh one is found, so that none is offered twice.
+    let mut offered_again = Vec::new();
+    loop {
+        let listener = bind();
+        if given.insert(listener.local_addr().expect("addr").port()) {
+            return listener;
+        }
+        offered_again.push(listener);
+    }
+}
+
+fn bind_port(port: u16) -> TcpListener {
+    TcpListener::bind(("127.0.0.1", port)).expect("bind")
+}
+
 fn unused_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+    fresh_listener().local_addr().expect("addr").port()
 }
 
 struct ProcessHarness {
@@ -264,6 +285,19 @@ fn read_response(stream: &mut TcpStream) -> String {
     let mut response = String::new();
     stream.read_to_string(&mut response).expect("read response");
     response
+}
+
+#[test]
+fn a_port_offered_again_is_not_given_twice() {
+    let mut given = BTreeSet::new();
+    let first = fresh_from(&mut given, || bind_port(0));
+    let port = first.local_addr().expect("addr").port();
+    drop(first);
+
+    let mut offers = [port, 0].into_iter();
+    let next = fresh_from(&mut given, || bind_port(offers.next().expect("an offer")));
+
+    assert_ne!(next.local_addr().expect("addr").port(), port);
 }
 
 #[test]
