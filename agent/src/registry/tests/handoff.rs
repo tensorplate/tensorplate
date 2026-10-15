@@ -6,7 +6,7 @@
 
 use super::*;
 use tensorplate_protocol::agent_control::AgentRunState;
-use tensorplate_protocol::agent_state::DeploymentRecord;
+use tensorplate_protocol::agent_state::{AgentState, DeploymentRecord};
 use tensorplate_protocol::bundle_profile::BundleRuleCode;
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::ErrorCode;
@@ -810,6 +810,29 @@ fn the_loop_never_clears_an_error_that_is_not_the_restores() {
     assert_eq!(w.coordinator.supervise(), serving("stt", 3));
 
     assert_eq!(w.store.snapshot().unwrap().last_error, recorded);
+}
+
+#[test]
+fn a_cleared_restore_error_recorded_again_is_not_cleared_by_a_later_restart() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let next = restarting_after_a_failed_restore(&w);
+    let restored = next.store.snapshot().unwrap().last_error.unwrap();
+    assert_eq!(next.coordinator.supervise(), serving("stt", 3));
+    assert_eq!(next.store.snapshot().unwrap().last_error, None);
+    let again = |s: &mut AgentState| {
+        s.last_error = Some(restored.clone());
+        Ok(())
+    };
+    next.store.update(again).unwrap();
+
+    next.stop(3);
+    // The restore's restart was the first inside the window.
+    next.f.clock.advance(RESTART_DELAYS[1]);
+    assert_eq!(next.coordinator.supervise(), restarted(4));
+    assert_eq!(next.coordinator.supervise(), serving("stt", 4));
+
+    assert_eq!(next.store.snapshot().unwrap().last_error, Some(restored));
 }
 
 /// The next start of `w`'s agent: its restore failed, and the restart

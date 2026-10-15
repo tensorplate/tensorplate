@@ -279,7 +279,10 @@ impl Coordinator {
                 s.last_error = None;
             }
             Ok(())
-        })
+        })?;
+        // Spent: an equal error recorded later is not the restore's.
+        self.restore_failure_mark().take();
+        Ok(())
     }
 
     /// Drive a deploy transaction end-to-end.
