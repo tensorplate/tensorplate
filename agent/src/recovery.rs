@@ -32,9 +32,8 @@ use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
 use crate::worker::WorkerControl;
 
-/// The context of a `last_error` that is the failure of a start's restore
-/// whose member the worker control restarts: it is cleared once that member
-/// serves.
+/// The context of a start's restore failure that has no typed reason of its
+/// own.
 pub(crate) const RESTORE_FAILURE: &str = "startup_restore";
 
 /// What a start does about the transaction it finds in flight.
@@ -350,11 +349,16 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
     let Err(err) = came_up else {
         return store.set_last_error(None);
     };
-    let failure = err.to_record().with_context(RESTORE_FAILURE);
+    let mut failure = err.to_record();
+    // A manifest rule or platform reason `to_record` set stays.
+    failure
+        .context
+        .get_or_insert_with(|| RESTORE_FAILURE.to_owned());
     store.set_last_error(Some(failure.clone()))?;
-    if !worker.owe_restore(&candidate, failure) {
+    if !worker.owe_restore(&candidate, failure.clone()) {
         return Err(err);
     }
+    coordinator.mark_restore_failure(failure);
     eprintln!(
         "startup recovery: `{}` did not come up and is started again: {err}",
         active.deployment_id

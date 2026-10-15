@@ -680,7 +680,7 @@ start does when the restore cannot be made:
 | a descriptor document that is missing, is not a regular file, does not verify, is another identity's or describes another bundle | the same |
 | a re-stamp of the descriptor that is refused | the same |
 | a state write of its own that fails, or a descriptor document it cannot write | ends with exit code `5` |
-| a worker that cannot be started, exits while loading, is not ready within `worker.warm_timeout_ms` or exits before it is promoted | comes up with the reason in `last_error`, and the [member registry](#member-registry) starts the record again as it restarts a serving member that stopped; `last_error`, whose `context` is `startup_restore`, is cleared once a restart serves the record (no error of another context is), and when the restarts are used up status reports the member's failure. A worker control that restarts nothing (`worker.mode = "mock"`) ends the start with exit code `5` |
+| a worker that cannot be started, exits while loading, is not ready within `worker.warm_timeout_ms` or exits before it is promoted | comes up with the reason in `last_error`, and the [member registry](#member-registry) starts the record again as it restarts a serving member that stopped; `last_error`, whose `context` is whatever typed reason the failure carries or else `startup_restore`, is cleared once a restart serves the record, unless a deploy or rollback has begun since (no other error is cleared), and when the restarts are used up status reports the member's failure. A worker control that restarts nothing (`worker.mode = "mock"`) ends the start with exit code `5` |
 
 The refusals in the first five rows are decided by the staged copy and
 the descriptor document, so the agent stays up for `deploy` and

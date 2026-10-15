@@ -27,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tensorplate_platform::PlatformRegistry;
@@ -53,7 +53,6 @@ use crate::bundle::{
 use crate::config::AgentConfig;
 use crate::error::{AgentError, AgentResult};
 use crate::platform_admission::PlatformAdmission;
-use crate::recovery::RESTORE_FAILURE;
 use crate::state::StateStore;
 use crate::supervision::supervisor::{DesiredWorker, WorkerSupervisor};
 use crate::transaction::is_permitted;
@@ -83,6 +82,9 @@ pub struct Coordinator {
     /// A member reported serving since `last_error` was last checked for a
     /// restore's failure; see [`Self::supervise`].
     restore_check_owed: AtomicBool,
+    /// The failure the start's restore recorded, while the loop may clear
+    /// it: forgotten as a transaction begins, whose writes are its own.
+    restore_failure: Mutex<Option<ErrorRecord>>,
     /// A failed clearing write was logged; it is not logged on every turn.
     clear_failure_logged: AtomicBool,
     #[cfg(test)]
@@ -116,6 +118,7 @@ impl Coordinator {
             platform_registry: None,
             platform_admission: None,
             restore_check_owed: AtomicBool::new(false),
+            restore_failure: Mutex::new(None),
             clear_failure_logged: AtomicBool::new(false),
             #[cfg(test)]
             restore_clear_logs: std::sync::atomic::AtomicUsize::new(0),
@@ -242,22 +245,37 @@ impl Coordinator {
         events
     }
 
+    /// Let the agent's loop clear `failure`, the start's restore's, once the
+    /// active record is served.
+    pub(crate) fn mark_restore_failure(&self, failure: ErrorRecord) {
+        *self.restore_failure_mark() = Some(failure);
+    }
+
+    fn restore_failure_mark(&self) -> std::sync::MutexGuard<'_, Option<ErrorRecord>> {
+        self.restore_failure
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Clear `last_error` when it is the restore's failure and the active
     /// record is served now.
     fn clear_restore_failure(&self) -> AgentResult<()> {
-        let is_restores = |error: &Option<ErrorRecord>| {
-            error.as_ref().and_then(|e| e.context.as_deref()) == Some(RESTORE_FAILURE)
-        };
         let state = self.store.snapshot()?;
+        let failure = self.restore_failure_mark().clone();
         let served = match (self.worker.serving_member()?, state.active.as_ref()) {
             (Some(serving), Some(active)) => serves(&serving, active),
             _ => false,
         };
-        if !served || !is_restores(&state.last_error) {
+        let Some(failure) = failure else {
+            return Ok(());
+        };
+        if !served || state.last_error.as_ref() != Some(&failure) {
             return Ok(());
         }
         self.store.update(|s| {
-            if is_restores(&s.last_error) {
+            // A transaction that began since the first read forgot the mark.
+            let marked = self.restore_failure_mark().is_some();
+            if marked && s.last_error.as_ref() == Some(&failure) {
                 s.last_error = None;
             }
             Ok(())
@@ -304,6 +322,7 @@ impl Coordinator {
             failure: None,
         };
         self.store.begin_transaction(tx_record)?;
+        self.restore_failure_mark().take();
         // No other deploy stages while this one's transaction is in flight.
         match crate::staging::prune(&self.config.staging_dir, &self.store) {
             Ok(0) => {}
@@ -594,6 +613,7 @@ impl Coordinator {
             failure: None,
         };
         self.store.begin_transaction(tx_record)?;
+        self.restore_failure_mark().take();
 
         self.advance(
             &transaction_id,
