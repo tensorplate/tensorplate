@@ -824,7 +824,7 @@ fn a_member_whose_staged_bundle_was_replaced_is_failed_instead_of_restarted() {
     let f = fixture();
     let staged = stage(&f, "v0_1/x86_fixture_smoke");
     serve_staged(&f, &staged);
-    // What a deploy of the same id leaves when it fails after staging.
+    // What a later deploy of the id leaves where an earlier agent staged.
     stage(&f, "v0_1/x86_cuda_smoke");
     exit(&f.launcher.handle(1));
     assert_eq!(owed(&f.registry.supervise()), Some(secs(1)));

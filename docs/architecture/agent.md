@@ -525,7 +525,8 @@ that failed, stay until the next deploy begins or the agent starts again. A depl
 its candidate was prepared leaves that candidate's process running until
 the next deploy or rollback prepares a candidate, or the agent stops; the
 abandoned candidate's tree can be removed before then, and nothing reads it
-again.
+again. So can the tree of a member a commit retired while its process is
+still draining: it has been told to stop and is not started again.
 
 A `staging_dir` belongs to one state directory, because the agent removes
 every tree its own state files do not name. Two agents with separate state
