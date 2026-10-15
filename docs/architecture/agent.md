@@ -477,8 +477,8 @@ probe, a candidate that exited, whose control channel failed or whose
 process cannot be inspected, as well as one that was given up, and moves
 nothing; a refused fence fails the
 transaction before its commit, and the serving worker keeps serving. The
-serving worker is not told to stop admitting work, since no worker
-implements that operation yet. `activate`, once the commit is durable,
+serving worker is not told to stop admitting work: the agent does not send
+`admission_fence` yet. `activate`, once the commit is durable,
 gives the candidate the serving slot and then asks the member it replaces
 to stop; it is the only call that mutates the worker's active deployment.
 It is refused once the agent is stopping, or when the worker control no

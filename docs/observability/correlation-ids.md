@@ -26,16 +26,21 @@ treat the field as a value carried on the request, not global state.
 
 [`worker_control.json`](../../protocol/schemas/worker_control.json)
 defines the messages of the runtime control channel between the agent and
-a serving worker; nothing opens that channel yet. On it, every request
-carries a `correlation_id` and the response that answers it echoes the
-same value. `transaction_id` there names the committing deploy
-transaction for `admission_fence`, `activate` and `retire`, and is the
-literal `runtime` for `quota_assign`, `ledger_status` and
-`pressure_directive`, which belong to no transaction. Each request gets its
-own `correlation_id`. The agent repeats only the latest request it sent on
-a channel, with the id it was first sent with; the worker keeps the id and
-outcome of the latest request it applied and answers a repeat from that
-record instead of applying it again.
+a serving worker. The agent's member registry opens one for every worker
+it starts and polls it with `ledger_status`; the agent sends no other
+operation yet. On it, every request carries a `correlation_id` and the
+response that answers it echoes the same value. `transaction_id` there
+names the committing deploy transaction for `admission_fence`, `activate`
+and `retire`, and is the literal `runtime` for `quota_assign`,
+`ledger_status` and `pressure_directive`, which belong to no transaction.
+Each request gets its own `correlation_id`. The schema lets the agent
+repeat only the latest request it sent on a channel, with the id it was
+first sent with, and asks the worker to answer a repeat with the outcome
+it gave. The agent repeats no request yet. The worker keeps no record of
+the latest request: a repeat of an applied `admission_fence`, `activate`
+or `retire` gets the same answer because each depends only on the
+member's admission state, and the operations whose repeat would act
+twice are not implemented.
 
 On the sidecar IPC, the speech job and session messages carry no
 `correlation_id`. A job's messages are joined by its `job_id`, which the
