@@ -20,7 +20,8 @@
 // From such an agent too, `agent_control_streaming_handover.jsonl` holds
 // the status between a streaming update's commit and its activation, and
 // `agent_control_unary_status.jsonl` the status of a deployment that does
-// not stream.
+// not stream, and `agent_control_no_deployment_status.jsonl` the status
+// before anything is deployed.
 
 #![cfg(unix)]
 #![allow(
@@ -346,4 +347,17 @@ fn the_status_of_a_deployment_that_does_not_stream_crosses_the_socket_as_recorde
     let lines = recorded_status(&h, &agent, "ctl-000001");
 
     assert_recorded(&fixture_path("agent_control_unary_status.jsonl"), &lines);
+}
+
+#[test]
+fn the_status_of_an_agent_with_nothing_deployed_crosses_the_socket_as_recorded() {
+    let h = Harness::new();
+    let agent = RegistryAgent::start_with_stream_ports(&h);
+
+    let lines = recorded_status(&h, &agent, "ctl-000001");
+
+    assert_recorded(
+        &fixture_path("agent_control_no_deployment_status.jsonl"),
+        &lines,
+    );
 }
