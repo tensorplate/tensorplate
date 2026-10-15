@@ -368,7 +368,11 @@ Every state write inside a transaction can fail without a crash (a full
 disk): the write that begins it aside, these are the write of a phase, of
 the bundle digest, of the candidate record or of a generation, the write
 that ends a failed transaction, the commit, and the write that ends a
-committed one. A write that fails before its commit rename (see the
+committed one. A refused commit write ends its transaction at once: the
+candidate is given up, and the write that ends a failed transaction records
+the failure, with a quarantine entry at `warmed` for a deploy and as
+`last_error` for a rollback. Otherwise, and when that write fails too, a
+write that fails before its commit rename (see the
 [durable state store](#durable-state-store-v01-e08-f02)) changes nothing:
 the request is answered with an `internal` error and the transaction stays
 in flight at the phase it had recorded. Nothing clears it while the agent
@@ -388,11 +392,11 @@ depends on the write that failed:
   `in_flight: phase=promoted`. The start clears the transaction, makes no
   quarantine entry and starts the committed deployment again.
 
-This run treats a commit write that fails at or after its rename
-(`StateIndeterminate`) as one refused before it: the candidate is given up
-and the member that served goes on serving. The next start reads
-whichever state the rename left, and settles the transaction forward when
-it was committed.
+A commit write that fails at or after its rename (`StateIndeterminate`)
+gives the candidate up too, and the member that served goes on serving. The
+store then refuses every write, so the transaction stays in flight until the
+agent restarts. The next start reads whichever state the rename left, and
+settles the transaction forward when it was committed.
 
 A transaction in flight never carries a `failure`: the write that records
 why a transaction failed is the one that clears it, so this agent never
