@@ -561,7 +561,7 @@ listener is opened. The binary's exit codes are:
 | 64   | Configuration parse / validation failure. |
 | 65   | Component build / session load failure. |
 | 66   | Listener bind / accept failure. |
-| 70   | Internal error, and a worker that stopped itself because its speech backend stalled ([A stalled speech backend](#a-stalled-speech-backend)). |
+| 70   | Internal error, and a worker that stopped itself because its speech backend stalled ([A stalled speech backend](#a-stalled-speech-backend)), also when the stall came during a stop it was asked for. |
 
 A worker that exits with 64 or 65 ends its stderr with one JSON line, the
 startup failure record, written whether or not `enable_stderr_logs` is
@@ -1681,6 +1681,29 @@ restart's delay, the successor's load and prime, a client's next job, the
 job's deadline and the bound, the stop). A longer cycle restarts the member
 after every stall and never fails it. A worker started by hand exits 70
 and nothing starts another.
+
+A bound can also pass during a stop the worker was asked for, because the
+dispatch runs until the stream listener has stopped, which takes up to the
+drain window (`shutdown.drain_deadline`): the bound of a release that had
+less of it left than that, and, with a window longer than the release bound
+(10 s; the member registry gives its members 5 s), the bound of a job that
+misses its deadline inside the window. The stall is then recorded
+and logged as above, without a second `shutdown requested` line, and that
+stop returns 70 instead of 0. The agent's member registry reaps a member it
+asked to stop without reading its exit status, and kills it if it has not
+exited 10 s after the request, so such a 70 changes nothing the agent
+records; the worker's `speech backend stalled` line, which the agent
+forwards to its own log, is what shows it.
+
+**Known, not changed here: a stopped worker's sidecar can outlive it.** A
+member whose backend does not end the job it holds when the registry asks
+it to stop does not exit within the registry's 10 s: its drain window is 5 s, and its
+unload then waits up to 15 s behind the job. The registry kills the worker
+alone, and the sidecar, whose runner returns only once its backend call
+does, keeps running without its parent, with what its backend loaded
+(seen with a backend that never ends a job: the sidecar was still running
+30 s after the kill). A later change makes the runner exit once its parent
+is gone.
 
 The worst case a client sees, end to end: its own session ends at the
 job's deadline (`deadline_missed`; for audio input usually
