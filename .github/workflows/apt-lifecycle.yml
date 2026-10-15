@@ -440,7 +440,11 @@ jobs:
           CC: clang
           CXX: clang++
         # sudo resets the environment; vcpkg needs every variable the action exported.
-        run: sudo --preserve-env=CI,CC,CXX,PATH,VCPKG_ROOT,VCPKG_BINARY_SOURCES,VCPKG_FORCE_DOWNLOADED_BINARIES bash test/packaging/verify_cpu_only_smoke.sh
+        # Root's HOME is /root, where rustup would install a toolchain of its
+        # own; the build uses the one the install step put under the runner's.
+        run: |
+          export RUSTUP_HOME="${HOME}/.rustup" CARGO_HOME="${HOME}/.cargo"
+          sudo --preserve-env=CI,CC,CXX,PATH,RUSTUP_HOME,CARGO_HOME,VCPKG_ROOT,VCPKG_BINARY_SOURCES,VCPKG_FORCE_DOWNLOADED_BINARIES bash test/packaging/verify_cpu_only_smoke.sh
 
       - name: Upload smoke evidence
         if: always()

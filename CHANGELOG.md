@@ -12,7 +12,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   half-installed copy and retry, up to three attempts, instead of failing on
   a file conflict that every repeat of the same command met again; the
   version is still read from `rust-toolchain.toml`. The job on the
-  self-hosted release runner is unchanged. (V030-E01-F03-T01)
+  self-hosted release runner is unchanged.
 
 - A start of the agent now settles the transaction it finds and starts the
   recorded active deployment again in one pass. Before, a transaction

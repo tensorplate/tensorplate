@@ -91,7 +91,7 @@ class InstallPinnedToolchain(unittest.TestCase):
     def run_script(self) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [str(self.tree / "tools/ci/install-pinned-toolchain.sh")],
-            env=self.env, capture_output=True, text=True, check=False,
+            env=self.env, capture_output=True, text=True, check=False, timeout=60,
         )
 
     def calls(self, verb: str) -> int:
@@ -112,6 +112,56 @@ class InstallPinnedToolchain(unittest.TestCase):
         self.assertTrue((self.toolchain_dir() / "COMPLETE").exists())
         # The first failure's reason stays in the step log.
         self.assertIn("detected conflict: 'bin/cargo-clippy'", r.stderr)
+
+    def test_sweep_leaves_other_toolchains_and_settings_alone(self) -> None:
+        (self.toolchain_dir() / "bin").mkdir(parents=True)
+        (self.toolchain_dir() / "PARTIAL").touch()
+        keep = [
+            self.home / "toolchains" / "1.90.0-x86_64-unknown-linux-gnu" / "COMPLETE",
+            self.home / "toolchains" / "stable-x86_64-unknown-linux-gnu" / "COMPLETE",
+            self.home / "toolchains" / f"{PIN}1-x86_64-unknown-linux-gnu" / "COMPLETE",
+            self.home / "settings.toml",
+        ]
+        for f in keep:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.touch()
+        self.assertEqual(self.run_script().returncode, 0)
+        for f in keep:
+            self.assertTrue(f.exists(), f)
+
+    def test_failed_sweep_warns_and_the_next_attempt_runs(self) -> None:
+        (self.toolchain_dir() / "bin").mkdir(parents=True)
+        (self.toolchain_dir() / "PARTIAL").touch()
+        # A read-only directory the sweep cannot empty; uninstall of the stand-in is a no-op.
+        fake = self.tmp / "bin/rustup"
+        text = fake.read_text()
+        self.assertIn('rm -rf "${dir}"', text)
+        fake.write_text(text.replace('rm -rf "${dir}"', "true"))
+        rm = self.tmp / "bin/rm"
+        rm.write_text('#!/usr/bin/env bash\n'
+                      'if [[ "$*" == *toolchains* ]]; then exit 1; fi\n'
+                      'exec /bin/rm "$@"\n')
+        rm.chmod(0o755)
+        r = self.run_script()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.calls("install"), 3)
+        self.assertIn("could not remove the toolchain directory", r.stdout)
+        self.assertIn("could not be installed in 3 attempts", r.stdout)
+
+    def test_unset_home_is_a_clear_error(self) -> None:
+        del self.env["RUSTUP_HOME"]
+        self.env.pop("HOME", None)
+        r = self.run_script()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("neither RUSTUP_HOME nor HOME is set", r.stdout)
+        self.assertEqual(self.calls("install"), 0)
+
+    def test_non_numeric_attempts_is_a_clear_error(self) -> None:
+        self.env["TOOLCHAIN_INSTALL_ATTEMPTS"] = "three"
+        r = self.run_script()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("TOOLCHAIN_INSTALL_ATTEMPTS must be a positive integer", r.stdout)
+        self.assertEqual(self.calls("install"), 0)
 
     def test_unlisted_partial_directory_is_removed_too(self) -> None:
         # rustup no longer lists it, so only the directory sweep clears it.
