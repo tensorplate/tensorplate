@@ -274,10 +274,10 @@ pub fn apply_startup(coordinator: &Coordinator) -> AgentResult<RecoverySummary> 
 /// Start the active record's deployment again. A restore refused by what
 /// is on disk leaves the record not serving, with the refusal as
 /// `last_error` and no error returned, so the operator can deploy or roll
-/// back: an id that cannot name a member, another bundle staged under the
-/// id, a staged copy that does not read, a descriptor document that is not
-/// the record's, a re-stamp that is refused. A failed state write and a
-/// worker that does not come up are returned.
+/// back: an id that cannot name a member, another bundle staged at the
+/// record's path, a staged copy that does not read, a descriptor document
+/// that is not the record's, a re-stamp that is refused. A failed state
+/// write and a worker that does not come up are returned.
 fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
     let store = coordinator.state();
     let active = store
@@ -302,9 +302,9 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
         eprintln!("startup recovery: not restored: {err}");
         return store.set_last_error(Some(err.to_record()));
     }
-    // Another bundle is staged under the id than the record names, as a
-    // same-id update that did not complete leaves it. Compared for every
-    // record, one that names no descriptor included.
+    // Another bundle is staged at the record's path than it names, as an
+    // update under the id left a directory of the layout before each deploy
+    // had a tree of its own. Compared for every record.
     if let Ok(Some(refusal)) = another_bundle_staged(&active) {
         return refuse(refusal.to_record());
     }

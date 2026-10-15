@@ -6,10 +6,11 @@
 // time. It:
 //
 //   1. Verifies the bundle through the V01-E08-F03 verifier.
-//   2. Stages the bundle into `staging_dir/<deployment_id>/` by copying
-//      verified artifacts plus the manifest. Staging is content-addressed
-//      so a successful prepare keeps the previous active deployment's
-//      files untouched.
+//   2. Stages the bundle into a tree of its own,
+//      `staging_dir/<deployment_id>/<transaction id>/`, by copying the
+//      manifest plus the verified artifacts. No tree a record names is
+//      written again, so the previous active deployment's files stay as
+//      they were (see `crate::staging`).
 //   3. Walks the F04 state machine, persisting each phase through the
 //      F02 state store before the next phase begins.
 //   4. Calls the V01-E08-F05 [`WorkerControl`] for prepare / warm /
@@ -22,7 +23,6 @@
 // the previous active deployment becomes the candidate and goes back
 // through prepare / warm / promote.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -46,7 +46,6 @@ use std::collections::BTreeMap;
 use crate::backend_detection::BackendProbeReport;
 use crate::bundle::{
     capacity_check, model_artifact_relative_path, verify_before_staging, DeployFacts,
-    VerifiedBundle,
 };
 use crate::config::AgentConfig;
 use crate::error::{AgentError, AgentResult};
@@ -237,6 +236,14 @@ impl Coordinator {
             failure: None,
         };
         self.store.begin_transaction(tx_record)?;
+        // No other deploy stages while this one's transaction is in flight.
+        match crate::staging::prune(&self.config.staging_dir, &self.store) {
+            Ok(0) => {}
+            Ok(removed) => {
+                eprintln!("staged bundles: {removed} removed that no state record names");
+            }
+            Err(err) => eprintln!("staged bundles: unnamed copies were not removed: {err}"),
+        }
 
         if let Some(admission) = &self.platform_admission {
             if let Err(err) = admission.ensure_supported() {
@@ -292,7 +299,9 @@ impl Coordinator {
         })?;
 
         // Phase: staged.
-        let staged_path = match self.stage_bundle(deployment_id, &verified) {
+        let staging_dir = &self.config.staging_dir;
+        let staged = crate::staging::stage(staging_dir, deployment_id, &transaction_id, &verified);
+        let staged_path = match staged {
             Ok(p) => p,
             Err(err) => {
                 return self.fail(&transaction_id, deployment_id, err);
@@ -836,26 +845,6 @@ impl Coordinator {
         // One write clears the transaction and records why.
         self.store.fail_transaction(err.to_record())?;
         Err(err)
-    }
-
-    fn stage_bundle(&self, deployment_id: &str, verified: &VerifiedBundle) -> AgentResult<PathBuf> {
-        let dest = self.config.staging_dir.join(deployment_id);
-        fs::create_dir_all(&dest)?;
-        // Manifest first.
-        fs::copy(
-            verified.root_path.join("manifest.json"),
-            dest.join("manifest.json"),
-        )?;
-        // All declared artifacts.
-        for art in &verified.manifest.artifacts {
-            let source = verified.root_path.join(&art.path);
-            let destination = dest.join(&art.path);
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(&source, &destination)?;
-        }
-        Ok(dest)
     }
 
     fn emit(&self, event: &WorkerEvent) {

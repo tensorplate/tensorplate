@@ -49,6 +49,7 @@ pub mod recovery;
 pub mod registry;
 pub mod rollback;
 pub mod server;
+pub mod staging;
 pub mod state;
 pub mod supervision;
 pub mod transaction;

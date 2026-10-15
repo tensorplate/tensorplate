@@ -25,10 +25,16 @@ impl Agent {
 }
 
 impl Host {
-    /// Where a deploy stages `id`.
+    /// The tree the records of `id` name: a deploy stages its own.
     fn staged_at(&self, id: &str) -> String {
-        let staged = self.td.path().join("staging").join(id);
-        staged.display().to_string()
+        let state = StateStore::open(self.state_dir()).unwrap().snapshot();
+        let state = state.unwrap();
+        let records = [state.active, state.previous_active, state.candidate];
+        let trees = records.into_iter().flatten();
+        let mut trees = trees.filter_map(|r| (r.deployment_id == id).then_some(r.staged_path));
+        let staged = trees.next().expect("a record of the id");
+        assert!(trees.all(|other| other == staged), "one tree for `{id}`");
+        staged
     }
     /// What the candidate record names, as the view shows a record.
     fn candidate(&self) -> String {
@@ -176,7 +182,7 @@ fn a_deploy_takes_no_generation_when_its_document_cannot_be_written() {
 
 /// An agent started over what a same-id update that did not complete left:
 /// `stt` recorded active as the speech-to-text bundle, and the other bundle
-/// staged under the id. The update was refused after staging.
+/// staged in a tree of its own. The update was refused after staging.
 pub(super) fn started_after_an_update_that_did_not_complete(host: &Host) -> Agent {
     let (agent, _) = host.start(Worker::default());
     agent.deploy("stt", STT).unwrap();
@@ -194,8 +200,42 @@ pub(super) fn started_after_an_update_that_did_not_complete(host: &Host) -> Agen
     next
 }
 
+/// Make the record in `slot` name `staging_dir/stt`, as a deploy staged
+/// before each had a tree of its own, with the speech-to-text bundle's
+/// manifest replaced by the other's there, as a later deploy under the id
+/// left it. Every artifact of the other bundle is copied.
+fn staged_under_the_id_as_before(host: &Host, agent: &Agent, slot: Slot) {
+    let flat = host.td.path().join("staging").join("stt");
+    fs::create_dir_all(flat.join("warmup")).unwrap();
+    for file in ["manifest.json", "entry.json", "warmup/segment.txt"] {
+        fs::copy(repo(TTS).join(file), flat.join(file)).unwrap();
+    }
+    let renamed = |state: &mut AgentState| {
+        slot(state).unwrap().staged_path = flat.display().to_string();
+        Ok(())
+    };
+    agent.store.update(renamed).unwrap();
+}
+
+type Slot = fn(&mut AgentState) -> Option<&mut DeploymentRecord>;
+
+/// An agent started over `stt` recorded active at a tree of the layout
+/// before this one that holds the other bundle.
+fn started_over_another_bundle_staged_under_the_id(host: &Host) -> Agent {
+    let (agent, _) = host.start(Worker::default());
+    agent.deploy("stt", STT).unwrap();
+    drop(agent.asked());
+    staged_under_the_id_as_before(host, &agent, |state| state.active.as_mut());
+
+    let (next, pruned) = host.start(Worker::default());
+    assert_eq!(pruned, 0);
+    let summary = apply_startup(&next.coordinator).unwrap();
+    assert_eq!(summary.action, RecoveryAction::RestoreActive);
+    next
+}
+
 /// Whether the last error is that of a start that did not restore `stt`
-/// because another bundle is staged under its id.
+/// because another bundle is staged where its record says.
 fn says_another_bundle_is_staged(host: &Host) -> bool {
     let Some(error) = host.last_error() else {
         return false;
@@ -207,41 +247,34 @@ fn says_another_bundle_is_staged(host: &Host) -> bool {
 }
 
 #[test]
-fn a_start_after_a_same_id_update_that_did_not_complete_leaves_the_agent_up_and_the_deployment_not_serving(
+fn a_tree_of_the_earlier_layout_that_holds_another_bundle_leaves_the_agent_up_whatever_the_state_of_its_artifacts(
 ) {
-    let host = host();
+    for removed in [None, Some("entry.json")] {
+        let host = host();
+        drop(started_over_another_bundle_staged_under_the_id(&host));
+        if let Some(artifact) = removed {
+            fs::remove_file(host.staged_at("stt") + "/" + artifact).unwrap();
+        }
 
-    // Staging is keyed by the id alone: the record's bundle is gone from it.
-    let next = started_after_an_update_that_did_not_complete(&host);
+        let (next, _) = host.start(Worker::default());
+        let summary = apply_startup(&next.coordinator).unwrap();
 
-    // No worker is asked for, no generation is taken and nothing is written.
-    assert!(next.never_asked() && says_another_bundle_is_staged(&host));
-    assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
-    assert_eq!(host.documents(), "stt-1");
-}
-
-#[test]
-fn a_staged_copy_of_another_bundle_leaves_the_agent_up_whatever_the_state_of_its_artifacts() {
-    let host = host();
-    drop(started_after_an_update_that_did_not_complete(&host));
-    // The staged manifest is the update's, and one of its artifacts is gone.
-    fs::remove_file(host.staged_at("stt") + "/entry.json").unwrap();
-
-    let (next, _) = host.start(Worker::default());
-    let summary = apply_startup(&next.coordinator).unwrap();
-
-    assert_eq!(summary.action, RecoveryAction::RestoreActive);
-    assert!(next.never_asked() && says_another_bundle_is_staged(&host));
-    assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
+        // No worker is asked for, no generation is taken and nothing is written.
+        assert_eq!(summary.action, RecoveryAction::RestoreActive);
+        assert!(next.never_asked() && says_another_bundle_is_staged(&host));
+        assert_eq!(host.view(), ["stt@1", "-", "-", "2"]);
+        assert_eq!(host.documents(), "stt-1");
+    }
 }
 
 #[test]
 fn a_deploy_of_the_id_through_an_agent_that_did_not_restore_it_succeeds_and_the_next_start_restores_it(
 ) {
-    // As the bundle the update staged, and as the one the record names.
+    // As the bundle staged at the record's path, and as the one it names.
     for bundle in [TTS, STT] {
         let host = host();
-        let next = started_after_an_update_that_did_not_complete(&host);
+        let next = started_over_another_bundle_staged_under_the_id(&host);
+        assert!(says_another_bundle_is_staged(&host));
 
         next.deploy("stt", bundle).unwrap();
 
@@ -262,12 +295,13 @@ fn a_deploy_of_the_id_through_an_agent_that_did_not_restore_it_succeeds_and_the_
 }
 
 #[test]
-fn a_same_id_update_killed_before_its_commit_is_ended_by_one_start_that_comes_up_with_the_error() {
+fn a_same_id_update_killed_before_its_commit_is_ended_by_one_start_that_restores_the_record() {
     for (call, reached) in [("prepare", "@CapacityChecked"), ("warm", "@Prepared")] {
         let host = host();
         let (agent, _) = host.start(Worker::killed_in(call, 2));
         agent.deploy("stt", STT).unwrap();
         drop(agent.asked());
+        let serving = host.staged_at("stt");
         // The update is deployed from a copy that is gone by the next start.
         let source = host.td.path().join("update");
         fs::create_dir_all(source.join("warmup")).unwrap();
@@ -278,37 +312,40 @@ fn a_same_id_update_killed_before_its_commit_is_ended_by_one_start_that_comes_up
         let update = agent.coordinator.deploy("stt", &source, labels, None, None);
         assert!(matches!(update, Err(AgentError::Stopping)), "{update:?}");
         refuse_state_writes(&host.state_dir(), false);
-        drop(agent.asked());
+        let updated = agent.asked().reference.staged_path;
         assert_eq!(host.view(), ["stt@1", "-", "stt@2", "3"]);
         fs::remove_dir_all(&source).unwrap();
 
-        // One start ends the update without running any of it again, and
-        // finds the update's bundle staged under the id: it comes up.
-        for removed in [0, 1, 0] {
-            let (next, pruned) = host.start(Worker::default());
-            assert_eq!(pruned, removed, "{call}");
-            let summary = apply_startup(&next.coordinator).unwrap();
-            assert_eq!(summary.action, RecoveryAction::RestoreActive, "{call}");
-            assert!(next.never_asked() && says_another_bundle_is_staged(&host));
-            assert_eq!(host.view(), ["stt@1", "-", "-", "3"], "{call}");
-            assert_eq!(host.candidate(), "-");
-            let (quarantined, _) = host.quarantined();
-            assert!(quarantined.ends_with(reached) && !quarantined.contains(' '));
-        }
-        assert_eq!(host.documents(), "stt-1");
+        // One start ends the update without running any of it again and
+        // starts the record from its own tree.
+        let (next, _) = host.start(Worker::default());
+        let summary = apply_startup(&next.coordinator).unwrap();
+
+        assert_eq!(summary.action, RecoveryAction::RestoreActive, "{call}");
+        assert_eq!(next.asked().reference.staged_path, serving, "{call}");
+        assert_eq!(host.view(), ["stt@3", "-", "-", "4"], "{call}");
+        assert_eq!(host.candidate(), "-");
+        assert_eq!(host.last_error(), None, "{call}");
+        let (quarantined, _) = host.quarantined();
+        assert!(quarantined.ends_with(reached) && !quarantined.contains(' '));
+        // The update's tree was named when the start pruned; the next goes.
+        assert!(Path::new(&updated).is_dir(), "{call}");
+        drop(host.start(Worker::default()));
+        assert!(!Path::new(&updated).exists() && Path::new(&serving).is_dir());
     }
 }
 
 #[test]
-fn a_rollback_after_a_deploy_of_another_bundle_under_the_same_id_is_refused() {
+fn a_rollback_to_a_record_whose_tree_of_the_earlier_layout_holds_another_bundle_is_refused() {
     let host = host();
     let (agent, _) = host.start(Worker::default());
     agent.deploy("stt", STT).unwrap();
     drop(agent.asked());
     agent.deploy("stt", TTS).unwrap();
-    assert_eq!(agent.asked().view, ["stt@1", "-", "stt@2", "3"]);
+    drop(agent.asked());
+    let previous: Slot = |state| state.previous_active.as_mut();
+    staged_under_the_id_as_before(&host, &agent, previous);
 
-    // The earlier record's bundle is no longer staged under the id.
     let error = agent.coordinator.rollback(None).unwrap_err().to_record();
 
     let load_failed = error.code == ErrorCode::LoadFailed && !error.recoverable;
@@ -342,7 +379,8 @@ impl Handed {
 fn a_bundle_of_another_format_is_referenced_without_its_staged_copy_being_read() {
     let host = host();
     let (agent, mut handed) = about_to_prepare(&host);
-    handed.record.staged_path = host.staged_at("gone");
+    let gone = host.td.path().join("staging").join("gone");
+    handed.record.staged_path = gone.display().to_string();
     let deploy = Deploy {
         transaction_id: "tx",
         record: &handed.record,

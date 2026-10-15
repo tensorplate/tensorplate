@@ -35,6 +35,7 @@ use tensorplate_agent::{
     platform_admission::{ObservedStack, PlatformAdmission},
     recovery,
     server::Server,
+    staging,
     state::StateStore,
     supervision::{
         ensure_supervisor_directories, DesiredWorker, HttpReadinessProbe, MonotonicClock,
@@ -839,6 +840,13 @@ fn main() -> ExitCode {
             eprintln!("deployment descriptors: {removed} removed that no state record names");
         }
         Err(err) => eprintln!("deployment descriptors: unnamed documents were not removed: {err}"),
+    }
+    // Nothing stages before the control socket opens; a tree left behind is
+    // never started again.
+    match staging::prune(&cfg.staging_dir, &store) {
+        Ok(0) => {}
+        Ok(removed) => eprintln!("staged bundles: {removed} removed that no state record names"),
+        Err(err) => eprintln!("staged bundles: unnamed copies were not removed: {err}"),
     }
     let worker = match worker::from_config(&cfg, &store) {
         Ok(w) => w,

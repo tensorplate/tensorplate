@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The agent binary removes the descriptor documents no state record names
-// when it starts, before its recovery writes the next one.
+// The agent binary removes the descriptor documents and the staged trees no
+// state record names when it starts, before its recovery writes the next
+// document.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
+use tensorplate_agent::coordinator::new_transaction_id;
 use tensorplate_agent::descriptor_store::DescriptorStore;
 use tensorplate_agent::state::StateStore;
 use tensorplate_protocol::agent_state::DeploymentRecord;
@@ -138,6 +140,11 @@ fn the_agent_removes_unnamed_documents_at_its_start_before_recovery_writes_the_n
     DescriptorStore::new(&state_dir).write(&unnamed).unwrap();
     std::fs::write(state_dir.join("descriptor-stt-8.json.tmp"), "{").unwrap();
     std::fs::write(state_dir.join("descriptor-notes.txt"), "kept").unwrap();
+    // Beside the tree of the layout before trees of their own, which `active`
+    // names: one a deploy staged and no record names.
+    let unnamed_tree = td.path().join("staging/stt").join(new_transaction_id());
+    std::fs::create_dir(&unnamed_tree).unwrap();
+    std::fs::write(unnamed_tree.join("manifest.json"), "{}").unwrap();
 
     let (_agent, stderr) = start_agent(td.path());
 
@@ -157,6 +164,13 @@ fn the_agent_removes_unnamed_documents_at_its_start_before_recovery_writes_the_n
     assert_eq!(files(&state_dir), left, "{stderr}");
     let says = "deployment descriptors: 2 removed that no state record names";
     assert!(stderr.contains(says), "{stderr}");
+    assert!(!unnamed_tree.exists(), "{stderr}");
+    assert_eq!(
+        files(&td.path().join("staging/stt")),
+        ["entry.json", "manifest.json"]
+    );
+    let says = "staged bundles: 1 removed that no state record names";
+    assert!(stderr.contains(says), "{stderr}");
 }
 
 #[test]
@@ -168,6 +182,8 @@ fn a_prune_that_fails_is_logged_and_does_not_stop_the_start() {
         .update(|_| Ok(()))
         .unwrap();
     std::fs::write(state_dir.join("descriptor-stt-7.json"), "{").unwrap();
+    let unnamed_tree = td.path().join("staging/stt").join(new_transaction_id());
+    std::fs::create_dir_all(&unnamed_tree).unwrap();
     // A backup the agent cannot read: it cannot tell what that file names.
     std::fs::remove_file(state_dir.join("state.json.bak")).unwrap();
     std::fs::create_dir(state_dir.join("state.json.bak")).unwrap();
@@ -180,4 +196,6 @@ fn a_prune_that_fails_is_logged_and_does_not_stop_the_start() {
         state_dir.join("descriptor-stt-7.json").is_file(),
         "{stderr}"
     );
+    let says = "staged bundles: unnamed copies were not removed: ";
+    assert!(stderr.contains(says) && unnamed_tree.is_dir(), "{stderr}");
 }
