@@ -199,7 +199,13 @@ fn a_status_recorded_before_the_fields_existed_renders_without_them() {
         human.contains("active: deployment_id=d2 backend=mock bundle="),
         "{human}"
     );
-    for absent in ["generation=", "process=", "readiness=", "draining="] {
+    for absent in [
+        "generation=",
+        "process=",
+        "readiness=",
+        "draining=",
+        "stream_endpoint=",
+    ] {
         assert!(!human.contains(absent), "`{absent}` in {human}");
     }
     let active = &json["payload"]["agent"]["active"];
@@ -209,4 +215,28 @@ fn a_status_recorded_before_the_fields_existed_renders_without_them() {
         .as_object()
         .expect("active")
         .contains_key("generation"));
+}
+
+#[test]
+fn a_streaming_deployment_s_status_names_its_stream_endpoint_and_digest() {
+    let response = recorded("agent_control_streaming_deploy.jsonl", 4);
+    let (human, json) = status_of(&response);
+
+    let active = response
+        .agent_status
+        .as_ref()
+        .and_then(|s| s.active.as_ref());
+    let digest = active
+        .and_then(|a| a.descriptor_digest.clone())
+        .expect("a digest");
+    assert!(
+        human.contains(&format!(
+            "  stream_endpoint=127.0.0.1:41285 descriptor_digest={digest}\n"
+        )),
+        "{human}"
+    );
+    let active = &json["payload"]["agent"]["active"];
+    assert_eq!(active["stream_endpoint"], "127.0.0.1:41285");
+    assert_eq!(active["descriptor_digest"], digest.as_str());
+    assert_eq!(active["generation"], 1);
 }

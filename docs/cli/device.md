@@ -119,9 +119,9 @@ Target selection precedence, highest first:
 
 `status`, `rollback`, `undeploy`, `recover`, `logs`, `doctor`, `infer`,
 `version`, and `deploy` route to the selected device. Flags added for resident
-sets (`deploy --set-operation add`, `rollback --deployment-id`) are forwarded
-only when given, so a device with an older CLI accepts every command that does
-not use them. Devices enrolled with `--run-as` route through a structured,
+sets (`deploy --set-operation add`, `rollback --deployment-id`) and
+`deploy --streaming` are forwarded only when given, so a device with an older
+CLI accepts every command that does not use them. Devices enrolled with `--run-as` route through a structured,
 non-interactive `sudo -n -u <user> -- …` invocation. Path flags are
 interpreted where the file lives: `logs --source` and
 `status --observability-snapshot` are device-local, while `infer --input` is read
@@ -136,7 +136,8 @@ recorded at enrollment, default `/var/lib/tensorplate/bundles/import`) — using
 `rsync` when available and `scp` otherwise, then runs the remote deploy
 transaction against that path with the original flags forwarded
 (`--deployment-id`, `--expected-digest`, `--no-wait`, `--wait-timeout-ms`,
-`--label`, and `--set-operation add` when given). A deployment id is
+`--label`, and `--set-operation add` and `--streaming` when given). A
+deployment id is
 generated when one is not supplied so each import is named by its deployment
 id.
 

@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 
 use tensorplate_protocol::agent_control::{
     is_valid_deployment_id, ControlRequest, ControlResponse, DeployRequest, DeployStatus,
-    ResponseStatus, SetOperation, FEATURE_SET_OPERATION_ADD,
+    ResponseStatus, SetOperation, FEATURE_DEPLOY_STREAMING, FEATURE_SET_OPERATION_ADD,
 };
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::MemberState;
@@ -76,12 +76,36 @@ pub fn run<W: Write, E: Write>(
             "`--set-operation add`",
         )?;
     }
+    if args.streaming {
+        crate::commands::member::require_control_feature(
+            client,
+            FEATURE_DEPLOY_STREAMING,
+            "`--streaming`",
+        )
+        .map_err(|err| match err {
+            CliError::Agent {
+                code,
+                message,
+                context,
+                hint: Some(hint),
+            } => CliError::Agent {
+                code,
+                message,
+                context,
+                hint: Some(format!(
+                    "{hint}; an agent lists it once it starts its serving workers (`worker.mode` `process`) with `worker.serving_port_range` set"
+                )),
+            },
+            other => other,
+        })?;
+    }
     let deploy_payload = DeployRequest {
         bundle_path: canonical_bundle.display().to_string(),
         deployment_id: deployment_id.clone(),
         expected_bundle_digest: args.expected_digest.clone(),
         labels,
         set_operation: args.set_operation,
+        streaming: args.streaming,
         ..DeployRequest::default()
     };
     let request = ControlRequest::deploy(Some(correlation.clone()), deploy_payload);
@@ -484,6 +508,7 @@ mod tests {
             wait,
             wait_timeout_ms: 5_000,
             labels: vec![],
+            streaming: false,
         }
     }
 

@@ -20,9 +20,9 @@ shipped at `/usr/share/tensorplate/provisioning/manifest.json` by
 The packaged example contains `stt-whisper-candidate` and
 `tts-kokoro-candidate`, the Whisper CT2 and Kokoro/af_heart validation references.
 They use the candidate-only unary runner contract and grant no qualified
-speech claim. Both declare `model_class` `speech` at version 0.2.0. The agent
-renders no streaming setting today, so deploys stay on the unary path; a
-deployment with streaming enabled would have the worker refuse `/infer` for
+speech claim. Both declare `model_class` `speech` at version 0.2.0. A deploy
+stays on the unary path unless it is made with `tensorplate deploy
+--streaming`; a deployment with streaming has the worker refuse `/infer` for
 this class and serve stream sessions, which the unary qualification recipe
 does not use. A host holding the old bundle removes its import directory
 under `/var/lib/tensorplate/bundles/import/` before provisioning the new one,

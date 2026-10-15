@@ -88,6 +88,8 @@ pub struct DeployArgs {
     pub labels: Vec<(String, String)>,
     /// `replace` unless `--set-operation add` is given.
     pub set_operation: SetOperation,
+    /// `--streaming`: every generation of the deployment serves streams.
+    pub streaming: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -457,6 +459,7 @@ fn parse_deploy(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeployArg
     let mut wait_timeout_ms = 120_000;
     let mut labels = Vec::new();
     let mut set_operation = SetOperation::Replace;
+    let mut streaming = false;
     let mut i = 0;
     while i < rest.len() {
         if parse_global_flag(rest, &mut i, global, true)? {
@@ -492,9 +495,13 @@ fn parse_deploy(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeployArg
                     }
                 };
             }
+            "--streaming" => {
+                streaming = true;
+                i += 1;
+            }
             "-h" | "--help" => {
                 return Err(CliError::Usage(
-                    "deploy <bundle> [--deployment-id <id>] [--expected-digest <algo:hex>] [--no-wait] [--wait-timeout-ms <n>] [--label <k>=<v>] [--set-operation <replace|add>]"
+                    "deploy <bundle> [--deployment-id <id>] [--expected-digest <algo:hex>] [--no-wait] [--wait-timeout-ms <n>] [--label <k>=<v>] [--set-operation <replace|add>] [--streaming]"
                         .into(),
                 ));
             }
@@ -522,6 +529,7 @@ fn parse_deploy(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeployArg
         wait_timeout_ms,
         labels,
         set_operation,
+        streaming,
     })
 }
 
