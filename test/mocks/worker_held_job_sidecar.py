@@ -12,10 +12,13 @@ from tensorplate_pytorch_backend.job_objects import JobRequest, JobResult
 
 
 class HeldJobBackend(FixtureBackend):
-    """Tell the parent a job started, then keep it until the process ends."""
+    """Tell the parent which process holds a started job, then keep it until the process ends."""
 
     def run_job(self, request: JobRequest) -> JobResult:
-        (Path(os.environ["TP_HELD_JOB_TEST_DIR"]) / "job").touch()
+        job = Path(os.environ["TP_HELD_JOB_TEST_DIR"]) / "job"
+        # Renamed into place: the test reads the id as soon as the file exists.
+        job.with_suffix(".writing").write_text(str(os.getpid()))
+        job.with_suffix(".writing").rename(job)
         threading.Event().wait()
         raise AssertionError("a held job never returns")
 
