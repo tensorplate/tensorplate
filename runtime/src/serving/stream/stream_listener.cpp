@@ -101,6 +101,10 @@ Error admission_closed() {
   return Error::make(Error::Code::NotReady, "session admission is closed", "admission_closed");
 }
 
+Error worker_shutdown() {
+  return Error::make(Error::Code::Unavailable, "the worker is shutting down", "worker_shutdown");
+}
+
 CallOutput::Delivered delivered_to(SessionDispatch* dispatch, std::uint64_t key) {
   if (dispatch == nullptr) {
     return {};
@@ -148,6 +152,9 @@ struct StreamListener::Impl final
 
   void on_transition(const ManagedSessionTransition& transition);
   void close_admission() noexcept;
+  /// Fails every session that has a call and whose outcome is still open,
+  /// which queues its terminal event at once.
+  void fail_open_sessions() noexcept;
   /// Ends a call that was never admitted, for `cause`.
   void refuse(CallOutput& call, const Error& cause) { call.refuse(refused, refusal(cause)); }
   /// Waits for the call's first message, with `start_read` run once the wait
@@ -696,8 +703,7 @@ void StreamListener::Impl::close_admission() noexcept {
     }
     admission_stopped = true;
     try {
-      (void)manager->stop_admission_and_drain(
-          Error::make(Error::Code::Unavailable, "the worker is shutting down", "worker_shutdown"));
+      (void)manager->stop_admission_and_drain(worker_shutdown());
     } catch (...) {  // NOLINT(bugprone-empty-catch): shutdown continues without the drain.
     }
   }
@@ -705,6 +711,25 @@ void StreamListener::Impl::close_admission() noexcept {
     // A call that has not sent its Open can no longer be admitted.
     for (const auto& call : handshakes.close()) {
       refuse(*call, admission_closed());
+    }
+  } catch (...) {  // NOLINT(bugprone-empty-catch): the stop cancels the calls left open.
+  }
+}
+
+void StreamListener::Impl::fail_open_sessions() noexcept {
+  try {
+    std::vector<std::uint64_t> keys;
+    {
+      const std::lock_guard guard(calls_mu);
+      keys.reserve(calls.size());
+      for (const auto& [key, unused] : calls) {
+        keys.push_back(key);
+      }
+    }
+    // Unlocked: the sink takes calls_mu. A session whose outcome is fixed
+    // stays as it is.
+    for (const auto key : keys) {
+      (void)manager->apply(key, LogicalSessionEvent::Fail, worker_shutdown());
     }
   } catch (...) {  // NOLINT(bugprone-empty-catch): the stop cancels the calls left open.
   }
@@ -875,10 +900,14 @@ void StreamListener::stop(std::chrono::steady_clock::time_point deadline) noexce
   }
   impl_->stopped = true;
   impl_->close_admission();
-  while (impl_->manager->held_slots() > 0 && std::chrono::steady_clock::now() < deadline) {
+  // With a window no longer than the reserve, the sessions are failed at once.
+  const auto fail_at = deadline - kTerminalEventReserve;
+  while (impl_->manager->held_slots() > 0 && std::chrono::steady_clock::now() < fail_at) {
     std::this_thread::sleep_for(std::chrono::milliseconds{10});
   }
-  // Calls still open at the deadline are cancelled, and each aborts its session.
+  impl_->fail_open_sessions();
+  // gRPC waits for the calls until the deadline, then cancels those still
+  // open: a reader that stopped never got its terminal event.
   const auto left = std::max(deadline - std::chrono::steady_clock::now(),
                              std::chrono::steady_clock::duration::zero());
   impl_->server->Shutdown(std::chrono::system_clock::now() +

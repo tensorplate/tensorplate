@@ -472,37 +472,44 @@ TEST(StreamListener, AClientDeadlineAbortsItsLiveSession) {
   EXPECT_TRUE(eventually([&] { return held.dispatch.seen.aborts() == 1; }));
 }
 
-TEST(StreamListener, StopAtTheDeadlineCancelsACallWhoseSessionNeverDrains) {
-  SystemSchedulerClock clock;
-  HoldingDispatch dispatch;
-  StreamListenerOptions options;
-  options.deployment_id = kDeployment;
-  auto listener = StreamListener::start(options, &dispatch, clock).value();
-  const auto stub = wire::SessionService::NewStub(grpc::CreateChannel(
-      "127.0.0.1:" + std::to_string(listener->bound_port()), grpc::InsecureChannelCredentials()));
-  grpc::ClientContext context;
-  context.set_deadline(std::chrono::system_clock::now() + 20s);
-  auto call = stub->Session(&context);
-  ASSERT_TRUE(call->Write(open_event(wire::SESSION_MODE_STT_STREAMING)));
+/// What a client that reads gets of a session the stop failed: SessionClosed,
+/// then the status of `worker_shutdown`. The dispatch never confirmed the
+/// release, so the session still holds its slot.
+void expect_failed_by_the_stop(HeldSession& held) {
+  EXPECT_EQ(held.listener->live_sessions(), 1U);
+  EXPECT_EQ(held.dispatch.seen.cause(), "worker_shutdown");
   wire::ServerEvent event;
-  ASSERT_TRUE(call->Read(&event));
-  ASSERT_TRUE(event.has_ready());
+  ASSERT_TRUE(held.call->Read(&event)) << "the call ended without SessionClosed";
+  ASSERT_TRUE(event.has_session_closed()) << event.ShortDebugString();
+  const auto& closed = event.session_closed();
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_FAILED);
+  EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_WORKER_SHUTDOWN);
+  EXPECT_EQ(closed.admission(), wire::ADMISSION_ADMITTED);
+  EXPECT_FALSE(held.call->Read(&event)) << "SessionClosed is the last event";
+  const auto status = held.call->Finish();
+  EXPECT_EQ(status.error_code(), grpc::StatusCode::UNAVAILABLE) << status.error_message();
+  EXPECT_NE(status.error_message().find("FAILURE_REASON_WORKER_SHUTDOWN"), std::string::npos)
+      << status.error_message();
+  EXPECT_EQ(held.dispatch.seen.aborts(), 0) << "the call was cancelled before its session failed";
+}
 
-  const auto began = std::chrono::steady_clock::now();
-  listener->stop(began + 300ms);
-  const auto took = std::chrono::steady_clock::now() - began;
-  EXPECT_GE(took, 300ms) << "the session never drained, so stop waited for the deadline";
-  EXPECT_LT(took, 10s);
-  // Its call was cancelled, and the dispatch never confirmed the release.
-  EXPECT_EQ(listener->live_sessions(), 1U);
-  while (call->Read(&event)) {
-    EXPECT_FALSE(event.has_ready());
-  }
-  // The server cancels the call as it shuts down; the client reads that as
-  // the server going away or as the cancellation itself.
-  const auto code = call->Finish().error_code();
-  EXPECT_TRUE(code == grpc::StatusCode::UNAVAILABLE || code == grpc::StatusCode::CANCELLED) << code;
-  listener.reset();
+// The session never drains. The stop fails it with the reserve of the window
+// left, and gRPC lets its call write the terminal event before the window's
+// end. The client reads only once the stop has returned.
+TEST(StreamListener, AStopFailsASessionThatOutlastsTheDrainWindowAndWritesItsTerminalEvent) {
+  HeldSession held;
+  held.listener->stop(std::chrono::steady_clock::now() +
+                      2 * tensorplate::serving::kTerminalEventReserve);
+  expect_failed_by_the_stop(held);
+}
+
+// A window no longer than the reserve: the session is failed at once, and its
+// call has the whole window for its terminal event.
+TEST(StreamListener, WithADrainWindowNoLongerThanTheReserveTheStopFailsTheSessionAtOnce) {
+  HeldSession held;
+  held.listener->stop(std::chrono::steady_clock::now() +
+                      tensorplate::serving::kTerminalEventReserve);
+  expect_failed_by_the_stop(held);
 }
 
 TEST(StreamListener, BindsLoopbackOnlyAndOwnsItsPort) {

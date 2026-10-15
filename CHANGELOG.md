@@ -32,6 +32,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   and aborts the session (`client_cancelled`) when the call is cancelled;
   only a failed read on a call that is not cancelled is a half-close.
   (V030-E04-F02-T02)
+- A stop of the serving worker that outlasts the drain window now writes
+  each stream session's `SessionClosed` before gRPC cancels the call, as the
+  stream schema promises. The stream listener fails each session still open
+  when 250 ms of the window are left (`worker_shutdown`, state failed), so a
+  client that reads gets the event and status `UNAVAILABLE`; a client that
+  does not read is cancelled at the window's end as before, which still
+  bounds the stop. With a window of 250 ms or less the sessions are failed
+  at once. (V030-E04-F02-T02)
 - The hosted jobs that install the pinned Rust toolchain now remove a
   half-installed copy and retry, up to three attempts, instead of failing on
   a file conflict that every repeat of the same command met again; the

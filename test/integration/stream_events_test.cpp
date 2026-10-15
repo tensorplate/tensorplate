@@ -962,10 +962,11 @@ std::uint64_t longest_chunk_on_the_wire() {
 /// A text session on a listener with an injected clock, or the system
 /// clock, whose client reads nothing after Ready.
 struct UnreadSession {
-  explicit UnreadSession(const grpc::ChannelArguments& arguments, bool on_the_system_clock = false)
+  explicit UnreadSession(const grpc::ChannelArguments& arguments, bool on_the_system_clock = false,
+                         std::chrono::seconds deadline = 300s)
       : served(true, "127.0.0.1", on_the_system_clock ? nullptr : &clock) {
     served.use_channel(arguments);
-    client = served.ready(wire::SESSION_MODE_TTS_STREAMING, nullptr, 300s);
+    client = served.ready(wire::SESSION_MODE_TTS_STREAMING, nullptr, deadline);
   }
 
   /// Sends one segment and returns once its chunk writes have all but filled
@@ -1134,6 +1135,81 @@ TEST(StreamEvents, ACallWhoseReaderNeverResumesIsCancelledAfterItsSessionEnded) 
     EXPECT_FALSE(event->has_session_closed()) << "SessionClosed was never written";
   }
   EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::CANCELLED);
+}
+
+// A reader that stopped cannot take its terminal event. A stop that outlasts
+// the drain window fails its session all the same and cancels the call at the
+// window's end, before the client's own deadline. The listener's clock never
+// moves, so no limit of the listener's ends the call.
+TEST(StreamEvents, AStopCancelsAtTheWindowsEndACallWhoseReaderStopped) {
+  UnreadSession session{with_no_room_for_a_chunk(), false, 30s};
+  session.block();
+  if (HasFatalFailure()) {
+    return;
+  }
+  auto& listener = session.served.listener();
+  listener.stop(std::chrono::steady_clock::now() + 2 * tensorplate::serving::kTerminalEventReserve);
+  EXPECT_EQ(listener.open_calls(), 0U);
+  EXPECT_EQ(session.seen().state(), LogicalSessionState::Failed);
+  EXPECT_EQ(session.seen().cause(), "worker_shutdown");
+  auto& client = session.client;
+  while (const auto event = client.read()) {
+    EXPECT_FALSE(event->has_session_closed()) << "SessionClosed passed a window it does not fit";
+  }
+  const auto code = client.call->Finish().error_code();
+  EXPECT_TRUE(code == grpc::StatusCode::CANCELLED || code == grpc::StatusCode::UNAVAILABLE) << code;
+}
+
+// A reader that fell behind and reads again once the stop has failed its
+// session still gets the terminal event: the reserve leaves the call time to
+// write what the window holds back and the event behind it.
+TEST(StreamEvents, AReaderThatCatchesUpWhileTheStopWaitsGetsTheTerminalEvent) {
+  UnreadSession session{without_the_bandwidth_probe(), false, 30s};
+  session.fill(kHttp2DefaultWindow);
+  if (HasFatalFailure()) {
+    return;
+  }
+  auto& listener = session.served.listener();
+  const std::jthread stopping([&] {
+    listener.stop(std::chrono::steady_clock::now() +
+                  2 * tensorplate::serving::kTerminalEventReserve);
+  });
+  ASSERT_TRUE(eventually([&] { return session.seen().state() == LogicalSessionState::Failed; }));
+  auto& client = session.client;
+  std::optional<wire::SessionClosed> closed;
+  while (const auto event = client.read()) {
+    if (event->has_session_closed()) {
+      closed = event->session_closed();
+    }
+  }
+  ASSERT_TRUE(closed.has_value()) << "the call was cancelled before its terminal event";
+  EXPECT_EQ(closed->state(), wire::SESSION_STATE_FAILED);
+  EXPECT_EQ(closed->cause().reason(), wire::FAILURE_REASON_WORKER_SHUTDOWN);
+  EXPECT_EQ(client.call->Finish().error_code(), grpc::StatusCode::UNAVAILABLE);
+}
+
+// The stop lets a session drain until the reserve of the window is left: a
+// decode that ends inside that time closes the session as a drain does.
+TEST(StreamEvents, AStopLetsASessionThatDrainsInsideTheWindowClose) {
+  Served served;
+  auto& fake = served.dispatch().synthetic();
+  auto& seen = served.dispatch().seen;
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  fake.pause(Fake::Gate::InJob);
+  ASSERT_TRUE(client.send_audio(kFrame));
+  const auto asked = client.finalize();
+  // The decode the Finalize started is held: the stop finds it running.
+  ASSERT_TRUE(eventually([&] { return seen.finalizes() == std::vector<std::uint64_t>{asked}; }));
+  const std::jthread stopping(
+      [&] { served.listener().stop(std::chrono::steady_clock::now() + 20s); });
+  ASSERT_TRUE(eventually([&] { return seen.state() == LogicalSessionState::Draining; }));
+  fake.resume();
+  ASSERT_NO_FATAL_FAILURE(expect_utterance(client, wire::ENDPOINT_REASON_CLIENT_FINALIZE, 1, kFrame,
+                                           client.audio_sent, asked));
+  const auto closed = closed_of(client);
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_EQ(closed.cause().reason(), wire::FAILURE_REASON_WORKER_SHUTDOWN);
+  EXPECT_EQ(end_of(client).error_code(), grpc::StatusCode::UNAVAILABLE);
 }
 
 // The limit after the end is its own: a session that failed with a write in

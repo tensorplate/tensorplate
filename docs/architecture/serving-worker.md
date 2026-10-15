@@ -393,9 +393,11 @@ line says `serves_sessions: false`.
   takes the class of the error code the failure-reason taxonomy pairs it
   with, and anything else is `INTERNAL`. A session drained by shutdown is
   therefore `SESSION_STATE_CLOSED` with cause `worker_shutdown` and status
-  `UNAVAILABLE`. The status follows the cause and not the state because a
-  session ended through the cancel path (a client `Cancel`, a timeout, a
-  slow consumer) is also `SESSION_STATE_CLOSED`.
+  `UNAVAILABLE`, and one the stop fails at the end of the drain window is
+  `SESSION_STATE_FAILED` with the same cause and status. The status
+  follows the cause and not the state because a session ended through the
+  cancel path (a client `Cancel`, a timeout, a slow consumer) is also
+  `SESSION_STATE_CLOSED`.
 - **Not enforced yet.** A refused call is counted (see "Refused calls and
   the calls of a connection") but not timed: it keeps its place until
   gRPC reports it done or its connection ends, and at shutdown
@@ -431,11 +433,35 @@ line says `serves_sessions: false`.
   `admission_closed`, also by a worker that has no dispatch, and a call
   that has not sent its `Open` is refused at once, so it does not hold the
   gRPC server through the drain unless the transport cannot deliver its
-  status. `stop()` stops the stream listener first:
-  it waits for the
-  stream sessions to close until `shutdown.drain_deadline` after the
-  shutdown was asked, then shuts the gRPC server down with what is left of
-  that window (a call still open is cancelled, which aborts its session),
+  status. `stop()` stops the stream listener first.
+  The listener waits for the stream sessions to close until 250 ms before
+  the end of the drain window (`shutdown.drain_deadline` after the shutdown
+  was asked), and then fails each session still open with
+  `worker_shutdown`, which queues its `SessionClosed` at once. It then
+  shuts the gRPC server down with what is left of the window: gRPC waits
+  for the calls until the window's end and then cancels those still open.
+  A client that reads gets `SessionClosed` (state failed, cause
+  `worker_shutdown`) and then status `UNAVAILABLE`; one that does not read
+  cannot take the event, is cancelled at the window's end and reads no
+  `SessionClosed`. The 250 ms come out of the window, not after it: the
+  stop ends at the window's end, and sessions that drain slowly have that
+  much less of it to drain in. With a window of
+  250 ms or less the sessions are failed as soon as the listener stops,
+  and their calls have what is left of the window for the event; with
+  none left gRPC cancels them at once and a client may read the event or
+  not. A session whose outcome a client `Cancel` has already fixed is not
+  failed: its `SessionClosed` waits for the dispatch's release, and a call
+  still open at the window's end is cancelled without it. Tests: a session
+  that never drains is failed and its client, reading once the stop has
+  returned, gets the event and `UNAVAILABLE`, with a window of twice the
+  reserve and with a window of the reserve; a client that fell behind and
+  reads again once the stop has failed its session gets the event; a
+  session whose decode ends
+  while the stop waits closes as a drain does (state closed, cause
+  `worker_shutdown`); a client whose window no chunk
+  fits is cancelled by the stop, with no event, before its own
+  deadline and with the listener's clock never moved; and the worker's
+  stop case below reads the event. The listener then
   stops the dispatch and destroys the manager. Only then does it stop the
   HTTP listener and run the HTTP drain
   below, which waits only for what is left of the same window. One value
@@ -1691,7 +1717,7 @@ backend takes and refuses, and a session of a mode the backend does not
 run; a drain that delivers the segment in flight, and a stop at the end of
 the drain window whose unload ends the job, with the job's audio still out
 while the unload waits behind the job and back when the stop returns, and
-whose client reads no `SessionClosed`; a
+whose client reads the `SessionClosed` of the session the stop failed; a
 start that could not bind and is not retried, and the same start of a
 worker without a dispatch, which is; a worker that is never started; the
 refused unary request; each row of the table above; and a session

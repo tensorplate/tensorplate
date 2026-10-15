@@ -16,6 +16,11 @@ namespace tensorplate::serving {
 
 class SessionDispatch;
 
+/// What stop() keeps of the drain window for the terminal events of the
+/// sessions it fails: gRPC cancels a call at the deadline whether or not its
+/// last event was written.
+inline constexpr std::chrono::milliseconds kTerminalEventReserve{250};
+
 struct StreamListenerOptions {
   /// A loopback literal unless `allow_non_loopback`, as for the HTTP bind.
   std::string host = "127.0.0.1";
@@ -61,9 +66,10 @@ class StreamListener {
   /// with `worker_shutdown`. Does not wait.
   void stop_admission() noexcept;
 
-  /// stop_admission(), then waits until `deadline` for every session to
-  /// close, cancels the calls still open, stops the dispatch and releases
-  /// the manager. Safe to repeat.
+  /// stop_admission(), then waits for every session to close until
+  /// kTerminalEventReserve before `deadline`, fails those still open with
+  /// `worker_shutdown`, waits for the calls until `deadline`, cancels those
+  /// still open, stops the dispatch and releases the manager. Safe to repeat.
   void stop(std::chrono::steady_clock::time_point deadline) noexcept;
 
   /// Sessions holding a slot; after stop(), those that still held one when it
