@@ -313,6 +313,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The Python SDK's streaming speech client finds its stream endpoint through
+  the agent. `resolve_stream_target()` reads the agent's status through the
+  CLI profile, as the unary clients' discovery does, and returns the active
+  deployment's `stream_endpoint` with the `Target` an Open names there.
+  `SpeechClient.from_agent()` opens every session on the target last read:
+  after a session ends with `worker_shutdown` or `deployment_retired`, or an
+  open whose read of the status failed, it reads the status before the next
+  open, and an open whose first call ends before any server event reads it
+  once and sends its second call to the target the agent names now, so an
+  open follows a deploy, a rollback or a restart and still makes at most two
+  calls. A session already open is never moved. When the status names no
+  stream target the client raises a `DiscoveryError` (`NotStreamingError`,
+  `NotServingError`, `ResidentSetError`, `RemoteAgentError`) and does not
+  wait or fall back to a default. The SDK's test server words a refused open
+  as the stream listener does. (V030-E04-F02-T03)
+
 - Recorded control-API status exchanges for clients that discover a
   stream endpoint from the agent's status, from an agent whose
   configuration gives stream ports:
