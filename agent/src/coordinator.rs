@@ -599,8 +599,16 @@ impl Coordinator {
     ///
     /// # Errors
     ///
-    /// Returns [`AgentError::Unavailable`] when rollback is not possible,
-    /// and the typed [`AgentError`] of whichever phase fails otherwise.
+    /// Before any transaction begins: [`AgentError::Stopping`] once the
+    /// agent stops; [`AgentError::Unavailable`] when there is no previous
+    /// active deployment or its staged directory or manifest is gone;
+    /// [`AgentError::BundleIntegrity`] when an artifact of the staged copy
+    /// is missing or does not match its digest,
+    /// [`AgentError::BundleManifest`] when its manifest does not validate,
+    /// and [`AgentError::Io`], naming the copy, when a file of it cannot be
+    /// read; [`AgentError::Busy`] when another transaction is in flight, and
+    /// the state store's error when the state cannot be read or written.
+    /// Afterwards, the typed [`AgentError`] of whichever phase fails.
     #[allow(clippy::too_many_lines)]
     pub fn rollback(&self, correlation_id: Option<String>) -> AgentResult<DeployOutcome> {
         self.refuse_while_stopping()?;
