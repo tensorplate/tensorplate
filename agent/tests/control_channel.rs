@@ -14,7 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tensorplate_agent::control_channel::{
-    ContactEvent, ContactState, ControlChannel, RuntimeCommand,
+    ContactEvent, ContactState, ControlChannel, RuntimeCall, RuntimeCommand,
 };
 use tensorplate_agent::error::ControlChannelError;
 use tensorplate_agent::worker::spawn_with_control;
@@ -350,5 +350,136 @@ fn an_unanswered_command_cannot_delay_the_next_scheduled_poll() {
     assert!(
         next_poll_at < Duration::from_millis(1200),
         "next poll was delayed until {next_poll_at:?}"
+    );
+}
+
+const FENCE: &str =
+    include_str!("../../protocol/rust/tests/fixtures/worker_control_admission_fence.jsonl");
+
+fn fence() -> RuntimeCommand {
+    RuntimeCommand::AdmissionFence {
+        transaction_id: "tx-one".into(),
+    }
+}
+
+fn fence_answer(delay: Duration) -> worker::Step {
+    worker::Step::Reply {
+        frame: FENCE.lines().nth(1).unwrap().into(),
+        delay,
+        stale_generation: false,
+    }
+}
+
+fn ops(requests: &[tensorplate_protocol::worker_control::WorkerControlRequest]) -> Vec<&str> {
+    requests.iter().map(|request| request.op.as_str()).collect()
+}
+
+/// Waits for the poll after the first, which follows anything a call sent.
+fn wait_for_the_second_poll(channel: &ControlChannel) {
+    wait_until(Duration::from_secs(4), || {
+        channel
+            .snapshot()
+            .ledger_received_at
+            .is_some_and(|at| at >= Duration::from_secs(1))
+    });
+}
+
+#[test]
+fn a_call_unanswered_when_its_gap_ends_is_sent_again_after_the_poll_as_a_new_request() {
+    // The answer comes after the gap has ended and before the poll that
+    // ended it times out.
+    let (stream, peer) = worker::spawn(vec![
+        worker::ledger(Duration::ZERO),
+        fence_answer(Duration::from_millis(1200)),
+        worker::ledger(Duration::ZERO),
+        fence_answer(Duration::ZERO),
+    ]);
+    let channel = ControlChannel::start(stream, member()).unwrap();
+    wait_until(Duration::from_secs(1), || {
+        channel.snapshot().ledger.is_some()
+    });
+
+    let answer = channel.caller().call(fence(), Duration::from_secs(3));
+
+    assert_eq!(answer.unwrap().status, WorkerStatusOutcome::Ok);
+    drop(channel);
+    let requests = peer.join().unwrap();
+    assert_eq!(
+        ops(&requests),
+        [
+            "ledger_status",
+            "admission_fence",
+            "ledger_status",
+            "admission_fence"
+        ]
+    );
+    assert_ne!(requests[1].correlation_id, requests[3].correlation_id);
+    assert_eq!(requests[1].transaction_id, "tx-one");
+    assert_eq!(requests[3].transaction_id, "tx-one");
+}
+
+#[test]
+fn a_call_queued_behind_a_poll_that_outlasts_its_budget_is_never_sent() {
+    let (stream, peer) = worker::spawn(vec![
+        worker::ledger(Duration::from_millis(800)),
+        worker::ledger(Duration::ZERO),
+    ]);
+    let channel = ControlChannel::start(stream, member()).unwrap();
+
+    let answer = channel.caller().call(fence(), Duration::from_millis(200));
+
+    assert_eq!(answer.unwrap_err(), ControlChannelError::Deadline);
+    wait_for_the_second_poll(&channel);
+    drop(channel);
+    let requests = peer.join().unwrap();
+    assert_eq!(ops(&requests), ["ledger_status", "ledger_status"]);
+}
+
+#[test]
+fn a_call_answered_with_a_refusal_or_whose_channel_fails_returns_at_once() {
+    let refusal = r#"{"schema_version":"0.1","transaction_id":"tx-one","correlation_id":"ctl-1","op":"admission_fence","member":{"deployment_id":"speech-tts","generation":5},"status":"unsupported","error":{"code":"unsupported","message":"this worker does not implement admission_fence"}}"#;
+    let (stream, peer) = worker::spawn(vec![
+        worker::ledger(Duration::ZERO),
+        worker::Step::Reply {
+            frame: refusal.into(),
+            delay: Duration::ZERO,
+            stale_generation: false,
+        },
+        worker::ledger(Duration::ZERO),
+    ]);
+    let channel = ControlChannel::start(stream, member()).unwrap();
+    wait_until(Duration::from_secs(1), || {
+        channel.snapshot().ledger.is_some()
+    });
+
+    let answer = channel.caller().call(fence(), Duration::from_secs(3));
+
+    assert_eq!(answer.unwrap().status, WorkerStatusOutcome::Unsupported);
+    wait_for_the_second_poll(&channel);
+    drop(channel);
+    let requests = peer.join().unwrap();
+    assert_eq!(
+        ops(&requests),
+        ["ledger_status", "admission_fence", "ledger_status"]
+    );
+
+    let (stream, peer) = worker::spawn(vec![worker::ledger(Duration::ZERO), worker::Step::Eof]);
+    let channel = ControlChannel::start(stream, member()).unwrap();
+    wait_until(Duration::from_secs(1), || {
+        channel.snapshot().ledger.is_some()
+    });
+    peer.join().unwrap();
+
+    let failed = channel
+        .caller()
+        .call(fence(), Duration::from_secs(3))
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            failed,
+            ControlChannelError::Closed | ControlChannelError::Io(_)
+        ),
+        "{failed:?}"
     );
 }
