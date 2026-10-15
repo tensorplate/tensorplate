@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# Fails unless the worker was configured with the streaming feature and neither
-# it nor the serving package asks for a distribution library of the gRPC closure.
+# Fails unless the worker was configured with the streaming feature, defines its
+# code, and neither it nor the serving package asks for a distribution library of
+# the gRPC closure. The worker must be the unstripped build-tree binary.
 
 set -Eeuo pipefail
 
@@ -36,6 +37,23 @@ done
 grep -qxF 'TP_ENABLE_STREAMING_GRPC:BOOL=ON' "$cache" ||
   die "$cache does not record TP_ENABLE_STREAMING_GRPC:BOOL=ON: the worker was not configured with the streaming feature"
 printf 'ok: %s records the streaming feature ON\n' "$cache"
+# The configure cache says what was asked for; the worker's own symbols say what was linked in.
+# Only the full table can tell: a stripped worker's dynamic table has none of these defined.
+symbols="$(readelf -sW "$binary")" || die "readelf could not read the symbol tables of $binary"
+grep -q "^Symbol table '.symtab'" <<<"$symbols" ||
+  die "$binary has no .symtab: a stripped worker cannot show that the streaming code is linked in"
+defined="$(awk '$7 != "UND" { print $8 }' <<<"$symbols")"
+lacking=()
+grep -qx 'grpc_version_string' <<<"$defined" || lacking+=("gRPC core (grpc_version_string)")
+grep -qxE '_ZN11tensorplate6stream2v114SessionService7ServiceC[12]Ev' <<<"$defined" ||
+  lacking+=("the generated stream service (tensorplate::stream::v1::SessionService::Service)")
+grep -q '^_ZN11tensorplate7serving14StreamListener' <<<"$defined" ||
+  lacking+=("the stream listener (tensorplate::serving::StreamListener)")
+if ((${#lacking[@]} > 0)); then
+  printf -v listed '%s, ' "${lacking[@]}"
+  die "$binary defines no symbol of ${listed%, }: the streaming code is not linked in"
+fi
+printf 'ok: %s defines gRPC core, the generated stream service and the stream listener\n' "$binary"
 depends="$(dpkg-deb -f "$deb" Depends)" || die "dpkg-deb could not read Depends from $deb"
 early="$(dpkg-deb -f "$deb" Pre-Depends)" || die "dpkg-deb could not read Pre-Depends from $deb"
 found=()
