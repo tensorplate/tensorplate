@@ -1768,15 +1768,34 @@ exited 10 s after the request, so such a 70 changes nothing the agent
 records; the worker's `speech backend stalled` line, which the agent
 forwards to its own log, is what shows it.
 
-**Known, not changed here: a stopped worker's sidecar can outlive it.** A
-member whose backend does not end the job it holds when the registry asks
-it to stop does not exit within the registry's 10 s: its drain window is 5 s, and its
-unload then waits up to 15 s behind the job. The registry kills the worker
-alone, and the sidecar, whose runner returns only once its backend call
-does, keeps running without its parent, with what its backend loaded
-(seen with a backend that never ends a job: the sidecar was still running
-30 s after the kill). A later change makes the runner exit once its parent
-is gone.
+**A killed worker's sidecar ends itself.** A member whose backend does not
+end the job it holds when the registry asks it to stop does not exit
+within the registry's 10 s: its drain window is 5 s, and its unload then
+waits up to 15 s behind the job. The registry kills the worker alone. A
+sidecar whose runner has no backend call in progress sees the worker's
+socket close and returns as before, unless its next look at its parent
+comes first. A runner that a backend call holds returns only once that
+call does; it is adopted by another process instead, looks at its parent
+about once a second, and once the parent has changed it logs `the serving
+worker that started this runner is gone`, to the stderr it shares with the
+worker, and exits with status 4 without waiting for the call, freeing what
+the backend loaded. The line gets at most a second to be written, so a
+stderr pipe that is full but still open does not hold the exit. A backend
+call that holds Python's interpreter lock (native code that does not
+release it) delays the exit until it returns. The same holds for a worker
+killed by hand. The interpreter the worker starts must be the runner's own
+process: a wrapper script must `exec` it, or the wrapper stays the
+runner's parent and the runner never sees it change (see the backend's
+[install page](../install/python-pytorch-backend.md#adapter-consumed-by-the-c-runtime-and-python-runner)).
+The worker never reads its sidecar's exit status (it reaps the sidecar
+without looking at it), and the runner's other failure statuses are 1 (an
+exception it did not catch), 2 (it could not connect to the worker's
+socket, or its arguments were refused) and 3 (it could not announce that
+it is ready); a launch whose `exec` fails ends with 127. A runner whose
+worker is already gone when it starts has an adopted parent from the start
+and does not see it change; the worker starts the runner and waits for it
+to connect, so this needs the worker to die within that wait, and then the
+runner's connect fails.
 
 The worst case a client sees, end to end: its own session ends at the
 job's deadline (`deadline_missed`; for audio input usually
