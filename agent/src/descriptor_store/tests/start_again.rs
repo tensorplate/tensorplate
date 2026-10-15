@@ -477,6 +477,12 @@ fn a_restore_of_a_record_that_names_no_descriptor_is_refused_when_another_bundle
     assert_eq!(host.view(), ["stt", "-", "-", "2"]);
 }
 
+/// Cut the file at `path` to its first half.
+fn halve(path: &Path) {
+    let whole = fs::read(path).unwrap();
+    fs::write(path, &whole[..whole.len() / 2]).unwrap();
+}
+
 #[test]
 fn a_restore_refused_by_what_is_on_disk_leaves_the_agent_up_with_the_refusal_recorded() {
     type Broken = (fn(&Host, &Agent), &'static str, ErrorCode);
@@ -502,11 +508,7 @@ fn a_restore_refused_by_what_is_on_disk_leaves_the_agent_up_with_the_refusal_rec
         ErrorCode::ConfigInvalid,
     );
     let half_written: Broken = (
-        |host, _| {
-            let manifest = host.staged("stt").join("manifest.json");
-            let whole = fs::read(&manifest).unwrap();
-            fs::write(&manifest, &whole[..whole.len() / 2]).unwrap();
-        },
+        |host, _| halve(&host.staged("stt").join("manifest.json")),
         "bundle manifest is invalid",
         ErrorCode::ConfigInvalid,
     );
@@ -542,6 +544,11 @@ fn a_restore_refused_by_what_is_on_disk_leaves_the_agent_up_with_the_refusal_rec
         "artifact `entry.json` failed integrity check: digest mismatch",
         load_failed,
     );
+    let truncated: Broken = (
+        |host, _| halve(&host.staged("stt").join("entry.json")),
+        "artifact `entry.json` failed integrity check: digest mismatch",
+        load_failed,
+    );
     let no_directory: Broken = (
         |host, _| fs::remove_dir_all(host.staged("stt")).unwrap(),
         "does not exist or is not a directory",
@@ -556,6 +563,7 @@ fn a_restore_refused_by_what_is_on_disk_leaves_the_agent_up_with_the_refusal_rec
         renamed,
         gone,
         altered,
+        truncated,
         no_directory,
     ]
     .into_iter()

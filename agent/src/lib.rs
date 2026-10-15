@@ -40,6 +40,7 @@ pub mod control;
 pub mod control_channel;
 pub mod coordinator;
 pub mod descriptor_store;
+mod durable;
 pub mod error;
 pub mod memory_admission;
 pub mod platform_admission;

@@ -4,7 +4,8 @@
 //! a tree of its own, `staging_dir/<deployment_id>/<transaction id>/`, before
 //! the candidate record names it, and no tree is written again: an update
 //! under the same id leaves the tree the earlier record names as it was. A
-//! tree no record names is removed at a start and when a deploy begins.
+//! tree no record names is removed at a start and when a deploy begins, and
+//! with it an id's directory left empty.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -55,8 +56,10 @@ fn names_a_tree(name: &str) -> bool {
 }
 
 /// Copy `verified`'s manifest and declared artifacts into a new tree for
-/// the deploy `transaction_id` of `deployment_id`, and return the tree. A
-/// tree that is there is not written; a copy that fails removes its tree.
+/// the deploy `transaction_id` of `deployment_id`, and return the tree once
+/// it is synced, with each directory above it that this stage made and the
+/// nearest one that was there. A tree that is there is not written; a copy
+/// or a sync that fails removes its tree and every directory it made.
 ///
 /// # Errors
 ///
@@ -78,30 +81,72 @@ pub(crate) fn stage(
         let named = format!("staging `{}`: {e}", tree.display());
         AgentError::Io(io::Error::new(e.kind(), named))
     };
-    fs::create_dir_all(staging_dir.join(deployment_id)).map_err(failed)?;
-    fs::create_dir(&tree).map_err(failed)?;
-    if let Err(e) = copy(verified, &tree) {
-        let _ = fs::remove_dir_all(&tree);
+    let id_dir = staging_dir.join(deployment_id);
+    // The nearest directory there before this stage: it gains an entry, and
+    // every directory below it is new.
+    let there = id_dir
+        .ancestors()
+        .find(|dir| dir.is_dir())
+        .map(Path::to_path_buf);
+    let made = || {
+        id_dir
+            .ancestors()
+            .take_while(|dir| Some(*dir) != there.as_deref())
+    };
+    // Nothing above the directory that was there: a prune removes an id's
+    // directory a stopped stage left unsynced once it is empty.
+    let synced = || made().chain(there.as_deref()).try_for_each(sync_naming);
+    let staged = fs::create_dir_all(&id_dir).and_then(|()| fs::create_dir(&tree));
+    let staged = staged.and_then(|()| {
+        let copied = copy(verified, &tree).and_then(|()| synced());
+        if copied.is_err() {
+            let _ = fs::remove_dir_all(&tree);
+        }
+        copied
+    });
+    if let Err(e) = staged {
+        // A directory left here would be there, unsynced, for the next stage.
+        for dir in made() {
+            let _ = fs::remove_dir(dir);
+        }
         return Err(failed(e));
     }
     Ok(tree)
 }
 
+/// Copy the bundle into `tree` and sync every file and directory of it, so
+/// the state write that names the tree cannot outlive its bytes.
 fn copy(verified: &VerifiedBundle, tree: &Path) -> io::Result<()> {
     let source = &verified.root_path;
-    fs::copy(source.join("manifest.json"), tree.join("manifest.json"))?;
+    let manifest = tree.join("manifest.json");
+    fs::copy(source.join("manifest.json"), &manifest)?;
+    sync_naming(&manifest)?;
     #[cfg(test)]
     if DISK_FULL.with(|full| full.replace(false)) {
         return Err(rustix::io::Errno::NOSPC.into());
     }
+    let mut directories = BTreeSet::from([tree.to_path_buf()]);
     for artifact in &verified.manifest.artifacts {
         let destination = tree.join(&artifact.path);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
+            let made = parent.ancestors().take_while(|dir| *dir != tree);
+            directories.extend(made.map(Path::to_path_buf));
         }
         fs::copy(source.join(&artifact.path), &destination)?;
+        sync_naming(&destination)?;
     }
-    Ok(())
+    // Deepest first: each directory after every entry in it.
+    directories
+        .iter()
+        .rev()
+        .try_for_each(|dir| sync_naming(dir))
+}
+
+/// Sync `path`, with an error that names it.
+fn sync_naming(path: &Path) -> io::Result<()> {
+    crate::durable::sync(path)
+        .map_err(|e| io::Error::new(e.kind(), format!("sync `{}`: {e}", path.display())))
 }
 
 /// The staged path of every record of `state` (the singleton records, and
@@ -121,10 +166,12 @@ fn named_by(state: &AgentState) -> impl Iterator<Item = PathBuf> + '_ {
 }
 
 /// Remove every tree under `staging_dir` that no record of either state
-/// file names, and return how many were removed. A tree is matched by where
+/// file names, then each id's directory left empty that no record names,
+/// and return how many trees were removed. A tree is matched by where
 /// its path resolves, so the records may spell `staging_dir` another way,
-/// and is kept when a path they name is in it. Only a directory a deploy
-/// named, under a directory a deployment id names, is removed: a tree of the
+/// and is kept when a path they name is in it or leaves it by `..`. Only a
+/// directory a deploy named, under a directory a deployment id names, is
+/// removed, and then that directory once it holds nothing: a tree of the
 /// layout before this one, `staging_dir/<deployment_id>/` itself with its
 /// manifest at its root, is never, nor a directory in it that its manifest
 /// lists an artifact under, nor anything in it while this build cannot read
@@ -146,13 +193,25 @@ pub fn prune(staging_dir: &Path, store: &StateStore) -> AgentResult<usize> {
     for state in store.every_file()? {
         for path in named_by(&state) {
             named.extend(resolved(&path)?);
+            // A directory the path leaves by `..` must stay for it to resolve.
+            let left = path.ancestors().filter(|dir| dir.ends_with(".."));
+            for dir in left.filter_map(Path::parent) {
+                named.extend(resolved(dir)?);
+            }
         }
     }
     let mut removed = 0;
     let mut first_error = None;
     for id in entries(staging_dir)? {
-        let trees = id.and_then(|id| trees_of(&id));
-        for tree in trees.unwrap_or_else(|e| vec![Err(e)]) {
+        let trees = id.and_then(|id| Ok((trees_of(&id)?, id)));
+        let (trees, id) = match trees {
+            Ok(trees) => trees,
+            Err(e) => {
+                first_error.get_or_insert(e);
+                continue;
+            }
+        };
+        for tree in trees {
             match tree.and_then(|tree| remove_unnamed(&tree, &named)) {
                 Ok(true) => removed += 1,
                 Ok(false) => {}
@@ -160,6 +219,9 @@ pub fn prune(staging_dir: &Path, store: &StateStore) -> AgentResult<usize> {
                     first_error.get_or_insert(e);
                 }
             }
+        }
+        if let Err(e) = remove_if_empty(&id, &named) {
+            first_error.get_or_insert(e);
         }
     }
     first_error.map_or(Ok(removed), |e| Err(e.into()))
@@ -238,12 +300,32 @@ fn remove_unnamed(tree: &DirEntry, named: &BTreeSet<PathBuf>) -> io::Result<bool
         return Ok(false);
     }
     let path = tree.path();
-    let resolved = fs::canonicalize(&path).map_err(|e| at(&path, &e))?;
-    if named.iter().any(|named| named.starts_with(&resolved)) {
+    if is_named(&path, named)? {
         return Ok(false);
     }
     fs::remove_dir_all(&path).map_err(|e| at(&path, &e))?;
     Ok(true)
+}
+
+/// Remove `id` when it is a directory a deployment id names that holds
+/// nothing and that no path in `named` resolves to. A stage that was stopped
+/// can leave one unsynced; the next stage under the id then makes it again
+/// and syncs the directory it is in.
+fn remove_if_empty(id: &DirEntry, named: &BTreeSet<PathBuf>) -> io::Result<()> {
+    if !is_directory(id, is_valid_deployment_id)? {
+        return Ok(());
+    }
+    let path = id.path();
+    if !entries(&path)?.is_empty() || is_named(&path, named)? {
+        return Ok(());
+    }
+    fs::remove_dir(&path).map_err(|e| at(&path, &e))
+}
+
+/// Whether a path in `named` resolves to `dir` or into it.
+fn is_named(dir: &Path, named: &BTreeSet<PathBuf>) -> io::Result<bool> {
+    let resolved = fs::canonicalize(dir).map_err(|e| at(dir, &e))?;
+    Ok(named.iter().any(|named| named.starts_with(&resolved)))
 }
 
 /// The entries of `dir` in name order, so a prune that meets one it cannot

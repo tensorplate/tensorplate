@@ -525,9 +525,30 @@ listens.
 Each deploy copies its bundle into a tree of its own,
 `<staging_dir>/<deployment_id>/<transaction id>/`, named by the deploy's
 transaction id (`tx-` and a UUID). The tree is created new: a deploy never
-writes into a tree that is there, and a copy that fails removes its tree,
-with an error that names it. The candidate record names the tree once the
-copy is complete, and nothing writes it again. Every reader takes the path
+writes into a tree that is there, and a copy that fails removes its tree
+and each directory it made above it, with an error that names the tree.
+The candidate record names the tree once the copy is complete and synced
+to disk: every file and directory of the tree, each directory above it
+that this deploy made, and the nearest one that was there, which gained an
+entry. A deploy under a `staging_dir` that is there therefore never opens
+the directory `staging_dir` is in. A power loss after that state write
+cannot leave a record naming a tree whose bytes never reached the disk,
+with one exception: a directory that a deploy that was stopped made and
+left unsynced is not synced by a later deploy that finds it there. An
+id's directory left so is removed once it holds nothing (see below), when
+the agent starts and before the next deploy stages, so that deploy makes
+it again and syncs `staging_dir`. What remains is a `staging_dir`, or a
+directory above it, that the agent made in a first deploy that was
+stopped, or an id's directory a removal could not remove: a power loss
+after a later deploy can lose its entry, and with it the trees under it
+that the records name. The agent must be able to read `staging_dir`, and,
+when a deploy makes `staging_dir`, the nearest directory above it that
+was there.
+A sync that fails fails the deploy as a copy that fails does. On macOS
+each of these syncs, of every file and directory, is an `F_FULLFSYNC` (what
+Rust's `File::sync_all` issues there), so a deploy's cost there differs
+from Linux's, where `sync_all` is an `fsync`. Nothing writes the tree
+again. Every reader takes the path
 from a record's `staged_path`: the rollback, the restore at a start, the
 registry's restart, `prepare`, the derived descriptor and status. An update
 under the same id therefore leaves the tree the earlier record names as it
@@ -547,10 +568,12 @@ agent's standard error and neither stops the start nor fails the deploy.
 Nothing is removed while what a state file holds cannot be told (it cannot
 be read, is damaged, or is at a state version this agent does not read),
 and only a directory named as a transaction id, under a directory named
-as a deployment id, is ever removed. A tree is matched by where its path
-resolves, and is kept when a path named there resolves to it or into it,
-so a `staging_dir` spelled another way than the records spell it (through
-a link, or with `..`) removes nothing a record names; a named path that
+as a deployment id, is ever removed; then that id's directory too, once it
+holds nothing and no path named there resolves to it or goes up out of
+it. A tree is matched by where its path resolves, and is kept when a path
+named there resolves to it or into it, or goes up out of it with `..`, so
+a `staging_dir` spelled another way than the records spell it (through a
+link, or with `..`) removes nothing a record names; a named path that
 does not resolve, other than because nothing is there, stops the removal
 before anything goes. An entry that cannot be read or removed is
 left, the removal goes on to the others in name order, and the first such
@@ -1008,7 +1031,9 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   started and the member is failed at once, without using a restart, with a
   `load_failed` error that names both digests. A staged manifest that cannot
   be read counts as a restart that could not be launched. The manifest's
-  digest covers each artifact's digest; artifact bytes are not hashed again.
+  digest covers each artifact's digest; artifact bytes are not hashed again,
+  since the tree was synced before a record named it and the restore hashes
+  them at every start.
   Startup recovery and a rollback compare the two digests as well, for
   every record, whether or not it names a
   [descriptor](#deployment-descriptor-documents). A staged bundle that is
@@ -1021,7 +1046,10 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   deployed again), and `active` as the record with no `generation` and no
   `serving_url`. To recover, deploy the id again through that agent, as
   either bundle: the deploy serves it and clears the error, and the next
-  start restores it.
+  start restores it. The restore, once the two digests agree, and the
+  rollback also hash every artifact of the staged copy: one that is missing,
+  truncated or replaced is `load_failed` at the restore, with the same
+  outcome, and the rollback is refused.
 - **Failure.** A member that stops with three restarts inside the last five
   minutes is failed: nothing is started for it until a deployment is
   promoted, by a deploy or a rollback. Status then reports

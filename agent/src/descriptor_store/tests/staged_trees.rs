@@ -5,6 +5,9 @@ use super::one_pass::another_format_0_1_bundle;
 use super::start_again::{host, Host, Worker};
 use super::*;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use tensorplate_protocol::agent_state::TransactionKind;
 
 use crate::coordinator::new_transaction_id;
@@ -320,6 +323,147 @@ fn a_deploy_that_finds_the_disk_full_as_it_stages_fails_and_leaves_every_tree_as
         (recorded.code, recorded.message),
         (ErrorCode::Internal, message)
     );
+
+    agent.deploy("stt", TTS).unwrap();
+    assert_eq!(staged_digest(&agent.asked().reference), digest_of(TTS));
+}
+
+#[test]
+fn a_deploy_syncs_its_tree_and_each_directory_it_adds_to_before_a_state_write_names_it() {
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    let (state_dir, staging) = (host.state_dir(), host.td.path().join("staging"));
+    let of_staging = |path: &Path| path.starts_with(&staging) || staging.starts_with(path);
+    assert!(!staging.exists());
+    let first: (_, &[_], _) = (TTS, &["warmup/segment.txt", "warmup"], 3);
+    let second: (_, &[_], _) = (STT, &[], 1);
+
+    let mut earlier = None;
+    for (bundle, nested, above) in [first, second] {
+        // The paths the records name at each sync of a staging path.
+        let named = Rc::new(RefCell::new(BTreeSet::new()));
+        let (seen, dir, under) = (Rc::clone(&named), state_dir.clone(), staging.clone());
+        crate::durable::hooks::fail_next_sync_of(move |path| {
+            if path.starts_with(&under) || under.starts_with(path) {
+                let state = StateStore::open(&dir).unwrap().snapshot().unwrap();
+                let records = [state.active, state.previous_active, state.candidate];
+                let paths = records.into_iter().flatten().map(|r| r.staged_path);
+                seen.borrow_mut().extend(paths.map(PathBuf::from));
+            }
+            false
+        });
+        drop(crate::durable::hooks::synced());
+        agent.deploy("tts", bundle).unwrap();
+        drop(agent.asked());
+
+        let synced = crate::durable::hooks::synced();
+        let tree = staged_path(&host, active);
+        assert!(!named.borrow().contains(&tree), "{named:?}");
+        // The records read are the agent's own: they name the earlier tree.
+        let seen_earlier = earlier.as_ref().map(|t| named.borrow().contains(t));
+        assert_ne!(seen_earlier, Some(false), "{named:?}");
+        let start = synced.iter().position(|path| of_staging(path)).unwrap();
+        let block = synced[start..].iter().take_while(|path| of_staging(path));
+        let block: Vec<_> = block.cloned().collect();
+        let mut expected: BTreeSet<_> = ["manifest.json", "entry.json", ""]
+            .iter()
+            .chain(nested)
+            .map(|name| tree.join(name))
+            .collect();
+        expected.extend(tree.ancestors().skip(1).take(above).map(Path::to_path_buf));
+        let blocked: BTreeSet<_> = block.iter().cloned().collect();
+        assert_eq!((blocked, block.len()), (expected.clone(), expected.len()));
+        for (at, path) in block.iter().enumerate() {
+            let dir = path
+                .parent()
+                .and_then(|dir| block.iter().position(|p| p == dir));
+            assert!(
+                dir.map_or(true, |dir| at < dir),
+                "{path:?} after its directory: {block:?}"
+            );
+        }
+        let rest = &synced[start + block.len()..];
+        assert!(!rest.iter().any(|path| of_staging(path)), "{synced:?}");
+        earlier = Some(tree);
+    }
+}
+
+#[test]
+fn a_deploy_after_a_stage_that_was_stopped_makes_its_id_directory_again_and_syncs_staging_dir() {
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    let staging = host.td.path().join("staging");
+    // What a stage stopped before its syncs leaves.
+    let left = staging.join("tts").join(new_transaction_id());
+    fs::create_dir_all(&left).unwrap();
+    fs::write(left.join("manifest.json"), "{").unwrap();
+    drop(crate::durable::hooks::synced());
+
+    agent.deploy("tts", TTS).unwrap();
+    drop(agent.asked());
+
+    let synced = crate::durable::hooks::synced();
+    assert!(!left.exists());
+    assert!(synced.contains(&staging), "{synced:?}");
+}
+
+#[test]
+fn a_deploy_whose_tree_cannot_be_synced_fails_and_leaves_every_tree_as_it_was() {
+    type Picks = Box<dyn Fn(&Path, &Path) -> bool>;
+    let host = host();
+    let (agent, _) = host.start(Worker::default());
+    agent.deploy("stt", STT).unwrap();
+    drop(agent.asked());
+    let id_dir = host.td.path().join("staging").join("stt");
+    let under = |name: &'static str| {
+        move |path: &Path, id: &Path| path.starts_with(id) && path.ends_with(name)
+    };
+    let picks: [(&str, Picks); 6] = [
+        ("the manifest", Box::new(under("manifest.json"))),
+        ("an artifact", Box::new(under("entry.json"))),
+        ("a nested artifact", Box::new(under("warmup/segment.txt"))),
+        ("a nested directory", Box::new(under("warmup"))),
+        ("the tree", Box::new(|path, id| path.parent() == Some(id))),
+        (
+            "the directory it is added to",
+            Box::new(|path, id| path == id),
+        ),
+    ];
+
+    for (case, picks) in picks {
+        let (view, trees) = (host.view(), host.trees("stt"));
+        let named = staged_path(&host, active);
+        let served = contents(&named);
+        let (picks, id) = (Rc::new(picks), id_dir.clone());
+        let picked = Rc::clone(&picks);
+        crate::durable::hooks::fail_next_sync_of(move |path| picked(path, &id));
+        let error = agent.deploy("stt", TTS).unwrap_err();
+
+        let failed = std::io::Error::from(rustix::io::Errno::IO);
+        let says = format!("staging `{}", id_dir.join("tx-").display());
+        let message = error.to_string();
+        assert!(matches!(error, AgentError::Io(_)), "{case}: {message}");
+        let told = message.contains(&says) && message.ends_with(&failed.to_string());
+        assert!(told, "{case}: {message}");
+        let synced = message
+            .split("sync `")
+            .nth(1)
+            .and_then(|r| r.split("`: ").next());
+        let names_it = synced.is_some_and(|path| picks(Path::new(path), &id_dir));
+        assert!(names_it, "{case}: {message}");
+        assert!(agent.never_asked(), "{case}");
+        let left = (host.view(), host.trees("stt"));
+        assert_eq!(left, (view, trees), "{case}");
+        assert_eq!(contents(&named), served, "{case}");
+        let (quarantined, latest) = host.quarantined();
+        assert!(
+            quarantined.ends_with("@Verified") && latest,
+            "{case}: {quarantined}"
+        );
+        let recorded = host.last_error().unwrap();
+        let recorded = (recorded.code, recorded.message);
+        assert_eq!(recorded, (ErrorCode::Internal, message), "{case}");
+    }
 
     agent.deploy("stt", TTS).unwrap();
     assert_eq!(staged_digest(&agent.asked().reference), digest_of(TTS));

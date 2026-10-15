@@ -161,6 +161,154 @@ fn a_copy_that_fails_removes_its_tree_and_names_it() {
 }
 
 #[test]
+fn each_directory_a_stage_makes_in_its_tree_is_synced_however_deep() {
+    let d = dirs();
+    let mut bundle = verified(&repo(FIXTURE));
+    let source = d.staging.parent().unwrap().join("source");
+    fs::create_dir_all(&source).unwrap();
+    fs::copy(
+        repo(FIXTURE).join("manifest.json"),
+        source.join("manifest.json"),
+    )
+    .unwrap();
+    for artifact in &mut bundle.manifest.artifacts {
+        let from = repo(FIXTURE).join(&artifact.path);
+        artifact.path = format!("a/b/c/{}", artifact.path);
+        let to = source.join(&artifact.path);
+        fs::create_dir_all(to.parent().unwrap()).unwrap();
+        fs::copy(from, to).unwrap();
+    }
+    bundle.root_path = source;
+    drop(crate::durable::hooks::synced());
+
+    let tree = stage(&d.staging, "stt", &new_transaction_id(), &bundle).unwrap();
+
+    let synced = crate::durable::hooks::synced();
+    for dir in ["a", "a/b", "a/b/c", "a/b/c/assets"] {
+        assert!(synced.contains(&tree.join(dir)), "{dir}: {synced:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stage_under_a_staging_dir_that_was_there_never_opens_the_directory_it_is_in() {
+    use std::os::unix::fs::PermissionsExt;
+    let bundle = verified(&repo(FIXTURE));
+    for id_dir_there in [false, true] {
+        let d = dirs();
+        let top = d.staging.parent().unwrap().to_path_buf();
+        let id_dir = d.staging.join("stt");
+        fs::create_dir_all(if id_dir_there { &id_dir } else { &d.staging }).unwrap();
+        let mode = |mode| fs::set_permissions(&top, fs::Permissions::from_mode(mode)).unwrap();
+        // Searched through, never read.
+        mode(0o100);
+        drop(crate::durable::hooks::synced());
+
+        let staged = stage(&d.staging, "stt", &new_transaction_id(), &bundle);
+
+        mode(0o700);
+        let tree = staged.unwrap();
+        let synced = crate::durable::hooks::synced();
+        let above: Vec<_> = synced.iter().filter(|dir| tree.starts_with(dir)).collect();
+        let there = if id_dir_there {
+            vec![&tree, &id_dir]
+        } else {
+            vec![&tree, &id_dir, &d.staging]
+        };
+        assert_eq!(above, there, "id directory there: {id_dir_there}");
+    }
+}
+
+#[test]
+fn a_stage_that_makes_staging_dir_syncs_the_directory_it_is_in() {
+    let d = dirs();
+    let top = d.staging.parent().unwrap().to_path_buf();
+    drop(crate::durable::hooks::synced());
+
+    let tree = stage(
+        &d.staging,
+        "stt",
+        &new_transaction_id(),
+        &verified(&repo(FIXTURE)),
+    )
+    .unwrap();
+
+    let synced = crate::durable::hooks::synced();
+    let above: Vec<_> = synced.iter().filter(|dir| tree.starts_with(dir)).collect();
+    assert_eq!(above, [&tree, &d.staging.join("stt"), &d.staging, &top]);
+}
+
+#[test]
+fn a_stage_that_makes_the_directory_staging_dir_is_in_syncs_each_one_it_made_and_the_one_there() {
+    let d = dirs();
+    let top = d.staging.parent().unwrap().to_path_buf();
+    let staging = top.join("a/b/staging");
+    drop(crate::durable::hooks::synced());
+
+    let tree = stage(
+        &staging,
+        "stt",
+        &new_transaction_id(),
+        &verified(&repo(FIXTURE)),
+    )
+    .unwrap();
+
+    let synced = crate::durable::hooks::synced();
+    let above: Vec<_> = synced.iter().filter(|dir| tree.starts_with(dir)).collect();
+    let (id_dir, a) = (staging.join("stt"), top.join("a"));
+    assert_eq!(above, [&tree, &id_dir, &staging, &a.join("b"), &a, &top]);
+}
+
+#[test]
+fn a_stage_that_fails_keeps_the_directory_that_was_there_however_empty() {
+    let d = dirs();
+    fs::create_dir_all(&d.staging).unwrap();
+    crate::durable::hooks::fail_next_sync_of(|path| path.ends_with("manifest.json"));
+
+    let failed = stage(
+        &d.staging,
+        "stt",
+        &new_transaction_id(),
+        &verified(&repo(FIXTURE)),
+    );
+
+    assert!(failed.is_err());
+    assert!(d.staging.is_dir());
+    assert_eq!(fs::read_dir(&d.staging).unwrap().count(), 0);
+}
+
+#[test]
+fn a_stage_that_fails_leaves_no_directory_it_made_so_the_next_one_makes_and_syncs_them() {
+    let bundle = verified(&repo(FIXTURE));
+    let cases = [
+        ("the manifest", None),
+        ("the id directory", Some("staging/stt")),
+        ("staging_dir", Some("staging")),
+        ("the directory that was there", Some("")),
+    ];
+    for (case, at) in cases {
+        let d = dirs();
+        let top = d.staging.parent().unwrap().to_path_buf();
+        let picked = at.map(|at| top.join(at));
+        crate::durable::hooks::fail_next_sync_of(move |path| match &picked {
+            Some(picked) => path == picked,
+            None => path.ends_with("manifest.json"),
+        });
+
+        let failed = stage(&d.staging, "stt", &new_transaction_id(), &bundle);
+
+        assert!(failed.is_err(), "{case}");
+        assert!(!d.staging.exists(), "{case}");
+        drop(crate::durable::hooks::synced());
+        let tree = stage(&d.staging, "stt", &new_transaction_id(), &bundle).unwrap();
+        let synced = crate::durable::hooks::synced();
+        let above: Vec<_> = synced.iter().filter(|dir| tree.starts_with(dir)).collect();
+        let made = [&tree, &d.staging.join("stt"), &d.staging, &top];
+        assert_eq!(above, made, "{case}");
+    }
+}
+
+#[test]
 fn nothing_is_staged_for_an_id_or_a_transaction_that_cannot_name_a_tree() {
     let d = dirs();
     let bundle = verified(&repo(FIXTURE));
@@ -304,7 +452,82 @@ fn a_removal_that_was_interrupted_is_finished_by_the_next_prune() {
 
     assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
 
-    assert!(!unnamed.exists() && d.staging.join("stt").is_dir());
+    assert!(!unnamed.exists());
+}
+
+#[test]
+fn an_id_directory_left_empty_is_removed_with_its_last_unnamed_tree() {
+    let d = dirs();
+    let unnamed = tree(&d.staging, "stt");
+    let empty = d.staging.join("tts");
+    fs::create_dir_all(&empty).unwrap();
+
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
+
+    assert!(!unnamed.exists() && !d.staging.join("stt").exists());
+    assert!(!empty.exists() && d.staging.is_dir());
+}
+
+#[test]
+fn an_id_directory_that_holds_anything_is_kept() {
+    let d = dirs();
+    let named = tree(&d.staging, "stt");
+    let flat = flat_tree(&d.staging, "vad", "assets");
+    let not_a_tree = d.staging.join("tts").join("notes");
+    fs::create_dir_all(d.staging.join("tts")).unwrap();
+    fs::write(&not_a_tree, "").unwrap();
+    let records = |state: &mut AgentState| {
+        state.active = Some(record("stt", &named));
+        Ok(())
+    };
+    d.store.update(records).unwrap();
+
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 0);
+
+    assert!(named.is_dir() && not_a_tree.is_file());
+    assert_eq!(files(&flat), ["assets/tokenizer.json", "manifest.json"]);
+}
+
+#[test]
+fn an_empty_id_directory_a_record_names_is_kept_until_none_does() {
+    let d = dirs();
+    let flat = d.staging.join("vad");
+    fs::create_dir_all(&flat).unwrap();
+    let name = |path: Option<PathBuf>| {
+        move |state: &mut AgentState| {
+            state.previous_active = path.as_deref().map(|path| record("vad", path));
+            Ok(())
+        }
+    };
+    d.store.update(name(Some(flat.join("../vad")))).unwrap();
+
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 0);
+    assert!(flat.is_dir());
+
+    d.store.update(name(None)).unwrap();
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 0);
+    assert!(!flat.exists());
+}
+
+#[test]
+fn an_empty_directory_no_deployment_id_names_or_a_link_to_one_is_kept() {
+    let d = dirs();
+    let not_an_id = d.staging.join("not an id");
+    fs::create_dir_all(&not_an_id).unwrap();
+    #[cfg(unix)]
+    let (link, outside) = {
+        let outside = d.staging.parent().unwrap().join("outside");
+        fs::create_dir(&outside).unwrap();
+        let link = d.staging.join("stt");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        (link, outside)
+    };
+
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 0);
+
+    assert!(not_an_id.is_dir());
+    #[cfg(unix)]
+    assert!(link.symlink_metadata().is_ok() && outside.is_dir());
 }
 
 #[test]
@@ -472,6 +695,31 @@ fn a_tree_that_cannot_be_removed_is_named() {
 
 #[cfg(unix)]
 #[test]
+fn an_empty_id_directory_that_cannot_be_removed_is_named() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: root removes from a directory of mode 500");
+        return;
+    }
+    let d = dirs();
+    let id = d.staging.join("stt");
+    fs::create_dir_all(&id).unwrap();
+    let mode = |mode: u32| {
+        fs::set_permissions(&d.staging, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    mode(0o500);
+
+    let error = prune(&d.staging, &d.store).unwrap_err().to_string();
+
+    mode(0o755);
+    let named = format!("`{}`: ", id.display());
+    assert!(error.contains(&named), "{error}");
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 0);
+    assert!(!id.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn an_id_directory_that_is_a_link_is_not_followed() {
     let d = dirs();
     let outside = d.staging.parent().unwrap().join("outside");
@@ -526,7 +774,7 @@ fn a_tree_the_transaction_in_flight_reads_its_bundle_from_or_from_within_is_kept
     let source = tree(&d.staging, "stt");
     let spelled = d
         .staging
-        .join("tts/../stt")
+        .join("stt/../stt")
         .join(source.file_name().unwrap());
     d.store.update(read_from(Some(spelled))).unwrap();
     assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
@@ -535,6 +783,32 @@ fn a_tree_the_transaction_in_flight_reads_its_bundle_from_or_from_within_is_kept
     d.store.update(read_from(None)).unwrap();
     assert_eq!(prune(&d.staging, &d.store).unwrap(), 1);
     assert!(!source.exists());
+}
+
+#[test]
+fn a_tree_or_an_id_directory_a_named_path_goes_up_out_of_is_kept() {
+    let d = dirs();
+    let [left, source] = ["tts", "stt"].map(|id| tree(&d.staging, id));
+    let empty = d.staging.join("vad");
+    fs::create_dir(&empty).unwrap();
+    let source_name = source.file_name().unwrap();
+    let name = |named: bool| {
+        let through_tree = left.join("../../stt").join(source_name);
+        let through_empty = empty.join("../stt").join(source_name);
+        move |state: &mut AgentState| {
+            state.active = named.then(|| record("stt", &through_tree));
+            state.in_flight_transaction = named.then(|| reading(&through_empty));
+            Ok(())
+        }
+    };
+    d.store.update(name(true)).unwrap();
+
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 0);
+    assert!(left.is_dir() && empty.is_dir() && source.is_dir());
+
+    d.store.update(name(false)).unwrap();
+    assert_eq!(prune(&d.staging, &d.store).unwrap(), 2);
+    assert_eq!(fs::read_dir(&d.staging).unwrap().count(), 0);
 }
 
 /// A tree of the earlier layout at `staging_dir/<id>`, its artifacts under
