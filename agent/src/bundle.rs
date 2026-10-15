@@ -125,7 +125,10 @@ impl From<BundleDescriptor> for VerifiedBundle {
 /// # Errors
 ///
 /// Returns [`AgentError::BundleManifest`] when the manifest is missing,
-/// malformed, or does not validate.
+/// malformed, or does not validate; [`AgentError::BundleIntegrity`] when an
+/// artifact is missing or does not match its digest;
+/// [`AgentError::BundleMissing`] when `bundle_path` is not a directory; and
+/// [`AgentError::Io`] when a file cannot be read.
 pub(crate) fn model_artifact_relative_path(bundle_path: &Path) -> AgentResult<String> {
     let descriptor = parse_bundle(bundle_path).map_err(parse_error_to_agent_error)?;
     descriptor

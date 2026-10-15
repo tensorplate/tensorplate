@@ -628,7 +628,9 @@ Rollback is a transaction, not a file-pointer swap:
 
 1. Read the previous active deployment from durable state.
 2. Verify its staged files (`staged_path/` exists and contains
-   `manifest.json`).
+   `manifest.json`), then hash every artifact against that manifest, as the
+   restore at a start does; a copy that fails is refused with the same
+   code, before a transaction begins.
 3. Walk the same prepare / warm / fence sequence as deploy.
 4. On success, swap active <-> previous_active in durable state, in the
    write that records `promoted`, then activate the candidate and clear the
@@ -1049,7 +1051,8 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   start restores it. The restore, once the two digests agree, and the
   rollback also hash every artifact of the staged copy: one that is missing,
   truncated or replaced is `load_failed` at the restore, with the same
-  outcome, and the rollback is refused.
+  outcome, and at the rollback, which is refused before it begins a
+  transaction.
 - **Failure.** A member that stops with three restarts inside the last five
   minutes is failed: nothing is started for it until a deployment is
   promoted, by a deploy or a rollback. Status then reports

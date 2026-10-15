@@ -2,7 +2,7 @@
 
 use super::deploy::{started_after_an_update_that_did_not_complete, FORMAT_0_1, STT, TTS};
 use super::one_pass::another_format_0_1_bundle;
-use super::start_again::{host, Host, Worker};
+use super::start_again::{halve, host, Host, Worker};
 use super::*;
 
 use std::cell::RefCell;
@@ -121,6 +121,67 @@ fn each_deploy_stages_a_tree_of_its_own_named_by_its_transaction() {
     assert_eq!(staged_path(&host, previous), tree(&first));
     assert_eq!(contents(&tree(&first)), earlier);
     assert_eq!(host.trees("stt"), [first, second].into_iter().collect());
+}
+
+#[test]
+fn a_rollback_to_a_copy_that_fails_its_artifact_check_answers_as_the_restore_does() {
+    // What the copy suffers, what the refusal says, its code, and whether it
+    // names the copy (only an I/O error, whose own message does not).
+    type Broken = (fn(&Path), &'static str, ErrorCode, bool);
+    let load_failed = ErrorCode::LoadFailed;
+    let cases: [Broken; 5] = [
+        (
+            |tree| fs::remove_file(tree.join("entry.json")).unwrap(),
+            "artifact `entry.json` failed integrity check: missing on disk",
+            load_failed,
+            false,
+        ),
+        (
+            |tree| fs::write(tree.join("entry.json"), b"{}").unwrap(),
+            "artifact `entry.json` failed integrity check: digest mismatch",
+            load_failed,
+            false,
+        ),
+        (
+            |tree| halve(&tree.join("entry.json")),
+            "artifact `entry.json` failed integrity check: digest mismatch",
+            load_failed,
+            false,
+        ),
+        (
+            |tree| fs::write(tree.join("manifest.json"), "{").unwrap(),
+            "bundle manifest is invalid",
+            ErrorCode::ConfigInvalid,
+            false,
+        ),
+        (
+            |tree| fs::write(tree.join("manifest.json"), b"\xff").unwrap(),
+            "did not contain valid UTF-8",
+            ErrorCode::Internal,
+            true,
+        ),
+    ];
+    for (case, (broken, says, code, names_the_copy)) in cases.into_iter().enumerate() {
+        let host = host();
+        let (agent, _) = host.start(Worker::default());
+        for bundle in [STT, TTS] {
+            agent.deploy("stt", bundle).unwrap();
+            drop(agent.asked());
+        }
+        let retained = staged_path(&host, previous);
+        broken(&retained);
+        let before = host.view();
+
+        let error = agent.coordinator.rollback(None).unwrap_err().to_record();
+
+        assert_eq!(error.code, code, "case {case}: {error:?}");
+        assert!(error.message.contains(says), "case {case}: {error:?}");
+        let named = error.message.contains(&retained.display().to_string());
+        assert_eq!(named, names_the_copy, "case {case}: {error:?}");
+        assert!(agent.never_asked(), "case {case}");
+        assert_eq!(host.view(), before, "case {case}");
+        assert!(host.settled(), "case {case}");
+    }
 }
 
 #[test]
