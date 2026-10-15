@@ -720,7 +720,11 @@ fn probe_serving_streaming_with(worker: &Path, timeout: Duration) -> Vec<Finding
 /// What the worker's `--version` says of streaming support, or why it says
 /// nothing this doctor can read.
 fn worker_streaming_support(worker: &Path, timeout: Duration) -> Result<bool, String> {
-    let output = run_bounded(Command::new(worker).arg("--version"), timeout)?;
+    // From `/`, as doctor's other probes run: nothing in the caller's directory is in the worker's reach.
+    let output = run_bounded(
+        Command::new(worker).arg("--version").current_dir("/"),
+        timeout,
+    )?;
     if !output.status.success() {
         // A worker the loader cannot start (a missing CUDA or TensorRT library) says why only here.
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2559,10 +2563,11 @@ tensorplate-agent-proxy    started operator ~/Library/LaunchAgents/proxy.plist
     }
 
     /// A worker that answers `--version` as the serving worker does, with
-    /// `feature` as its fourth line, and refuses any other invocation.
+    /// `feature` as its fourth line, and refuses any other invocation or a
+    /// run from another directory than `/`.
     fn worker_version(feature: &str) -> String {
         format!(
-            "[ \"$*\" = --version ] || exit 3\n\
+            "[ \"$*\" = --version ] || exit 3\n[ \"$(pwd)\" = / ] || exit 4\n\
              printf 'tensorplate-serving 0.3.1\\nprotocol 0.1\\nbundle-format 0.1\\n{feature}\\n'"
         )
     }
