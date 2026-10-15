@@ -820,7 +820,9 @@ agent stamps the oldest state version whose readers decode the file without
 loss: `0.2` from the first generation it allocates, `0.1` until then. A
 deploy of a format 0.2 bundle takes a generation itself, so it writes a
 `0.2` file under either worker mode; with `worker.mode = "mock"` a format
-0.1 deploy takes none and the file stays `0.1`. An
+0.1 deploy takes none and the file stays `0.1`. A deployment record that
+carries the [streaming](#streaming) flag is `0.2` content too, whatever
+the generation counter says. An
 agent through 0.2.x refuses a `0.2` file with its typed unsupported-version
 error and exits instead of misreading it; nothing migrates a state file
 backwards, and a downgrade sets the state directory aside instead. The
@@ -1214,7 +1216,10 @@ or the member is failed. `candidate.generation` is
 the generation a deploy has prepared and not promoted; a worker an earlier
 deploy abandoned is not named. `active.stream_endpoint` and
 `active.descriptor_digest` are attached with `active.generation`, and only
-when that generation was started with [streaming](#streaming).
+when that generation was started with [streaming](#streaming); in the
+window above where the outgoing worker's generation is attached, a
+redeploy of a format 0.1 bundle under its own id, the outgoing worker's
+endpoint and digest are too, if it streams.
 
 A singleton record that names a descriptor carries its generation: a
 deploy, a rollback, a restore and the
