@@ -233,6 +233,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `tensorplate doctor` reports `serving_streaming_support`: it runs the
+  installed serving worker's `--version`, stopped after 5 s, and reads its
+  `streaming-grpc` line. `on` is `ok`; `off` is `ok` with a message that the
+  worker refuses a config with `streaming.enabled`. A run that does not
+  start, does not finish, leaves its output open, exits non-zero (with the
+  last line the worker wrote to stderr), or prints no line or an
+  unrecognised value is a `warning` naming why, and a host with no worker at
+  `/usr/lib/tensorplate/tensorplate-serving` (macOS included) is `skipped`.
+  The finding never fails, so doctor's exit status is unchanged.
+  (V030-E04-F02-T02)
+
 - A deadline for the speech job in flight and a bound on the wait for a
   session's release, so that a backend that never ends a job no longer
   holds the serving worker's one stream session for good. Both are

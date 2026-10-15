@@ -71,6 +71,10 @@ yet:
 - `observability_service_state = warning` until the unit is enabled in step 3
 - `serving_systemd_absent = ok`
 - `serving_binary_installed = ok`
+- `serving_streaming_support = ok`: the release packages' worker is built
+  with streaming support; `warning` on a Jetson where `cuda_runtime` warns
+  or `tensorrt_runtime` is `missing`, because a worker that cannot load its
+  CUDA or TensorRT libraries cannot answer `--version`
 - `platform_registry = ok`
 - `python_pytorch_backend = missing` (informational; install in step 5
   if SmolVLA validation is in scope)
