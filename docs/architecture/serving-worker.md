@@ -768,8 +768,11 @@ Draining → Stopped):
 A worker is stopped once. `start()` after `stop()` returns `unavailable`
 (`worker_shutdown`) and opens no listener, whether the worker was serving,
 was never started, or failed its start. `serve_forever()` and `stop()`
-called after that return the first stop's exit code. The binary starts its
-worker once, and the agent replaces a member by starting a new process.
+called after that return the first stop's exit code. `start()` holds the
+lock `stop()` holds for its whole run, so a `start()` and a `stop()` called
+on two threads at once run one after the other: the start serves until the
+stop, or it is refused. The binary starts its worker once, and the agent
+replaces a member by starting a new process.
 
 ASAN-clean: the buffer manager reports zero active buffers after
 shutdown in the V01-E07-F08 integration tests.

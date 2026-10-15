@@ -691,6 +691,9 @@ Result<void> ServingWorker::start() {
   if (!impl_) {
     return unexpected(Error::Code::Internal, "serving worker: impl null");
   }
+  // Held throughout, as stop() holds it: a stop on another thread runs
+  // wholly before this start or wholly after it.
+  const std::lock_guard guard(impl_->stop_mutex);
   // A stop unloaded the session, and nothing loads it again.
   if (impl_->stopped.load()) {
     return unexpected(

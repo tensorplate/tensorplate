@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -873,6 +874,39 @@ TEST(ServingE2E, AStartAfterAStopIsRefused) {
   EXPECT_EQ(again.error().context, "worker_shutdown");
   EXPECT_EQ(worker->serve_forever(), ServingExitCode::Ok) << "the refusal replaced the stop's code";
   EXPECT_EQ(worker->stop(), ServingExitCode::Ok);
+}
+
+// Released together, each pair runs in either order but never interleaved: a
+// start that slipped in after the stop would leave threads no stop joins, and
+// destroying the worker would end the process.
+TEST(ServingE2E, AStartAndAStopOnTwoThreadsRunOneAfterTheOther) {
+  for (int round = 0; round < 100; ++round) {
+    auto created = ServingWorker::create(default_test_config());
+    ASSERT_TRUE(created.has_value()) << created.error().message;
+    const auto worker = std::move(created).value();
+    std::atomic<int> arriving{2};
+    const auto meet = [&arriving] {
+      arriving.fetch_sub(1);
+      while (arriving.load() > 0) {
+      }
+    };
+    std::optional<Result<void>> started;
+    std::thread starting([&] {
+      meet();
+      started.emplace(worker->start());
+    });
+    std::thread stopping([&] {
+      meet();
+      (void)worker->stop();
+    });
+    starting.join();
+    stopping.join();
+    ASSERT_TRUE(started.has_value());
+    if (!started->has_value()) {
+      EXPECT_EQ(started->error().context, "worker_shutdown") << "round " << round;
+    }
+    EXPECT_FALSE(worker->start().has_value()) << "round " << round;
+  }
 }
 
 TEST(ServingE2E, AWorkerStoppedBeforeItsFirstStartIsNotStarted) {
