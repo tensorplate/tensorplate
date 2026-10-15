@@ -58,6 +58,9 @@ LARGE = bytes(320 * 192)
 # waiting, or stops the clock, and is not about that timer.
 NO_STALL_MS = 3_600_000
 NO_PING_MS = 3_600_000
+# Seconds the relay cases' `dropped()` gate waits for the channel to leave READY; it takes
+# milliseconds, so a run that reaches this bound is stuck, not slow.
+DROPPED_WITHIN = 10
 Scenario = Callable[[StreamServer, speech.SpeechToTextSession], Awaitable[Any]]
 
 
@@ -686,8 +689,18 @@ async def dropped(stream: speech.SpeechClient) -> None:
     lost with it ("Delayed close due to in-progress write").
     """
     channel = stream._channel
-    while channel.get_state() is grpc.ChannelConnectivity.READY:
-        await channel.wait_for_state_change(grpc.ChannelConnectivity.READY)
+
+    async def left_ready() -> None:
+        while channel.get_state() is grpc.ChannelConnectivity.READY:
+            await channel.wait_for_state_change(grpc.ChannelConnectivity.READY)
+
+    try:
+        await asyncio.wait_for(left_ready(), DROPPED_WITHIN)
+    except asyncio.TimeoutError:
+        raise AssertionError(
+            f"the dropped() gate: the client's channel was still READY {DROPPED_WITHIN} s"
+            " after the relay reset its connection"
+        ) from None
 
 
 def conclude_once_dropped(
@@ -697,9 +710,12 @@ def conclude_once_dropped(
     conclude = session._conclude
 
     async def concluding() -> None:
-        if not session._reopened:
-            await dropped(stream)
-        await conclude()
+        try:
+            if not session._reopened:
+                await dropped(stream)
+        finally:
+            # Concluded either way, so that a gate that fails ends the session, not the test's wait.
+            await conclude()
 
     monkeypatch.setattr(session, "_conclude", concluding)
 
