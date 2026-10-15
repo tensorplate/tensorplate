@@ -95,6 +95,12 @@ if(TP_ENABLE_STREAMING_GRPC AND NOT TP_ENABLE_TSAN)
     PRIVATE tp::runtime tp::synthetic_session_dispatch tp::stream_proto gRPC::grpc++
             GTest::gtest_main)
   target_compile_definitions(tp_test_stream_listener PRIVATE TP_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+  # One speech worker case runs the worker binary.
+  if(TARGET tp_serving_worker)
+    add_dependencies(tp_test_stream_listener tp_serving_worker)
+    target_compile_definitions(tp_test_stream_listener
+      PRIVATE TP_SERVING_WORKER_BINARY="$<TARGET_FILE:tp_serving_worker>")
+  endif()
   target_compile_features(tp_test_stream_listener PRIVATE cxx_std_20)
   tp_apply_warnings(tp_test_stream_listener)
   tp_apply_sanitizers(tp_test_stream_listener)

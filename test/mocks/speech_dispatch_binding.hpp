@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -77,10 +78,62 @@ namespace tensorplate::testing {
       AudioChunkResult{kJobOutputAudioFormat, PcmWindow{*buffer, 0, speech.size()}, 0});
 }
 
+/// Passes every event to the sink behind it, but holds back the
+/// acknowledgements of session releases while told to, as a runner's
+/// separate frame can come after the session's last job has ended. What it
+/// held it delivers on the thread that lets it go.
+class HeldAcknowledgements final : public JobEventSink {
+ public:
+  explicit HeldAcknowledgements(std::shared_ptr<JobEventSink> inner) : inner_(std::move(inner)) {}
+
+  void on_accepted(const JobEvent& event) noexcept override { inner_->on_accepted(event); }
+  void on_progress(const JobEvent& event) noexcept override { inner_->on_progress(event); }
+  void on_completed(const JobEvent& event) noexcept override { inner_->on_completed(event); }
+  void on_failed(const JobEvent& event) noexcept override { inner_->on_failed(event); }
+  void on_cancel_acknowledged(const JobEvent& event) noexcept override {
+    inner_->on_cancel_acknowledged(event);
+  }
+  void on_released(const JobEvent& event) noexcept override { inner_->on_released(event); }
+  void on_session_released(std::uint64_t session_key, std::uint64_t generation) noexcept override {
+    {
+      const std::lock_guard guard(mu_);
+      if (holding_) {
+        held_.emplace_back(session_key, generation);
+        return;
+      }
+    }
+    inner_->on_session_released(session_key, generation);
+  }
+
+  void hold() {
+    const std::lock_guard guard(mu_);
+    holding_ = true;
+  }
+  void let_go() {
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> held;
+    {
+      const std::lock_guard guard(mu_);
+      holding_ = false;
+      held.swap(held_);
+    }
+    for (const auto& [session_key, generation] : held) {
+      inner_->on_session_released(session_key, generation);
+    }
+  }
+
+ private:
+  const std::shared_ptr<JobEventSink> inner_;
+  std::mutex mu_;
+  bool holding_ = false;
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> held_;
+};
+
 /// Passes every call to the fixture bridge behind it and counts what the
 /// dispatch asked. It can answer one session release as the adapter does when
 /// its release record is full, and a job class as a backend that does not run
-/// it.
+/// it. It can hold back the backend's acknowledgements of session releases,
+/// and hold the caller of the next release_session() until the test lets it
+/// go.
 ///
 /// Told to (deliver_callbacks_first()), its submit() and release_session()
 /// return only once the fixture has settled: every callback the call caused
@@ -94,7 +147,16 @@ class CountingJobBridge final : public BoundedJobBridge {
   explicit CountingJobBridge(std::shared_ptr<FixtureJobBridge> inner) : inner_(std::move(inner)) {}
 
   [[nodiscard]] Result<void> set_event_sink(std::shared_ptr<JobEventSink> sink) override {
-    return inner_->set_event_sink(std::move(sink));
+    if (sink == nullptr) {
+      return inner_->set_event_sink(nullptr);
+    }
+    auto held = std::make_shared<HeldAcknowledgements>(std::move(sink));
+    auto set = inner_->set_event_sink(held);
+    if (set) {
+      const std::lock_guard guard(mu_);
+      acknowledgements_ = std::move(held);
+    }
+    return set;
   }
   [[nodiscard]] Result<void> submit(JobRequest request) override {
     {
@@ -119,8 +181,14 @@ class CountingJobBridge final : public BoundedJobBridge {
   [[nodiscard]] Result<void> release_session(std::uint64_t session_key,
                                              std::uint64_t generation) override {
     {
-      const std::lock_guard guard(mu_);
+      std::unique_lock lock(mu_);
       ++releases_[session_key];
+      if (hold_next_release_) {
+        hold_next_release_ = false;
+        release_held_ = true;
+        gate_.notify_all();
+        gate_.wait(lock, [&] { return !release_held_; });
+      }
       if (refuse_next_release_) {
         refuse_next_release_ = false;
         return unexpected(Error::make(Error::Code::ResourceExhausted,
@@ -138,6 +206,28 @@ class CountingJobBridge final : public BoundedJobBridge {
   }
 
   void deliver_callbacks_first() { callbacks_first_.store(true); }
+  /// The next release_session() waits, before it reaches the fixture, until
+  /// let_release_go().
+  void hold_next_release() {
+    const std::lock_guard guard(mu_);
+    hold_next_release_ = true;
+  }
+  /// True once a release_session() waits to be let go.
+  [[nodiscard]] bool release_held(std::chrono::milliseconds patience) {
+    std::unique_lock lock(mu_);
+    return gate_.wait_for(lock, patience, [&] { return release_held_; });
+  }
+  /// Also takes back a hold no release_session() has met yet.
+  void let_release_go() {
+    {
+      const std::lock_guard guard(mu_);
+      hold_next_release_ = false;
+      release_held_ = false;
+    }
+    gate_.notify_all();
+  }
+  void hold_acknowledgements() { acknowledgements().hold(); }
+  void let_acknowledgements_go() { acknowledgements().let_go(); }
   void refuse_next_release() {
     const std::lock_guard guard(mu_);
     refuse_next_release_ = true;
@@ -171,8 +261,17 @@ class CountingJobBridge final : public BoundedJobBridge {
     }
   }
 
+  HeldAcknowledgements& acknowledgements() {
+    const std::lock_guard guard(mu_);
+    return *acknowledgements_;
+  }
+
   const std::shared_ptr<FixtureJobBridge> inner_;
   mutable std::mutex mu_;
+  std::condition_variable gate_;
+  bool hold_next_release_ = false;
+  bool release_held_ = false;
+  std::shared_ptr<HeldAcknowledgements> acknowledgements_;
   std::map<std::uint64_t, std::uint64_t> releases_;
   std::vector<JobRequest> submitted_;
   std::vector<std::uint64_t> cancelled_;
@@ -186,14 +285,17 @@ class SpeechUnderTest final : public DispatchUnderTest {
  public:
   static constexpr std::uint64_t kGeneration = 9;
 
+  /// `dispatch` is given this generation, and its stalls are recorded.
   explicit SpeechUnderTest(const SchedulerClock& clock, FixtureJobBridgeOptions options = {},
                            FixtureJobBridge::ResultFunction result = result_following_input,
-                           BufferManagerConfig pool = {})
+                           BufferManagerConfig pool = {},
+                           serving::SpeechDispatchOptions dispatch = {})
       : buffers(BufferManager::create(std::move(pool)).value()),
         fixture(std::make_shared<FixtureJobBridge>(*buffers, std::move(result), options)),
         bridge(std::make_shared<CountingJobBridge>(fixture)),
-        strategy(
-            serving::SpeechJobDispatch::create(bridge, *buffers, clock, {kGeneration}).value()) {
+        strategy(serving::SpeechJobDispatch::create(bridge, *buffers, clock,
+                                                    recording_stalls(std::move(dispatch)))
+                     .value()) {
     fixture->prime();
   }
   /// With the dispatch stopped and the backend unloaded no job reads a buffer
@@ -259,6 +361,18 @@ class SpeechUnderTest final : public DispatchUnderTest {
     return pool.active_count;
   }
 
+  /// What the dispatch reported through `on_stall`, in order.
+  [[nodiscard]] std::vector<Error> stalls() const {
+    const std::lock_guard guard(stalls_mu_);
+    return stalls_;
+  }
+
+  // Ahead of `strategy`, whose thread reports stalls.
+ private:
+  mutable std::mutex stalls_mu_;
+  std::vector<Error> stalls_;
+
+ public:
   /// Results the case's backend gave in a buffer it had released itself: the
   /// dispatch's one release of each is refused.
   std::uint64_t stale_results = 0;
@@ -266,6 +380,16 @@ class SpeechUnderTest final : public DispatchUnderTest {
   std::shared_ptr<FixtureJobBridge> fixture;
   std::shared_ptr<CountingJobBridge> bridge;
   std::unique_ptr<serving::SpeechJobDispatch> strategy;
+
+ private:
+  serving::SpeechDispatchOptions recording_stalls(serving::SpeechDispatchOptions dispatch) {
+    dispatch.generation = kGeneration;
+    dispatch.on_stall = [this](const Error& cause) {
+      const std::lock_guard guard(stalls_mu_);
+      stalls_.push_back(cause);
+    };
+    return dispatch;
+  }
 };
 
 /// The speech dispatch of `binding`, with its fixture backend.

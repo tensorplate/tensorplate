@@ -30,6 +30,7 @@ TEST(SpeechWorker, FeatureFlagDisabled) {
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iterator>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -49,11 +50,13 @@ TEST(SpeechWorker, FeatureFlagDisabled) {
 #include "tensorplate/core/model_spec.hpp"
 #include "tensorplate/core/result.hpp"
 #include "tensorplate/serving/config.hpp"
+#include "tensorplate/serving/health.hpp"
 #include "tensorplate/serving/serialization.hpp"
 #include "tensorplate/serving/worker.hpp"
 #include "tensorplate/stream/v1/session.grpc.pb.h"
 
 #include "adapters/python_pytorch/python_pytorch_session.hpp"
+#include "control_socket_harness.hpp"
 #include "fixture_job_bridge.hpp"
 #include "job_bridge_harness.hpp"
 #include "recording_job_event_sink.hpp"
@@ -966,6 +969,62 @@ TEST_F(SpeechWorkerScripted, AStopAtTheEndOfTheDrainWindowLeavesTheJobToTheUnloa
   EXPECT_EQ(stopped.front().value("jobs_completed", -1), 0);
 }
 
+// The runner ends a cancelled job only when its work returns. A session
+// cancelled under a job that does not end holds its place until its release
+// passes the bound: the job's deadline (10 s and 50 ms for 100 ms of audio),
+// then 10 s. The worker then ends the wait of serve_forever(), whose stop
+// returns an internal error, which is what has it restarted. The case waits
+// those 20 seconds. That the health reads failed meanwhile is what the worker
+// binary's case below holds.
+TEST_F(SpeechWorkerScripted, ACancelledSessionWhoseJobDoesNotEndFailsTheWorker) {
+  register_backend();
+  backend->hold();
+  auto config = streaming_config(speech_model());
+  config.shutdown.drain_deadline = 300ms;
+  auto built = worker(config);
+  ASSERT_NE(built, nullptr);
+  const Serving served{std::move(built)};
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  ASSERT_TRUE(client.send_audio(kFrame));
+  (void)client.finalize();
+  const auto job_id = running_job().at("job_id").get<std::uint64_t>();
+  ASSERT_NE(job_id, 0U);
+
+  ::testing::internal::CaptureStderr();
+  wire::ClientEvent cancel;
+  cancel.mutable_cancel();
+  ASSERT_TRUE(client.send(cancel));
+  const auto accepted = client.next();
+  ASSERT_TRUE(accepted.has_value());
+  EXPECT_TRUE(accepted->has_cancel_accepted()) << accepted->ShortDebugString();
+  ASSERT_EQ(sidecar.sent("session_release", 1).size(), 1U);
+  // Started already: serve_forever() waits for the shutdown and stops.
+  std::promise<tensorplate::ServingExitCode> served_until;
+  auto exit_code = served_until.get_future();
+  std::thread serving([&] { served_until.set_value(served.worker->serve_forever()); });
+  const bool stopped_by_itself = exit_code.wait_for(60s) == std::future_status::ready;
+  if (!stopped_by_itself) {
+    served.worker->shutdown("test");
+  }
+  serving.join();
+  const auto log = ::testing::internal::GetCapturedStderr();
+  ASSERT_TRUE(stopped_by_itself) << "serve_forever() did not end";
+  EXPECT_EQ(exit_code.get(), tensorplate::ServingExitCode::Internal);
+  EXPECT_EQ(served.worker->health().snapshot().last_error_code, Error::Code::Timeout);
+  const auto stalled = logged(log, "speech backend stalled");
+  ASSERT_EQ(stalled.size(), 1U);
+  EXPECT_EQ(stalled.front().value("code", ""), "timeout");
+  EXPECT_EQ(stalled.front().value("reason", ""), "release_bound_exceeded");
+  // The unload ended the job: the backend holds it until one waits behind it.
+  EXPECT_EQ(kinds_of(sidecar.written(), job_id),
+            (std::vector<std::string>{"job_accepted", "job_cancel_acknowledged", "job_failed",
+                                      "job_released"}));
+  const auto stopped = logged(log, "speech dispatch stopped");
+  ASSERT_EQ(stopped.size(), 1U);
+  EXPECT_EQ(stopped.front().value("jobs_past_deadline", 0), 1);
+  EXPECT_EQ(stopped.front().value("releases_past_bound", 0), 1);
+}
+
 // The backend takes the job and then refuses it: a failed job.
 TEST_F(SpeechWorkerScripted, AJobTheBackendRefusesFailsItsSession) {
   register_backend();
@@ -1300,6 +1359,102 @@ TEST_F(SpeechWorkerRunner, OneSegmentIsSynthesized) {
   (void)served.stop();
   EXPECT_TRUE(runners().empty()) << "the stop left the runner process";
 }
+
+#ifdef TP_SERVING_WORKER_BINARY
+// The worker binary over the runner with a fixture backend that never ends a
+// job (test/mocks/worker_held_job_sidecar.py). A session cancelled under its
+// job holds its place until its release passes the bound (the job's deadline,
+// 10 s and 50 ms, then 10 s); the worker then stops by itself, its unload
+// gives up on the job after the adapter's 15 s and ends the sidecar, and the
+// process exits as an internal error. The case waits that long.
+TEST_F(SpeechWorkerRunner, AWorkerProcessWhoseBackendKeepsACancelledJobExitsAsFailed) {
+  std::string pattern = (std::filesystem::temp_directory_path() / "tp-stall-XXXXXX").string();
+  ASSERT_NE(::mkdtemp(pattern.data()), nullptr);
+  const std::filesystem::path dir = pattern;
+  struct Removed {
+    std::filesystem::path dir;
+    ~Removed() {
+      std::error_code ignored;
+      std::filesystem::remove_all(dir, ignored);
+    }
+  } removed{dir};
+  const auto wrapper = dir / "sidecar";
+  std::ofstream(wrapper)
+      << "#!/bin/sh\nexec \"${TP_TEST_PYTHON:-python3}\" \"$TP_HELD_JOB_SIDECAR\" \"$@\"\n";
+  std::filesystem::permissions(wrapper, std::filesystem::perms::owner_all);
+  const Json config = {{"schema_version", "0.1"},
+                       {"bind", {{"host", "127.0.0.1"}, {"port", 0}}},
+                       {"streaming", {{"enabled", true}, {"port", 0}}},
+                       {"deployment",
+                        {{"use_mock_session", false},
+                         {"endpoint", kDeployment},
+                         {"backend", "python_pytorch"},
+                         {"model",
+                          {{"model_id", "speech"},
+                           {"model_class", "speech"},
+                           {"artifact_path", "/dev/null"},
+                           {"backend_hint", "python_pytorch"}}}}},
+                       {"shutdown", {{"drain_deadline_ms", 300}}},
+                       {"enable_stderr_logs", true}};
+  const tensorplate::testing::OwnedFd null_input{::open("/dev/null", O_RDONLY)};
+  auto worker = tensorplate::testing::ChildProcess::spawn(
+      {TP_SERVING_WORKER_BINARY, "--config-json", config.dump()}, null_input.get(),
+      dir / "stderr.txt",
+      {"TP_PYTHON_PYTORCH_EXECUTABLE=" + wrapper.string(),
+       "TP_HELD_JOB_SIDECAR=" +
+           (std::filesystem::path{TP_SOURCE_DIR} / "test/mocks/worker_held_job_sidecar.py")
+               .string(),
+       "TP_HELD_JOB_TEST_DIR=" + dir.string()});
+  std::vector<Json> bound;
+  const auto loading = std::chrono::steady_clock::now() + 60s;
+  while (bound.empty() && std::chrono::steady_clock::now() < loading) {
+    std::this_thread::sleep_for(20ms);
+    bound = logged(worker.stderr_text(), "stream listener bound");
+  }
+  ASSERT_EQ(bound.size(), 1U) << worker.stderr_text();
+  const auto stub = wire::SessionService::NewStub(
+      grpc::CreateChannel("127.0.0.1:" + std::to_string(bound.front().at("port").get<int>()),
+                          grpc::InsecureChannelCredentials()));
+  Client client;
+  client.context->set_deadline(std::chrono::system_clock::now() + 180s);
+  client.call = stub->Session(client.context.get());
+  ASSERT_TRUE(client.call->Write(open_event(wire::SESSION_MODE_STT_STREAMING)));
+  const auto ready = client.read();
+  ASSERT_TRUE(ready.has_value() && ready->has_ready()) << worker.stderr_text();
+  client.took(ready->ready());
+  ASSERT_TRUE(client.send_audio(kFrame));
+  (void)client.finalize();
+  // A cancel that reached the runner before its backend took the job would
+  // end the job at once.
+  const auto taking = std::chrono::steady_clock::now() + 60s;
+  while (!std::filesystem::exists(dir / "job") && std::chrono::steady_clock::now() < taking) {
+    std::this_thread::sleep_for(20ms);
+  }
+  ASSERT_TRUE(std::filesystem::exists(dir / "job")) << worker.stderr_text();
+  wire::ClientEvent cancel;
+  cancel.mutable_cancel();
+  ASSERT_TRUE(client.send(cancel));
+  const auto accepted = client.next();
+  ASSERT_TRUE(accepted.has_value());
+  EXPECT_TRUE(accepted->has_cancel_accepted()) << accepted->ShortDebugString();
+
+  const auto status = worker.wait_exit(180s);
+  const auto log = worker.stderr_text();
+  ASSERT_TRUE(status.has_value()) << log;
+  EXPECT_EQ(*status, static_cast<int>(tensorplate::ServingExitCode::Internal)) << log;
+  const auto stalled = logged(log, "speech backend stalled");
+  ASSERT_EQ(stalled.size(), 1U) << log;
+  EXPECT_EQ(stalled.front().value("reason", ""), "release_bound_exceeded");
+  const auto requested = logged(log, "shutdown requested");
+  ASSERT_EQ(requested.size(), 1U) << log;
+  EXPECT_EQ(requested.front().value("reason", ""), "speech backend stalled");
+  const auto stopped = logged(log, "speech dispatch stopped");
+  ASSERT_EQ(stopped.size(), 1U) << log;
+  EXPECT_EQ(stopped.front().value("jobs_past_deadline", 0), 1);
+  EXPECT_EQ(stopped.front().value("releases_past_bound", 0), 1);
+  EXPECT_EQ(logged(log, "shutdown complete").size(), 1U) << log;
+}
+#endif
 
 }  // namespace
 

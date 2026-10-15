@@ -480,7 +480,7 @@ listener is opened. The binary's exit codes are:
 | 64   | Configuration parse / validation failure. |
 | 65   | Component build / session load failure. |
 | 66   | Listener bind / accept failure. |
-| 70   | Internal error. |
+| 70   | Internal error, and a worker that stopped itself because its speech backend stalled ([A stalled speech backend](#a-stalled-speech-backend)). |
 
 A worker that exits with 64 or 65 ends its stderr with one JSON line, the
 startup failure record, written whether or not `enable_stderr_logs` is
@@ -607,8 +607,9 @@ completed result is delivered; subsequent reads return 404.
 ## Health and metrics
 
 `HealthState` is a thread-safe state container updated by the
-composition root, by the scheduler event sink, and by the shutdown
-controller. The schema mirrors `protocol/schemas/serving_health.json`.
+composition root, by the scheduler event sink, by the shutdown
+controller, and by a stalled speech backend, which sets `failed`. The
+schema mirrors `protocol/schemas/serving_health.json`.
 
 `ServingMetrics` is a bounded counter / histogram bag with four
 labels: `endpoint`, `model_class`, `model_name`, `backend`. The
@@ -647,6 +648,10 @@ Each handler only writes the signal number to a nonblocking self-pipe and
 preserves `errno`; it never touches the worker, allocates, logs, or locks.
 The main thread waits on that pipe after `start()`, then calls
 `shutdown("SIGINT" | "SIGTERM")` and `stop()` in ordinary thread context.
+While it waits it reads the worker's health once a second: a worker that
+reads `failed`, which only a stalled speech backend sets, is shut down the
+same way (the worker has already logged why) and exits with the code its
+`stop()` returns.
 A second signal during shutdown cannot re-enter either call. SIGPIPE
 remains ignored through worker teardown.
 
@@ -1305,14 +1310,57 @@ partial transcripts and endpointing.
 - **One lane.** One job is in flight for the whole dispatch, and sessions
   are served in the order their work became ready. A job keeps the lane
   until the backend ends it, also when its session was cancelled
-  meanwhile: that is where a cancel waits behind the backend. No
-  deadline covers the job in flight: one the backend never ends keeps
-  the lane, and every session's work waits behind it. With one
-  job in flight nothing else is queued behind it in the backend. The
+  meanwhile, or failed at the job's deadline (below): that is where a
+  cancel waits behind the backend. With one job in flight nothing else is
+  queued behind it in the backend. The
   dispatch records the longest wait between a session's release and the
   backend's acknowledgement (`stats()`), for measuring that cost. The
   scheduler's public contract is not involved: no speech job passes
   through `InferScheduler`.
+
+**The job's deadline and the release's bound.** Both are
+**provisional**: `SpeechDispatchOptions` defaults, which no configuration
+key sets, sized by arithmetic on one latency measurement of a short clip
+on an L4, with margins of several times what it took. A measurement of
+long input will resize them.
+
+- A job that has not ended `job_deadline_base` (10 s) plus
+  `job_deadline_per_audio_second` (0.5 s) for each second of its audio
+  after its submit has missed its deadline. A decode counts its input,
+  at most 30 s, so its deadline is 10 to 25 s; a synthesis counts the 30
+  s a segment may yield, since its length is known only once it ran, so
+  25 s. A live session whose job missed its deadline fails with
+  `timeout` (`deadline_missed`), and its release cancels the job; a
+  session that has already ended is left as it is. For audio input a
+  decode usually runs while its session is finalizing or draining, so the
+  finalize deadline, 10 s, comes first: a live session whose decode does
+  not end reads `finalize_timeout`, and the job's deadline then only
+  starts the release's bound. Not always: an utterance that the 30-second
+  limit ended while an earlier one was decoded is decoded once the session
+  is active again, and a decode that does not end there reads
+  `deadline_missed`. Not measured: a 30-second utterance, and
+  three of them back to back as the backlog allows, each in the first
+  session after a load. Whisper pads every window to 30 s, so a long
+  utterance costs the same encoder pass as the measured one and more
+  decoder tokens; the time is not linear in the audio.
+- A session's release must be acknowledged within `release_bound` (10 s)
+  of its request or, when its job is the one in flight, of that job's
+  deadline, whichever is later. The bound is fixed when the release is
+  asked, so a job that ends before the backend acknowledges the release
+  does not bring it forward. A release the bridge refused counts as
+  never acknowledged. When a release passes its bound the dispatch calls
+  `on_stall` once, on its thread, and the slot stays held: only the
+  backend's acknowledgement frees it, or the backend's reset that the
+  worker then performs ([A stalled speech backend](#a-stalled-speech-backend)).
+- The bounds are read on the manager's clock. The thread waits for the
+  next command or the next bound; a test that moves the clock by hand
+  calls `notify_clock_advanced()`, and once a timed wait has ended short of
+  its bound, which only such a clock causes, the thread waits for the
+  notice alone. Once a bound is due, the commands queued by then are
+  handled ahead of its check and none that arrive later: a job's end
+  already queued is not taken for a deadline missed, and a stream of
+  commands cannot put the check off. `stats()` counts `jobs_past_deadline`
+  and `releases_past_bound`.
 
 **What it cannot refuse before admission.** `negotiate` refuses an input
 kind the dispatch was not built for, an audio format other than the one
@@ -1394,7 +1442,13 @@ completes) and once with every callback run before the bridge call that
 caused it returns, with results that follow their input.
 `test/unit/speech_dispatch_test.cpp` holds what the cases leave to it:
 the job requests, the lane's order, each row of the table above, one
-release a session, and the buffer accounting of every path.
+release a session, the buffer accounting of every path, and the job's
+deadline and the release's bound on the fake clock, each one nanosecond
+before and at its instant; a job's end queued as its deadline passes is
+taken first, one queued after the check fell due is not, and a release
+whose job ends before the backend acknowledges it keeps its bound (the
+dispatch's thread held by a gate in the manager's sink or in the bridge
+double, which can also hold acknowledgements back).
 
 ### The speech dispatch in the worker
 
@@ -1474,10 +1528,12 @@ it today, for three clients:
   owes nothing. Nothing keeps it from opening again when that session
   ends.
 - *One that cancels, or goes away, while its job runs* holds the place
-  until the backend releases the job, and nothing bounds that. No deadline
-  covers the job in flight, and a session that was cancelled or has failed
-  has no timer left, the maximum duration included: it waits for the
-  release.
+  until the backend releases the job: at most the job's deadline and then
+  the release's bound, 20 s and 50 ms for a decode of 100 ms of audio and
+  35 s for a synthesis or a 30-second utterance. A session that was
+  cancelled or has failed has no timer of the session manager's left; the
+  dispatch's bound is what ends the wait, by stopping the worker ([A
+  stalled speech backend](#a-stalled-speech-backend)).
 - *One that reads a chunk every few seconds* never meets the 5-second
   no-progress limit, whose clock restarts at every write that completes.
   Once it has sent a Finalize or closed its sending half, the finalize
@@ -1486,8 +1542,54 @@ it today, for three clients:
   duration. Until then it holds the place and the synthesis result of the
   segment it is reading.
 
-A deadline for the job in flight and a bound on the wait for a release are
-changes of their own.
+Neither the first client nor the third is bounded by the dispatch: more
+than one session per worker is what would keep either from holding the
+only place.
+
+**A stalled speech backend.** The worker gives the dispatch its
+`on_stall`. When a session's release passes its bound, the worker records
+the error in its health, logs `speech backend stalled` (level `error`,
+`code` `timeout`, `reason` `release_bound_exceeded`), asks for its own
+shutdown (`shutdown requested`, reason `speech backend stalled`) and only
+then reads `failed`, all without waiting on the dispatch's thread. The
+binary's main thread, which reads the health once a second, or
+`serve_forever()` then runs the ordinary stop, and `stop()` returns 70:
+
+1. The stream listener stops. The stalled session keeps its slot, so the
+   listener waits out the drain window (`shutdown.drain_deadline`, 5 s by
+   default) and cancels the calls still open.
+2. The HTTP listener stops and the unary drain runs. A worker that serves
+   stream sessions takes no unary inference (it answers `/infer` with
+   `unsupported`), so no inference is cut; requests that arrive during
+   the stop are refused with 503 `not_ready`, and those in flight finish.
+3. The unload waits behind the job for up to the adapter's startup
+   timeout (`TP_PYTHON_PYTORCH_STARTUP_TIMEOUT_MS`, 15 s by default) and
+   then ends the sidecar, `SIGTERM` and `SIGKILL` 500 ms later: that is
+   the backend's reset.
+
+In `worker.mode: process` the agent's member registry takes a worker whose
+process exited out of service and starts its successor on the same port, 1,
+2 and 4 s after the stop for the first, second and third restart inside a
+sliding five-minute window; a member that stops with three restarts inside
+the last five minutes is failed, and the agent reports it (`agent_state:
+degraded`, `last_error`; [worker-supervision.md](worker-supervision.md)).
+So an input that makes the runner hang every time ends in a failed member
+that the agent reports when the stops come close enough: four inside five
+minutes, a cycle of about 100 s at most from one stop to the next (the
+restart's delay, the successor's load and prime, a client's next job, the
+job's deadline and the bound, the stop). A longer cycle restarts the member
+after every stall and never fails it. A worker started by hand exits 70
+and nothing starts another.
+
+The worst case a client sees, end to end: its own session ends at the
+job's deadline (`deadline_missed`; for audio input usually
+`finalize_timeout`) or at its cancel; every other `Open` is refused with
+`session_count_limit` for up to the job's deadline and the release's bound
+(at most 35 s) and the second the main thread may take to notice, then with
+`admission_closed` during the drain window, and its connection is refused
+from then on: up to the startup timeout and 0.5 s of the unload, the
+process's exit, and until the successor has loaded, primed and bound the
+port, which this page does not measure.
 
 **Order of construction and of destruction.** The bridge's destructor
 detaches its event sink: once it returns no callback runs or follows, and
@@ -1539,9 +1641,12 @@ cancel is the listener's change.
 `serves_sessions`. Once the listener has stopped, `speech dispatch stopped`
 carries the dispatch's counters as of the last step of its thread:
 `jobs_submitted`, `jobs_completed`, `jobs_failed`, `jobs_discarded`,
-`releases_refused` and `longest_release_wait_ms`. A job the unload ends is
-in none of the last four, and a job the bridge refuses when it is submitted
-is in none at all. No metric is exported for them.
+`releases_refused`, `jobs_past_deadline`, `releases_past_bound` and
+`longest_release_wait_ms`. A job the unload ends is in none of
+`jobs_completed`, `jobs_failed`, `jobs_discarded` and `releases_refused`,
+and a job the bridge refuses when it is submitted is in none of the
+counters. No metric is exported for them. A stall adds the `speech backend
+stalled` line above.
 
 **Tests.** `test/integration/speech_worker_test.cpp` drives a worker over
 gRPC in process: one transcription and one synthesis segment, each against
@@ -1562,7 +1667,13 @@ while the unload waits behind the job and back when the stop returns, and
 whose client reads no `SessionClosed`; a
 start that could not bind and is not retried, and the same start of a
 worker without a dispatch, which is; a worker that is never started; the
-refused unary request; and each row of the table above. Where a session's
+refused unary request; each row of the table above; and a session
+cancelled under a job the backend does not end, which fails the worker
+once its release passes the bound, in process (`stop()` returns 70) and as
+the worker binary over the runner with a backend that never ends a job
+(`test/mocks/worker_held_job_sidecar.py`), which exits 70 after its unload
+gave up on the job. Both wait out the provisional figures, about 20 and 36
+seconds. Where a session's
 release is what cancels its job, the scripted sidecar counts how often
 that job was asked to be cancelled: once, and by no `job_cancel` frame.
 The file is part of the listener's test binary, so the release and the
