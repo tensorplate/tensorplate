@@ -560,10 +560,12 @@ agent's standard error and neither stops the start nor fails the deploy.
 Nothing is removed while what a state file holds cannot be told (it cannot
 be read, is damaged, or is at a state version this agent does not read),
 and only a directory named as a transaction id, under a directory named
-as a deployment id, is ever removed. A tree is matched by where its path
-resolves, and is kept when a path named there resolves to it or into it,
-so a `staging_dir` spelled another way than the records spell it (through
-a link, or with `..`) removes nothing a record names; a named path that
+as a deployment id, is ever removed; then that id's directory too, once it
+holds nothing and no path named there resolves to it or goes up out of
+it. A tree is matched by where its path resolves, and is kept when a path
+named there resolves to it or into it, or goes up out of it with `..`, so
+a `staging_dir` spelled another way than the records spell it (through a
+link, or with `..`) removes nothing a record names; a named path that
 does not resolve, other than because nothing is there, stops the removal
 before anything goes. An entry that cannot be read or removed is
 left, the removal goes on to the others in name order, and the first such

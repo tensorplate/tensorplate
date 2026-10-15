@@ -4,7 +4,8 @@
 //! a tree of its own, `staging_dir/<deployment_id>/<transaction id>/`, before
 //! the candidate record names it, and no tree is written again: an update
 //! under the same id leaves the tree the earlier record names as it was. A
-//! tree no record names is removed at a start and when a deploy begins.
+//! tree no record names is removed at a start and when a deploy begins, and
+//! with it an id's directory left empty.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -179,10 +180,12 @@ fn named_by(state: &AgentState) -> impl Iterator<Item = PathBuf> + '_ {
 }
 
 /// Remove every tree under `staging_dir` that no record of either state
-/// file names, and return how many were removed. A tree is matched by where
+/// file names, then each id's directory left empty that no record names,
+/// and return how many trees were removed. A tree is matched by where
 /// its path resolves, so the records may spell `staging_dir` another way,
-/// and is kept when a path they name is in it. Only a directory a deploy
-/// named, under a directory a deployment id names, is removed: a tree of the
+/// and is kept when a path they name is in it or leaves it by `..`. Only a
+/// directory a deploy named, under a directory a deployment id names, is
+/// removed, and then that directory once it holds nothing: a tree of the
 /// layout before this one, `staging_dir/<deployment_id>/` itself with its
 /// manifest at its root, is never, nor a directory in it that its manifest
 /// lists an artifact under, nor anything in it while this build cannot read
@@ -204,13 +207,25 @@ pub fn prune(staging_dir: &Path, store: &StateStore) -> AgentResult<usize> {
     for state in store.every_file()? {
         for path in named_by(&state) {
             named.extend(resolved(&path)?);
+            // A directory the path leaves by `..` must stay for it to resolve.
+            let left = path.ancestors().filter(|dir| dir.ends_with(".."));
+            for dir in left.filter_map(Path::parent) {
+                named.extend(resolved(dir)?);
+            }
         }
     }
     let mut removed = 0;
     let mut first_error = None;
     for id in entries(staging_dir)? {
-        let trees = id.and_then(|id| trees_of(&id));
-        for tree in trees.unwrap_or_else(|e| vec![Err(e)]) {
+        let trees = id.and_then(|id| Ok((trees_of(&id)?, id)));
+        let (trees, id) = match trees {
+            Ok(trees) => trees,
+            Err(e) => {
+                first_error.get_or_insert(e);
+                continue;
+            }
+        };
+        for tree in trees {
             match tree.and_then(|tree| remove_unnamed(&tree, &named)) {
                 Ok(true) => removed += 1,
                 Ok(false) => {}
@@ -218,6 +233,9 @@ pub fn prune(staging_dir: &Path, store: &StateStore) -> AgentResult<usize> {
                     first_error.get_or_insert(e);
                 }
             }
+        }
+        if let Err(e) = remove_if_empty(&id, &named) {
+            first_error.get_or_insert(e);
         }
     }
     first_error.map_or(Ok(removed), |e| Err(e.into()))
@@ -296,12 +314,32 @@ fn remove_unnamed(tree: &DirEntry, named: &BTreeSet<PathBuf>) -> io::Result<bool
         return Ok(false);
     }
     let path = tree.path();
-    let resolved = fs::canonicalize(&path).map_err(|e| at(&path, &e))?;
-    if named.iter().any(|named| named.starts_with(&resolved)) {
+    if is_named(&path, named)? {
         return Ok(false);
     }
     fs::remove_dir_all(&path).map_err(|e| at(&path, &e))?;
     Ok(true)
+}
+
+/// Remove `id` when it is a directory a deployment id names that holds
+/// nothing and that no path in `named` resolves to. A stage that was stopped
+/// can leave one unsynced; the next stage under the id then makes it again
+/// and syncs the directory it is in.
+fn remove_if_empty(id: &DirEntry, named: &BTreeSet<PathBuf>) -> io::Result<()> {
+    if !is_directory(id, is_valid_deployment_id)? {
+        return Ok(());
+    }
+    let path = id.path();
+    if !entries(&path)?.is_empty() || is_named(&path, named)? {
+        return Ok(());
+    }
+    fs::remove_dir(&path).map_err(|e| at(&path, &e))
+}
+
+/// Whether a path in `named` resolves to `dir` or into it.
+fn is_named(dir: &Path, named: &BTreeSet<PathBuf>) -> io::Result<bool> {
+    let resolved = fs::canonicalize(dir).map_err(|e| at(dir, &e))?;
+    Ok(named.iter().any(|named| named.starts_with(&resolved)))
 }
 
 /// The entries of `dir` in name order, so a prune that meets one it cannot
