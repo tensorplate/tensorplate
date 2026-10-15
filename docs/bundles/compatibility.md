@@ -96,7 +96,8 @@ staging**. Phases:
 1. `received` — deploy request accepted, correlation ID assigned.
 2. `verified` — `bundle::verify_before_staging()` returns `Ok`. The parser,
    the compatibility checks and the rules judged against the target passed.
-3. `staged` — bundle copied into `<staging_dir>/<bundle_id>/`.
+3. `staged` — bundle copied into a tree of its own,
+   `<staging_dir>/<deployment_id>/<transaction id>/`.
 4. `capacity_checked` — second-pass memory check against the running worker.
 5. `prepared` / `warmed` / `promoted` / `active` — worker control plane.
 

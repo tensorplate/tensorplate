@@ -310,8 +310,18 @@ impl Host {
             .unwrap()
             .bundle_digest
     }
+    /// The trees staged for `id`, by name.
+    pub(super) fn trees(&self, id: &str) -> BTreeSet<String> {
+        let entries = fs::read_dir(self.td.path().join("staging").join(id));
+        let entries = entries.into_iter().flatten().map(|e| e.unwrap());
+        let trees = entries.filter(|e| e.file_type().unwrap().is_dir());
+        trees
+            .map(|e| e.file_name().into_string().unwrap())
+            .collect()
+    }
     /// Start the agent as `main` does up to its recovery: open the state,
-    /// then prune. Returns how many documents the prune removed.
+    /// then prune documents and staged trees. Returns how many documents
+    /// the prune removed.
     pub(super) fn start(&self, worker: Worker) -> (Agent, usize) {
         self.start_probed(worker, probes())
     }
@@ -324,6 +334,7 @@ impl Host {
         let config = agent_config(self.td.path());
         let store = Arc::new(StateStore::open(self.state_dir()).unwrap());
         let pruned = prune_at_start(&store).unwrap();
+        crate::staging::prune(&config.staging_dir, &store).unwrap();
         let state_dir = self.state_dir();
         let worker = Arc::new(Worker {
             state_dir,
@@ -722,31 +733,23 @@ fn a_rollback_to_a_record_that_names_no_descriptor_writes_and_names_nothing() {
 }
 
 #[test]
-fn a_rollback_to_a_record_that_names_no_descriptor_starts_whatever_is_staged_under_its_id() {
+fn a_rollback_to_a_record_that_names_no_descriptor_is_refused_when_another_bundle_is_staged_at_its_path(
+) {
     let host = host();
-    let (agent, first) = host.rolling_back(Worker::default());
+    let (agent, _) = host.rolling_back(Worker::default());
     undescribe(&agent, |state| state.previous_active.as_mut());
     let staged = host.restage();
 
-    agent.coordinator.rollback(None).unwrap();
+    let error = agent.coordinator.rollback(None).unwrap_err().to_record();
 
-    // As before descriptors: the staged bundle is not compared with the
-    // record's.
-    let asked = agent.asked();
-    assert_ne!(asked.reference.bundle_digest, staged);
-    assert_eq!(asked.reference, naming(&reference(&first), [false; 3]));
-    assert_eq!(host.view(), ["stt", "tts@2", "-", "3"]);
-    assert_eq!(host.last_error(), None);
-
-    // The restore compares for such a record: the next start does not
-    // start the record over the other bundle.
-    let (next, _) = host.start(Worker::default());
-    apply_startup(&next.coordinator).unwrap();
-    let refusal = host.last_error().expect("the refusal is recorded");
-    let remedy = "names; `stt` is not serving until it is deployed again";
-    assert!(refusal.message.ends_with(remedy), "{refusal:?}");
-    assert!(next.never_asked());
-    assert_eq!(host.view(), ["stt", "tts@2", "-", "3"]);
+    // Compared as the restore compares: not started over the other bundle.
+    let load_failed = error.code == ErrorCode::LoadFailed && !error.recoverable;
+    let says = "`stt` is not started again: the bundle staged at";
+    let told = error.message.contains(says) && error.message.contains(&staged);
+    assert!(load_failed && told, "{error:?}");
+    assert!(agent.never_asked());
+    assert_eq!(host.view(), ["tts@2", "stt", "-", "3"]);
+    assert_eq!(host.last_error(), Some(error));
 }
 
 #[test]

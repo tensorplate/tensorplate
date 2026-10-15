@@ -434,10 +434,9 @@ pub(crate) enum Start<'a> {
 }
 
 /// The refusal to start `record` again when the bundle staged at its path is
-/// not the one it names: staging is keyed by the deployment id, so a later
-/// deploy under the id replaced it. None when the staged bundle is the
-/// record's. Whether the record names a descriptor is the caller's to read:
-/// the restore compares for every record, a rollback only for one that does.
+/// not the one it names: a record from before each deploy had a tree of its
+/// own names `staging_dir/<deployment_id>`, where a later deploy under the
+/// id staged as well. None when the staged bundle is the record's.
 ///
 /// # Errors
 ///
@@ -457,20 +456,21 @@ pub(crate) fn another_bundle_staged(record: &DeploymentRecord) -> AgentResult<Op
     }))
 }
 
-/// The reference `record` is started again from. For a record that names a
+/// The reference `record` is started again from, once the bundle staged at
+/// its path is found to be the record's. For a record that names a
 /// descriptor, one state update takes the next generation, re-stamps the
 /// descriptor for it, names it where `start` says and writes its document;
 /// the reference names it, in hand under a hold on `worker`. A record that
-/// names none is referenced as it is, whatever is staged under its id.
+/// names none is referenced as it is.
 ///
 /// # Errors
 ///
-/// For a described record: the staged manifest's own error when it cannot
-/// be read, and [`AgentError::BundleIntegrity`] when it is not the record's
-/// bundle; [`AgentError::DeploymentDescriptor`] when the record no longer
-/// stands where `start` reads it, its document is refused or describes
-/// another bundle, or a rollback's transaction is not in flight; and the
-/// errors of the state update.
+/// The staged manifest's own error when it cannot be read, and
+/// [`AgentError::BundleIntegrity`] when it is not the record's bundle. For a
+/// described record: [`AgentError::DeploymentDescriptor`] when the record no
+/// longer stands where `start` reads it, its document is refused or
+/// describes another bundle, or a rollback's transaction is not in flight;
+/// and the errors of the state update.
 pub(crate) fn start_again<'w>(
     store: &StateStore,
     worker: &'w dyn WorkerControl,
@@ -482,13 +482,12 @@ pub(crate) fn start_again<'w>(
     let reference = reference_of(record, Some(artifact_relative_path));
     let named = record.descriptor_identity();
     let named = named.map_err(|e| unusable(format!("of `{id}` is not named: its record {e}")))?;
-    let Some(identity) = named else {
-        return Ok(InHand::as_recorded(worker, reference));
-    };
-    // `prepare` reads no staged manifest for a reference that names a descriptor.
     if let Some(refusal) = another_bundle_staged(record)? {
         return Err(refusal);
     }
+    let Some(identity) = named else {
+        return Ok(InHand::as_recorded(worker, reference));
+    };
     let (digest, staged_path) = (&*record.bundle_digest, &*record.staged_path);
     let descriptors = DescriptorStore::new(store.state_dir());
     let path = descriptors.path(id, identity.generation)?;

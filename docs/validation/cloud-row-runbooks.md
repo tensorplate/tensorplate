@@ -363,8 +363,9 @@ classified against the control taken before the denial, and the agent's
   `schema_version` is 2, the layout the baseline reads
   (`offline-record-before-start.json`). The baseline agent must then
   start on it, the record and the instance binding must keep their bytes,
-  the set-aside state must be preserved, and a fresh deploy, `status` and
-  `infer` must answer on the baseline, each denied. The deploy uses the
+  the set-aside state and staged bundles must be preserved, and a fresh
+  deploy, `status` and `infer` must answer on the baseline, each denied.
+  The deploy uses the
   smoke deployment's id, not the one the candidate was serving, so the
   status that follows names a deployment only the baseline can have made.
 - `offline-upgrade/`, after it. The candidate's `install.sh` over that
@@ -526,9 +527,9 @@ over the running baseline. It passes when:
 
 **rollback** follows the procedure in
 [`docs/install/lifecycle.md`](../install/lifecycle.md). It stops both
-services, moves durable state aside to `state.bak`, copies the
-machine-type record back into a fresh `state/`, and removes — never
-purges — every installed TensorPlate package except
+services, moves durable state aside to `state.bak` and the staged bundles
+to `staging.bak` beside it right after, copies the machine-type record
+back into a fresh `state/`, and removes — never purges — every installed TensorPlate package except
 `tensorplate-apt-source`. Every package, because any newer one left
 behind makes the older installer's `apt-get -y` a refused downgrade.
 Before installing the baseline fresh through its `install.sh`, it
@@ -536,8 +537,11 @@ requires that no TensorPlate package other than `tensorplate-apt-source`
 is still installed and that the agent's conffiles were kept.
 It passes when exactly the baseline's packages are installed, the edited
 `cli.json` still has its bytes, the whole set-aside `state.bak` directory
-is intact, the restored machine-type record and the instance binding are
-byte-identical to their copies taken with the services stopped, the
+is intact, `staging.bak` holds every file the staging directory held when
+the services were stopped, at the same size and nothing more (sizes, not
+digests: staged bundles carry model weights), the restored machine-type
+record and the instance binding are byte-identical to their copies taken
+with the services stopped, the
 rolled-back agent answers with no active or previous deployment — it did
 not load the newer agent's state — and a fresh deploy answers health and
 inference.
@@ -561,11 +565,11 @@ removed: there is no deployment state for the rollback to preserve, and
 two directories holding only the rest would compare equal all the way to
 a pass.
 
-No `state.bak` from before the run survives it: install and upgrade each
-delete `/var/lib/tensorplate` while clearing the host, so copy any earlier
-`state.bak` off the VM before running the harness. Rollback still refuses
-to start if `state.bak` exists when it begins, so the move can never
-nest state inside, or replace, a directory it did not create.
+No `state.bak` or `staging.bak` from before the run survives it:
+install and upgrade each delete `/var/lib/tensorplate` while clearing the
+host, so copy any earlier one off the VM before running the harness.
+Rollback still refuses to start if either exists when it begins, so a move
+can never nest a directory inside, or replace, one it did not create.
 
 A run with a baseline ends with the baseline installed.
 

@@ -223,6 +223,21 @@ impl StateStore {
         Ok(states)
     }
 
+    /// The state each file of the pair holds, as [`Self::files`] reads it,
+    /// except that a damaged file is an error too.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError::Io`] when a file is there and cannot be read,
+    /// and [`AgentError::CorruptState`] for one that does not decode.
+    pub(crate) fn every_file(&self) -> AgentResult<Vec<AgentState>> {
+        let mut states = Vec::new();
+        for path in [&self.primary, &self.backup] {
+            states.extend(load_one(path)?);
+        }
+        Ok(states)
+    }
+
     /// Clone of the currently-loaded state. Cheap; intended for status
     /// projection.
     ///

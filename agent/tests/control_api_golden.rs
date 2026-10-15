@@ -99,10 +99,15 @@ fn normalize(line: &str, tempdirs: &[String], tx_ids: &mut Vec<String>) -> Strin
     for tempdir in tempdirs {
         out = out.replace(tempdir.as_str(), "/srv/golden");
     }
-    // Transaction ids: `tx-` and a UUID, numbered by first appearance.
+    // Transaction ids: `tx-` and a UUID, numbered by first appearance. A
+    // deploy's also names its staged tree, after a `/`.
     let mut rebuilt = String::new();
     let mut rest = out.as_str();
-    while let Some(at) = rest.find("\"tx-") {
+    while let Some(at) = ["\"tx-", "/tx-"]
+        .iter()
+        .filter_map(|at| rest.find(at))
+        .min()
+    {
         let start = at + 1;
         let end = start + 3 + 36;
         let id = &rest[start..end];

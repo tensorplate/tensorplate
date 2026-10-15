@@ -18,6 +18,7 @@ use crate::state::StateStore;
 
 mod deploy;
 mod one_pass;
+mod staged_trees;
 mod start_again;
 
 const STAGED: &str = "/var/lib/tensorplate/bundles/staging/stt";

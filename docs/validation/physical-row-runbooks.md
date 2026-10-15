@@ -462,9 +462,11 @@ Prerequisites:
 
    **rollback** follows [the documented procedure](../install/lifecycle.md):
    it requires the candidate to be serving `<deployment-id>-baseline`,
-   refuses to start if `/var/lib/tensorplate/state.bak` already exists,
-   stops both services, moves `/var/lib/tensorplate/state` aside to
-   `state.bak`, files dpkg's unfiltered listing in
+   refuses to start if `/var/lib/tensorplate/state.bak` or
+   `/var/lib/tensorplate/staging.bak` already exists, stops both
+   services, moves `/var/lib/tensorplate/state` aside to `state.bak` and
+   `/var/lib/tensorplate/bundles/staging` to `staging.bak` right after it,
+   files dpkg's unfiltered listing in
    `packages-before-remove.txt`, and `apt remove`s every installed
    `tensorplate*` package except `tensorplate-apt-source` — including
    `tensorplate-common`, without which the older set would be a
@@ -502,7 +504,9 @@ Prerequisites:
    **not** load them — so the digests are what make the preservation
    claim checkable. The harness holds whatever the directory carries, so
    a device that keeps a file none of these names covers is held to it
-   too.
+   too. `staging.bak` must hold every file the staging directory held when
+   the services were stopped, at the same size and nothing more: sizes,
+   not digests, because staged bundles carry model weights.
    The older agent must report **no** active or previous
    deployment: the state was set aside on purpose, and what to restore
    from it is the operator's decision. A fresh `<deployment-id>-rollback`
@@ -541,9 +545,10 @@ Prerequisites:
    It says where durable state is: the upgrade's clearing step deletes
    `/etc/tensorplate` and `/var/lib/tensorplate` along with the packages —
    the report says whether it got that far — while the rollback sets
-   durable state aside at `state.bak` first. Where it says `state.bak`,
-   it also says what is behind that pathname, because this report is
-   written in the window where a baseline install that failed may already
+   durable state aside at `state.bak` first, and the staged bundles at
+   `staging.bak` beside it; the report says where those are too. Where it
+   says `state.bak`, it also says what is behind that pathname, because
+   this report is written in the window where a baseline install that failed may already
    have destroyed it: whether the set-aside copy **still matches** the
    digests taken before the move, **no longer matches** them and should
    be treated as damaged, or could not be read back at all. That read is
@@ -551,14 +556,14 @@ Prerequisites:
    allowed to fail — so an unreadable copy is reported as unknown rather
    than as either answer. When the rollback stopped before removing
    anything, it gives the commands that return to the candidate instead:
-   moving `state.bak` back, when it was moved, and starting both
-   services.
+   moving `state.bak` and `staging.bak` back, each when it was moved, and
+   starting both services.
 
    Re-running the harness also recovers the device, because its install
    stage purges and installs the candidate from scratch — but that same
    stage deletes `/etc/tensorplate` and `/var/lib/tensorplate`, including
-   a `state.bak` the message above just pointed at. Copy anything worth
-   keeping elsewhere before re-running.
+   a `state.bak` and `staging.bak` the message above just pointed at. Copy
+   anything worth keeping elsewhere before re-running.
 
    This native harness ran on the Jetson for `v0.2.1-rc.2` on
    2026-09-22, all eight canonical stages passing; the fixture checks

@@ -1125,9 +1125,9 @@ impl MemberRegistry {
         if crate::bundle::bundle_digests_equal(&staged.bundle_digest, &recipe.bundle_digest) {
             return Some(Ok(staged));
         }
-        // A deploy of the same id that failed after staging left its own
-        // bundle in the staged root. Another attempt would read the same
-        // root, so the member is failed without one.
+        // Another bundle is in the tree: one an earlier agent staged every
+        // deploy of the id into, or one changed on disk. Another attempt
+        // would read the same tree, so the member is failed without one.
         let error = AgentError::BundleIntegrity {
             path: "manifest.json".into(),
             reason: format!(

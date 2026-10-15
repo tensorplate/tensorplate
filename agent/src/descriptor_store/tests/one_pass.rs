@@ -78,7 +78,7 @@ impl Host {
         agent
     }
     /// Whether a start would read a candidate record or a transaction.
-    fn settled(&self) -> bool {
+    pub(super) fn settled(&self) -> bool {
         let state = StateStore::open(self.state_dir()).unwrap();
         let state = state.snapshot().unwrap();
         state.candidate.is_none() && state.in_flight_transaction.is_none()
@@ -202,7 +202,7 @@ fn one_start_settles_a_deploy_killed_after_any_of_its_durable_writes() {
 
 /// The format 0.1 fixture bundle at another version, which is another
 /// bundle: its manifest's digest differs.
-fn another_format_0_1_bundle(host: &Host) -> PathBuf {
+pub(super) fn another_format_0_1_bundle(host: &Host) -> PathBuf {
     let source = host.td.path().join("update");
     fs::create_dir_all(&source).unwrap();
     let manifest = fs::read_to_string(repo(FORMAT_0_1).join("manifest.json")).unwrap();
@@ -215,21 +215,21 @@ fn another_format_0_1_bundle(host: &Host) -> PathBuf {
 }
 
 #[test]
-fn one_start_after_a_format_0_1_update_of_the_serving_id_killed_once_staged_comes_up_not_serving() {
+fn one_start_after_a_format_0_1_update_of_the_serving_id_killed_after_any_write_restores_the_record(
+) {
     let original = repo(FORMAT_0_1);
     let digest_of = |bundle: &Path| parse_bundle(bundle).unwrap().manifest_digest;
-    // The update's state writes up to `warmed`. The copy staged under the
-    // id is replaced after the third, before the candidate is recorded.
+    // The update's state writes up to `warmed`. Its bundle is staged after
+    // the third, in a tree of its own, which the fourth names.
     let phases = phases_before_the_commit(true, false);
-    let replaced_after = 3;
     // `another`: the update is another bundle than the one serving.
-    // `again`: what is deployed through the agent that did not restore.
-    for (another, again) in [(true, "the update"), (true, "the original"), (false, "")] {
+    for another in [true, false] {
         for landed in 1..=phases.len() {
             let case = format!("another bundle: {another}, killed after write {landed}");
             let host = host();
             let (agent, _) = host.start(Worker::default());
             agent.deploy("smoke", FORMAT_0_1).unwrap();
+            let serving = host.trees("smoke");
             let update = if another {
                 another_format_0_1_bundle(&host)
             } else {
@@ -240,14 +240,12 @@ fn one_start_after_a_format_0_1_update_of_the_serving_id_killed_once_staged_come
             let updated = coordinator.deploy("smoke", &update, BTreeMap::new(), None, None);
             assert!(matches!(updated, Err(AgentError::Io(_))), "{case}");
             drop(agent);
-            let staged = host.td.path().join("staging").join("smoke");
-            let replaced = another && landed >= replaced_after;
-            let staged_is_another = digest_of(&staged) != digest_of(&original);
-            assert_eq!(staged_is_another, replaced, "{case}");
+            let staged = host.trees("smoke").len() - serving.len();
+            assert_eq!(staged, usize::from(landed >= 3), "{case}");
 
             let (action, next) = host.one_start(Worker::default());
 
-            // The update is ended either way, and the record stays.
+            // The update is ended, and the record is started from its tree.
             assert_eq!(action, RecoveryAction::RestoreActive, "{case}");
             assert!(host.settled(), "{case}");
             assert_eq!(host.ids(), ["smoke", "-"], "{case}");
@@ -255,40 +253,19 @@ fn one_start_after_a_format_0_1_update_of_the_serving_id_killed_once_staged_come
             let (quarantined, _) = host.quarantined();
             let once = quarantined.ends_with(&ended) && !quarantined.contains(' ');
             assert!(once, "{case}: {quarantined}");
-            if !replaced {
-                // The staged copy is the record's: it is started again.
-                let asked = next.asked().reference;
-                assert_eq!(asked.bundle_digest, digest_of(&original), "{case}");
-                assert_eq!(host.last_error(), None, "{case}");
-                continue;
-            }
-            // The staged copy is the update's: nothing is started.
-            assert!(next.never_asked(), "{case}");
-            let error = host.last_error().expect("the refusal is recorded");
-            assert_eq!(error.code, ErrorCode::LoadFailed, "{case}: {error:?}");
-            let says = "`smoke` is not started again: the bundle staged at";
-            let remedy = "names; `smoke` is not serving until it is deployed again";
-            let told = error.message.contains(says) && error.message.ends_with(remedy);
-            assert!(told, "{case}: {error:?}");
-
-            // A deploy of the id through that agent serves it, as either
-            // bundle, and the start after restores what was deployed.
-            let bundle = if again == "the update" {
-                &update
-            } else {
-                &original
-            };
-            let coordinator = &next.coordinator;
-            let deployed = coordinator.deploy("smoke", bundle, BTreeMap::new(), None, None);
-            deployed.unwrap_or_else(|e| panic!("{case}, {again}: {e}"));
-            assert_eq!(next.asked().reference.bundle_digest, digest_of(bundle));
-            assert_eq!(host.last_error(), None, "{case}, {again}");
-            assert_eq!(host.ids(), ["smoke", "smoke"], "{case}, {again}");
-            let (action, after) = host.one_start(Worker::default());
-            assert_eq!(action, RecoveryAction::RestoreActive, "{case}, {again}");
-            let restored = after.asked().reference.bundle_digest;
-            assert_eq!(restored, digest_of(bundle), "{case}, {again}");
-            assert_eq!(host.last_error(), None, "{case}, {again}");
+            let asked = next.asked().reference;
+            assert_eq!(asked.bundle_digest, digest_of(&original), "{case}");
+            assert_eq!(
+                digest_of(Path::new(&asked.staged_path)),
+                digest_of(&original)
+            );
+            assert_eq!(host.last_error(), None, "{case}");
+            // A tree no record named went at that start; one the candidate
+            // named goes at the next.
+            let named = usize::from(landed >= 4);
+            assert_eq!(host.trees("smoke").len() - serving.len(), named, "{case}");
+            drop(host.start(Worker::default()));
+            assert_eq!(host.trees("smoke"), serving, "{case}");
         }
     }
 }

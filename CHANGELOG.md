@@ -63,6 +63,26 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   version is still read from `rust-toolchain.toml`. The job on the
   self-hosted release runner is unchanged.
 
+- A rollback after a deploy of another bundle under the same deployment id
+  now starts the earlier bundle, and a start of the agent after such an
+  update that did not complete restores the deployment that was serving.
+  Each deploy now copies its bundle into a tree of its own,
+  `<staging_dir>/<deployment_id>/<transaction id>/`, which the deployment's
+  records name and nothing writes again. Before, every deploy of an id
+  staged into `<staging_dir>/<deployment_id>/`, replacing the files the
+  earlier record named: a rollback to a record that names a descriptor was
+  refused, a rollback to one that names none started the update's bundle
+  under the earlier record, and a start after an update that did not
+  complete left the deployment not serving. A tree no state record names is
+  removed when the agent starts and when a deploy begins; a directory an
+  earlier agent staged at `<staging_dir>/<deployment_id>/` is still started
+  from and is never removed by the agent. A rollback now compares the
+  staged bundle with the record's for a record that names no descriptor as
+  well, as the start does, and is refused when they differ. A copy that
+  fails, as on a full disk, removes its tree, and its error names the tree.
+  Because an agent removes every tree its state does not name, the
+  documented rollback now sets `/var/lib/tensorplate/bundles/staging` aside
+  with `state`, and the two are restored together. (V030-E03-F01-T05)
 - A start of the agent now settles the transaction it finds and starts the
   recorded active deployment again in one pass. Before, a transaction
   interrupted while its candidate was prepared, warming or promoted was
@@ -87,15 +107,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   transaction stays in flight at `promoted` and later transactions are
   refused as busy until the agent is restarted, whose start clears it;
   before, the next transaction replaced it. A transaction in flight no
-  longer carries a `failure`. A start now compares the bundle staged under
-  the id with the one the `active` record names for every record, one that
-  names no descriptor included, which is every format 0.1 deployment: after
-  an update under the serving id that staged its bundle and did not commit,
-  the start no longer starts the old record over the update's files and
+  longer carries a `failure`. A start now compares the bundle staged at
+  the `active` record's path with the one it names for every record, one
+  that names no descriptor included, which is every format 0.1 deployment:
+  when they differ it no longer starts the record over the other files and
   reports ready. It starts nothing, records the `load_failed` refusal as
   `last_error` and comes up, and the deployment is not serving until the id
-  is deployed again. A rollback to a record that names no descriptor is
-  still not compared. A candidate record found with no deploy in flight,
+  is deployed again. A candidate record found with no deploy in flight,
   which an earlier release could leave, is cleared by the start that finds
   it. `recovery.action` in status reports `restore_active`,
   `quarantine_candidate`, `no_op` or `operator_required`; the `resume_*`

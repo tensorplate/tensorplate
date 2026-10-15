@@ -94,9 +94,9 @@ root after path resolution. Symlinks inside the bundle that escape the root
 are treated like absolute paths and rejected.
 
 The parser does **not** extract files outside the configured staging area.
-Bundles staged into `<staging_dir>/<bundle_id>/` inherit the staging area's
-permission boundary; the parser's path-safety rules are the second line of
-defense, not the only one.
+Bundles staged into `<staging_dir>/<deployment_id>/<transaction id>/`
+inherit the staging area's permission boundary; the parser's path-safety
+rules are the second line of defense, not the only one.
 
 ---
 

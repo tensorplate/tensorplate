@@ -326,6 +326,28 @@ fn a_deploy_after_one_whose_candidate_never_became_ready_takes_a_new_generation(
 }
 
 #[test]
+fn a_start_after_a_same_id_update_whose_worker_could_not_start_restores_the_record() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    // A same-id update stages another bundle; its worker cannot be started.
+    w.f.launcher.refuse.store(true, Ordering::SeqCst);
+    w.deploy("stt", TTS).unwrap_err();
+    assert_eq!(w.named(), ["stt@1", "-", "3"]);
+
+    let next = w.started_again();
+    apply_startup(&next.coordinator).unwrap();
+
+    let status = next.coordinator.status().unwrap();
+    assert_eq!(status.active.unwrap().generation, Some(3));
+    assert_eq!(
+        (status.agent_state, status.last_error),
+        (AgentRunState::Ready, None)
+    );
+    assert_eq!(next.launched(), [3]);
+    assert_eq!(next.named(), ["stt@3", "-", "4"]);
+}
+
+#[test]
 fn status_after_a_start_that_did_not_restore_shows_the_error_and_no_serving_generation_until_the_id_is_deployed_again(
 ) {
     let w = wired();
@@ -333,10 +355,8 @@ fn status_after_a_start_that_did_not_restore_shows_the_error_and_no_serving_gene
     let serving = w.coordinator.status().unwrap().active.unwrap();
     assert_eq!(serving.generation, Some(1));
     assert!(serving.serving_url.is_some());
-    // A same-id update stages another bundle; its worker cannot be started.
-    w.f.launcher.refuse.store(true, Ordering::SeqCst);
-    w.deploy("stt", TTS).unwrap_err();
-    assert_eq!(w.named(), ["stt@1", "-", "3"]);
+    // The tree the record names is gone.
+    std::fs::remove_dir_all(serving.staged_path.unwrap()).unwrap();
 
     let next = w.started_again();
     apply_startup(&next.coordinator).unwrap();
@@ -348,20 +368,20 @@ fn status_after_a_start_that_did_not_restore_shows_the_error_and_no_serving_gene
     assert_eq!(status.agent_state, AgentRunState::Degraded);
     let error = status.last_error.unwrap();
     let says = "`stt` is not serving until it is deployed again";
-    assert_eq!(error.code, ErrorCode::LoadFailed);
+    assert_eq!(error.code, ErrorCode::ConfigInvalid);
     assert!(error.message.ends_with(says), "{error:?}");
     assert!(next.launched().is_empty() && next.f.registry.serving_member().unwrap().is_none());
-    assert_eq!(next.named(), ["stt@1", "-", "3"]);
+    assert_eq!(next.named(), ["stt@1", "-", "2"]);
 
     next.deploy("stt", TTS).unwrap();
 
     let status = next.coordinator.status().unwrap();
-    assert_eq!(status.active.unwrap().generation, Some(3));
+    assert_eq!(status.active.unwrap().generation, Some(2));
     assert_eq!(
         (status.agent_state, status.last_error),
         (AgentRunState::Ready, None)
     );
-    assert_eq!(next.named(), ["stt@3", "stt@1", "4"]);
+    assert_eq!(next.named(), ["stt@2", "stt@1", "3"]);
 }
 
 #[test]
