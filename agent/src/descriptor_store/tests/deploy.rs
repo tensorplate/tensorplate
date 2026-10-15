@@ -177,7 +177,7 @@ fn a_deploy_takes_no_generation_when_its_document_cannot_be_written() {
 /// An agent started over what a same-id update that did not complete left:
 /// `stt` recorded active as the speech-to-text bundle, and the other bundle
 /// staged under the id. The update was refused after staging.
-fn started_after_an_update_that_did_not_complete(host: &Host) -> Agent {
+pub(super) fn started_after_an_update_that_did_not_complete(host: &Host) -> Agent {
     let (agent, _) = host.start(Worker::default());
     agent.deploy("stt", STT).unwrap();
     drop(agent.asked());

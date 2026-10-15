@@ -202,7 +202,7 @@ fn one_start_settles_a_deploy_killed_after_any_of_its_durable_writes() {
 
 /// The format 0.1 fixture bundle at another version, which is another
 /// bundle: its manifest's digest differs.
-fn another_format_0_1_bundle(host: &Host) -> PathBuf {
+pub(super) fn another_format_0_1_bundle(host: &Host) -> PathBuf {
     let source = host.td.path().join("update");
     fs::create_dir_all(&source).unwrap();
     let manifest = fs::read_to_string(repo(FORMAT_0_1).join("manifest.json")).unwrap();
