@@ -944,9 +944,14 @@ correlation ids is kept.
 - `admission_fence` closes admission: a new stream `Open` is refused with
   `admission_closed`, and `/infer` and `/policy/infer` with 503 (see
   [Route contract](#route-contract)). Sessions and requests already
-  admitted go on. A stream `Open` is checked for this before the session
-  count, so a fenced worker whose one slot is taken refuses with
-  `admission_closed`, not `session_count_limit`.
+  admitted go on. The stream session manager asks for this right after its
+  own admission flag, before each of its other checks: the session count,
+  the session key space and the `Open`'s generation. A fenced worker whose
+  one slot is taken therefore refuses with `admission_closed`, not
+  `session_count_limit`, and so does one asked for another generation,
+  not `stale_generation`. What the listener checks before it asks the
+  manager, the `Open` itself, its terms and their budgets, still comes
+  first.
 - `activate` opens admission again and answers with the quota in force:
   the stream sessions the worker serves at one time (1 for a speech
   deployment that serves streams), and `guest_ram`, the domain the

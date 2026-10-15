@@ -1098,8 +1098,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `/policy/infer` with 503 `not_ready`, context `admission_closed`, while
   it is fenced or retiring; the message names which. Sessions and requests
   already admitted go on. The stream session manager asks this check
-  before the session count, so a fenced worker whose one slot is taken
-  refuses with `admission_closed`, not `session_count_limit`. A stream
+  right after its own admission flag, before the session count, the key
+  space and the generation, so a fenced worker whose one slot is taken
+  refuses with `admission_closed`, not `session_count_limit`, as it does
+  an `Open` for another generation, not `stale_generation`; the `Open`'s
+  own validation, terms and budgets are still checked first. A stream
   client reads the reason alone, as before. (V030-E04-F01-T04)
 - After a retire, the worker binary's once-a-second wait ends on its own
   and the ordinary stop runs, with no shutdown of its own: stream sessions
