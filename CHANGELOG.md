@@ -8,6 +8,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The rolling validation comparison now sets a line only against an earlier
+  line of the same kind: a validation pass against an earlier pass, an
+  evidence line (a run filed publicly, such as a standalone qualification
+  run) against an earlier evidence line. Before, it
+  took the newest line for the row and subject whatever its kind, so a pass
+  indexed after a session's standalone runs was compared with those runs,
+  whose first request after a deploy is not measured from a dropped page
+  cache. A line with no earlier line of its kind now says so, names the kinds
+  it was not compared with, and gets no verdict unless its subject is named
+  with `--new-subject`; the subjects owed are those of the latest session of
+  the same kind on the row; and comparing two lines of different kinds is
+  refused. `validation-pass.py index` now requires `--kind`, which defaulted
+  to `validation`. (V030-E06-F02-T01)
+
 - The hosted jobs that install the pinned Rust toolchain now remove a
   half-installed copy and retry, up to three attempts, instead of failing on
   a file conflict that every repeat of the same command met again; the

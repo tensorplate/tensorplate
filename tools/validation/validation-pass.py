@@ -7,8 +7,9 @@
            the qualification recipe, then index what ran
   index    derive index lines from a lifecycle report, qualification records, a
            streaming slice measurement record and doctor's JSON output
-  compare  report what moved between the newest earlier lines of an index and a
-           pass's lines; exit 0 nothing moved, 1 something moved, 2 not comparable
+  compare  report what moved between a pass's lines and the newest earlier lines
+           of the same kind in an index; exit 0 nothing moved, 1 something moved,
+           2 not comparable
 
 docs/validation/rolling-validation.md describes a pass, the index and the comparison.
 """
@@ -40,7 +41,16 @@ def add_envelope_arguments(parser: argparse.ArgumentParser, a_pass: bool = False
         parser.set_defaults(kind="validation", raw_object=None, raw_sha256=None)
     else:
         parser.add_argument("--date", required=True, help="the session's day, YYYY-MM-DD")
-        parser.add_argument("--kind", choices=("validation", "evidence"), default="validation")
+        parser.add_argument(
+            "--kind",
+            choices=("validation", "evidence"),
+            required=True,
+            help=(
+                "validation: a rolling pass, filed nowhere public; evidence: a run whose records"
+                " are filed publicly, a standalone qualification run among them. No default: the"
+                " comparison never sets one kind against the other"
+            ),
+        )
         parser.add_argument("--raw-object", help="the raw archive's object name, once stored")
         parser.add_argument("--raw-sha256", help="the raw archive's sha256, with --raw-object")
     parser.add_argument("--session", required=True, help="the hardware session's name")
@@ -194,7 +204,12 @@ def command_compare(args: argparse.Namespace) -> int:
     for line in current:
         earlier = index_mod.select_previous(previous, line, current_ids)
         if earlier is None:
-            print(f"== {line['subject']} ({line['run_id']}): no earlier line on {line['row']}")
+            kinds = index_mod.other_kinds(previous, line, current_ids)
+            others = f"; not compared with its {' or '.join(kinds)} lines" if kinds else ""
+            print(
+                f"== {line['subject']} ({line['run_id']}): no earlier {line['kind']} line"
+                f" on {line['row']}{others}"
+            )
             if line["subject"] not in args.new_subject:
                 worst = index_mod.EXIT_NOT_COMPARABLE
             continue
@@ -206,8 +221,8 @@ def command_compare(args: argparse.Namespace) -> int:
         unchanged = sum(1 for finding in findings if finding["status"] == "unchanged")
         print(f"  unchanged: {unchanged} of {len(findings)} fields")
         worst = max(worst, index_mod.verdict(findings))
-    for row, subject in index_mod.missing_subjects(previous, current):
-        print(f"== {subject}: missing; the previous session on {row} ran it")
+    for row, kind, subject in index_mod.missing_subjects(previous, current):
+        print(f"== {subject}: missing; the previous {kind} session on {row} ran it")
         worst = index_mod.EXIT_NOT_COMPARABLE
     return worst
 
@@ -271,7 +286,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="append",
         default=[],
         metavar="SUBJECT",
-        help="a subject this pass runs for the first time; any other with no earlier line is refused",
+        help=(
+            "a subject this pass runs for the first time as a line of its kind; any other"
+            " with no earlier line of its kind is refused"
+        ),
     )
     compare.set_defaults(run=command_compare)
     return parser.parse_args(argv)

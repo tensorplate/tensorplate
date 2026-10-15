@@ -383,7 +383,7 @@ A line is derived, never written by hand:
 tools/validation/validation-pass.py index \
   --date 2026-10-01 --session "L4 session, first of October" \
   --row ubuntu2404-x86-l4-g2s8 --machine "g2-standard-8, one NVIDIA L4" \
-  --build v0.3.1-rc.1 \
+  --build v0.3.1-rc.1 --kind evidence \
   --lifecycle-report lifecycle/lifecycle-report.json \
   --qualification-record stt-whisper=whisper/record.json \
   --qualification-record tts-kokoro=kokoro/record.json \
@@ -437,8 +437,15 @@ tools/validation/validation-pass.py compare \
   --previous runs.jsonl --current lines.jsonl
 ```
 
-Each current line is compared with the newest earlier line for the same row
-and subject. Every metric and check gets one status:
+Each current line is compared with the newest earlier line of the same kind,
+row and subject. A line's kind is the one it was indexed with: `run` writes
+`validation`, a rolling pass filed nowhere public, for every line of a pass;
+`index` writes the `--kind` it is given, which it requires: `validation`, or
+`evidence` for a run whose records are filed publicly, standalone
+qualification runs among them. Kinds are never compared with each other. A
+pass deploys each candidate once from a dropped page cache before it qualifies
+it, and a standalone run does not, so the two measure the first request after
+a deploy differently. Every metric and check gets one status:
 
 | Status | Meaning |
 | --- | --- |
@@ -453,11 +460,13 @@ and subject. Every metric and check gets one status:
 | --- | --- |
 | 0 | nothing moved |
 | 1 | a value moved by more than the tolerance, up or down, or an outcome changed |
-| 2 | no verdict: a value or a subject is missing, a line or an input is malformed, a subject has no earlier line, or the tool failed |
+| 2 | no verdict: a value or a subject is missing, a line or an input is malformed, a subject has no earlier line of its kind, or the tool failed |
 
 A missing value is never reported as unchanged, and a subject the previous
-session ran and this one did not is reported as missing. A subject run for
-the first time is refused unless it is named with `--new-subject`. The
+session of the same kind on the row ran and this one did not is reported as
+missing. A subject with no earlier line of its kind is refused unless it is
+named with `--new-subject`; the report names the other kinds that row and
+subject have lines of, which were not compared. The
 lines of the pass itself are never the earlier line, so an index the pass
 has already been appended to gives the same answer.
 
