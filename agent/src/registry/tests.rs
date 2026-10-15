@@ -21,8 +21,8 @@ mod view;
 const ACTIVE_PORT: u16 = 41_080;
 const CANDIDATE_PORT: u16 = 41_081;
 const DRAIN: Duration = Duration::from_millis(60);
-/// Given to a port lease or a warm that succeeds, which returns as soon as
-/// it does: longer than load makes either take.
+/// Given to a port lease or a warm that succeeds or fails at once, which
+/// returns as soon as it does: longer than load makes either take.
 const WARM: Duration = Duration::from_secs(10);
 /// Waited out in full by a warm that is never ready or a lease that finds no
 /// free port.
@@ -165,10 +165,13 @@ struct FakeProbe {
     models: Mutex<BTreeMap<u16, String>>,
     /// Runs inside each probe, before it answers.
     during: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// How many probes have been made.
+    probes: AtomicU64,
 }
 
 impl HealthProbe for FakeProbe {
     fn ready_model(&self, port: u16, _timeout: Duration) -> AgentResult<Option<String>> {
+        self.probes.fetch_add(1, Ordering::SeqCst);
         if let Some(during) = self.during.lock().unwrap().as_ref() {
             during();
         }
@@ -291,8 +294,18 @@ impl Fixture {
     fn warm(&self, id: &str) -> AgentResult<WorkerReadiness> {
         self.registry.warm("tx", &candidate(id), WARM)
     }
+    /// Warms with the short budget, doubled until a warm has probed: a warm
+    /// whose thread stalls past its deadline returns not ready without one.
     fn warm_briefly(&self, id: &str) -> AgentResult<WorkerReadiness> {
-        self.registry.warm("tx", &candidate(id), WAIT_OUT)
+        let probed = self.probe.probes.load(Ordering::SeqCst);
+        let mut budget = WAIT_OUT;
+        loop {
+            let readiness = self.registry.warm("tx", &candidate(id), budget)?;
+            if readiness.ready || self.probe.probes.load(Ordering::SeqCst) > probed {
+                return Ok(readiness);
+            }
+            budget *= 2;
+        }
     }
     /// Make `/health` on `port` report `id` ready.
     fn health(&self, port: u16, id: &str) {
