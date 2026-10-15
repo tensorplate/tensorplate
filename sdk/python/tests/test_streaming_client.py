@@ -15,6 +15,7 @@ import gc
 import inspect
 import os
 import re
+import time
 import typing
 from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from typing import Any
@@ -683,11 +684,14 @@ class LateWrite:
 
     With `internal` the call reports what gRPC does when that write is issued
     while gRPC reads the reset (seen against a relay, and not forced there):
-    the write fails and the status is INTERNAL.
+    the write fails and the status is INTERNAL. gRPC sets that status as the
+    write fails; here the reader already waits for it, so it reads it on the
+    next turn, the earliest it can.
     """
 
     def __init__(self, call: Any, internal: bool) -> None:
         self._call, self._internal = call, internal
+        self._asked, self._failed = asyncio.Event(), asyncio.Event()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._call, name)
@@ -695,6 +699,8 @@ class LateWrite:
     async def write(self, event: Any) -> None:
         await self._call.code()
         if self._internal:
+            await self._asked.wait()
+            self._failed.set()
             raise grpc.aio.AioRpcError(
                 grpc.StatusCode.INTERNAL,
                 grpc.aio.Metadata(),
@@ -705,7 +711,11 @@ class LateWrite:
 
     async def code(self) -> grpc.StatusCode:
         status = await self._call.code()
-        return grpc.StatusCode.INTERNAL if self._internal else status
+        if not self._internal:
+            return status
+        self._asked.set()
+        await self._failed.wait()
+        return grpc.StatusCode.INTERNAL
 
 
 @pytest.mark.parametrize(
@@ -972,6 +982,113 @@ def test_a_first_call_lost_while_the_open_times_out_raises_the_timeout(
             await opening
         assert session._ended
         assert (relay.connections, relay.calls) == (1, 2)
+
+    relayed(scenario)
+
+
+def test_an_open_that_times_out_as_it_makes_its_second_call_leaves_no_write_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        await warm(stream)
+        relay.arm("data")
+        session = stream.transcribe(TARGET, language="en", input_format=PCM, open_timeout=0.2)
+        loop = asyncio.get_running_loop()
+        connect = session._connect
+        asked, release = asyncio.Event(), asyncio.Event()
+        made: list[Any] = []
+
+        def connecting() -> Any:
+            made.append(connect())
+            return HeldEnd(made[0], asked, release) if len(made) == 1 else made[-1]
+
+        monkeypatch.setattr(session, "_connect", connecting)
+        deadlines: list[float] = []
+        within = session._within
+
+        def timed(work: Any, timeout: float | None) -> Any:
+            deadlines.append(loop.time() + (timeout or 0))
+            return within(work, timeout)
+
+        monkeypatch.setattr(session, "_within", timed)
+        opening = asyncio.create_task(session.open())
+        await asked.wait()
+        early: list[bool] = []
+
+        def late() -> None:
+            # The reader concludes the loss on the next turn, and the open's timer is due on
+            # it too: the open makes its second call and times out in the turn after.
+            early.append(loop.time() < deadlines[0])
+            release.set()
+            while loop.time() < deadlines[0] + 0.003:
+                time.sleep(0.001)
+
+        loop.call_at(deadlines[0] - 0.1, late)
+        with pytest.raises(speech.SessionTimeoutError):
+            await opening
+        assert early == [True]
+        assert session._reopened
+        await turns()
+        assert session._writer is None
+        assert not session._write_lock.locked()
+        assert session._ended
+        # The second call was ended before gRPC sent it.
+        assert relay.calls == 2
+
+    relayed(scenario)
+
+
+class ParkedWrite:
+    """A call whose write calls `then` once gRPC's write waits for the call's first batch."""
+
+    def __init__(self, call: Any, then: Callable[[], Any]) -> None:
+        self._call, self._then = call, then
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._call, name)
+
+    async def write(self, event: Any) -> None:
+        written = asyncio.ensure_future(self._call.write(event))
+        await asyncio.sleep(0)
+        # grpc.aio's flag for that batch: not sent, so the write waits on it.
+        assert not written.done()
+        assert not self._call._metadata_sent.is_set()
+        self._then()
+        await written
+
+
+@pytest.mark.parametrize("when", ["connect", "write"])
+def test_an_open_cancelled_as_it_makes_its_second_call_leaves_no_write_waiting(
+    when: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario(fake: StreamServer, relay: ResettingRelay, stream: Any) -> None:
+        await warm(stream)
+        relay.arm("data")
+        session = stream.transcribe(TARGET, language="en", input_format=PCM)
+        connect = session._connect
+        made: list[Any] = []
+
+        def connecting() -> Any:
+            made.append(connect())
+            if len(made) == 1:
+                return made[0]
+            if when == "write":
+                return ParkedWrite(made[1], opening.cancel)
+            opening.cancel()
+            return made[1]
+
+        monkeypatch.setattr(session, "_connect", connecting)
+        opening = asyncio.create_task(session.open())
+        with pytest.raises(asyncio.CancelledError):
+            await opening
+        assert session._reopened
+        # The open does not wait for its call's end; iterating does.
+        with pytest.raises(speech.SessionCancelledError):
+            await taken(session)
+        await turns()
+        assert session._writer is None
+        assert not session._write_lock.locked()
+        assert relay.calls == 2
 
     relayed(scenario)
 

@@ -213,11 +213,15 @@ class ResettingRelay:
     data_frames: int = 0
     _armed: tuple[int, int] = (-1, 0)
     _open: set[_Pair] = field(default_factory=set)
+    # Client connections whose upstream connection is still being opened.
+    _joining: set[asyncio.WriteTransport] = field(default_factory=set)
 
     def arm(self, frame: str, times: int = 1) -> None:
         self._armed = (_FRAME_TYPES[frame], times)
 
     def reset(self) -> None:
+        for transport in list(self._joining):
+            transport.abort()
         for pair in list(self._open):
             self._cut(pair)
 
@@ -239,7 +243,15 @@ class ResettingRelay:
     async def _relay(self, client: asyncio.StreamReader, back: asyncio.StreamWriter) -> None:
         self.connections += 1
         host, port = self.upstream.rsplit(":", 1)
-        answers, server = await asyncio.open_connection(host, int(port))
+        self._joining.add(back.transport)
+        try:
+            answers, server = await asyncio.open_connection(host, int(port))
+        finally:
+            self._joining.discard(back.transport)
+        if back.transport.is_closing():
+            # Reset while it was being joined: the relay's teardown does not wait for it.
+            server.transport.abort()
+            return
         pair = (back.transport, server.transport)
         self._open.add(pair)
         returning = asyncio.create_task(self._copy(answers, back))

@@ -42,7 +42,8 @@ SessionT = TypeVar("SessionT", bound="Session[Any]")
 METADATA_BUFFER_BYTES = 16 * 1024
 
 # What a write raises once its call has ended. The CancelledError among them is gRPC's, for a
-# call this side cancelled: a session's own writes are never cancelled (`Session._within`).
+# call this side cancelled, or a write given up before Ready (`Session._write`): a session's
+# writing task is never cancelled (`Session._within`).
 _CALL_ENDED = (grpc.RpcError, grpc.aio.BaseError, asyncio.InvalidStateError, asyncio.CancelledError)
 
 _ERROR_OF_STATUS: dict[str, type[SpeechError]] = {
@@ -423,7 +424,8 @@ class Session(Generic[EventT]):
         cancellation and for nothing else, so the caller is never told that
         it was cancelled when gRPC cancelled the call, nor the reverse. Work
         left unfinished is cancelled, unless it is writing: gRPC cancels a
-        call when a write on it is cancelled, so that write runs to its end.
+        call when a write on it is cancelled, so that write runs to its end,
+        or before Ready to the end of its call (`_write`).
         """
         task = asyncio.ensure_future(work)
         try:
@@ -518,7 +520,7 @@ class Session(Generic[EventT]):
             self._sending(event)
             self._writer = asyncio.current_task()
             try:
-                await self._call.write(event)
+                await self._write(event)
             except _CALL_ENDED:
                 # The reader has the reason, and is let past a full buffer to reach it. The
                 # cancel is for a call that a failed write left open, if gRPC ever does.
@@ -532,6 +534,38 @@ class Session(Generic[EventT]):
             finally:
                 self._writer = None
             return sequence
+
+    async def _write(self, event: pb.ClientEvent) -> None:
+        """Write `event`; before Ready, give the write up once the call has ended.
+
+        gRPC never ends a write on a call cancelled before its first batch
+        was sent, as an open's timeout or its caller's cancellation can do.
+        A call ended before Ready is abandoned, so the write is not needed.
+        """
+        if self._ready is not None:
+            await self._call.write(event)
+            return
+
+        async def attempt() -> None:
+            try:
+                await self._call.write(event)
+            except _CALL_ENDED:
+                # In the step gRPC fails the write in, before the reader can read that
+                # INTERNAL: `_conclude` must see the write as failed.
+                self._write_failed = True
+                raise
+
+        write = asyncio.ensure_future(attempt())
+        write.add_done_callback(_retrieve)
+        ended = asyncio.ensure_future(self._until_ended())
+        try:
+            await asyncio.wait({write, ended}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            ended.cancel()
+        if not write.done():
+            write.cancel()
+        # One given up raises CancelledError, which `_send` takes as the end of the call.
+        await write
 
     def _fits(self, size: int) -> bool:
         """Whether the credit last reported, less what was sent since, admits `size` more bytes.
