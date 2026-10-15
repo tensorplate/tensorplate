@@ -735,7 +735,9 @@ ServingExitCode ServingWorker::serve_forever() {
     return ServingExitCode::Internal;
   }
   if (auto r = start(); !r) {
-    // A stopped worker keeps the exit code its stop returned.
+    // Under the stop's lock: a stop in flight sets its code first, and a
+    // stopped worker keeps the code its stop returned.
+    const std::lock_guard guard(impl_->stop_mutex);
     if (!impl_->stopped.load()) {
       impl_->exit_code = r.error().code == Error::Code::ConfigInvalid ? ServingExitCode::ConfigError
                                                                       : ServingExitCode::ServeError;
