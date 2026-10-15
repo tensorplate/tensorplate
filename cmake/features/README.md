@@ -24,8 +24,9 @@ their archives: they must be static and inside that vcpkg triplet's install
 prefix. This keeps the worker independent of distribution gRPC/protobuf
 sonames. Runtime headers expose no gRPC types. The runtime links `gRPC::grpc++`
 privately; it reaches the worker through CMake's static-library link closure.
-Until the stream listener is implemented, the linker can discard unused
-transport objects; this build is not a transport-footprint measurement.
+The release jobs' closure check fails a worker whose symbol table does not
+define gRPC core, the generated stream service and the stream listener (see
+[`docs/release/artifacts.md`](../../docs/release/artifacts.md)).
 
 The baseline resolves the streaming closure to gRPC 1.81.1, protobuf 6.33.4
 (port revision 2), OpenSSL 3.6.5, abseil 20260107.1 (port revision 3),
@@ -50,9 +51,10 @@ and set `-DTP_ENABLE_STREAMING_GRPC=OFF`. Worker config `streaming.enabled`
 defaults to false, mirrored by C++ `ServingConfig::streaming` of type
 `StreamingConfig` with `bool enabled = false`. Setting it to true in that
 build returns `unsupported`.
-The feature currently prepares dependencies, config validation and those
-bindings, with no stream listener. Unary HTTP and sidecar UDS keep their
-existing transports.
+With the feature, `streaming.enabled` starts the stream listener on
+`streaming.port` (see
+[`docs/architecture/serving-worker.md`](../../docs/architecture/serving-worker.md)).
+Unary HTTP and sidecar UDS keep their existing transports.
 
 Hosted C++ tests enable the feature; adapter-shell tests explicitly disable
 it and check both the typed refusal and unary serving. The cold dependency

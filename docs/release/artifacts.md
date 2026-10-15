@@ -108,8 +108,11 @@ through the vcpkg checkout `VCPKG_ROOT` names, at the `builtin-baseline` of
 `vcpkg.json`, and link gRPC, protobuf and their dependencies statically. A
 run that publishes restores those packages from a binary cache and fails on
 a miss; each job then runs `tools/release/assert-static-streaming-closure.sh`
-on its serving package and worker, which also fails a worker whose
-`CMakeCache.txt` does not record the feature ON. `--without-streaming`
+on its serving package and its unstripped build-tree worker. It also fails a
+worker whose `CMakeCache.txt` does not record the feature ON, and one whose
+full symbol table (`readelf -sW`) does not define gRPC core, a constructor of
+the generated stream service and a member of the stream listener; a worker
+without a `.symtab` cannot show them and fails. `--without-streaming`
 builds a snapshot without the feature and without vcpkg; no release job
 passes it. See "Provision the vcpkg checkout and binary cache" in
 [`runbook.md`](runbook.md).

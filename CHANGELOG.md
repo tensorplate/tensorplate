@@ -952,6 +952,18 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The release jobs' closure check,
+  `tools/release/assert-static-streaming-closure.sh`, now also requires the
+  worker to define gRPC core (`grpc_version_string`), a constructor of the
+  generated stream service and a member of the stream listener in its full
+  symbol table (`readelf -sW`), and fails a worker without a `.symtab`.
+  Before, only the configure cache told a worker with the streaming feature
+  from one without it: the serving package's `Depends` and the worker's
+  `NEEDED` entries are the same for both. Both release jobs and the CPU-only
+  smoke already pass it the unstripped build-tree worker; the packaging
+  check's serving stub now defines one name of each part.
+  (V030-E04-F02-T02)
+
 - The serving worker's stream listener now has gRPC close a connection with
   no call open at an idle limit of 67 minutes (60 to 147 minutes after its
   last call, as gRPC checks once a limit; a gRPC client that has made a

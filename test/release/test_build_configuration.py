@@ -65,6 +65,28 @@ CPP_WORKFLOW = WORKFLOWS / "cpp.yml"
 CHECKOUT_VCPKG = REPO_ROOT / "tools/ci/checkout-vcpkg.sh"
 SOURCE_INSTALL = REPO_ROOT / "packaging/scripts/build-install-from-source.sh"
 CLOSURE_CHECK = REPO_ROOT / "tools/release/assert-static-streaming-closure.sh"
+# `readelf -sW` rows recorded from a release-configured streaming worker, one per part the
+# closure checker requires of it.
+STREAMING_SYMBOLS = {
+    "gRPC core": " 51949: 00000000007e2940     8 FUNC    GLOBAL DEFAULT   15 grpc_version_string",
+    "the generated stream service": " 47623: 000000000029bae0   339 FUNC    GLOBAL DEFAULT   15"
+                                    " _ZN11tensorplate6stream2v114SessionService7ServiceC1Ev",
+    "the stream listener": " 31706: 00000000001a87c0     8 FUNC    LOCAL  DEFAULT   15"
+                           " _ZN11tensorplate7serving14StreamListener14stop_admissionEv",
+}
+SYMBOL_HEADER = "   Num:    Value          Size Type    Bind   Vis      Ndx Name"
+DYNAMIC_SYMBOLS = (
+    "Symbol table '.dynsym' contains 508 entries:", SYMBOL_HEADER,
+    "     2: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __modti3@GCC_3.0 (3)",
+)
+
+
+def symbol_listing(rows=tuple(STREAMING_SYMBOLS.values()), symtab=True) -> str:
+    """What `readelf -sW` prints for a worker with these .symtab rows, or a stripped one."""
+    full = ("Symbol table '.symtab' contains 72659 entries:", SYMBOL_HEADER, *rows)
+    return "\n".join((*DYNAMIC_SYMBOLS, *(full if symtab else ()))) + "\n"
+
+
 FIXTURE_SOURCES = (
     "packaging/version.sh",
     "packaging/scripts/install.sh",
@@ -4658,8 +4680,10 @@ class ReleaseWorkflowVcpkgTests(unittest.TestCase):
         ships = f"*serving*) {ls}/lib/tensorplate/tensorplate-serving' ;; *) {ls}/share/doc/x' ;;"
         listing = f"#!/bin/sh\n[ \"$1\" = -c ] || exit 0\ncase \"$2\" in {ships} esac\n"
         write_executable(self.root / "bin/dpkg-deb", listing)
+        (self.root / "symbols").write_text(symbol_listing())
         needed = "echo ' 0x01 (NEEDED) Shared library: [libc.so.6]'"
-        write_executable(self.root / "bin/readelf", f"#!/bin/sh\n{needed}\n")
+        answers = f"-d) {needed} ;; -sW) cat '{self.root / 'symbols'}' ;; *) exit 9 ;;"
+        write_executable(self.root / "bin/readelf", f"#!/bin/sh\ncase \"$1\" in {answers} esac\n")
         jobs = {name: self.job("release.yml", name) for name in packages}
         return {name: (job["steps"][self.only_step(job, CLOSURE_CHECK.name)], packages[name])
                 for name, job in jobs.items()}
@@ -5235,7 +5259,8 @@ class StaticStreamingClosureTests(unittest.TestCase):
     ARGS = ("--deb", "serving.deb", "--binary", "worker", "--cmake-cache", "CMakeCache.txt")
 
     def check(self, depends="libc6 (>= 2.35), libstdc++6", needed=("libc.so.6",), dpkg_status=0,
-              readelf_status=0, args=ARGS, pre_depends="tensorplate-common (= 1)", streaming="ON"):
+              readelf_status=0, args=ARGS, pre_depends="tensorplate-common (= 1)", streaming="ON",
+              symbols=symbol_listing(), symbols_status=0):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / "serving.deb").write_text("")
@@ -5247,8 +5272,11 @@ class StaticStreamingClosureTests(unittest.TestCase):
             write_executable(root / "dpkg-deb", f"{asked}exit {dpkg_status}\n")
             entries = [f" 0x01 (NEEDED)   Shared library: [{name}]" for name in needed]
             dynamic = "\n".join(["Dynamic section at offset 0x1 contains 2 entries:", *entries])
-            listed = f"#!/bin/sh\n[ \"$1\" = -d ] || exit 9\necho '{dynamic}'\n"
-            write_executable(root / "readelf", f"{listed}exit {readelf_status}\n")
+            (root / "dynamic").write_text(f"{dynamic}\n")
+            (root / "symbols").write_text(symbols)
+            answers = (f"-d) cat '{root / 'dynamic'}'; exit {readelf_status} ;;"
+                       f" -sW) cat '{root / 'symbols'}'; exit {symbols_status} ;;")
+            write_executable(root / "readelf", f"#!/bin/sh\ncase \"$1\" in {answers} esac\nexit 9\n")
             env = {**os.environ, "PATH": f"{root}{os.pathsep}{os.environ['PATH']}"}
             return subprocess.run(
                 [str(CLOSURE_CHECK), *args], cwd=root, env=env,
@@ -5257,7 +5285,10 @@ class StaticStreamingClosureTests(unittest.TestCase):
 
     def test_a_streaming_worker_with_a_static_closure_passes_with_a_line_per_check(self):
         result = self.check(needed=("libstdc++.so.6", "libz.so.1", "libc.so.6"))
-        self.assertEqual((result.returncode, len(result.stdout.splitlines())), (0, 3), result)
+        self.assertEqual((result.returncode, len(result.stdout.splitlines())), (0, 4), result)
+        # The services derived from it call only the base-object constructor: either one is enough.
+        base = [row.replace("ServiceC1Ev", "ServiceC2Ev") for row in STREAMING_SYMBOLS.values()]
+        self.assertEqual(self.check(symbols=symbol_listing(base)).returncode, 0)
 
     def test_what_the_check_finds_or_cannot_make_fails_and_is_named(self):
         refused = {
@@ -5283,7 +5314,8 @@ class StaticStreamingClosureTests(unittest.TestCase):
             "--binary needs a value": {"args": ("--binary", "--deb", "serving.deb")},
             # A check that could not be made is not a pass.
             "dpkg-deb": {"dpkg_status": 2},
-            "readelf": {"readelf_status": 1},
+            "could not read the dynamic section": {"readelf_status": 1},
+            "could not read the symbol tables": {"symbols_status": 1},
             "no NEEDED entry": {"needed": ()},
             "--binary": {"args": self.ARGS[:2] + self.ARGS[4:]},
             "--deb": {"args": self.ARGS[2:]},
@@ -5293,6 +5325,34 @@ class StaticStreamingClosureTests(unittest.TestCase):
                 result = self.check(**case)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn(name, result.stderr)
+
+    def test_a_worker_that_does_not_define_every_streaming_part_fails_and_names_each_one(self):
+        parts = STREAMING_SYMBOLS
+        undefined = {name: row.replace("   15 ", "  UND ") for name, row in parts.items()}
+        cases = {
+            **{f"without {name}": ((*(r for n, r in parts.items() if n != name),), {name})
+               for name in parts},
+            # A worker that only calls into a part has its name in the table, undefined.
+            **{f"{name} undefined": ((*(undefined[n] if n == name else r for n, r in parts.items()),),
+                                     {name}) for name in parts},
+            # What a worker built without the feature defines: none of them.
+            "built without the feature": ((), set(parts)),
+        }
+        for case, (rows, lacking) in cases.items():
+            with self.subTest(case=case):
+                result = self.check(symbols=symbol_listing(rows))
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertEqual({name for name in parts if name in result.stderr}, lacking,
+                                 result.stderr)
+
+    def test_a_stripped_worker_fails_because_its_parts_cannot_be_read(self):
+        dynamic_markers = (*DYNAMIC_SYMBOLS, *STREAMING_SYMBOLS.values())
+        for case, listing in {"no symbol table": symbol_listing(symtab=False),
+                              "markers only in .dynsym": "\n".join(dynamic_markers) + "\n"}.items():
+            with self.subTest(case=case):
+                result = self.check(symbols=listing)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn("no .symtab", result.stderr)
 
 
 class SourceInstallStreamingTests(unittest.TestCase):

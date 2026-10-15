@@ -36,7 +36,7 @@ if [[ "${CI:-}" != "true" && "${TP_ALLOW_LOCAL_ARCH_PACKAGE_TEST:-}" != "1" ]]; 
   exit 0
 fi
 
-for tool in dpkg-buildpackage dpkg-deb dpkg-parsechangelog cc; do
+for tool in dpkg-buildpackage dpkg-deb dpkg-parsechangelog cc strip readelf; do
   command -v "$tool" >/dev/null 2>&1 || die "required command not found: $tool"
 done
 
@@ -89,11 +89,19 @@ trap cleanup EXIT
 note "staging stub ELF binaries"
 stub_src="$(mktemp -d)/stub.c"
 printf 'int main(void) { return 0; }\n' > "$stub_src"
+# The serving stub defines one name of each part the closure checker requires of a streaming worker.
+serving_src="$(dirname "$stub_src")/serving.c"
+printf '%s\n' 'const char *grpc_version_string(void) { return "0"; }' \
+  'void service(void) __asm__("_ZN11tensorplate6stream2v114SessionService7ServiceC1Ev");' \
+  'void listener(void) __asm__("_ZN11tensorplate7serving14StreamListener14stop_admissionEv");' \
+  'void service(void) {}' 'void listener(void) {}' 'int main(void) { return 0; }' >"$serving_src"
 for stub in "${stub_paths[@]}"; do
   mkdir -p "$(dirname "$stub")"
   [[ -f "$stub" ]] && mv -f "$stub" "${saved_dir}/$(basename "$stub")"
+  src="$stub_src"
+  [[ "$stub" == */tensorplate-serving ]] && src="$serving_src"
   # -g so debhelper has debug info to split into a -dbgsym package.
-  cc -g -o "$stub" "$stub_src"
+  cc -g -o "$stub" "$src"
 done
 
 note "building binary-arch packages for ${host_arch}"
@@ -206,12 +214,16 @@ for dependency in libgrpc++1 libprotobuf23; do
 done
 refuses TP_ENABLE_STREAMING_GRPC --deb "$serving" \
   --binary build/release/tensorplate-serving --cmake-cache "${fixtures}/off"
+cc -o "${fixtures}/plain" "$stub_src"
+refuses 'gRPC core' --deb "$serving" --binary "${fixtures}/plain" --cmake-cache "${fixtures}/on"
+strip -o "${fixtures}/stripped" build/release/tensorplate-serving
+refuses 'no .symtab' --deb "$serving" --binary "${fixtures}/stripped" --cmake-cache "${fixtures}/on"
 # A library with gRPC's soname stands in for it; nothing needs gRPC installed.
 cc -shared -fPIC -Wl,-soname,libgrpc++.so.1 -o "${fixtures}/libgrpc++.so.1" "$stub_src"
-cc -o "${fixtures}/worker" "$stub_src" \
+cc -o "${fixtures}/worker" "$serving_src" \
   -Wl,--no-as-needed "${fixtures}/libgrpc++.so.1" -Wl,-rpath,"$fixtures"
 refuses libgrpc++.so.1 --deb "$serving" --binary "${fixtures}/worker" --cmake-cache "${fixtures}/on"
-pass "closure checker refuses a feature-off worker, a libgrpc++1 or libprotobuf23 dependency and a needed libgrpc++.so.1"
+pass "closure checker refuses a feature-off worker, one without the streaming code or stripped, a libgrpc++1 or libprotobuf23 dependency and a needed libgrpc++.so.1"
 
 # The agent config is selected per architecture by a dh-exec filter, which is
 # only exercised by a real build. Read it back out of the archive: a filter
