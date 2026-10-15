@@ -51,9 +51,13 @@ same CMake option the runtime's config check is compiled with.
 way the CLI runs the worker (see [`ownership.md`](ownership.md)).
 
 `streaming.enabled` in the worker config defaults to false. A true value in
-a feature-OFF build returns `unsupported` before runtime construction, and so
-does a true value in a worker with `deployment.generation`: `Ready` would have
-to name the descriptor that generation serves, which the worker is not given.
+a feature-OFF build returns `unsupported` before runtime construction. In a
+worker with `deployment.generation`, a true value also needs
+`deployment.descriptor_digest` (`sha256:` and 64 lowercase hexadecimal
+digits), and is `config_invalid` without it, because `Ready` names the
+descriptor the generation serves. The digest is an opaque echo of the
+config: the worker reads no descriptor and cannot verify it. A digest
+without a generation is `config_invalid` as well.
 With `streaming.enabled`, `deployment.endpoint` must be a deployment id (1 to
 128 of letters, digits, `.`, `_` and `-`). `streaming.port` (0 to 65535, 0 for
 an ephemeral port) is the stream listener's port, which must differ from
@@ -102,13 +106,24 @@ line says `serves_sessions: false`.
   when the path takes it from the queue. A body the listener cannot encode
   (the dispatch contract lets `TaskOutput` grow) ends the call `INTERNAL`:
   no result or audio is dropped silently.
-- **Target.** The worker serves no generation and no descriptor digest, so an
-  `Open` must name the worker's `deployment.endpoint` with generation zero and
-  an empty digest; `Ready` names neither. A selector is refused as
-  `target_unresolved`, another deployment or any digest as `target_mismatch`,
-  any generation as `stale_generation`. Internally the manager binds sessions
-  to a fixed non-zero generation that never reaches the wire, because the
-  session layer refuses generation zero.
+- **Target.** An `Open` names the worker's `deployment.endpoint` and the
+  generation and descriptor digest it serves: `deployment.generation` and
+  `deployment.descriptor_digest`, or zero and an empty digest in a worker
+  without a generation. `Ready` names both. A selector is refused as
+  `target_unresolved`. A resolved target is compared by deployment id, then
+  generation, then digest: another deployment is `target_mismatch`, another
+  generation `stale_generation` whatever digest it names, and another digest
+  of the served generation `target_mismatch`. The manager binds sessions to
+  the served generation; in a worker without one, to a fixed non-zero
+  generation that never reaches the wire, because the session layer refuses
+  generation zero.
+- **Known limit.** Streaming is not offered through the agent yet. A member
+  that serves streams answers the agent through the control target described
+  under "Control channel", which implements no admission fence and no
+  retire. The agent can stop such a worker, which then drains its sessions
+  for its drain window and ends the rest as `worker_shutdown`; it cannot
+  close a generation to new sessions while the worker keeps serving, nor
+  retire one so that its sessions end as `deployment_retired`.
 - **Calls waiting to open.** The listener waits on a call from the moment
   gRPC hands it over until the call's first message has been read: on at
   most 32 calls at one time, and on each for at most the open handshake
@@ -923,8 +938,8 @@ lifecycle as `LogicalSessionMachine`, a pure state machine. It holds no
 timers, clocks, queues, threads or I/O. Its owner applies one session's
 events in order and carries out the effects of each accepted event, in
 ascending `LogicalSessionEffect` order, before applying the next. The
-serving worker does not create logical sessions yet; this is the
-lifecycle the streaming serving modes build on.
+stream listener's session manager creates one for each `Open` it
+admits.
 
 `SessionManager` owns those machines, their count reservations and their
 input credit. It opens only for the worker's generation, admits at most
@@ -1634,8 +1649,8 @@ session together with its job bridge
 session as any other, constructs a `SpeechJobDispatch` over the bridge, the
 worker's buffer manager and the clock the listener's session manager runs
 on, and gives it to the stream listener. The listener then admits an `Open`
-and the dispatch serves it. Every job identity carries generation 1: a
-worker with `streaming.enabled` has no `deployment.generation`.
+and the dispatch serves it. Every job identity carries the worker's
+`deployment.generation`, or generation 1 in a worker without one.
 
 The model class is part of the condition because a session built with its
 bridge loads with speech jobs enabled, and a backend refuses that load for a

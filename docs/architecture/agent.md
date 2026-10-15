@@ -1080,8 +1080,8 @@ range must hold at least two pairs). Without a range, which is how every
 packaged configuration ships, the pool is the two ports
 `serving_bind_port` and `serving_candidate_bind_port`, one worker each, and
 no stream port is held. Only the HTTP port is rendered into a worker's
-config today: the serving config has no key for the stream listener's port
-yet, so a range reserves the stream ports and nothing binds them.
+config today: the agent renders no `streaming` block, so a range reserves
+the stream ports and nothing binds them.
 
 A restart can be stamped: a registry built with a restart stamp calls it
 for each generation a restart starts, after the staged bundle check and

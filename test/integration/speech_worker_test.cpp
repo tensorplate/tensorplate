@@ -54,6 +54,7 @@ TEST(SpeechWorker, FeatureFlagDisabled) {
 #include "tensorplate/core/execution_session.hpp"
 #include "tensorplate/core/model_spec.hpp"
 #include "tensorplate/core/result.hpp"
+#include "tensorplate/ipc/worker_control.hpp"
 #include "tensorplate/serving/config.hpp"
 #include "tensorplate/serving/health.hpp"
 #include "tensorplate/serving/serialization.hpp"
@@ -83,15 +84,22 @@ using tensorplate::Result;
 using tensorplate::ServingConfig;
 using tensorplate::ServingWorker;
 using tensorplate::SessionWithBridge;
+using tensorplate::testing::ControlSocketPair;
+using tensorplate::testing::FrameRead;
+using tensorplate::testing::read_frame;
 using tensorplate::testing::ScriptedBackend;
 using tensorplate::testing::ScriptedSidecar;
+using tensorplate::testing::send_frame;
+using tensorplate::testing::StdinReplaced;
 using tensorplate::testing::stream_listener::Client;
 using tensorplate::testing::stream_listener::end_of;
 using tensorplate::testing::stream_listener::eventually;
 using tensorplate::testing::stream_listener::kDeployment;
 using tensorplate::testing::stream_listener::open_event;
+using tensorplate::testing::stream_listener::ServedGeneration;
 using Json = nlohmann::json;
 namespace adapter = tensorplate::adapters::python_pytorch;
+namespace ipc = tensorplate::ipc;
 namespace wire = tensorplate::stream::v1;
 
 /// 100 ms of the input format.
@@ -145,7 +153,8 @@ ModelSpec speech_model() {
 
 /// A started worker, and a stream client's side of it.
 struct Serving {
-  explicit Serving(std::unique_ptr<ServingWorker> built) : worker(std::move(built)) {
+  explicit Serving(std::unique_ptr<ServingWorker> built, ServedGeneration served = {})
+      : worker(std::move(built)), generation(std::move(served)) {
     ::testing::internal::CaptureStderr();
     const auto started = worker->start();
     const auto bound = logged(::testing::internal::GetCapturedStderr(), "stream listener bound");
@@ -176,7 +185,7 @@ struct Serving {
     bool admitted = false;
     (void)eventually([&] {
       client = connect();
-      client.call->Write(open_event(mode));
+      client.call->Write(open_event(mode, generation));
       const auto first = client.read();
       if (first.has_value() && first->has_ready()) {
         EXPECT_EQ(first->sequence(), 1U) << "Ready is the session's first event";
@@ -196,8 +205,13 @@ struct Serving {
 
   /// The status of a call whose Open the worker refuses.
   [[nodiscard]] grpc::Status refused(wire::SessionMode mode) const {
+    return refused(open_event(mode, generation));
+  }
+
+  /// The status of a call whose Open, `open`, the worker refuses.
+  [[nodiscard]] grpc::Status refused(const wire::ClientEvent& open) const {
     auto client = connect();
-    client.call->Write(open_event(mode));
+    client.call->Write(open);
     client.call->WritesDone();
     EXPECT_FALSE(client.read().has_value()) << "a refused Open has no event";
     return client.call->Finish();
@@ -222,6 +236,8 @@ struct Serving {
   std::uint16_t port = 0;
   bool serves_sessions = false;
   std::unique_ptr<wire::SessionService::Stub> stub;
+  /// What the worker serves, which every Open names.
+  ServedGeneration generation;
 };
 
 /// A listening TCP socket on a loopback port of its own.
@@ -333,14 +349,14 @@ class Reader {
   std::optional<wire::Accepted> accepted_;
 };
 
-/// What a test can know of the Ready that answers `open_event(mode)`.
-void expect_ready(const wire::Ready& ready, wire::SessionMode mode) {
+/// What a test can know of the Ready that answers `open_event(mode, served)`.
+void expect_ready(const wire::Ready& ready, wire::SessionMode mode,
+                  const ServedGeneration& served) {
   SCOPED_TRACE(ready.ShortDebugString());
   EXPECT_FALSE(ready.session_id().empty());
   EXPECT_LE(ready.session_id().size(), 64U);
-  // The worker serves no generation.
-  EXPECT_EQ(ready.generation(), 0U);
-  EXPECT_TRUE(ready.descriptor_digest().empty());
+  EXPECT_EQ(ready.generation(), served.generation);
+  EXPECT_EQ(ready.descriptor_digest(), served.descriptor_digest);
   const auto& limits = ready.limits();
   EXPECT_NE(limits.idle_timeout_ms(), 0U);
   EXPECT_NE(limits.heartbeat_interval_ms(), 0U);
@@ -433,7 +449,7 @@ void expect_segment(Events& client, std::uint64_t segment_id, std::size_t text_b
 void transcribes_one_utterance(const Serving& served) {
   wire::Ready ready;
   auto client = served.ready(wire::SESSION_MODE_STT_STREAMING, &ready);
-  ASSERT_NO_FATAL_FAILURE(expect_ready(ready, wire::SESSION_MODE_STT_STREAMING));
+  ASSERT_NO_FATAL_FAILURE(expect_ready(ready, wire::SESSION_MODE_STT_STREAMING, served.generation));
   ASSERT_TRUE(client.send_audio(3 * kFrame, kFrame));
   const auto asked = client.finalize();
   Reader events{client, ready, 3, 2 * std::uint64_t{kFrame}};
@@ -475,7 +491,7 @@ void transcribes_one_utterance(const Serving& served) {
 void synthesizes_one_segment(const Serving& served) {
   wire::Ready ready;
   auto client = served.ready(wire::SESSION_MODE_TTS_STREAMING, &ready);
-  ASSERT_NO_FATAL_FAILURE(expect_ready(ready, wire::SESSION_MODE_TTS_STREAMING));
+  ASSERT_NO_FATAL_FAILURE(expect_ready(ready, wire::SESSION_MODE_TTS_STREAMING, served.generation));
   // 1,200 samples: two whole chunks and one of 240.
   const std::string text = "fifteen bytes!!";
   ASSERT_TRUE(client.send_text(1, text));
@@ -681,6 +697,52 @@ TEST_F(SpeechWorkerScripted, OneUtteranceIsTranscribed) {
   EXPECT_TRUE(stopped.front().contains("longest_release_wait_ms"));
   EXPECT_EQ(sidecar.sent("unload", 1).size(), 1U);
   expect_one_job_that_ran_uncancelled();
+}
+
+TEST_F(SpeechWorkerScripted, AMemberServesItsGenerationToStreamsAndToItsJobs) {
+  register_backend();
+  auto config = streaming_config(speech_model());
+  config.deployment.generation = 7;
+  config.deployment.descriptor_digest = "sha256:" + std::string(64, 'a');
+  auto pair = ControlSocketPair::create();
+  std::unique_ptr<ServingWorker> built;
+  {
+    // The worker end reaches the worker as fd 0, the way the agent passes it.
+    const StdinReplaced as_the_agent_passes_it(pair.worker.get());
+    pair.worker.reset();
+    built = worker(config);
+  }
+  ASSERT_NE(built, nullptr);
+  const Serving served{std::move(built), {7, *config.deployment.descriptor_digest}};
+  ASSERT_TRUE(served.serves_sessions);
+  ipc::WorkerControlRequest request;
+  request.transaction_id = "runtime";
+  request.correlation_id = "while-serving";
+  request.op = ipc::WorkerControlOp::LedgerStatus;
+  request.member = ipc::WorkerMember{kDeployment, 7};
+  ASSERT_TRUE(send_frame(pair.agent.get(), ipc::encode_worker_control_request(request).value()));
+  std::string reply;
+  ASSERT_EQ(read_frame(pair.agent.get(), 10s, reply), FrameRead::Frame);
+  const auto answer = ipc::decode_worker_control_response(reply);
+  ASSERT_TRUE(answer.has_value()) << answer.error().message;
+  EXPECT_TRUE(ipc::worker_control_answers(*answer, request).has_value());
+  EXPECT_EQ(answer->status, ipc::WorkerControlStatus::Ok);
+  for (const auto& [target, reason] :
+       {std::pair{ServedGeneration{6, "sha256:" + std::string(64, 'b')},
+                  "FAILURE_REASON_STALE_GENERATION"},
+        std::pair{ServedGeneration{7, "sha256:" + std::string(64, 'b')},
+                  "FAILURE_REASON_TARGET_MISMATCH"}}) {
+    SCOPED_TRACE(reason);
+    const auto status = served.refused(open_event(wire::SESSION_MODE_STT_STREAMING, target));
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+    EXPECT_NE(status.error_message().find(reason), std::string::npos) << status.error_message();
+  }
+  ASSERT_NO_FATAL_FAILURE(transcribes_one_utterance(served));
+
+  (void)served.stop();
+  const auto submits = sidecar.sent("job_submit", 0);
+  ASSERT_EQ(submits.size(), 1U);
+  EXPECT_EQ(submits.front().value("generation", std::uint64_t{0}), 7U);
 }
 
 TEST_F(SpeechWorkerScripted, OneSegmentIsSynthesized) {
