@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import weakref
+from collections.abc import Callable
 from types import TracebackType
 from typing import Any
 
 import grpc.aio
 
 from tensorplate.speech._session import Session
+from tensorplate.speech.discovery import (
+    DEFAULT_STATUS_TIMEOUT,
+    AgentTargets,
+    resolve_stream_target,
+)
 from tensorplate.speech.errors import SessionClosedError
 from tensorplate.speech.events import AudioFormat, Target
 from tensorplate.speech.stt import SpeechToTextSession
@@ -36,7 +42,10 @@ class SpeechClient:
     `channel` is a ``grpc.aio`` channel the caller made and keeps: the
     client never closes it, and its options are the caller's, among them
     ``grpc.http2.bdp_probe`` 0, without which a session that stops reading
-    does not hold the server back.
+    does not hold the server back. Such a client opens each session on the
+    `target` it is given. ``from_agent()`` makes one that asks the agent
+    instead, and follows the active deployment from one generation to the
+    next.
 
     Create the client inside a running event loop and close it with
     ``aclose()`` or ``async with``. The client is asyncio only. It retries
@@ -55,10 +64,71 @@ class SpeechClient:
         self._stub = session_pb2_grpc.SessionServiceStub(self._channel)
         self._sessions: weakref.WeakSet[Session[Any]] = weakref.WeakSet()
         self._closed = False
+        self._targets: AgentTargets | None = None
+        # From the agent's status, a channel per endpoint it named. One the deployment left
+        # stays until the client closes: a channel with no call opens no connection.
+        self._stubs: dict[str, Any] = {}
+        self._channels: list[Any] = []
+
+    @classmethod
+    async def from_agent(
+        cls,
+        *,
+        profile: str | None = None,
+        config_path: str | None = None,
+        status_timeout: float = DEFAULT_STATUS_TIMEOUT,
+    ) -> SpeechClient:
+        """A client whose sessions open on the active deployment, as the agent's status names it.
+
+        The status is read now, through the CLI profile as
+        ``resolve_stream_target()`` reads it, and raises what that raises.
+        Each session then opens on the endpoint and target last read, with no
+        `target` given. The status is read again before an open after a
+        session ended because its worker went away (``worker_shutdown``,
+        ``deployment_retired``), and once when an open's first call ends
+        before any server event: when the agent then names another target
+        the open's second call goes there, in place of the one more call
+        that ``open()`` otherwise makes, so an open never makes more than two
+        calls. A session already open is never moved to another generation.
+        `status_timeout` bounds each socket operation of a read, in seconds;
+        a read during an open counts toward its `open_timeout`.
+        """
+        first = await resolve_stream_target(
+            profile=profile, config_path=config_path, timeout=status_timeout
+        )
+        client = cls(first.endpoint)
+        client._stubs[first.endpoint] = client._stub
+        client._channels.append(client._channel)
+        client._targets = AgentTargets(
+            first,
+            client._connector,
+            profile=profile,
+            config_path=config_path,
+            timeout=status_timeout,
+        )
+        return client
+
+    def _connector(self, endpoint: str) -> Callable[[], Any]:
+        if endpoint not in self._stubs:
+            channel = grpc.aio.insecure_channel(endpoint, options=CHANNEL_OPTIONS)
+            self._channels.append(channel)
+            self._stubs[endpoint] = session_pb2_grpc.SessionServiceStub(channel)
+        connect: Callable[[], Any] = self._stubs[endpoint].Session
+        return connect
+
+    def _addressed(self, target: Target | None) -> tuple[Any, Target]:
+        if self._targets is None:
+            if target is None:
+                raise ValueError("give the session a target, or make the client with from_agent()")
+            return self._stub.Session, target
+        if target is not None:
+            raise ValueError("a client made by from_agent() opens on the target the agent names")
+        current = self._targets.current
+        return self._connector(current.endpoint), current.target
 
     def transcribe(
         self,
-        target: Target,
+        target: Target | None = None,
         *,
         language: str,
         input_format: AudioFormat,
@@ -70,7 +140,9 @@ class SpeechClient:
     ) -> SpeechToTextSession:
         """A speech-to-text session on `target`, not yet open: enter it with ``async with``.
 
-        `language` and `input_format` must be ones the deployment declares.
+        `target` is required unless the client was made by ``from_agent()``,
+        and refused if it was. `language` and `input_format` must be ones
+        the deployment declares.
         The three timeouts are in seconds. `open_timeout` bounds the wait
         for the server's answer to the open. `close_timeout` bounds
         ``close()`` and a clean exit from ``async with``; past it the call
@@ -82,9 +154,10 @@ class SpeechClient:
         """
         if self._closed:
             raise SessionClosedError("the client is closed")
+        connect, addressed = self._addressed(target)
         session = SpeechToTextSession._create(
-            self._stub.Session,
-            target,
+            connect,
+            addressed,
             language=language,
             input_format=input_format,
             trace_id=trace_id,
@@ -92,13 +165,14 @@ class SpeechClient:
             open_timeout=open_timeout,
             close_timeout=close_timeout,
             cancel_timeout=cancel_timeout,
+            targets=self._targets,
         )
         self._sessions.add(session)
         return session
 
     def synthesize(
         self,
-        target: Target,
+        target: Target | None = None,
         *,
         language: str,
         voice: str,
@@ -110,7 +184,8 @@ class SpeechClient:
     ) -> TextToSpeechSession:
         """A text-to-speech session on `target`, not yet open: enter it with ``async with``.
 
-        `language` and `voice` must be ones the deployment declares. The
+        `target` is as for ``transcribe()``. `language` and `voice` must be
+        ones the deployment declares. The
         three timeouts are those of ``transcribe()``, and a `close_timeout`
         in seconds, or ``None``, means what it means there. Its default,
         ``Follow.FINALIZE_DEADLINE``, follows the server: a close ends once
@@ -123,9 +198,10 @@ class SpeechClient:
         """
         if self._closed:
             raise SessionClosedError("the client is closed")
+        connect, addressed = self._addressed(target)
         session = TextToSpeechSession._create(
-            self._stub.Session,
-            target,
+            connect,
+            addressed,
             language=language,
             voice=voice,
             trace_id=trace_id,
@@ -133,6 +209,7 @@ class SpeechClient:
             open_timeout=open_timeout,
             close_timeout=close_timeout,
             cancel_timeout=cancel_timeout,
+            targets=self._targets,
         )
         self._sessions.add(session)
         return session
@@ -160,7 +237,8 @@ class SpeechClient:
             for wait in late:
                 wait.cancel()
         if self._owns_channel:
-            await self._channel.close()
+            for channel in self._channels or [self._channel]:
+                await channel.close()
 
     async def __aenter__(self) -> SpeechClient:
         return self

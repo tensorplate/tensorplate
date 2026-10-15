@@ -6,14 +6,16 @@ import asyncio
 import contextlib
 from collections.abc import Callable, Coroutine
 from types import TracebackType
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Protocol, TypeVar
 
 import grpc
 import grpc.aio
 
 from tensorplate.errors import ErrorCode
 from tensorplate.speech._buffer import EventBuffer, Signal
+from tensorplate.speech.discovery import StreamTarget
 from tensorplate.speech.errors import (
+    DiscoveryError,
     InvalidEventError,
     PreconditionFailedError,
     ResourceExhaustedError,
@@ -38,8 +40,24 @@ EventT = TypeVar("EventT")
 ResultT = TypeVar("ResultT")
 SessionT = TypeVar("SessionT", bound="Session[Any]")
 
+
+class Targets(Protocol):
+    """Where a client made from the agent's status opens its sessions."""
+
+    async def fresh(self) -> StreamTarget: ...
+
+    async def after(self, seen: StreamTarget) -> StreamTarget: ...
+
+    def stale(self) -> None: ...
+
+    def connector(self, endpoint: str) -> Callable[[], Any]: ...
+
+
 # Transcripts and control events a session holds for its caller before it stops reading.
 METADATA_BUFFER_BYTES = 16 * 1024
+
+# A session ended with one of these reasons was served by a worker that is going away.
+_MOVED = ("worker_shutdown", "deployment_retired")
 
 # What a write raises once its call has ended. The CancelledError among them is gRPC's, for a
 # call this side cancelled, or a write given up before Ready (`Session._write`): a session's
@@ -170,8 +188,10 @@ class Session(Generic[EventT]):
         open_timeout: float | None,
         close_timeout: float | None,
         cancel_timeout: float,
+        targets: Targets | None = None,
     ) -> None:
-        self._connect, self._target = connect, target
+        self._connect, self._target, self._targets = connect, target, targets
+        self._resolved: StreamTarget | None = None
         self._open_timeout, self._close_timeout = open_timeout, close_timeout
         self._cancel_timeout = cancel_timeout
         self._call: Any = None
@@ -203,9 +223,10 @@ class Session(Generic[EventT]):
         self._answer: tuple[int, EventT] | None = None
         self._unknown_events = 0
         # While `open()` runs, once it made its second call, and the failure of its first
-        # call while it makes the second.
+        # call while it makes the second, with whether that failure alone allows the second.
         self._opening = self._reopened = False
         self._lost: SpeechError | None = None
+        self._lost_retryable = False
 
     # --- what a subclass supplies ---------------------------------------------
 
@@ -287,23 +308,25 @@ class Session(Generic[EventT]):
         call that way, and the call carried nothing but the Open. The
         session is not ended in between, so a cancel or a close then ends
         it with no second call.
+
+        A session of a client made by ``SpeechClient.from_agent()`` may read
+        the agent's status first, and between the two calls, and then raises
+        a ``DiscoveryError`` when the status names no stream target; its
+        second call may go to the target the agent names then. It makes no
+        more than two calls either way.
         """
-        if self._call is not None or self._ended:
+        if self._opening or self._call is not None or self._ended:
             raise SessionClosedError("the session was opened before, or its client is closed")
-        target = self._target
-        opening = self._open_body(
-            pb.ResolvedTarget(
-                deployment_id=target.deployment_id,
-                generation=target.generation,
-                descriptor_digest=target.descriptor_digest,
-            )
-        )
-        self._call = self._connected()
         self._opening = True
         try:
-            await self._bounded(self._begin(opening), self._open_timeout, "answer to Open")
+            await self._bounded(self._begin(), self._open_timeout, "answer to Open")
         except BaseException:
-            self._call.cancel()
+            if self._call is not None:
+                self._call.cancel()
+            elif not self._ended:
+                self._abort(
+                    SessionClosedError("the open ended before its first call", admitted=False)
+                )
             raise
         finally:
             self._opening = False
@@ -347,7 +370,13 @@ class Session(Generic[EventT]):
         before ending the call. Leaving ``async with`` on an exception, or
         cancelled, calls this.
         """
-        if self._call is None or self._ended:
+        if self._ended:
+            return
+        if self._call is None:
+            # An open still reading its target from the agent sends no Open once it has read it.
+            if self._opening:
+                self._cancelling = True
+                self._settle(None)
             return
         self._cancelling = True
         if self._lost is not None:
@@ -465,21 +494,76 @@ class Session(Generic[EventT]):
         self._reader = asyncio.create_task(self._read())
         return call
 
-    async def _begin(self, opening: pb.Open) -> None:
+    async def _begin(self) -> None:
+        if self._targets is not None:
+            try:
+                found = await self._targets.fresh()
+            except DiscoveryError as error:
+                self._settle(error)
+                raise self._end_error() from None
+            if not self._ended:
+                self._use(found)
+        # A cancel or a close before the first call leaves none to make.
+        if self._ended:
+            raise self._end_error()
+        self._call = self._connected()
         try:
-            await self._send(pb.ClientEvent(open=opening))
+            await self._send(pb.ClientEvent(open=self._open_event()))
             await self._until(lambda: self._ready is not None)
             return
         except SpeechError:
             if self._lost is None:
                 raise
         # Outside the handler, so that the second call's error has no context.
+        if self._targets is not None:
+            await self._follow(self._lost)
         # `_lost` is cleared once the new call exists, so a closed channel ends the session.
         self._call = self._connected()
         self._lost, self._reopened = None, True
         self._write_failed, self._sent = False, 0
-        await self._send(pb.ClientEvent(open=opening))
+        await self._send(pb.ClientEvent(open=self._open_event()))
         await self._until(lambda: self._ready is not None)
+
+    async def _follow(self, lost: SpeechError) -> None:
+        """Read the target again after the first call was `lost`; raise if no second call follows.
+
+        The second call goes to the target the agent names now when it
+        changed, and to the same one only when the loss alone allows it.
+        """
+        targets, seen = self._targets, self._resolved
+        assert targets is not None
+        assert seen is not None
+        unread: DiscoveryError | None = None
+        try:
+            found = await targets.after(seen)
+        except DiscoveryError as error:
+            unread = error
+        if unread is not None:
+            # The next open reads before its first call, which the old target just lost.
+            targets.stale()
+            unread.admitted, unread.__cause__ = lost.admitted, lost
+            self._settle(unread)
+        if self._ended:
+            raise self._end_error()
+        if found == seen and not self._lost_retryable:
+            self._settle(lost)
+            raise self._end_error()
+        self._use(found)
+
+    def _use(self, resolved: StreamTarget) -> None:
+        assert self._targets is not None
+        self._resolved, self._target = resolved, resolved.target
+        self._connect = self._targets.connector(resolved.endpoint)
+
+    def _open_event(self) -> pb.Open:
+        target = self._target
+        return self._open_body(
+            pb.ResolvedTarget(
+                deployment_id=target.deployment_id,
+                generation=target.generation,
+                descriptor_digest=target.descriptor_digest,
+            )
+        )
 
     async def _drain(self) -> None:
         async with self._write_lock:
@@ -613,10 +697,11 @@ class Session(Generic[EventT]):
         """End the call from this side; the session's error is `error` unless one came first."""
         if self._abort_error is None:
             self._abort_error = error
-        if self._lost is not None:
+        if self._call is None or self._lost is not None:
             self._settle(None)
         self._events.end()
-        self._call.cancel()
+        if self._call is not None:
+            self._call.cancel()
 
     def _shut(self) -> None:
         """End the session because its client or channel closed; unread events are dropped."""
@@ -778,9 +863,11 @@ class Session(Generic[EventT]):
         )
         # A call ended so before any server event was lost with its connection, and carried
         # only the Open: the open makes one more call, and the session is not ended meanwhile.
+        # An open on the agent's target holds any such end, to read the target again.
         reopen = self._opening and not self._reopened and not self._received
-        if lost and reopen and not self._cancelling and self._abort_error is None:
-            self._lost = failure
+        follows = lost or (self._targets is not None and status is not grpc.StatusCode.OK)
+        if follows and reopen and not self._cancelling and self._abort_error is None:
+            self._lost, self._lost_retryable = failure, lost
             self._changed.notify()
             return
         self._settle(failure)
@@ -788,6 +875,8 @@ class Session(Generic[EventT]):
     def _settle(self, failure: SpeechError | None) -> None:
         """End the session with `failure`, unless it was cancelled or aborted first."""
         self._lost = None
+        if self._targets is not None and failure is not None and failure.reason in _MOVED:
+            self._targets.stale()
         if self._cancelling:
             failure = None
         elif self._abort_error is not None:
