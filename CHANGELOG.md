@@ -910,6 +910,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The serving worker's stream listener now has gRPC close a connection with
+  no call open at an idle limit of 67 minutes (60 to 147 minutes after its
+  last call, as gRPC checks once a limit; a gRPC client that has made a
+  call closes its own idle connection first, 30 to 60 minutes after it),
+  and accepts at most 256 connections at one time, sized from the worker's default soft limit of
+  1,024 descriptors and the 13 it holds at idle with a speech deployment. A
+  connection past the cap is closed as it is accepted and its call reads
+  `UNAVAILABLE`; an open call is never cut by the idle limit. Before, gRPC
+  kept a connection that opened no call until its peer closed it, and
+  accepted any number. (V030-E04-F02-T02)
 - The Whisper and Kokoro candidate bundles that `tensorplate bundle provision`
   installs, and their test fixture twins, now declare `model_class` `speech`
   (format 0.1, which asks no speech block) at version 0.2.0, and the packaged

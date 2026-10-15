@@ -497,7 +497,14 @@ default of about 64 KiB, and with sent and received messages capped at
 64 KiB. With the probe on, gRPC widens the window to megabytes, and a
 session that stopped reading would not hold the server back until that much
 had been sent. A channel passed in with `channel=` has whatever options its
-owner gave it.
+owner gave it. The worker accepts at most 256 connections at one time; a
+session opened on a connection past them ends with
+`ServiceUnavailableError`. The worker closes a connection with no call open
+60 to 147 minutes after its last call, after the client's own channel has
+closed it (30 to 60 minutes). A channel passed in that turns gRPC's client
+idle limit off, or that was connected without a call, can meet the
+worker's close, and a session opened at that instant may end with
+`ServiceUnavailableError` too; the client does not send it again.
 
 ### Text-to-speech sessions
 

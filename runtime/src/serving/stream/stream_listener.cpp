@@ -139,6 +139,11 @@ struct CallState {
 
 }  // namespace
 
+ConnectionBounds connection_bounds(const StreamListenerOptions& options) noexcept {
+  return {options.max_connection_idle.value_or(kMaxConnectionIdle),
+          options.max_connections.value_or(kMaxConnections)};
+}
+
 /// The method is registered raw: gRPC hands over each message as bytes, so a
 /// message that does not parse reaches the call instead of failing its read.
 struct StreamListener::Impl final
@@ -881,6 +886,13 @@ Result<std::unique_ptr<StreamListener>> StreamListener::start(StreamListenerOpti
   builder.AddChannelArgument(GRPC_ARG_HTTP2_BDP_PROBE, 0);
   // gRPC refuses a stream beyond these before a call exists for it.
   builder.AddChannelArgument(GRPC_ARG_MAX_CONCURRENT_STREAMS, kMaxConcurrentStreams);
+  const auto bounds = connection_bounds(raw->options);
+  // gRPC keeps a connection with no call open until its peer closes it,
+  // unless told otherwise; an open call is never cut by this.
+  builder.AddChannelArgument(GRPC_ARG_MAX_CONNECTION_IDLE_MS,
+                             static_cast<int>(bounds.idle.count()));
+  // gRPC closes a connection past these as it accepts it.
+  builder.AddChannelArgument(GRPC_ARG_MAX_ALLOWED_INCOMING_CONNECTIONS, bounds.connections);
   raw->server = builder.BuildAndStart();
   if (!raw->server || selected <= 0) {
     if (dispatch != nullptr) {

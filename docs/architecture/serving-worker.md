@@ -171,10 +171,10 @@ line says `serves_sessions: false`.
   sees that only while 4,096 refused calls are outstanding over the whole
   listener at one time. The bound was 32 at first, below the 64 streams of
   one connection, and a single channel with 64 calls open then read bare
-  cancels. What the two bounds leave open: the number of
-  connections is not limited, so the 64 calls bound each connection and
-  not their sum (the 4,096 places do bound the refused calls of all of
-  them together); a refused call has no time limit, so a peer that does
+  cancels. What the two bounds leave open: the 64 calls bound each
+  connection, and their sum is bounded only through gRPC's cap of 256
+  connections (see "Connections"; the 4,096 places do bound the refused
+  calls of all of them together); a refused call has no time limit, so a peer that does
   not read keeps the places it took for as long as its connection lasts;
   and what gRPC itself keeps for a call that was cancelled, or for a
   stream it refused, is gRPC's to bound. A time limit of the listener's
@@ -190,7 +190,9 @@ line says `serves_sessions: false`.
   server's listening socket, 20 s unless `grpc.keepalive_timeout_ms` says
   otherwise, and the listener sets neither; by that option's description
   the kernel ends a connection whose peer has acknowledged or taken no
-  bytes for that long. The 4,096 places stay a bound on memory. All of
+  bytes for that long while the server has bytes to send, and never one
+  with nothing to send (see "Connections" for those). The 4,096 places
+  stay a bound on memory. All of
   this is read from the source of the gRPC this tree builds (1.81.1), not
   shown by a run here. The tests: against a writer
   whose calls end when the test says so, the 4,096th refused call keeps
@@ -203,6 +205,61 @@ line says `serves_sessions: false`.
   listener that is given no place cancels a call its watch thread refuses,
   a call refused when admission closes and a call refused on arrival. No
   test has a real peer that does not read.
+- **Connections.** Two of gRPC's own limits bound a connection, and the
+  listener sets both; how gRPC applies them is read from the source of the
+  gRPC this tree builds (1.81.1). A connection with no call open is
+  closed by the idle limit, 67 minutes (`grpc.max_connection_idle_ms`,
+  which gRPC moves by up to a tenth either way, once per connection).
+  gRPC's timer starts with the connection and checks once a limit; it
+  closes only at a check that finds no call open and none started since
+  the check before, and a check made while a call is open leaves that
+  call counted as started, so the first check after a call keeps the
+  connection too. So an open call is never cut, a connection that never
+  opens one is closed one limit after it starts (about 60 to 74
+  minutes), and any other connection one to two limits after its last
+  call ends (about 60 to 147 minutes); a session of 1.5 s against a limit
+  of 1 s saw the close 1.2 to 1.8 s after it ended, in 8 runs of 8 (a
+  probe of this change's review, not a test here). At the close gRPC sends
+  GOAWAY (`INTERNAL_ERROR`, debug text `connection idle`). A gRPC client
+  with gRPC's defaults closes a connection of its own in the same way
+  after 30 minutes (`grpc.client_idle_timeout_ms`), its timer starting when
+  its first call ends: 30 to 60 minutes after its last call. A client
+  that has made a call therefore closes first, and the SDK's always has
+  before its channel is idle. The known residual is a client that turns
+  its own idle limit off and a channel that connected without a call:
+  the worker may close those first, and an Open sent at the instant it
+  closes may read `UNAVAILABLE`, which the SDK does not send again. After
+  an idle close a client's next call connects again, and gRPC sends again
+  by itself a call the GOAWAY shows the server never saw. At most 256 connections are open at one time
+  (`grpc.max_allowed_incoming_connections`): gRPC closes a connection past
+  them as it accepts it, before reading from it, and a call on it reads
+  `UNAVAILABLE` ("failed to connect to all addresses; last error:
+  UNAVAILABLE: ipv4:127.0.0.1:<port>: Socket closed" in the tests); a
+  connection gives its place back when it closes. The figure comes from
+  descriptors. The agent's unit sets no `LimitNOFILE`, so the agent and
+  the worker it starts have systemd's default soft limit of 1,024 (a
+  worker started by hand has its shell's). At idle with a speech deployment
+  the worker holds 12: its HTTP and stream listening sockets, the socket
+  to its sidecar, two pipes, two epoll and two eventfd descriptors, its
+  standard input, output and error (measured over the sidecar runner with
+  a fixture backend, `/health` ready); a worker the agent starts also
+  holds its control socket, so 13. Half of what is left stays for what
+  the worker opens while it serves, and the other half is rounded down to
+  a power of two: (1,024 − 13) / 2 = 505, so 256, which holds for any
+  idle count up to 512. A connection that never sends its HTTP/2 preface,
+  or never acknowledges the server's SETTINGS, is closed by gRPC itself
+  with a GOAWAY after 60 s, the time it waits for that acknowledgement
+  (seen once against the worker, not tested here). The tests, with the
+  limits shortened:
+  a connected channel that opens no call is closed and its next call is
+  served; a session held for three idle limits keeps its connection; at a
+  cap of three, three connections each hold a session, a fourth reads
+  `UNAVAILABLE` and is served once one of the three closes. At the
+  listener's own figures, 256 connections each have a call answered (an
+  Open refused, the listener having no dispatch) while all are held and
+  the next reads `UNAVAILABLE`, and the options a test leaves unset
+  resolve to 67 minutes and 256. That the worker's listener uses the
+  67 minutes is shown only there: no test waits that long.
 - **Compression.** The server enables no compression algorithm. A call
   whose client announces one for its messages (gzip or deflate) is ended
   by gRPC itself, with status `UNIMPLEMENTED` and no event: the listener
@@ -346,7 +403,8 @@ line says `serves_sessions: false`.
   sent 60,000 bytes of a 65,000-byte message by a raw HTTP/2 client, were
   all taken (1,920,000 bytes), the server widening each stream by 65,005
   bytes and the connection by the sum; for a 33rd, refused on arrival,
-  it widened neither. The number of connections is not bounded.
+  it widened neither. The number of connections is bounded by gRPC's
+  cap of 256 (see "Connections").
 - **Calls that outlive their session.** A write in flight completes only
   when the peer takes it, the session's `SessionClosed` waits behind it,
   and the call is finished only after that event is written. A reader that
@@ -413,11 +471,8 @@ line says `serves_sessions: false`.
   the calls of a connection") but not timed by the listener: it keeps its
   place until gRPC reports it done or its connection ends, and at shutdown
   such a call still holds the gRPC server until the drain window ends. A
-  connection that opens no call
-  is neither counted nor expired, and the number of connections is not
-  limited: nothing here bounds transport state that has no call yet.
-  gRPC has a limit of its own for a connection with no call open
-  (`grpc.max_connection_idle_ms`), which the listener does not set yet. A
+  connection that opens no call is bounded only by gRPC's limits (see
+  "Connections"): the listener counts calls, not connections. A
   client event larger than the 64 KiB the listener
   receives is rejected by the transport's own limit, below the listener's
   parse: the call ends with a transport status and no `SessionClosed`, and
