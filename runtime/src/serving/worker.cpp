@@ -321,6 +321,9 @@ Result<void> ServingWorker::Impl::build() {
 #if TP_ENABLE_STREAMING_GRPC
   if (job_bridge != nullptr) {
     serving::SpeechDispatchOptions options;
+    if (config.deployment.generation) {
+      options.generation = *config.deployment.generation;
+    }
     options.on_stall = [this](const Error& cause) { on_speech_stall(cause); };
     auto dispatch =
         serving::SpeechJobDispatch::create(job_bridge, *buffer_manager, *clock, std::move(options));
@@ -494,6 +497,8 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
   options.port = config.streaming.port;
   options.allow_non_loopback = config.bind.allow_non_loopback;
   options.deployment_id = config.deployment.endpoint;
+  options.generation = config.deployment.generation.value_or(0);
+  options.descriptor_digest = config.deployment.descriptor_digest.value_or("");
   options.limits = *limits;
   // Without a dispatch the listener refuses every Open.
   auto listener = serving::StreamListener::start(std::move(options), speech_dispatch.get(), *clock);

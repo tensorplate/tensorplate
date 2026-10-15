@@ -292,11 +292,12 @@ message ClientEvent {
 
 // A deployment as the client, or a proxy in front of the server, resolved it.
 //
-// A worker started without a deployment generation serves no generation and
-// no descriptor digest. It is addressed by its deployment alone: generation
-// zero and an empty digest, and its Ready names neither. Such a worker
-// refuses a non-zero generation with reason `stale_generation` and any
-// digest with reason `target_mismatch`.
+// A server compares it with what it serves by deployment id, then generation,
+// then digest: another generation is refused with reason `stale_generation`
+// whatever digest it names. A worker started without a deployment generation
+// serves no generation and no descriptor digest. It is addressed by its
+// deployment alone: generation zero and an empty digest, and its Ready names
+// neither.
 message ResolvedTarget {
   // 1 to 128 characters of [A-Za-z0-9._-], not `.` or `..`.
   string deployment_id = 1;
@@ -305,8 +306,8 @@ message ResolvedTarget {
   uint64 generation = 2;
   // Identity of the descriptor addressed: `sha256:` and 64 lowercase
   // hexadecimal digits, empty only for a worker that serves no generation.
-  // An Open whose deployment id or digest is not the served one is refused
-  // with reason `target_mismatch`.
+  // An Open whose deployment id, or whose digest of the served generation, is
+  // not the served one is refused with reason `target_mismatch`.
   string descriptor_digest = 3;
 }
 

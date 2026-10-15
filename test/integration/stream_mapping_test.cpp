@@ -403,6 +403,56 @@ TEST(StreamMapping, EachTaskOutputBecomesItsServerEvent) {
   EXPECT_EQ(event->synthesis_completed().finalize_sequence(), 14U);
 }
 
+TEST(StreamMapping, AnOpenIsCheckedByDeploymentThenGenerationThenDigest) {
+  const std::string served_digest = "sha256:" + std::string(64, 'a');
+  const std::string other_digest = "sha256:" + std::string(64, 'b');
+  const stream::ServedTarget seven{"dep-a", 7, served_digest};
+  const stream::ServedTarget none{"dep-a", 0, ""};
+  struct Case {
+    const char* name;
+    const stream::ServedTarget& served;
+    const char* deployment;
+    std::uint64_t generation;
+    std::string digest;
+    std::optional<std::string> refusal;
+  };
+  const std::vector<Case> cases{
+      {"the served target", seven, "dep-a", 7, served_digest, std::nullopt},
+      {"another deployment", seven, "dep-b", 7, served_digest, "target_mismatch"},
+      {"another deployment, generation and digest", seven, "dep-b", 6, other_digest,
+       "target_mismatch"},
+      {"an older generation", seven, "dep-a", 6, served_digest, "stale_generation"},
+      {"a newer generation", seven, "dep-a", 8, served_digest, "stale_generation"},
+      {"no generation", seven, "dep-a", 0, served_digest, "stale_generation"},
+      {"an older generation and another digest", seven, "dep-a", 6, other_digest,
+       "stale_generation"},
+      {"no generation and no digest", seven, "dep-a", 0, "", "stale_generation"},
+      {"another digest", seven, "dep-a", 7, other_digest, "target_mismatch"},
+      {"no digest", seven, "dep-a", 7, "", "target_mismatch"},
+      {"none served and none named", none, "dep-a", 0, "", std::nullopt},
+      {"a generation where none is served", none, "dep-a", 7, "", "stale_generation"},
+      {"a digest where none is served", none, "dep-a", 0, served_digest, "target_mismatch"},
+      {"a generation and a digest where none is served", none, "dep-a", 7, served_digest,
+       "stale_generation"},
+  };
+  for (const auto& entry : cases) {
+    SCOPED_TRACE(entry.name);
+    wire::Open open;
+    auto& target = *open.mutable_resolved();
+    target.set_deployment_id(entry.deployment);
+    target.set_generation(entry.generation);
+    target.set_descriptor_digest(entry.digest);
+    const auto checked = stream::check_target(open, entry.served);
+    if (!entry.refusal) {
+      EXPECT_TRUE(checked.has_value()) << checked.error().message;
+      continue;
+    }
+    ASSERT_FALSE(checked.has_value());
+    EXPECT_EQ(checked.error().code, Error::Code::NotReady);
+    EXPECT_EQ(checked.error().context, entry.refusal);
+  }
+}
+
 TEST(StreamMapping, LocalhostIsTheIpv4LoopbackAndIpv6IsBracketed) {
   EXPECT_EQ(stream::listen_address("localhost", 7001), "127.0.0.1:7001");
   EXPECT_EQ(stream::listen_address("127.0.0.1", 0), "127.0.0.1:0");

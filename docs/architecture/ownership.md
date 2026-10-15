@@ -65,7 +65,8 @@ Dependencies flow downward only. Upward dependencies are forbidden.
   backends/python_pytorch/ over IPC.
   protocol/rust/   is consumed by agent/, cli/, observability/.
   protocol/proto/  is compiled into C++ bindings by runtime/'s build when
-  TP_ENABLE_STREAMING_GRPC is ON. Only a contract test links them today.
+  TP_ENABLE_STREAMING_GRPC is ON, and the serving worker's stream
+  listener links them.
   sdk/python/'s build compiles it into the Python modules its wheel carries.
   include/tensorplate/ is consumed by runtime/, serving_worker/, and tests.
 ```

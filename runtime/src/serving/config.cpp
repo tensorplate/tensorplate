@@ -28,6 +28,19 @@ bool names_a_deployment(std::string_view id) noexcept {
   });
 }
 
+/// `sha256:` and 64 lowercase hexadecimal digits, as a stream Open names a descriptor.
+bool is_descriptor_digest(std::string_view digest) noexcept {
+  constexpr std::string_view kPrefix = "sha256:";
+  constexpr std::size_t kHexDigits = 64;
+  if (digest.size() != kPrefix.size() + kHexDigits || digest.substr(0, kPrefix.size()) != kPrefix) {
+    return false;
+  }
+  const auto hex = digest.substr(kPrefix.size());
+  return std::all_of(hex.begin(), hex.end(), [](unsigned char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+  });
+}
+
 /// Largest generation every reader of the control protocol represents exactly.
 constexpr std::uint64_t kMaxGeneration = (std::uint64_t{1} << 53U) - 1;
 
@@ -106,11 +119,11 @@ Result<void> validate_streaming(const StreamingConfig& streaming,
   return unexpected(Error::Code::Unsupported,
                     "serving config: streaming.enabled requires TP_ENABLE_STREAMING_GRPC");
 #else
-  if (deployment.generation) {
-    // Ready names the descriptor a generation serves, which the worker is not given.
-    return unexpected(Error::Code::Unsupported,
-                      "serving config: streaming.enabled is not supported with "
-                      "deployment.generation");
+  if (deployment.generation && !deployment.descriptor_digest) {
+    // Ready names the descriptor the generation serves.
+    return unexpected(Error::Code::ConfigInvalid,
+                      "serving config: streaming.enabled with deployment.generation requires "
+                      "deployment.descriptor_digest");
   }
   if (!names_a_deployment(deployment.endpoint)) {
     return unexpected(Error::Code::ConfigInvalid,
@@ -123,6 +136,23 @@ Result<void> validate_streaming(const StreamingConfig& streaming,
   }
   return {};
 #endif
+}
+
+Result<void> validate_descriptor_digest(const ActiveDeploymentConfig& deployment) {
+  if (!deployment.descriptor_digest) {
+    return {};
+  }
+  if (!deployment.generation) {
+    return unexpected(
+        Error::Code::ConfigInvalid,
+        "serving config: deployment.descriptor_digest requires deployment.generation");
+  }
+  if (!is_descriptor_digest(*deployment.descriptor_digest)) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "serving config: deployment.descriptor_digest must be sha256: and 64 "
+                      "lowercase hexadecimal digits");
+  }
+  return {};
 }
 }  // namespace
 
@@ -199,7 +229,7 @@ Result<void> ServingConfig::validate() const {
                       "serving config: with deployment.generation, deployment.endpoint must be "
                       "a deployment id: 1 to 128 of letters, digits, '.', '_' and '-'");
   }
-  return Result<void>{};
+  return validate_descriptor_digest(deployment);
 }
 
 namespace {
@@ -362,6 +392,14 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
         }
         cfg.deployment.generation = generation.get<std::uint64_t>();
       }
+      if (d.contains("descriptor_digest")) {
+        if (!d["descriptor_digest"].is_string()) {
+          return unexpected(Error::Code::ConfigInvalid,
+                            "serving config: deployment.descriptor_digest must be sha256: and 64 "
+                            "lowercase hexadecimal digits");
+        }
+        cfg.deployment.descriptor_digest = d["descriptor_digest"].get<std::string>();
+      }
       if (d.contains("model") && d["model"].is_object()) {
         const auto& m = d["model"];
         if (!m.contains("model_id") || !m.contains("model_class") || !m.contains("artifact_path") ||
@@ -454,6 +492,9 @@ std::string ServingConfig::to_json() const {
   dep["endpoint"] = deployment.endpoint;
   if (deployment.generation) {
     dep["generation"] = *deployment.generation;
+  }
+  if (deployment.descriptor_digest) {
+    dep["descriptor_digest"] = *deployment.descriptor_digest;
   }
   if (deployment.model.has_value()) {
     const auto& m = *deployment.model;

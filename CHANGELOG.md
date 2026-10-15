@@ -1041,6 +1041,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   check's serving stub now defines one name of each part.
   (V030-E04-F02-T02)
 
+- A serving worker with `deployment.generation` now accepts
+  `streaming.enabled` when its config also names
+  `deployment.descriptor_digest` (`sha256:` and 64 lowercase hexadecimal
+  digits, allowed only beside a generation), and refuses it with
+  `config_invalid` without one; before, a worker with a generation refused
+  `streaming.enabled` as `unsupported`. Its stream listener names the
+  generation and digest in `Ready`, binds sessions to that generation, and
+  every speech job carries it. An `Open` is compared by deployment id, then
+  generation, then digest: another generation is `stale_generation` whatever
+  digest it names, also in a worker without a generation, which refused an
+  `Open` naming both as `target_mismatch`. The digest is echoed as rendered:
+  the worker reads no descriptor and does not verify it. The agent renders
+  no `streaming` block yet, so no worker it starts serves streams.
+  (V030-E04-F02-T02, V030-E04-F01-T03)
+
 - The serving worker's stream listener now has gRPC close a connection with
   no call open at an idle limit of 67 minutes (60 to 147 minutes after its
   last call, as gRPC checks once a limit; a gRPC client that has made a call

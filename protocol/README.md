@@ -35,8 +35,8 @@ C++ and Rust components.
 `proto/tensorplate/stream/v1/session.proto` is a **draft** of the messages a
 client and the serving worker will exchange on one bidirectional gRPC call
 per logical session, and the source of truth for them. The serving worker's
-stream listener is built from it and implements its events, but no worker
-serves a session yet: none builds the dispatch that runs speech jobs (see
+stream listener is built from it and implements its events, and a worker
+with `streaming.enabled` serves a speech deployment's sessions (see
 [`serving-worker.md`](../docs/architecture/serving-worker.md#stream-listener)).
 Its clients are the measurement tool `tools/validation/slice_measure.py`,
 which generates Python bindings from it when it starts, and the Python SDK's
@@ -171,14 +171,16 @@ What the draft now fixes:
   taxonomy's retry hint says of the reason it was refused with.
 - **Target.** `Open` names a resolved target (deployment id, generation,
   descriptor digest) or a model selector, and is the only client event that
-  names a generation. The server refuses a selector as unresolved, and a
-  deployment id or digest that is not the served one. The request metadata names
+  names a generation. The server refuses a selector as unresolved, and
+  compares a resolved target by deployment id, then generation, then digest:
+  another deployment is a mismatch, another generation stale whatever digest
+  it names, and another digest of the served generation a mismatch. The
+  request metadata names
   `tensorplate-model` and `tensorplate-model-version` are reserved for the
   selector; the proxy that resolves a selector compares them with it, and
   the server does not read them. A worker started without a deployment
   generation is addressed by its deployment alone (generation zero, an empty
-  digest); its `Ready` names neither, and it refuses any generation as stale
-  and any digest as a mismatch.
+  digest), and its `Ready` names neither.
 - **Bounds.** Sequences, generations and 64-bit ids stop at 2^53 - 1. A client value
   that disagrees with what earlier events determine fails the session.
 - **Totals and recovery.** `SessionClosed` carries the session's totals.

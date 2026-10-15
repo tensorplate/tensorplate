@@ -964,8 +964,8 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   ends before the registry would kill it. The signal goes to the worker's
   process id only: a worker that has to be killed leaves its sidecar to
   exit when it sees the worker's socket close or, while a backend call
-  holds it, within about two seconds of the kill, once it sees its parent
-  change (status 4; see
+  holds it, once it sees its parent change: within about two seconds of
+  the kill, unless the call holds the interpreter lock (status 4; see
   [the speech dispatch](serving-worker.md#the-speech-dispatch-in-the-worker)).
   Every member is stopped this way when the agent itself is told to stop.
 - **Promotion.** A candidate that exited after it was warmed is refused
@@ -1080,8 +1080,8 @@ range must hold at least two pairs). Without a range, which is how every
 packaged configuration ships, the pool is the two ports
 `serving_bind_port` and `serving_candidate_bind_port`, one worker each, and
 no stream port is held. Only the HTTP port is rendered into a worker's
-config today: the serving config has no key for the stream listener's port
-yet, so a range reserves the stream ports and nothing binds them.
+config today: the agent renders no `streaming` block, so a range reserves
+the stream ports and nothing binds them.
 
 A restart can be stamped: a registry built with a restart stamp calls it
 for each generation a restart starts, after the staged bundle check and

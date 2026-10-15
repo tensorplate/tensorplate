@@ -23,9 +23,11 @@ namespace wire = ::tensorplate::stream::v1;
 inline constexpr std::uint64_t kMaxWireInteger = (std::uint64_t{1} << 53U) - 1U;
 
 /// The deployment a listener serves. A worker without a generation serves no
-/// generation and no descriptor digest.
+/// generation and no descriptor digest: zero and empty.
 struct ServedTarget {
   std::string deployment_id;
+  std::uint64_t generation = 0;
+  std::string descriptor_digest;
 };
 
 /// The reason an end cause reports for `error`: the reason its context names,
@@ -119,12 +121,13 @@ struct InputHistory {
 ///   encoding this server does not know.
 [[nodiscard]] Result<SessionRequest> session_request(const wire::Open& open);
 
-/// Whether an Open's target is the one served.
+/// Whether an Open's target is the one served, compared by deployment id, then
+/// generation, then descriptor digest.
 /// @return Unsupported "target_unresolved" for a selector, ConfigInvalid
 ///   "invalid_event" for no target or a malformed deployment id, NotReady
-///   "target_mismatch" for another deployment or any descriptor digest, and
-///   NotReady "stale_generation" for any generation: the worker serves none, and
-///   is addressed by its deployment alone.
+///   "target_mismatch" for another deployment, NotReady "stale_generation" for
+///   another generation, whatever digest it names, and NotReady
+///   "target_mismatch" for another digest of the served generation.
 [[nodiscard]] Result<void> check_target(const wire::Open& open, const ServedTarget& served);
 
 }  // namespace tensorplate::serving::stream
