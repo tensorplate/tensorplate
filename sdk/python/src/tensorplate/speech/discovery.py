@@ -159,7 +159,7 @@ class AgentTargets:
     def __init__(
         self,
         first: StreamTarget,
-        connector: Callable[[str], Callable[[], Any]],
+        connector: Callable[[StreamTarget], Callable[[], Any]],
         *,
         profile: str | None,
         config_path: str | None,

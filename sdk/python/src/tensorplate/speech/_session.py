@@ -50,7 +50,7 @@ class Targets(Protocol):
 
     def stale(self) -> None: ...
 
-    def connector(self, endpoint: str) -> Callable[[], Any]: ...
+    def connector(self, resolved: StreamTarget) -> Callable[[], Any]: ...
 
 
 # Transcripts and control events a session holds for its caller before it stops reading.
@@ -553,7 +553,7 @@ class Session(Generic[EventT]):
     def _use(self, resolved: StreamTarget) -> None:
         assert self._targets is not None
         self._resolved, self._target = resolved, resolved.target
-        self._connect = self._targets.connector(resolved.endpoint)
+        self._connect = self._targets.connector(resolved)
 
     def _open_event(self) -> pb.Open:
         target = self._target

@@ -588,6 +588,11 @@ read goes stale, and a client made by `from_agent()` follows it:
   [one more Open](#streaming-speech-client) rule allows it, and otherwise
   the first call's error is raised. Either way an `open()` makes at most
   two calls, all within its `open_timeout`, which also bounds the read.
+- **Each target has a channel of its own.** A later generation may take the
+  port an earlier one left, and a channel that met the port closed is still
+  backing off from it, so the client opens a new channel for every target
+  the agent names. The channel of a target no unended session uses is
+  closed at the next open.
 
 When the status names no stream target, discovery raises a
 `DiscoveryError`, which is a `SpeechError` and an `EndpointResolutionError`,

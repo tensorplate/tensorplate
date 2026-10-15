@@ -14,6 +14,7 @@ from tensorplate.speech._session import Session
 from tensorplate.speech.discovery import (
     DEFAULT_STATUS_TIMEOUT,
     AgentTargets,
+    StreamTarget,
     resolve_stream_target,
 )
 from tensorplate.speech.errors import SessionClosedError
@@ -30,6 +31,9 @@ CHANNEL_OPTIONS = (
     ("grpc.http2.bdp_probe", 0),
     ("grpc.max_send_message_length", MAX_MESSAGE_BYTES),
     ("grpc.max_receive_message_length", MAX_MESSAGE_BYTES),
+    # A channel of its own connection state: one that reused another's, to the same port, would
+    # inherit its reconnect backoff.
+    ("grpc.use_local_subchannel_pool", 1),
 )
 
 
@@ -65,10 +69,11 @@ class SpeechClient:
         self._sessions: weakref.WeakSet[Session[Any]] = weakref.WeakSet()
         self._closed = False
         self._targets: AgentTargets | None = None
-        # From the agent's status, a channel per endpoint it named. One the deployment left
-        # stays until the client closes: a channel with no call opens no connection.
-        self._stubs: dict[str, Any] = {}
+        # From the agent's status, a channel per target it named, as a new generation may reuse
+        # a port the channel of an earlier one is still backing off from.
+        self._stubs: dict[StreamTarget, tuple[Any, Any]] = {}
         self._channels: list[Any] = []
+        self._closing: set[asyncio.Task[None]] = set()
 
     @classmethod
     async def from_agent(
@@ -97,7 +102,7 @@ class SpeechClient:
             profile=profile, config_path=config_path, timeout=status_timeout
         )
         client = cls(first.endpoint)
-        client._stubs[first.endpoint] = client._stub
+        client._stubs[first] = (client._channel, client._stub)
         client._channels.append(client._channel)
         client._targets = AgentTargets(
             first,
@@ -108,13 +113,24 @@ class SpeechClient:
         )
         return client
 
-    def _connector(self, endpoint: str) -> Callable[[], Any]:
-        if endpoint not in self._stubs:
-            channel = grpc.aio.insecure_channel(endpoint, options=CHANNEL_OPTIONS)
+    def _connector(self, resolved: StreamTarget) -> Callable[[], Any]:
+        self._retire(resolved)
+        if resolved not in self._stubs:
+            channel = grpc.aio.insecure_channel(resolved.endpoint, options=CHANNEL_OPTIONS)
             self._channels.append(channel)
-            self._stubs[endpoint] = session_pb2_grpc.SessionServiceStub(channel)
-        connect: Callable[[], Any] = self._stubs[endpoint].Session
+            self._stubs[resolved] = (channel, session_pb2_grpc.SessionServiceStub(channel))
+        connect: Callable[[], Any] = self._stubs[resolved][1].Session
         return connect
+
+    def _retire(self, kept: StreamTarget) -> None:
+        """Close the channel of each target but `kept` that no session still uses."""
+        held = {session._resolved for session in self._sessions if not session._ended}
+        for resolved in [known for known in self._stubs if known not in held and known != kept]:
+            channel, _ = self._stubs.pop(resolved)
+            self._channels.remove(channel)
+            closing = asyncio.ensure_future(channel.close())
+            self._closing.add(closing)
+            closing.add_done_callback(self._closing.discard)
 
     def _addressed(self, target: Target | None) -> tuple[Any, Target]:
         if self._targets is None:
@@ -124,7 +140,7 @@ class SpeechClient:
         if target is not None:
             raise ValueError("a client made by from_agent() opens on the target the agent names")
         current = self._targets.current
-        return self._connector(current.endpoint), current.target
+        return self._connector(current), current.target
 
     def transcribe(
         self,
@@ -239,6 +255,8 @@ class SpeechClient:
         if self._owns_channel:
             for channel in self._channels or [self._channel]:
                 await channel.close()
+            if self._closing:
+                await asyncio.wait(self._closing)
 
     async def __aenter__(self) -> SpeechClient:
         return self
