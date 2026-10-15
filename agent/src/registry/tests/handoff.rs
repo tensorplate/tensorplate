@@ -588,8 +588,12 @@ fn the_serving_member_is_asked_to_stop_only_once_the_commit_is_durable() {
 
 /// The next start of `w`'s agent, its worker failing as `fail` makes it.
 fn started_failing(w: &Wired, fail: &str) -> Wired {
+    // Only a worker that never answers waits the warm out; the other modes
+    // keep the default so a loaded machine cannot turn them into that one.
     let next = wired_at(w.root.clone(), Step::BeforePrepare, |config| {
-        config.worker.warm_timeout_ms = 50;
+        if fail == "ready" {
+            config.worker.warm_timeout_ms = 50;
+        }
     });
     let launcher = next.f.launcher.clone();
     let exit_last = move || {
