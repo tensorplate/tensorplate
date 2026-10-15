@@ -224,8 +224,11 @@ stream endpoints from the committed endpoint map. `process`, `readiness`,
 generation stands, [as the member registry holds
 it](#what-status-reads-from-the-registry); an agent whose worker control
 reports no processes (`worker.mode: mock`) leaves all four absent.
-`stream_api_version`, `effective_quota` (the quota the member's worker
-reports in force) and `staged_bytes` stay absent until their sources exist.
+`effective_quota` is the quota the member's worker answered its last
+`activate` with, while its process runs; it is absent before a worker has
+answered one `ok` (see [Admission](#member-registry)).
+`stream_api_version` and `staged_bytes` stay absent until their sources
+exist.
 Beside a resident set the durable singleton slots
 are empty; a set whose only member is serving projects that member into
 `active` (with `serving_url`, the `/infer` URL of its unary endpoint when
@@ -476,11 +479,17 @@ transaction's commit write. `fence` refuses what a warm refuses before each
 probe, a candidate that exited, whose control channel failed or whose
 process cannot be inspected, as well as one that was given up, and moves
 nothing; a refused fence fails the
-transaction before its commit, and the serving worker keeps serving. The
-serving worker is not told to stop admitting work: the agent does not send
-`admission_fence` yet. `activate`, once the commit is durable,
-gives the candidate the serving slot and then asks the member it replaces
-to stop; it is the only call that mutates the worker's active deployment.
+transaction before its commit, and the serving worker keeps serving. Once
+the candidate passes, the serving worker is told to stop admitting work
+(`admission_fence` over its control channel) and must answer `ok` within 3
+seconds, or the fence fails the transaction: `timeout` when it does not
+answer, and `inference_failed`, naming the worker's answer, when it refuses
+or its channel fails during the fence. A serving worker that exited or
+whose control channel failed admits nothing and is not told. `activate`,
+once the commit is durable, gives the candidate the serving slot, asks
+the member it replaces to stop, sends the candidate `activate`, and then
+reaps the replaced member; it is the only call that mutates the worker's
+active deployment.
 It is refused once the agent is stopping, or when the worker control no
 longer holds the candidate; either refusal leaves the committed
 transaction for the next start to settle forward. A candidate that exited
@@ -495,8 +504,10 @@ so a worker control that restarts nothing ends the start.
 promotion). `abandon` tells the worker control that the transaction
 which prepared a candidate returned without promoting it; the coordinator
 calls it on every such return, a failed state write included, and it does
-nothing by default. `hold` asks the worker control to start no generation
-by itself until `release`; a transaction that hands over a generation takes
+nothing by default. The registry then sends `activate` to a serving
+worker that transaction fenced, so it admits work again. `hold` asks the
+worker control to start no generation by itself until `release`; a
+transaction that hands over a generation takes
 the hold before it takes that generation and releases it when `prepare` has
 returned (see [the member registry](#member-registry)). Every
 implementation supplies both, so one that forwards `prepare` cannot leave
@@ -1030,10 +1041,13 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   by the fence, before the commit write: the deploy fails with the
   worker's failure and the serving member stays. One whose control
   channel failed since its warm, or whose process can no longer be
-  inspected, is killed and refused the same way. Once
+  inspected, is killed and refused the same way. A serving member that
+  does not answer its fence `ok` fails the deploy the same way and is
+  activated again. Once
   the commit is written the candidate takes the serving slot even if it
   exited since, and the supervision step restarts it; the member it
-  replaces is sent its stop only after the commit.
+  replaces is sent its stop only after the commit, before the candidate
+  is sent `activate`, so the agent's own stop never waits on that answer.
 - **Supervision.** The agent's loop runs the coordinator's turn
   (`Coordinator::supervise`) every 100 ms and logs what it did: the
   registry's supervision step (`WorkerControl::supervise`), then, once a
@@ -1046,6 +1060,24 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   is killed. Nothing else stops a serving member: a slow `/health` answer
   or slow inference does not, and `/health` is not polled once a
   generation is ready.
+- **Admission.** The registry tells workers over their control channels
+  when to admit work. A transaction fences the serving worker after its
+  candidate passes the fence's checks and before the commit write; the
+  fence is recorded before it is sent, and a transaction that ends without
+  promoting its candidate sends `activate` to the worker it fenced, with
+  its own transaction id, so it admits again. After the commit the new
+  serving worker is sent `activate`. A restarted generation is sent
+  `activate`, with a transaction id of its own, once the supervision step
+  judges it ready; it is sent from a thread of its own, so the step does
+  not wait for the answer, and not at all while a transaction has fenced
+  that generation. An `activate` waits at most 3 seconds for its answer;
+  one not answered `ok` is logged and changes nothing else. The quota an
+  `ok` carries is the member's `effective_quota` in status. Operations to
+  one worker are sent one at a time, and a restart's activate is not sent
+  while a transaction's fence is in force. Each
+  is exchanged in the gap before the channel's next ledger poll, so none
+  delays a poll; one not answered when its gap ends is sent again after
+  the poll, as a new request with its own `correlation_id`.
 - **Restart.** The successor is a new generation: a new generation number
   and serving config, on the same port, from the member's staged root. It
   starts 1, 2 and 4 seconds after the stop for the first, second and third
@@ -1175,7 +1207,8 @@ one it kills, for lost contact or for not becoming ready after a restart,
 is not listed while it is killed. For each one listed the registry reports
 its deployment id and generation, whether its process has been seen to
 exit, whether the agent judged it ready, whether its control channel is in
-contact, and the ports it holds.
+contact, the ports it holds, and the quota its worker answered its last
+`activate` with (none for a draining one).
 
 - **Running** means the process has not been seen to exit. A process the
   agent cannot inspect has not been, and is reported as running with the

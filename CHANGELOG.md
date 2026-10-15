@@ -1111,6 +1111,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- A deploy or rollback that replaces a serving worker now tells that worker
+  to stop admitting work (`admission_fence` on its control channel) before
+  the commit, and fails before the commit, with the serving worker kept and
+  told to admit again, when the worker does not answer `ok` within 3
+  seconds: `timeout` when it does not answer, and `inference_failed`, naming
+  the worker's answer, when it refuses or its channel fails during the
+  fence. A serving worker that exited or whose control channel failed is not
+  told. After the commit the new serving worker is sent `activate`, as is a
+  restored worker at the agent's start and a restarted one once it is judged
+  ready (from a thread of its own, so supervision does not wait). An
+  `activate` not answered `ok` within 3 seconds is logged and fails nothing;
+  the quota an `ok` carries is reported as the member's `effective_quota` in
+  status. An operation not answered before the channel's next ledger poll is
+  sent again after it as a new request. A serving worker without the control
+  target that answers these operations answers the fence `unsupported`, so a
+  deploy that would replace it fails. (V030-E03-F01-T04, V030-E04-F01-T04)
 - A rollback whose previous deployment's staged copy fails its artifact
   check now answers as the restore at the agent's start does: `load_failed`
   when an artifact is missing, truncated or replaced, `config_invalid` when

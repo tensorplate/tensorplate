@@ -120,9 +120,10 @@ line says `serves_sessions: false`.
   generation zero.
 - **Known limit.** Streaming is not offered through the agent yet. A member
   that serves streams answers `admission_fence`, `activate` and `retire`
-  (see "Control channel"), but the agent sends none of them yet: it stops a
-  worker with a signal, which drains its sessions for its drain window and
-  ends the rest as `worker_shutdown`.
+  (see "Control channel"). The agent sends a fence and an activate around
+  each commit, but no retire yet: it stops a worker with a signal, which
+  drains its sessions for its drain window and ends the rest as
+  `worker_shutdown`.
 - **Calls waiting to open.** The listener waits on a call from the moment
   gRPC hands it over until the call's first message has been read: on at
   most 32 calls at one time, and on each for at most the open handshake

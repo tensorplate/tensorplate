@@ -988,11 +988,11 @@ pub enum Readiness {
 
 /// One resident-set member at its committed generation, as status reports
 /// it. `process`, `readiness`, `draining` and `contact` are absent when the
-/// agent's worker control does not report its processes. Fields whose
-/// source does not exist yet stay absent: `stream_api_version` until the
-/// stream endpoint lands, `effective_quota` until the agent reports what
-/// the member's worker has in force, and `staged_bytes` until staging is
-/// keyed by generation.
+/// agent's worker control does not report its processes. `effective_quota`
+/// is the quota the member's worker answered its last `activate` with,
+/// while its process runs. Fields whose source does not exist yet stay
+/// absent: `stream_api_version` until the stream endpoint lands, and
+/// `staged_bytes` until staging is keyed by generation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MemberStatus {
     pub deployment_id: String,
@@ -1008,8 +1008,8 @@ pub struct MemberStatus {
     pub stream_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_api_version: Option<String>,
-    /// The quota the member's worker reports in force; it may be lower than
-    /// `quota`.
+    /// The quota the member's worker answered its last `activate` with; it
+    /// may be lower than `quota`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_quota: Option<MemberQuota>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
