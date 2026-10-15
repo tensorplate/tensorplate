@@ -35,7 +35,7 @@ access is a site policy and is left to the operator.
 | `/var/lib/tensorplate/` | `tensorplate:tensorplate` | `0750` | `tensorplate-common` postinst | Durable state root. |
 | `/var/lib/tensorplate/state/` | `tensorplate:tensorplate` | `0750` | postinst | Desired-state file and transaction journals. |
 | `/var/lib/tensorplate/identity/` | `tensorplate:tensorplate` | `0750` | postinst | Host identity kept outside `state/`, which the documented rollback sets aside. Kept by remove, removed by purge. |
-| `/var/lib/tensorplate/bundles/staging/` | `tensorplate:tensorplate` | `0750` | postinst | Verified bundles stage here under `<deployment_id>/`. |
+| `/var/lib/tensorplate/bundles/staging/` | `tensorplate:tensorplate` | `0750` | postinst | Each deploy stages its verified bundle here in a tree of its own, `<deployment_id>/<transaction id>/`; the agent removes a tree once no state record names it. |
 | `/var/lib/tensorplate/bundles/active/` | `tensorplate:tensorplate` | `0750` | postinst | Active deployment (symlink or dir). |
 | `/var/lib/tensorplate/bundles/previous/` | `tensorplate:tensorplate` | `0750` | postinst | Previous deployment retained for rollback. |
 | `/var/lib/tensorplate/bundles/quarantine/` | `tensorplate:tensorplate` | `0750` | postinst | Failed deploys land here for operator review. |
