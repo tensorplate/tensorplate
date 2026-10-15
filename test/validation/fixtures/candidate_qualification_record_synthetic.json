@@ -19,9 +19,9 @@
     "backend_profile": "faster_whisper",
     "bundle": {
       "name": "stt-whisper-candidate",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "format_version": "0.1",
-      "manifest_digest": "sha256:fbc44da7dca3d0c0fdf135e8c34c0ace7797eb28d723f55fd51ffc7234e0174f",
+      "manifest_digest": "sha256:7f9785b0e739f8dc2461b0962fbc87a87066d1af12c08c2ca8bafbb64c44ffd1",
       "entry_path": "stt-whisper-candidate.json"
     },
     "artifacts": [
@@ -104,7 +104,7 @@
       "deployment_id": "qualify-stt",
       "transaction_id": "txn-2",
       "phase": "active",
-      "bundle_digest": "sha256:fbc44da7dca3d0c0fdf135e8c34c0ace7797eb28d723f55fd51ffc7234e0174f",
+      "bundle_digest": "sha256:7f9785b0e739f8dc2461b0962fbc87a87066d1af12c08c2ca8bafbb64c44ffd1",
       "wall_ms": 33,
       "status": "ok",
       "failure": null

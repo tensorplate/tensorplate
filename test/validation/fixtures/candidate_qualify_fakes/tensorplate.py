@@ -94,9 +94,9 @@ if command == "status":
                 "deployment_id": d["deployment_id"],
                 "bundle_digest": d["bundle_digest"],
                 "bundle_name": d["bundle_name"],
-                "bundle_version": "0.1.0",
+                "bundle_version": "0.2.0",
                 "backend": "python_pytorch",
-                "model_class": "custom",
+                "model_class": "speech",
                 "serving_url": os.environ["TP_FAKE_SERVING_URL"],
             }
     print(envelope("status", "ok", {"agent_response_status": "ok", "agent": agent}))

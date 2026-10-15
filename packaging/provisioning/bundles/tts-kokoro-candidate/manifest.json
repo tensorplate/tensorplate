@@ -1,9 +1,9 @@
 {
   "schema_version": "0.1",
   "name": "tts-kokoro-candidate",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "format_version": "0.1",
-  "model_class": "custom",
+  "model_class": "speech",
   "backend_hint": "python_pytorch",
   "precision_hint": "fp32",
   "artifacts": [

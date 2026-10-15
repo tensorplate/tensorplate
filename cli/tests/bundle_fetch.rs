@@ -467,6 +467,27 @@ fn shipped_references_pin_exact_entry_sets_and_preserve_candidate_declarations()
         )
         .unwrap();
         assert!(validator.is_valid(&emitted), "{name}: bundle schema");
+        // The fixture twin is what the tests deploy: it must declare what the
+        // operator provisions.
+        let twin: Value = serde_json::from_str(
+            &fs::read_to_string(repo(&format!(
+                "test/models/bundles/v0_1/{fixture}/manifest.json"
+            )))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(emitted["model_class"], "speech", "{name}");
+        // Only the artifact lists may differ between the twin and the bundle.
+        let without_artifacts = |manifest: &Value| {
+            let mut manifest = manifest.clone();
+            manifest.as_object_mut().unwrap().remove("artifacts");
+            manifest
+        };
+        assert_eq!(
+            without_artifacts(&emitted),
+            without_artifacts(&twin),
+            "{name}: manifest differs from its fixture twin"
+        );
         assert_eq!(
             emitted["runtime_compatibility"]["min_runtime_version"],
             "0.3.0"

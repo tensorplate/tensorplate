@@ -146,6 +146,24 @@ impl ProcessHarness {
         warm_timeout: Duration,
         stderr_sink: Option<WorkerStderrSink>,
     ) -> Self {
+        Self::build_configured(
+            serving_binary,
+            active_port,
+            candidate_port,
+            warm_timeout,
+            stderr_sink,
+            |_| {},
+        )
+    }
+
+    fn build_configured(
+        serving_binary: PathBuf,
+        active_port: u16,
+        candidate_port: u16,
+        warm_timeout: Duration,
+        stderr_sink: Option<WorkerStderrSink>,
+        configure: impl FnOnce(&mut AgentConfig),
+    ) -> Self {
         let td = TempDir::new().expect("td");
         let state_dir = td.path().join("state");
         let mut config = AgentConfig {
@@ -174,6 +192,7 @@ impl ProcessHarness {
         config.worker.serving_candidate_bind_port = candidate_port;
         config.worker.warm_timeout_ms = u64::try_from(warm_timeout.as_millis()).expect("ms");
         config.worker.status_poll_interval_ms = 10;
+        configure(&mut config);
         let config = config.validate().expect("valid config");
         let store = Arc::new(StateStore::open(&state_dir).expect("open store"));
         let worker = Arc::new(
@@ -591,16 +610,7 @@ fn kokoro_bundle_with_undeclared_voice(dir: &Path) -> PathBuf {
     bundle
 }
 
-/// The reproduction through the real serving worker and Python sidecar,
-/// for a host that has both: set `TP_TEST_SERVING_BINARY` to a built
-/// `tensorplate-serving` and make `tensorplate_pytorch_backend` importable
-/// by the interpreter the worker starts.
-#[test]
-#[ignore = "needs a built tensorplate-serving and the Python sidecar module"]
-fn real_worker_and_sidecar_report_an_undeclared_voice_as_unsupported() {
-    let serving = std::env::var_os("TP_TEST_SERVING_BINARY").expect("TP_TEST_SERVING_BINARY");
-    let td = TempDir::new().expect("td");
-    let state_dir = td.path().join("state");
+fn python_pytorch_capabilities() -> BTreeMap<String, BackendCapability> {
     let mut capabilities = BTreeMap::new();
     capabilities.insert(
         "python_pytorch".to_string(),
@@ -620,6 +630,78 @@ fn real_worker_and_sidecar_report_an_undeclared_voice_as_unsupported() {
             ],
         },
     );
+    capabilities
+}
+
+/// A format 0.1 bundle of the speech class names no speech block: the Kokoro
+/// candidate deploys, and its worker is configured as the speech class.
+#[test]
+fn the_kokoro_candidate_is_served_as_the_speech_class() {
+    let health = HealthPort::listen();
+    let stub = fixture_dir().join("stub-worker.sh");
+    let h = ProcessHarness::build_configured(
+        stub,
+        health.port,
+        unused_port(),
+        WARM_TIMEOUT,
+        None,
+        |config| {
+            config.available_backends = vec!["python_pytorch".into()];
+            config.backend_capabilities = python_pytorch_capabilities();
+            config.runtime_version = Some("0.3.1".into());
+        },
+    );
+    let bundle = h.td.path().join("kokoro-speech");
+    copy_dir(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../test/models/bundles/v0_1/tts_kokoro_candidate"),
+        &bundle,
+    );
+    health.serve("kokoro-speech");
+
+    let response = dispatch(
+        &h.coord,
+        ControlRequest::deploy(
+            None,
+            DeployRequest {
+                bundle_path: bundle.display().to_string(),
+                deployment_id: "kokoro-speech".into(),
+                ..DeployRequest::default()
+            },
+        ),
+    )
+    .expect("dispatch deploy");
+    assert_eq!(response.status, ResponseStatus::Ok, "{:?}", response.error);
+
+    let rendered: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            h.td.path()
+                .join("worker-configs/serving-kokoro-speech-1.json"),
+        )
+        .expect("worker config"),
+    )
+    .expect("worker config JSON");
+    assert_eq!(rendered["deployment"]["model"]["model_class"], "speech");
+    let active = h
+        .store
+        .snapshot()
+        .expect("snapshot")
+        .active
+        .expect("active");
+    assert_eq!(active.model_class, "speech");
+}
+
+/// The reproduction through the real serving worker and Python sidecar,
+/// for a host that has both: set `TP_TEST_SERVING_BINARY` to a built
+/// `tensorplate-serving` and make `tensorplate_pytorch_backend` importable
+/// by the interpreter the worker starts.
+#[test]
+#[ignore = "needs a built tensorplate-serving and the Python sidecar module"]
+fn real_worker_and_sidecar_report_an_undeclared_voice_as_unsupported() {
+    let serving = std::env::var_os("TP_TEST_SERVING_BINARY").expect("TP_TEST_SERVING_BINARY");
+    let td = TempDir::new().expect("td");
+    let state_dir = td.path().join("state");
+    let capabilities = python_pytorch_capabilities();
     let mut config = AgentConfig {
         schema_version: SCHEMA_VERSION.to_string(),
         transport: ControlTransport::UnixSocket,
