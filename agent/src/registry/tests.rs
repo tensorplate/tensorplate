@@ -818,6 +818,53 @@ fn a_candidate_that_exits_after_it_was_warmed_is_not_fenced_and_the_serving_memb
 }
 
 #[test]
+fn a_candidate_whose_control_channel_failed_since_its_warm_is_not_fenced() {
+    let f = fixture();
+    let serving = f.serve("stt");
+    f.prepare("tts").unwrap();
+    f.health(CANDIDATE_PORT, "tts");
+    assert!(f.warm("tts").unwrap().ready);
+    let candidate_handle = f.launcher.handle(2);
+    candidate_handle.set_contact(ControlContact::Failed);
+
+    let err = f.registry.fence("tx", &candidate("tts")).unwrap_err();
+    assert!(matches!(err, AgentError::WorkerControl(_)), "{err}");
+    assert_eq!(candidate_handle.calls(), ["kill"]);
+    assert!(serving.calls().is_empty());
+    assert_eq!(
+        f.registry.active_deployment_id().unwrap().as_deref(),
+        Some("stt")
+    );
+    assert!(matches!(
+        f.registry.fence("tx", &candidate("tts")),
+        Err(AgentError::WorkerNotReady)
+    ));
+    assert_eq!(f.configs(), 1);
+}
+
+#[test]
+fn a_candidate_whose_control_channel_is_pending_or_unanswered_at_the_fence_is_fenced() {
+    for contact in [ControlContact::Pending, ControlContact::Unanswered] {
+        let f = fixture();
+        let serving = f.serve("stt");
+        f.prepare("tts").unwrap();
+        f.health(CANDIDATE_PORT, "tts");
+        assert!(f.warm("tts").unwrap().ready);
+        let candidate_handle = f.launcher.handle(2);
+        candidate_handle.set_contact(contact);
+
+        f.registry.fence("tx", &candidate("tts")).unwrap();
+
+        assert!(candidate_handle.calls().is_empty(), "{contact:?}");
+        assert!(serving.calls().is_empty(), "{contact:?}");
+        f.registry.activate("tx", &candidate("tts")).unwrap();
+        assert_eq!(serving.calls(), ["terminate"], "{contact:?}");
+        let active = f.registry.active_deployment_id().unwrap();
+        assert_eq!(active.as_deref(), Some("tts"), "{contact:?}");
+    }
+}
+
+#[test]
 fn an_exit_during_the_last_probe_outranks_the_warm_deadline() {
     let f = fixture();
     f.prepare("stt").unwrap();

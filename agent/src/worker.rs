@@ -140,16 +140,17 @@ pub trait WorkerControl: Send + Sync {
     ) -> AgentResult<WorkerReadiness>;
 
     /// Before the transaction's commit is written: the prepared candidate
-    /// still runs and was not given up. Nothing is stopped or moved; the
-    /// serving member is not told to stop admitting, since no worker
-    /// implements that operation yet.
+    /// still runs, keeps its control channel and was not given up. Nothing
+    /// is stopped or moved; the serving member is not told to stop
+    /// admitting, since no worker implements that operation yet.
     ///
     /// # Errors
     ///
     /// Returns [`AgentError::Stopping`] once [`Self::shutdown`] has begun,
     /// [`AgentError::WorkerNotReady`] when no candidate is held, the
     /// candidate's own failure when it exited, and
-    /// [`AgentError::WorkerControl`] for adapter/IPC failures.
+    /// [`AgentError::WorkerControl`] when its control channel failed and for
+    /// adapter/IPC failures.
     fn fence(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()>;
 
     /// Once the commit is durable: the candidate takes the serving slot, then

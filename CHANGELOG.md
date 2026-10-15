@@ -8,6 +8,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- A deploy or rollback now refuses, before its commit, a candidate worker
+  whose control channel failed after its warm: the candidate is killed, the
+  transaction fails as it does for a candidate that exited, and the serving
+  worker keeps serving. Before, the check before the commit asked only
+  whether the candidate still ran. A start whose restore fails now keeps
+  whatever typed reason the failure carries in `last_error.context`, and
+  records `startup_restore` only when it carries none. The agent clears
+  that error once a restart serves the record, unless a deploy or rollback
+  has begun since, so a transaction's failure equal to the restore's is no
+  longer cleared with it, and a later error equal to it is not cleared
+  either. A restored worker whose process cannot be inspected while it
+  loads or at the check before the commit is handed to the restarts like
+  any restore that does not come up; before, the start ended with exit
+  code 5. A deploy's or rollback's candidate whose process cannot be
+  inspected while it loads is now killed and refused, as it is at the
+  check before the commit; before, it was left running until the next
+  deploy.
+  (V030-E03-F01-T04)
+
 - The agent's member registry tests no longer fail now and then on a loaded
   machine. One 40 ms budget served both the warms and port leases that must
   succeed and the cases that wait out a worker that never becomes ready or a

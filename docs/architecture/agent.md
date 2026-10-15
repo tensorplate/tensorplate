@@ -443,19 +443,25 @@ pub trait WorkerControl: Send + Sync {
 ```
 
 `fence` and `activate` are a promotion's two halves, on either side of the
-transaction's commit write. `fence` checks that the prepared candidate
-still runs and was not given up, and moves nothing; the serving worker is
-not told to stop admitting work, since no worker implements that operation
-yet. `activate`, once the commit is durable, gives the candidate the
-serving slot and then asks the member it replaces to stop; it is the only
-call that mutates the worker's active deployment, and is refused only once
-the agent is stopping. A candidate that exited between the two takes the
-slot all the same, and the next supervision step restarts it: after the
-commit the transaction does not fail. `promote`, fence then activate, is
-for the start's restore, which has no commit to write. `owe_restore` hands
-a restore whose worker did not come up to the worker control's restarts
-(see [Restart recovery](#restart-recovery-v01-e08-f07)); it is false by
-default, so a worker control that restarts nothing ends the start.
+transaction's commit write. `fence` refuses what a warm refuses before each
+probe, a candidate that exited, whose control channel failed or whose
+process cannot be inspected, as well as one that was given up, and moves
+nothing; a refused fence fails the
+transaction before its commit, and the serving worker keeps serving. The
+serving worker is not told to stop admitting work, since no worker
+implements that operation yet. `activate`, once the commit is durable,
+gives the candidate the serving slot and then asks the member it replaces
+to stop; it is the only call that mutates the worker's active deployment.
+It is refused once the agent is stopping, or when the worker control no
+longer holds the candidate; either refusal leaves the committed
+transaction for the next start to settle forward. A candidate that exited
+between the two takes the slot all the same, and the next supervision step
+restarts it: after the commit the transaction does not fail. `promote`,
+fence then activate, is for the start's restore, which has no commit to
+write. `owe_restore` hands a restore whose worker did not come up to the
+worker control's restarts (see
+[Restart recovery](#restart-recovery-v01-e08-f07)); it is false by default,
+so a worker control that restarts nothing ends the start.
 `unload` is best-effort (failure is logged but never undoes a successful
 promotion). `abandon` tells the worker control that the transaction
 which prepared a candidate returned without promoting it; the coordinator
@@ -675,7 +681,7 @@ start does when the restore cannot be made:
 | a descriptor document that is missing, is not a regular file, does not verify, is another identity's or describes another bundle | the same |
 | a re-stamp of the descriptor that is refused | the same |
 | a state write of its own that fails, or a descriptor document it cannot write | ends with exit code `5` |
-| a worker that cannot be started, exits while loading, is not ready within `worker.warm_timeout_ms` or exits before it is promoted | comes up with the reason in `last_error`, and the [member registry](#member-registry) starts the record again as it restarts a serving member that stopped; `last_error`, whose `context` is `startup_restore`, is cleared once a restart serves the record (no error of another context is), and when the restarts are used up status reports the member's failure. A worker control that restarts nothing (`worker.mode = "mock"`) ends the start with exit code `5` |
+| a worker that cannot be started, exits while loading, is not ready within `worker.warm_timeout_ms`, exits or loses its control channel before it is promoted, or whose process cannot be inspected | comes up with the reason in `last_error`, and the [member registry](#member-registry) starts the record again as it restarts a serving member that stopped; `last_error`, whose `context` is whatever typed reason the failure carries or else `startup_restore`, is cleared once a restart serves the record, unless a deploy or rollback has begun since (no other error is cleared), and when the restarts are used up status reports the member's failure. A worker control that restarts nothing (`worker.mode = "mock"`) ends the start with exit code `5` |
 
 The refusals in the first five rows are decided by the staged copy and
 the descriptor document, so the agent stays up for `deploy` and
@@ -949,7 +955,8 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   deployment and its control channel has delivered a ledger. A candidate
   that exits while loading answers with its startup failure record; one
   that answers no ledger poll for 10 seconds has a failed control channel
-  and is killed and refused, whatever the warm timeout.
+  and is killed and refused, whatever the warm timeout, and so is one whose
+  process can no longer be inspected (its wait fails).
 - **Stop.** A member being replaced, displaced or unloaded is sent SIGTERM
   and is killed if it has not exited 10 seconds later; members stopped
   together share that deadline. Its serving config tells it to drain its
@@ -963,10 +970,12 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   Every member is stopped this way when the agent itself is told to stop.
 - **Promotion.** A candidate that exited after it was warmed is refused
   by the fence, before the commit write: the deploy fails with the
-  worker's failure and the serving member stays. Once the commit is
-  written the candidate takes the serving slot even if it exited since,
-  and the supervision step restarts it; the member it replaces is sent
-  its stop only after the commit.
+  worker's failure and the serving member stays. One whose control
+  channel failed since its warm, or whose process can no longer be
+  inspected, is killed and refused the same way. Once
+  the commit is written the candidate takes the serving slot even if it
+  exited since, and the supervision step restarts it; the member it
+  replaces is sent its stop only after the commit.
 - **Supervision.** The agent's loop runs the coordinator's turn
   (`Coordinator::supervise`) every 100 ms and logs what it did: the
   registry's supervision step (`WorkerControl::supervise`), then, once a

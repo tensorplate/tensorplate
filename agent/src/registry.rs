@@ -896,8 +896,8 @@ impl MemberRegistry {
     }
 
     /// The prepared candidate's port and control contact. A candidate that
-    /// exited or lost its control channel is removed and answered as the
-    /// failure it is.
+    /// exited, lost its control channel or cannot be inspected is removed
+    /// and answered as the failure it is.
     fn candidate_progress(
         &self,
         candidate: &CandidateRef,
@@ -919,9 +919,9 @@ impl MemberRegistry {
                     member.deployment_id, candidate.deployment_id
                 )));
             }
-            let exited = member.process.exited()?;
+            let exited = member.process.exited();
             let contact = member.process.control();
-            if !exited && contact != ControlContact::Failed {
+            if matches!(exited, Ok(false)) && contact != ControlContact::Failed {
                 return Ok((member.generation, member.ports.ports.http, contact));
             }
             let Some((generation, member)) = members.take_candidate() else {
@@ -930,14 +930,20 @@ impl MemberRegistry {
             (generation, member, exited)
         };
         let _ = fs::remove_file(&member.config_path);
-        if exited {
-            return Err(member.process.startup_failure());
+        match exited {
+            Ok(true) => return Err(member.process.startup_failure()),
+            // Not left running where nothing would look at it again.
+            Err(err) => {
+                member.process.kill();
+                return Err(err);
+            }
+            Ok(false) => {}
         }
         // A worker that stopped answering its control channel is wedged; a
         // request to drain would not reach it either.
         member.process.kill();
         Err(AgentError::WorkerControl(format!(
-            "serving worker `{}` generation {generation} lost its control channel while loading",
+            "serving worker `{}` generation {generation} lost its control channel before it served",
             member.deployment_id
         )))
     }
@@ -1398,42 +1404,34 @@ impl WorkerControl for MemberRegistry {
     }
 
     fn fence(&self, _transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
-        let mut members = self.members()?;
-        if members.stopping {
-            return Err(AgentError::Stopping);
+        {
+            let mut members = self.members()?;
+            if members.stopping {
+                return Err(AgentError::Stopping);
+            }
+            if members.candidate_abandoned {
+                return Err(AgentError::WorkerNotReady);
+            }
+            let Some(prepared) = members
+                .candidate
+                .and_then(|generation| members.by_generation.get(&generation))
+            else {
+                return Err(AgentError::WorkerNotReady);
+            };
+            if prepared.deployment_id != candidate.deployment_id {
+                let err = AgentError::WorkerControl(format!(
+                    "prepared candidate `{}` does not match promote request `{}`",
+                    prepared.deployment_id, candidate.deployment_id
+                ));
+                let prepared = members.take_candidate().map(|(_, m)| members.stopping(m));
+                drop(members);
+                self.retire(prepared.into_iter().collect());
+                return Err(err);
+            }
         }
-        if members.candidate_abandoned {
-            return Err(AgentError::WorkerNotReady);
-        }
-        let Some(prepared) = members
-            .candidate
-            .and_then(|generation| members.by_generation.get_mut(&generation))
-        else {
-            return Err(AgentError::WorkerNotReady);
-        };
-        if prepared.deployment_id != candidate.deployment_id {
-            let err = AgentError::WorkerControl(format!(
-                "prepared candidate `{}` does not match promote request `{}`",
-                prepared.deployment_id, candidate.deployment_id
-            ));
-            let prepared = members.take_candidate().map(|(_, m)| members.stopping(m));
-            drop(members);
-            self.retire(prepared.into_iter().collect());
-            return Err(err);
-        }
-        // A candidate that exited after it was warmed replaces nothing.
-        let exited = prepared.process.exited();
-        if matches!(exited, Ok(false)) {
-            return Ok(());
-        }
-        let Some((_, mut prepared)) = members.take_candidate() else {
-            return Err(AgentError::WorkerNotReady);
-        };
-        drop(members);
-        let _ = fs::remove_file(&prepared.config_path);
-        Err(exited
-            .err()
-            .unwrap_or_else(|| prepared.process.startup_failure()))
+        // A candidate that exited or lost its control channel since it was
+        // warmed replaces nothing.
+        self.candidate_progress(candidate).map(|_| ())
     }
 
     fn activate(&self, _transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
@@ -1501,8 +1499,8 @@ impl WorkerControl for MemberRegistry {
             let _ = owe_restart(&mut members, owed, error, now);
             held
         };
-        // Held only after its warm timed out: it would not hear a request to
-        // drain.
+        // Held only after its warm timed out or its process could not be
+        // inspected: it would not hear a request to drain.
         if let Some((_, mut member)) = restored {
             member.process.kill();
             let _ = fs::remove_file(&member.config_path);

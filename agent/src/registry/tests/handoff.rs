@@ -6,13 +6,15 @@
 
 use super::*;
 use tensorplate_protocol::agent_control::AgentRunState;
-use tensorplate_protocol::agent_state::DeploymentRecord;
+use tensorplate_protocol::agent_state::{AgentState, DeploymentRecord};
+use tensorplate_protocol::bundle_profile::BundleRuleCode;
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::ErrorCode;
 
 use crate::coordinator::{Coordinator, EventSink};
 use crate::descriptor_store::restart_stamp;
 use crate::descriptor_store::tests::{agent_config, probes};
+use crate::error::BundleManifestFailure;
 use crate::recovery::apply_startup;
 use crate::worker::WorkerEvent;
 
@@ -47,6 +49,16 @@ struct Stepped {
     /// The next warm's budget, in place of the configured timeout, and
     /// doubled until that warm has probed.
     next_warm: Mutex<Option<Duration>>,
+    /// While set, `prepare` answers [`refused_by_rule`].
+    refuse_prepare: AtomicBool,
+}
+
+/// A prepare the staged manifest refuses: its record names the rule.
+fn refused_by_rule() -> AgentError {
+    AgentError::BundleManifest(BundleManifestFailure {
+        rule: Some(BundleRuleCode::RequiredField),
+        message: "a required field is missing".into(),
+    })
 }
 
 impl Stepped {
@@ -60,6 +72,9 @@ impl Stepped {
 
 impl WorkerControl for Stepped {
     fn prepare(&self, tx: &str, candidate: &CandidateRef, timeout: Duration) -> AgentResult<()> {
+        if self.refuse_prepare.load(Ordering::SeqCst) {
+            return Err(refused_by_rule());
+        }
         self.step(Step::BeforePrepare);
         self.f.registry.prepare(tx, candidate, timeout)
     }
@@ -169,6 +184,7 @@ fn wired_at(root: Arc<TempDir>, step: Step, configure: impl FnOnce(&mut AgentCon
         on_failure: Mutex::default(),
         before_serving_member: Mutex::default(),
         next_warm: Mutex::default(),
+        refuse_prepare: AtomicBool::new(false),
     });
     let failed = worker.clone();
     let sink: Arc<EventSink> = Arc::new(move |event: &WorkerEvent| {
@@ -543,6 +559,67 @@ fn a_deploy_whose_commit_write_is_refused_fails_and_the_serving_member_stays() {
 }
 
 #[test]
+fn a_deploy_whose_candidate_lost_its_control_channel_after_its_warm_fails_before_the_commit() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let before = w.store.snapshot().unwrap();
+    let launcher = w.f.launcher.clone();
+    let lose = move || launcher.handle(2).set_contact(ControlContact::Failed);
+    *w.worker.before_fence.lock().unwrap() = Some(Box::new(lose));
+
+    let refused = w.deploy("tts", TTS).unwrap_err();
+
+    assert!(
+        matches!(refused, AgentError::WorkerControl(_)),
+        "{refused:?}"
+    );
+    let serving = (MemberRef::new("stt", 1), MemberRole::Serving);
+    assert_eq!(roles(&w.f), [serving]);
+    assert!(w.f.launcher.handle(1).calls().is_empty());
+    assert_eq!(w.f.launcher.handle(2).calls(), ["kill"]);
+    let found = w.store.snapshot().unwrap();
+    assert_eq!(found.active, before.active);
+    assert!(found.in_flight_transaction.is_none());
+    let entry = found.quarantined.last().expect("a quarantine entry");
+    assert_eq!(entry.phase, DeployState::Warmed);
+}
+
+#[test]
+fn a_deploy_whose_candidate_cannot_be_inspected_kills_it_and_the_serving_member_stays() {
+    for at_the_fence in [false, true] {
+        let w = wired();
+        w.deploy("stt", STT).unwrap();
+        let before = w.store.snapshot().unwrap();
+        let launcher = w.f.launcher.clone();
+        let probe = w.f.probe.clone();
+        let blind = move || {
+            launcher
+                .handle(2)
+                .uninspectable
+                .store(true, Ordering::SeqCst);
+            probe.silent.store(!at_the_fence, Ordering::SeqCst);
+        };
+        if at_the_fence {
+            *w.worker.before_fence.lock().unwrap() = Some(Box::new(blind));
+        } else {
+            *w.f.probe.during.lock().unwrap() = Some(Box::new(blind));
+        }
+
+        let refused = w.deploy("tts", TTS).unwrap_err();
+
+        let says = matches!(&refused, AgentError::WorkerControl(s) if s == "wait failed");
+        assert!(says, "{at_the_fence}: {refused:?}");
+        let serving = (MemberRef::new("stt", 1), MemberRole::Serving);
+        assert_eq!(roles(&w.f), [serving], "{at_the_fence}");
+        assert!(w.f.launcher.handle(1).calls().is_empty(), "{at_the_fence}");
+        assert_eq!(w.f.launcher.handle(2).calls(), ["kill"], "{at_the_fence}");
+        let found = w.store.snapshot().unwrap();
+        assert_eq!(found.active, before.active, "{at_the_fence}");
+        assert!(found.in_flight_transaction.is_none(), "{at_the_fence}");
+    }
+}
+
+#[test]
 fn a_rollback_whose_commit_write_is_refused_fails_and_the_serving_member_stays() {
     let w = wired();
     w.deploy("stt", STT).unwrap();
@@ -608,16 +685,39 @@ fn started_failing(w: &Wired, fail: &str) -> Wired {
         }
     });
     let launcher = next.f.launcher.clone();
-    let exit_last = move || {
-        let last = launcher.launched.lock().unwrap().last().cloned();
-        last.unwrap().exited.store(true, Ordering::SeqCst);
+    let last = move || launcher.launched.lock().unwrap().last().cloned().unwrap();
+    let exit_last = {
+        let last = last.clone();
+        move || last().exited.store(true, Ordering::SeqCst)
     };
+    let probe = next.f.probe.clone();
     match fail {
         "spawn" => next.f.launcher.refuse.store(true, Ordering::SeqCst),
+        "rule" => next.worker.refuse_prepare.store(true, Ordering::SeqCst),
         "ready" => next.f.probe.silent.store(true, Ordering::SeqCst),
-        "loading" => *next.f.probe.during.lock().unwrap() = Some(Box::new(exit_last)),
+        // Gone while loading: the probe that finds it gone gets no answer.
+        "loading" => {
+            let exit_unanswered = move || {
+                exit_last();
+                probe.silent.store(true, Ordering::SeqCst);
+            };
+            *next.f.probe.during.lock().unwrap() = Some(Box::new(exit_unanswered));
+        }
         // Ready, then gone before it would serve.
         "fence" => *next.worker.before_fence.lock().unwrap() = Some(Box::new(exit_last)),
+        // Its process can no longer be inspected while it loads.
+        "uninspectable" => {
+            let blind = move || {
+                last().uninspectable.store(true, Ordering::SeqCst);
+                probe.silent.store(true, Ordering::SeqCst);
+            };
+            *next.f.probe.during.lock().unwrap() = Some(Box::new(blind));
+        }
+        // Ready, then its process cannot be inspected at the fence.
+        "uninspectable at the fence" => {
+            let blind = move || last().uninspectable.store(true, Ordering::SeqCst);
+            *next.worker.before_fence.lock().unwrap() = Some(Box::new(blind));
+        }
         _ => unreachable!(),
     }
     next
@@ -625,6 +725,7 @@ fn started_failing(w: &Wired, fail: &str) -> Wired {
 
 fn heal(next: &Wired) {
     next.f.launcher.refuse.store(false, Ordering::SeqCst);
+    next.worker.refuse_prepare.store(false, Ordering::SeqCst);
     next.f.probe.silent.store(false, Ordering::SeqCst);
     next.f.probe.during.lock().unwrap().take();
 }
@@ -636,7 +737,14 @@ fn serving(id: &str, generation: u64) -> [MemberEvent; 1] {
 
 #[test]
 fn a_start_whose_restored_worker_does_not_come_up_stays_up_and_restarts_it() {
-    for fail in ["spawn", "ready", "loading", "fence"] {
+    for fail in [
+        "spawn",
+        "ready",
+        "loading",
+        "fence",
+        "uninspectable",
+        "uninspectable at the fence",
+    ] {
         let w = wired();
         w.deploy("stt", STT).unwrap();
         let next = started_failing(&w, fail);
@@ -645,7 +753,11 @@ fn a_start_whose_restored_worker_does_not_come_up_stays_up_and_restarts_it() {
 
         let status = next.coordinator.status().unwrap();
         assert_eq!(status.agent_state, AgentRunState::Degraded, "{fail}");
-        assert!(status.last_error.is_some(), "{fail}");
+        let error = status.last_error.expect(fail);
+        if matches!(fail, "loading" | "fence") {
+            // Ended by the worker's exit, not by the warm's deadline.
+            assert_eq!(error.code, ErrorCode::LoadFailed, "{fail}");
+        }
         // The restore's own generation is not left running.
         assert!(roles(&next.f).is_empty(), "{fail}");
         heal(&next);
@@ -700,6 +812,29 @@ fn the_loop_never_clears_an_error_that_is_not_the_restores() {
     assert_eq!(w.store.snapshot().unwrap().last_error, recorded);
 }
 
+#[test]
+fn a_cleared_restore_error_recorded_again_is_not_cleared_by_a_later_restart() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let next = restarting_after_a_failed_restore(&w);
+    let restored = next.store.snapshot().unwrap().last_error.unwrap();
+    assert_eq!(next.coordinator.supervise(), serving("stt", 3));
+    assert_eq!(next.store.snapshot().unwrap().last_error, None);
+    let again = |s: &mut AgentState| {
+        s.last_error = Some(restored.clone());
+        Ok(())
+    };
+    next.store.update(again).unwrap();
+
+    next.stop(3);
+    // The restore's restart was the first inside the window.
+    next.f.clock.advance(RESTART_DELAYS[1]);
+    assert_eq!(next.coordinator.supervise(), restarted(4));
+    assert_eq!(next.coordinator.supervise(), serving("stt", 4));
+
+    assert_eq!(next.store.snapshot().unwrap().last_error, Some(restored));
+}
+
 /// The next start of `w`'s agent: its restore failed, and the restart
 /// of the restored deployment has been launched.
 fn restarting_after_a_failed_restore(w: &Wired) -> Wired {
@@ -729,8 +864,9 @@ fn the_loop_keeps_an_error_written_after_it_read_the_restores() {
 
 #[test]
 fn a_restores_error_is_kept_while_the_member_serving_is_not_the_active_records() {
-    // An update of the id, and another id with the same bundle.
-    for (id, bundle) in [("stt", TTS), ("tts", STT)] {
+    // An update of the id, another id with the same bundle, and a redeploy
+    // of both.
+    for (id, bundle) in [("stt", TTS), ("tts", STT), ("stt", STT)] {
         let w = wired();
         w.deploy("stt", STT).unwrap();
         let next = restarting_after_a_failed_restore(&w);
@@ -765,6 +901,137 @@ fn a_restores_error_is_kept_while_the_member_serving_is_not_the_active_records()
         assert_eq!(during, recorded, "{id}");
         assert_eq!(next.store.snapshot().unwrap().last_error, None, "{id}");
     }
+}
+
+#[test]
+fn a_restores_error_keeps_its_typed_reason_and_is_cleared_once_its_restart_serves() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let next = started_failing(&w, "rule");
+    apply_startup(&next.coordinator).unwrap();
+    let recorded = next.store.snapshot().unwrap().last_error;
+    assert_eq!(recorded, Some(refused_by_rule().to_record()));
+    let rule = BundleRuleCode::RequiredField.as_str();
+    assert_eq!(recorded.unwrap().context.as_deref(), Some(rule));
+
+    heal(&next);
+    next.f.clock.advance(Duration::from_secs(1));
+    assert_eq!(next.coordinator.supervise(), restarted(3));
+    assert_eq!(next.coordinator.supervise(), serving("stt", 3));
+
+    assert_eq!(next.store.snapshot().unwrap().last_error, None);
+}
+
+#[test]
+fn a_deploys_failure_equal_to_the_restores_is_not_cleared_once_the_restart_serves() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let next = started_failing(&w, "rule");
+    apply_startup(&next.coordinator).unwrap();
+    next.f.clock.advance(Duration::from_secs(1));
+    assert_eq!(next.coordinator.supervise(), restarted(3));
+
+    next.deploy("tts", TTS).unwrap_err();
+    let failed = next.store.snapshot().unwrap();
+    assert_eq!(failed.last_error, Some(refused_by_rule().to_record()));
+    assert_eq!(failed.quarantined.last().unwrap().deployment_id, "tts");
+    assert_eq!(next.coordinator.supervise(), serving("stt", 3));
+
+    let kept = next.store.snapshot().unwrap().last_error;
+    assert_eq!(kept, Some(refused_by_rule().to_record()));
+}
+
+#[test]
+fn a_rollbacks_failure_equal_to_the_restores_is_not_cleared_once_the_restart_serves() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    w.deploy("tts", TTS).unwrap();
+    let next = started_failing(&w, "rule");
+    // The restore's restart of `tts` takes the first port.
+    next.f.health(ACTIVE_PORT, "tts");
+    apply_startup(&next.coordinator).unwrap();
+    let recorded = next.store.snapshot().unwrap().last_error;
+    assert_eq!(recorded, Some(refused_by_rule().to_record()));
+    next.f.clock.advance(Duration::from_secs(1));
+    assert_eq!(next.coordinator.supervise(), restarted_as("tts", 4));
+
+    next.coordinator.rollback(None).unwrap_err();
+    let failed = next.store.snapshot().unwrap();
+    assert_eq!(failed.last_error, recorded);
+    assert_eq!(failed.active.unwrap().deployment_id, "tts");
+    assert_eq!(next.coordinator.supervise(), serving("tts", 4));
+
+    assert_eq!(next.store.snapshot().unwrap().last_error, recorded);
+}
+
+#[test]
+fn a_deploy_whose_transaction_never_began_leaves_the_restores_error_to_the_loop() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let next = restarting_after_a_failed_restore(&w);
+    next.store.kill_after_writes(0);
+
+    next.deploy("tts", TTS).unwrap_err();
+    next.store.kill_after_writes(usize::MAX);
+
+    assert!(next
+        .store
+        .snapshot()
+        .unwrap()
+        .in_flight_transaction
+        .is_none());
+    assert_eq!(next.coordinator.supervise(), serving("stt", 3));
+    assert_eq!(next.store.snapshot().unwrap().last_error, None);
+}
+
+#[test]
+fn a_deploys_failure_written_between_the_loops_read_and_its_write_is_kept() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let next = started_failing(&w, "rule");
+    apply_startup(&next.coordinator).unwrap();
+    next.f.clock.advance(Duration::from_secs(1));
+    assert_eq!(next.coordinator.supervise(), restarted(3));
+    let (at, is_at) = std::sync::mpsc::channel();
+    let (go, gone) = std::sync::mpsc::channel::<()>();
+    let wait = move || {
+        at.send(()).unwrap();
+        let _ = gone.recv();
+    };
+    *next.worker.before_serving_member.lock().unwrap() = Some(Box::new(wait));
+
+    std::thread::scope(|scope| {
+        // Dropped if this closure panics, which lets the turn end.
+        let go = go;
+        let turn = scope.spawn(|| next.coordinator.supervise());
+        is_at.recv_timeout(GRACE).unwrap();
+        // The loop has read the restore's error and not written yet.
+        next.deploy("tts", TTS).unwrap_err();
+        go.send(()).unwrap();
+        assert_eq!(turn.join().unwrap(), serving("stt", 3));
+    });
+
+    let kept = next.store.snapshot().unwrap().last_error;
+    assert_eq!(kept, Some(refused_by_rule().to_record()));
+}
+
+#[test]
+fn a_restores_error_whose_clearing_is_owed_is_kept_while_nothing_serves() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let next = restarting_after_a_failed_restore(&w);
+    let recorded = next.store.snapshot().unwrap().last_error;
+    next.store.kill_after_writes(0);
+    assert_eq!(next.coordinator.supervise(), serving("stt", 3));
+    next.store.kill_after_writes(usize::MAX);
+
+    // The restart stops before the turn that owes the clearing.
+    let restart = next.f.launcher.handle(3);
+    restart.exited.store(true, Ordering::SeqCst);
+    next.coordinator.supervise();
+
+    assert!(next.f.registry.serving_member().unwrap().is_none());
+    assert_eq!(next.store.snapshot().unwrap().last_error, recorded);
 }
 
 #[test]
