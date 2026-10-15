@@ -16,14 +16,16 @@
 
 mod common;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::vision_bundle;
+use rustix::net::{self, AddressFamily, SocketAddrAny, SocketType};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tensorplate_agent::config::{
@@ -59,7 +61,7 @@ struct HealthPort {
 
 impl HealthPort {
     fn listen() -> Self {
-        let listener = fresh_listener();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let serving = Arc::new(Mutex::new(String::new()));
         let answer = serving.clone();
@@ -103,33 +105,19 @@ fn read_request_head(stream: &mut TcpStream) {
     }
 }
 
-/// A listener on a port no case of this binary was given before. A port is
-/// released once a case has it, and the kernel may offer it again: a case's
-/// worker that does not listen would then reach another case's health stub.
-fn fresh_listener() -> TcpListener {
-    static GIVEN: Mutex<BTreeSet<u16>> = Mutex::new(BTreeSet::new());
-    let mut given = GIVEN.lock().expect("lock");
-    fresh_from(&mut given, || bind_port(0))
-}
-
-fn fresh_from(given: &mut BTreeSet<u16>, mut bind: impl FnMut() -> TcpListener) -> TcpListener {
-    // Held until a fresh one is found, so that none is offered twice.
-    let mut offered_again = Vec::new();
-    loop {
-        let listener = bind();
-        if given.insert(listener.local_addr().expect("addr").port()) {
-            return listener;
-        }
-        offered_again.push(listener);
-    }
-}
-
-fn bind_port(port: u16) -> TcpListener {
-    TcpListener::bind(("127.0.0.1", port)).expect("bind")
-}
-
+/// A port bound and not listening until the binary exits: a connection to it
+/// is refused, and neither another case nor another process can bind it. A
+/// port closed once it was picked could be given to another case's health
+/// stub, whose answer the case's worker that does not listen would then get.
 fn unused_port() -> u16 {
-    fresh_listener().local_addr().expect("addr").port()
+    static HELD: Mutex<Vec<OwnedFd>> = Mutex::new(Vec::new());
+    let socket = net::socket(AddressFamily::INET, SocketType::STREAM, None).expect("socket");
+    net::bind_v4(&socket, &SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("bind");
+    let SocketAddrAny::V4(bound) = net::getsockname(&socket).expect("addr") else {
+        panic!("an IPv4 socket bound to an IPv6 address");
+    };
+    HELD.lock().expect("lock").push(socket);
+    bound.port()
 }
 
 struct ProcessHarness {
@@ -288,17 +276,13 @@ fn read_response(stream: &mut TcpStream) -> String {
 }
 
 #[test]
-fn a_port_offered_again_is_not_given_twice() {
-    let mut given = BTreeSet::new();
-    let first = fresh_from(&mut given, || bind_port(0));
-    let port = first.local_addr().expect("addr").port();
+fn an_unused_port_refuses_a_connection_and_cannot_be_bound_again() {
+    let port = unused_port();
 
-    // Its listener stands for the port offered again: binding the port anew
-    // could find it taken by another process.
-    let mut offers = [first, bind_port(0)].into_iter();
-    let next = fresh_from(&mut given, || offers.next().expect("an offer"));
-
-    assert_ne!(next.local_addr().expect("addr").port(), port);
+    let connected = TcpStream::connect(("127.0.0.1", port));
+    assert!(connected.is_err(), "{connected:?}");
+    let bound = TcpListener::bind(("127.0.0.1", port));
+    assert!(bound.is_err(), "{bound:?}");
 }
 
 #[test]
