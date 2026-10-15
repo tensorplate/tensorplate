@@ -387,6 +387,12 @@ impl Reach {
         };
         let transaction_id = fence.transaction_id.clone();
         let Err(failed) = self.send_activate(&transaction_id) else {
+            if fence.reopen_at.is_some() {
+                eprintln!(
+                    "{}: activate after failed transaction `{transaction_id}` answered ok",
+                    self.name
+                );
+            }
             *fenced_by = None;
             return;
         };
