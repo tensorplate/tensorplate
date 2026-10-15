@@ -286,8 +286,11 @@ impl WorkerControl for Abandons {
     ) -> AgentResult<WorkerReadiness> {
         self.inner.warm(tx, candidate, timeout)
     }
-    fn promote(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
-        self.inner.promote(tx, candidate)
+    fn fence(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        self.inner.fence(tx, candidate)
+    }
+    fn activate(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        self.inner.activate(tx, candidate)
     }
     fn abandon(&self, candidate: &CandidateRef) {
         let mut abandoned = self.abandoned.lock().expect("abandoned");

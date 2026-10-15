@@ -35,8 +35,8 @@ struct Stepped {
     step: Step,
     /// What each of those steps did.
     steps: Mutex<Vec<Vec<MemberEvent>>>,
-    /// Runs once, as the candidate is about to replace the serving member.
-    before_promote: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once, before the candidate is fenced.
+    before_fence: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Stepped {
@@ -61,11 +61,17 @@ impl WorkerControl for Stepped {
     ) -> AgentResult<WorkerReadiness> {
         self.f.registry.warm(tx, candidate, timeout)
     }
-    fn promote(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
-        if let Some(hook) = self.before_promote.lock().unwrap().take() {
+    fn fence(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        if let Some(hook) = self.before_fence.lock().unwrap().take() {
             hook();
         }
-        self.f.registry.promote(tx, candidate)
+        self.f.registry.fence(tx, candidate)
+    }
+    fn activate(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        self.f.registry.activate(tx, candidate)
+    }
+    fn owe_restore(&self, candidate: &CandidateRef, error: ErrorRecord) -> bool {
+        self.f.registry.owe_restore(candidate, error)
     }
     fn abandon(&self, candidate: &CandidateRef) {
         self.f.registry.abandon(candidate);
@@ -138,7 +144,7 @@ fn wired_at(root: Arc<TempDir>, step: Step, configure: impl FnOnce(&mut AgentCon
         f: f.clone(),
         step,
         steps,
-        before_promote: Mutex::default(),
+        before_fence: Mutex::default(),
     });
     let coordinator = Coordinator::new(config, store.clone(), worker.clone());
     Wired {
@@ -458,12 +464,11 @@ fn a_format_0_1_transaction_killed_after_the_registry_took_its_generation_is_end
     }
 }
 
-/// From the moment the candidate is about to replace the serving member,
-/// every state write fails.
+/// From the fence of the candidate on, every state write fails.
 fn refuse_the_commit_write(w: &Wired) {
     let store = w.store.clone();
     let refuse = move || store.kill_after_writes(0);
-    *w.worker.before_promote.lock().unwrap() = Some(Box::new(refuse));
+    *w.worker.before_fence.lock().unwrap() = Some(Box::new(refuse));
 }
 
 fn roles(f: &Fixture) -> Vec<(MemberRef, MemberRole)> {

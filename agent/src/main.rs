@@ -935,7 +935,7 @@ fn run_until_stopped(
 ) {
     let worker = server.coordinator().worker_client().clone();
     while !stop.load(Ordering::Relaxed) {
-        for event in worker.supervise() {
+        for event in server.coordinator().supervise() {
             log_member_event(&event);
         }
         if let Some(supervisor) = supervisor {
@@ -2164,12 +2164,19 @@ mod tests {
         ) -> tensorplate_agent::AgentResult<tensorplate_agent::worker::WorkerReadiness> {
             self.inner.warm(tx, candidate, timeout)
         }
-        fn promote(
+        fn fence(
             &self,
             tx: &str,
             candidate: &tensorplate_protocol::worker_control::CandidateRef,
         ) -> tensorplate_agent::AgentResult<()> {
-            self.inner.promote(tx, candidate)
+            self.inner.fence(tx, candidate)
+        }
+        fn activate(
+            &self,
+            tx: &str,
+            candidate: &tensorplate_protocol::worker_control::CandidateRef,
+        ) -> tensorplate_agent::AgentResult<()> {
+            self.inner.activate(tx, candidate)
         }
         fn hold(&self) {
             self.inner.hold();

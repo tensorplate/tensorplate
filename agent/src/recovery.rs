@@ -32,6 +32,11 @@ use crate::error::{AgentError, AgentResult};
 use crate::state::StateStore;
 use crate::worker::WorkerControl;
 
+/// The context of a `last_error` that is the failure of a start's restore
+/// whose member the worker control restarts: it is cleared once that member
+/// serves.
+pub(crate) const RESTORE_FAILURE: &str = "startup_restore";
+
 /// What a start does about the transaction it finds in flight.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Settle {
@@ -276,8 +281,10 @@ pub fn apply_startup(coordinator: &Coordinator) -> AgentResult<RecoverySummary> 
 /// `last_error` and no error returned, so the operator can deploy or roll
 /// back: an id that cannot name a member, another bundle staged at the
 /// record's path, a staged copy that does not read, a descriptor document
-/// that is not the record's, a re-stamp that is refused. A failed state
-/// write and a worker that does not come up are returned.
+/// that is not the record's, a re-stamp that is refused. A worker that does
+/// not come up is handed to the worker control's restarts, its failure as
+/// `last_error`; it is returned when the control restarts nothing. A failed
+/// state write is returned.
 fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
     let store = coordinator.state();
     let active = store
@@ -332,27 +339,26 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
     let warm_timeout =
         std::time::Duration::from_millis(coordinator.config().worker.warm_timeout_ms);
     let (candidate, prepared) = in_hand.prepare(&tx, prepare_timeout);
-    if let Err(err) = prepared {
-        store.set_last_error(Some(err.to_record()))?;
+    let came_up = prepared
+        .and_then(|()| match worker.warm(&tx, &candidate, warm_timeout) {
+            Ok(readiness) if readiness.ready => Ok(()),
+            Ok(_) => Err(AgentError::WorkerNotReady),
+            Err(err) => Err(err),
+        })
+        .and_then(|()| worker.promote(&tx, &candidate));
+    let Err(err) = came_up else {
+        return store.set_last_error(None);
+    };
+    let failure = err.to_record().with_context(RESTORE_FAILURE);
+    store.set_last_error(Some(failure.clone()))?;
+    if !worker.owe_restore(&candidate, failure) {
         return Err(err);
     }
-    match worker.warm(&tx, &candidate, warm_timeout) {
-        Ok(readiness) if readiness.ready => {}
-        Ok(_) => {
-            let err = AgentError::WorkerNotReady;
-            store.set_last_error(Some(err.to_record()))?;
-            return Err(err);
-        }
-        Err(err) => {
-            store.set_last_error(Some(err.to_record()))?;
-            return Err(err);
-        }
-    }
-    if let Err(err) = worker.promote(&tx, &candidate) {
-        store.set_last_error(Some(err.to_record()))?;
-        return Err(err);
-    }
-    store.set_last_error(None)
+    eprintln!(
+        "startup recovery: `{}` did not come up and is started again: {err}",
+        active.deployment_id
+    );
+    Ok(())
 }
 
 #[cfg(test)]

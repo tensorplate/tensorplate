@@ -39,8 +39,11 @@ impl WorkerControl for FailedMember {
         self.inner.warm(tx, candidate, timeout)
     }
 
-    fn promote(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
-        self.inner.promote(tx, candidate)
+    fn fence(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        self.inner.fence(tx, candidate)
+    }
+    fn activate(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        self.inner.activate(tx, candidate)
     }
 
     fn hold(&self) {

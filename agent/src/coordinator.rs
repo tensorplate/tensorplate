@@ -24,6 +24,7 @@
 // through prepare / warm / promote.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -34,7 +35,7 @@ use tensorplate_protocol::agent_control::{
     QuarantineSummary, Readiness, ResidentSetStatus, ResponseError, SupervisionStatusSummary,
 };
 use tensorplate_protocol::agent_state::{
-    AgentState, DeploymentRecord, TransactionKind, TransactionRecord,
+    AgentState, DeploymentRecord, ErrorRecord, TransactionKind, TransactionRecord,
 };
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::supervision_event::SupervisionAgentState;
@@ -50,6 +51,7 @@ use crate::bundle::{
 use crate::config::AgentConfig;
 use crate::error::{AgentError, AgentResult};
 use crate::platform_admission::PlatformAdmission;
+use crate::recovery::RESTORE_FAILURE;
 use crate::state::StateStore;
 use crate::supervision::supervisor::{DesiredWorker, WorkerSupervisor};
 use crate::transaction::is_permitted;
@@ -76,6 +78,11 @@ pub struct Coordinator {
     backend_probes: BTreeMap<String, BackendProbeReport>,
     platform_registry: Option<PlatformRegistry>,
     platform_admission: Option<PlatformAdmission>,
+    /// A member reported serving since `last_error` was last checked for a
+    /// restore's failure; see [`Self::supervise`].
+    restore_check_owed: AtomicBool,
+    /// A failed clearing write was logged; it is not logged on every turn.
+    clear_failure_logged: AtomicBool,
 }
 
 /// Result of a successful deploy/rollback.
@@ -104,6 +111,8 @@ impl Coordinator {
             backend_probes: BTreeMap::new(),
             platform_registry: None,
             platform_admission: None,
+            restore_check_owed: AtomicBool::new(false),
+            clear_failure_logged: AtomicBool::new(false),
         }
     }
 
@@ -198,9 +207,56 @@ impl Coordinator {
         &self.worker
     }
 
-    /// One turn of the agent's loop over the serving members.
+    /// One turn of the agent's loop over the serving members. Once a member
+    /// serves the active record, a `last_error` that is the failure of the
+    /// start's restore is cleared; a clearing write that fails is tried
+    /// again on a later turn, at most once a turn.
     pub fn supervise(&self) -> Vec<MemberEvent> {
-        self.worker.supervise()
+        let events = self.worker.supervise();
+        if events
+            .iter()
+            .any(|event| matches!(event, MemberEvent::Serving { .. }))
+        {
+            self.restore_check_owed.store(true, Ordering::SeqCst);
+        }
+        if self.restore_check_owed.load(Ordering::SeqCst) {
+            match self.clear_restore_failure() {
+                Ok(()) => {
+                    self.restore_check_owed.store(false, Ordering::SeqCst);
+                    self.clear_failure_logged.store(false, Ordering::SeqCst);
+                }
+                Err(err) => {
+                    if !self.clear_failure_logged.swap(true, Ordering::SeqCst) {
+                        eprintln!(
+                            "the restored deployment serves; its error is not cleared yet: {err}"
+                        );
+                    }
+                }
+            }
+        }
+        events
+    }
+
+    /// Clear `last_error` when it is the restore's failure and the active
+    /// record is served now.
+    fn clear_restore_failure(&self) -> AgentResult<()> {
+        let is_restores = |error: &Option<ErrorRecord>| {
+            error.as_ref().and_then(|e| e.context.as_deref()) == Some(RESTORE_FAILURE)
+        };
+        let state = self.store.snapshot()?;
+        let served = match (self.worker.serving_member()?, state.active.as_ref()) {
+            (Some(serving), Some(active)) => serves(&serving, active),
+            _ => false,
+        };
+        if !served || !is_restores(&state.last_error) {
+            return Ok(());
+        }
+        self.store.update(|s| {
+            if is_restores(&s.last_error) {
+                s.last_error = None;
+            }
+            Ok(())
+        })
     }
 
     /// Drive a deploy transaction end-to-end.
@@ -420,7 +476,7 @@ impl Coordinator {
         });
 
         // Phase: promoted -> active.
-        if let Err(err) = self.worker.promote(&transaction_id, &candidate_ref) {
+        if let Err(err) = self.worker.fence(&transaction_id, &candidate_ref) {
             self.emit(&WorkerEvent::Failure {
                 transaction_id: transaction_id.clone(),
                 deployment_id: deployment_id.to_string(),
@@ -428,10 +484,16 @@ impl Coordinator {
             });
             return self.fail(&transaction_id, deployment_id, err);
         }
-        prepared.promoted = true;
         // The commit: the records move and the phase becomes `promoted` in
         // one write. No later phase is written to a transaction in flight.
-        self.store.promote_candidate(now_monotonic_ns())?;
+        // Refused, it gives the candidate up and the serving member stays.
+        if let Err(err) = self.store.promote_candidate(now_monotonic_ns()) {
+            return self.fail(&transaction_id, deployment_id, err);
+        }
+        prepared.promoted = true;
+        // Refused only once the agent stops: the next start settles the
+        // committed transaction forward.
+        self.worker.activate(&transaction_id, &candidate_ref)?;
         self.emit(&WorkerEvent::Promote {
             transaction_id: transaction_id.clone(),
             deployment_id: deployment_id.to_string(),
@@ -443,8 +505,8 @@ impl Coordinator {
             let s = self.store.snapshot()?;
             s.previous_active.as_ref().map(|d| d.deployment_id.clone())
         };
-        // A deployment replaced under its own id was retired at promotion;
-        // unloading that id now would stop the worker just promoted.
+        // A deployment replaced under its own id was retired at activation;
+        // unloading that id now would stop the worker just activated.
         if let Some(prev) = previous_active
             .as_deref()
             .filter(|prev| *prev != deployment_id)
@@ -600,12 +662,15 @@ impl Coordinator {
             deployment_id: prev.deployment_id.clone(),
         });
 
-        if let Err(err) = self.worker.promote(&transaction_id, &candidate_ref) {
+        if let Err(err) = self.worker.fence(&transaction_id, &candidate_ref) {
+            return self.fail_rollback(&transaction_id, &prev.deployment_id, err);
+        }
+        // The commit, as a deploy's: the swap and `promoted` in one write.
+        if let Err(err) = self.store.swap_active_with_previous(now_monotonic_ns()) {
             return self.fail_rollback(&transaction_id, &prev.deployment_id, err);
         }
         prepared.promoted = true;
-        // The commit, as a deploy's: the swap and `promoted` in one write.
-        self.store.swap_active_with_previous(now_monotonic_ns())?;
+        self.worker.activate(&transaction_id, &candidate_ref)?;
         self.emit(&WorkerEvent::Promote {
             transaction_id: transaction_id.clone(),
             deployment_id: prev.deployment_id.clone(),
