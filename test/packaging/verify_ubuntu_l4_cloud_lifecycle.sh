@@ -1474,7 +1474,7 @@ if [ -n "${TP_FAKE_SUDO_FAIL:-}" ]; then
   if [ -e "${TP_OFFLINE_UNIT_ROOT}/run/systemd/system/tensorplate-agent.service.d/10-tensorplate-validation-offline.conf" ]; then
     case "$*" in
       *"/install.sh --local-artifacts "*|*"systemctl stop "*|*"apt-get remove"*) spared=1 ;;
-      "sha256sum /var/lib/tensorplate/"*|"mv -T "*|"cp -p /var/lib/tensorplate/state.bak/"*) spared=1 ;;
+      "sha256sum /var/lib/tensorplate/"*|"find /var/lib/tensorplate/"*|"mv -T "*|"cp -p /var/lib/tensorplate/state.bak/"*) spared=1 ;;
     esac
   fi
   if [ "$spared" -eq 0 ]; then
@@ -2428,11 +2428,14 @@ JSON
     # state.json alone would never see it destroyed.
     printf '{"active":"%s"}\n' "$deployment" >"${state_file}.bak" || exit 9
     # Staged in a tree of its own, numbered by the deploys before it, which
-    # the state names and the rollback sets aside with it.
-    tree="${TP_FAKE_VARLIB}/bundles/staging/${deployment}/tx-$(wc -l <"${TP_FAKE_DEPLOY_VERSIONS}" | tr -d ' ')"
-    mkdir -p "$tree" || exit 9
-    printf '{"deployment_id":"%s"}\n' "$deployment" >"${tree}/manifest.json" || exit 9
-    printf 'fixture weights\n' >"${tree}/model.bin" || exit 9
+    # the state names and the rollback sets aside with it. Two modes stage
+    # nothing, so a rollback finds an empty staging directory.
+    if [ "$mode" != rollback-nothing-staged ] && [ "${TP_FAKE_MODE:-ok}" != offline-rollback-nothing-staged ]; then
+      tree="${TP_FAKE_VARLIB}/bundles/staging/${deployment}/tx-$(wc -l <"${TP_FAKE_DEPLOY_VERSIONS}" | tr -d ' ')"
+      mkdir -p "$tree" || exit 9
+      printf '{"deployment_id":"%s"}\n' "$deployment" >"${tree}/manifest.json" || exit 9
+      printf 'fixture weights\n' >"${tree}/model.bin" || exit 9
+    fi
     "${TP_FAKE_DPKG_DB}" agent-version >>"${TP_FAKE_DEPLOY_VERSIONS}"
     printf '{"command":"deploy","payload":{"phase":"active","deployment_id":"%s"}}\n' \
       "$deployment"
@@ -4179,6 +4182,7 @@ for case in \
   "rollback-loses-staged-file::step failed (exit 1): the set-aside staged bundles are preserved" \
   "rollback-resizes-staged-file::step failed (exit 1): the set-aside staged bundles are preserved" \
   "rollback-adds-staged-file::step failed (exit 1): the set-aside staged bundles are preserved" \
+  "rollback-nothing-staged::step failed (exit 1): list the staged bundles before setting them aside" \
   "rollback-remove-leaves-backend::tensorplate-backend-python-pytorch is still installed" \
   "rollback-remove-purges::tensorplate-agent is absent, not config-files" \
   "rollback-leaves-candidate-package::tensorplate-cli is installed 0.2.1~rc.2-1, expected installed 0.2.1~rc.1-1" \
@@ -4210,6 +4214,7 @@ for case in \
   "ok:sha256sum /var/lib/tensorplate/state/state.json:step failed (exit 9): digest the durable state before setting it aside" \
   "ok:mv -T:step failed (exit 9): set durable state aside" \
   "ok:mv -T /var/lib/tensorplate/bundles/staging:step failed (exit 9): set the staged bundles aside" \
+  "ok:find /var/lib/tensorplate/bundles/staging :step failed (exit 9): list the staged bundles before setting them aside" \
   "ok:apt-get remove:step failed (exit 9): remove tensorplate-"; do
   mode="${case%%:*}"
   rest="${case#*:}"
@@ -4251,6 +4256,16 @@ for case in \
       check "  and the failure says it holds staged files that were not set aside" yes \
         "$(stage_log_says "${evidence}/rollback.log" \
            'the rollback did not preserve /var/lib/tensorplate/staging.bak: it holds staged files the stopped services did not leave')"
+      ;;
+    # Refused where the listing is taken, as an empty state directory is:
+    # two empty listings would compare equal all the way to a pass.
+    rollback-nothing-staged)
+      check "  and says the staging directory holds nothing to preserve" yes \
+        "$(stage_log_says "${evidence}/rollback.log" \
+           '/var/lib/tensorplate/bundles/staging holds no staged files; there are no staged bundles here to preserve')"
+      check "  with nothing set aside or removed" "no no" \
+        "$(after="$(last_sudo_line 'assets-rc2/install.sh')"
+           printf '%s %s' "$(sudo_after "$after" 'mv -T')" "$(sudo_after "$after" 'apt-get remove')")"
       ;;
     rollback-remove-leaves-backend)
       check "  and the baseline was never installed over the leftover" no \
@@ -4417,6 +4432,13 @@ for case in \
       check "  and names the file it could not digest" yes \
         "$(stage_log_says "${evidence}/rollback.log" \
            'could not compute a sha256 of /var/lib/tensorplate/state/machine-type.json')"
+      check "  with nothing set aside or removed" "no no" \
+        "$(after="$(last_sudo_line 'assets-rc2/install.sh')"
+           printf '%s %s' "$(sudo_after "$after" 'mv -T')" "$(sudo_after "$after" 'apt-get remove')")"
+      ;;
+  esac
+  case "$sudo_fail" in
+    "find /var/lib/tensorplate/bundles/staging ")
       check "  with nothing set aside or removed" "no no" \
         "$(after="$(last_sudo_line 'assets-rc2/install.sh')"
            printf '%s %s' "$(sudo_after "$after" 'mv -T')" "$(sudo_after "$after" 'apt-get remove')")"
@@ -4619,6 +4641,7 @@ for case in \
   "offline-rollback-state-not-preserved:the set-aside state is preserved, file by file:offline-restart:offline-rollback" \
   "offline-rollback-staging-aside-exists:refuse to replace an existing /var/lib/tensorplate/staging.bak:offline-restart:offline-rollback" \
   "offline-rollback-loses-staged-file:the set-aside staged bundles are preserved:offline-restart:offline-rollback" \
+  "offline-rollback-nothing-staged:list the staged bundles before setting them aside:offline-restart:offline-rollback" \
   "offline-rollback-identity-live-metadata:the machine type came from the record, not from metadata:offline-restart:offline-rollback" \
   "offline-rollback-infer-garbled:inference checks:offline-restart:offline-rollback" \
   "offline-upgrade-rewrites-record:the machine-type record is byte-identical across the denied upgrade:offline-rollback:offline-upgrade" \
@@ -4644,6 +4667,10 @@ for case in \
       check "  and nothing was stopped or set aside after the refusal" "no no" \
         "$(refused="$(last_sudo_line 'test ! -e /var/lib/tensorplate/staging.bak')"
            printf '%s %s' "$(sudo_after "$refused" 'systemctl stop')" "$(sudo_after "$refused" 'mv -T')")" ;;
+    offline-rollback-nothing-staged)
+      check "  and nothing was set aside or removed after the listing" "no no" \
+        "$(listed="$(last_sudo_line 'find /var/lib/tensorplate/bundles/staging ')"
+           printf '%s %s' "$(sudo_after "$listed" 'mv -T')" "$(sudo_after "$listed" 'apt-get remove')")" ;;
     offline-rollback-remove-*)
       check "  and the baseline's installer is never run" 0 \
         "$(grep -c '/set-rc1/install.sh ' "${appliance}/sudo.log" || true)"

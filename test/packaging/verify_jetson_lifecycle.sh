@@ -2097,11 +2097,14 @@ JSON
     printf '{"fixture":"durable state","recovery":true}\n' \
       >"${TP_FAKE_VARLIB}/state/state.json.bak"
     # Staged in a tree of its own, numbered by the deploys so far, which the
-    # state names and the rollback sets aside with it.
-    tree="${TP_FAKE_VARLIB}/bundles/staging/${deployment_id}/tx-$(wc -l <"${TP_FAKE_DEPLOY_LOG}" | tr -d ' ')"
-    mkdir -p "$tree"
-    printf '{"deployment_id":"%s"}\n' "$deployment_id" >"${tree}/manifest.json"
-    printf 'fixture weights\n' >"${tree}/model.bin"
+    # state names and the rollback sets aside with it. One mode stages
+    # nothing, so the rollback finds an empty staging directory.
+    if [ "$mode" != rollback-nothing-staged ]; then
+      tree="${TP_FAKE_VARLIB}/bundles/staging/${deployment_id}/tx-$(wc -l <"${TP_FAKE_DEPLOY_LOG}" | tr -d ' ')"
+      mkdir -p "$tree"
+      printf '{"deployment_id":"%s"}\n' "$deployment_id" >"${tree}/manifest.json"
+      printf 'fixture weights\n' >"${tree}/model.bin"
+    fi
     deploy_phase=active
     deployed="$deployment_id"
     [ "$mode" = deploy-not-active ] && deploy_phase=rolled_back
@@ -4951,6 +4954,7 @@ for mode_case in "rollback-other-active|1|no|the rollback must start from jetson
                  "rollback-empties-state-dir|1|no|step failed (exit 1): the set-aside state is preserved, file by file" \
                  "rollback-state-file-missing|1|yes|step failed (exit 1): digest the durable state before setting it aside" \
                  "rollback-digest-not-hex|1|yes|step failed (exit 1): digest the durable state before setting it aside" \
+                 "rollback-nothing-staged|1|yes|step failed (exit 1): list the staged bundles before setting them aside" \
                  "rollback-destroys-backup-then-fails|1|yes|step failed (exit 1): install.sh" \
                  "rollback-keeps-state|1|no|it loaded state that was set aside" \
                  "rollback-agent-unavailable|1|no|the agent is not available after the rollback" \
@@ -5147,6 +5151,16 @@ for mode_case in "rollback-other-active|1|no|the rollback must start from jetson
         "$(third="$(install_line 3)"
            echo "$(sudo_after "$third" 'mv -T')" "$(sudo_after "$third" 'apt-get remove')")"
       ;;
+    # Refused where the listing is taken, as an empty state directory is:
+    # two empty listings would compare equal all the way to a pass.
+    rollback-nothing-staged)
+      check "  and says the staging directory holds nothing to preserve" yes \
+        "$(logged "${evidence}/rollback.log" \
+           '/var/lib/tensorplate/bundles/staging holds no staged files; there are no staged bundles here to preserve')"
+      check "  with nothing set aside or removed" "no no" \
+        "$(third="$(install_line 3)"
+           echo "$(sudo_after "$third" 'mv -T')" "$(sudo_after "$third" 'apt-get remove')")"
+      ;;
     rollback-destroys-backup-then-fails)
       # The install destroyed the saved state and then failed the way
       # install.sh does, after installing every package. The stage never
@@ -5253,6 +5267,7 @@ $(err_says "$evidence" 'NO LONGER matches the digests taken before the move')"
 
 for injected_case in "systemctl stop tensorplate-agent tensorplate-observability=stop the services" \
                      "sha256sum /var/lib/tensorplate/state/state.json=digest the durable state before setting it aside" \
+                     "find /var/lib/tensorplate/bundles/staging =list the staged bundles before setting them aside" \
                      "mv -T=set durable state aside" \
                      "apt-get remove=remove tensorplate-"; do
   injected="${injected_case%%=*}"
