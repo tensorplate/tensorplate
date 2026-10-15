@@ -56,9 +56,10 @@ fn names_a_tree(name: &str) -> bool {
 
 /// Copy `verified`'s manifest and declared artifacts into a new tree for
 /// the deploy `transaction_id` of `deployment_id`, and return the tree once
-/// it and every directory above it that gained an entry are synced. A tree
-/// that is there is not written; a copy or a sync that fails removes its
-/// tree and every directory it made.
+/// it is synced, with each directory above it up to the one `staging_dir`
+/// is in and any further one that gained an entry. A tree that is there is
+/// not written; a copy or a sync that fails removes its tree and every
+/// directory it made.
 ///
 /// # Errors
 ///
@@ -92,9 +93,21 @@ pub(crate) fn stage(
             .ancestors()
             .take_while(|dir| Some(*dir) != there.as_deref())
     };
+    // Up to the directory staging_dir is in whether or not this stage made
+    // them: a stage that did not return may have left them unsynced.
+    let floor = staging_dir.parent().unwrap_or(staging_dir);
+    let last = there
+        .as_deref()
+        .filter(|there| floor.starts_with(there))
+        .unwrap_or(floor);
     let synced = || {
-        made().try_for_each(crate::durable::sync)?;
-        there.as_deref().map_or(Ok(()), crate::durable::sync)
+        for dir in id_dir.ancestors() {
+            crate::durable::sync(dir)?;
+            if dir == last {
+                break;
+            }
+        }
+        Ok(())
     };
     let staged = fs::create_dir_all(&id_dir).and_then(|()| fs::create_dir(&tree));
     let staged = staged.and_then(|()| {

@@ -29,11 +29,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - A power loss right after a deploy can no longer leave the agent's state
   naming a staged tree whose files never reached the disk. The agent now
-  syncs every file and directory of the tree it copies a bundle into, and
-  each directory above the tree that gained an entry, before the state
-  write that names the tree; a sync that fails fails the deploy as a copy
-  that fails does, removing the tree and each directory the deploy made
-  for it, with an error that names the tree.
+  syncs every file and directory of the tree it copies a bundle into, the
+  deployment id's directory, the staging directory and the directory it is
+  in, and any further directory the deploy created, before the state write
+  that names the tree; a sync that fails fails the deploy as a copy that
+  fails does, removing the tree and each directory the deploy made for it,
+  with an error that names the tree.
   `docs/bundles/integrity.md` no longer says that a recovery or a rollback
   starts a deployment without verifying it again: the restore at the
   agent's start and a rollback hash every staged artifact, and a member's

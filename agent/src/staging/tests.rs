@@ -190,6 +190,27 @@ fn each_directory_a_stage_makes_in_its_tree_is_synced_however_deep() {
 }
 
 #[test]
+fn a_stage_syncs_up_to_the_directory_staging_dir_is_in_when_the_id_directory_was_there() {
+    let d = dirs();
+    let id_dir = d.staging.join("stt");
+    fs::create_dir_all(&id_dir).unwrap();
+    drop(crate::durable::hooks::synced());
+
+    let tree = stage(
+        &d.staging,
+        "stt",
+        &new_transaction_id(),
+        &verified(&repo(FIXTURE)),
+    )
+    .unwrap();
+
+    let synced = crate::durable::hooks::synced();
+    let above: Vec<_> = synced.iter().filter(|dir| tree.starts_with(dir)).collect();
+    let top = d.staging.parent().unwrap().to_path_buf();
+    assert_eq!(above, [&tree, &id_dir, &d.staging, &top]);
+}
+
+#[test]
 fn a_stage_that_fails_leaves_no_directory_it_made_so_the_next_one_makes_and_syncs_them() {
     let bundle = verified(&repo(FIXTURE));
     let cases = [

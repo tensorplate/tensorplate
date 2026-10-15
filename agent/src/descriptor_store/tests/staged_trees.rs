@@ -336,7 +336,7 @@ fn a_deploy_syncs_its_tree_and_each_directory_it_adds_to_before_a_state_write_na
     let of_staging = |path: &Path| path.starts_with(&staging) || staging.starts_with(path);
     assert!(!staging.exists());
     let first: (_, &[_], _) = (TTS, &["warmup/segment.txt", "warmup"], 3);
-    let second: (_, &[_], _) = (STT, &[], 1);
+    let second: (_, &[_], _) = (STT, &[], 3);
 
     for (bundle, nested, above) in [first, second] {
         // The paths the records name at each sync of a staging path.
