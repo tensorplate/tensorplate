@@ -99,7 +99,7 @@ fn a_draining_members_ports_are_not_given_out_until_it_is_reaped() {
             .recv_timeout(GRACE)
             .expect("the old member is asked to stop");
 
-        let refused = f.prepare("third").unwrap_err();
+        let refused = f.prepare_briefly("third").unwrap_err();
         assert!(matches!(refused, AgentError::NoFreePort(_)), "{refused}");
         assert_eq!(
             refused.code(),
@@ -648,15 +648,6 @@ fn held_stamp() -> (
     (stamp, is_stamping, release)
 }
 
-/// Waits, with a bound, until the registry's stop has begun.
-fn wait_for_stopping(f: &Fixture) {
-    let deadline = Instant::now() + GRACE;
-    while !f.registry.stopping() {
-        assert!(Instant::now() < deadline, "shutdown never began");
-        std::thread::sleep(Duration::from_millis(1));
-    }
-}
-
 fn held_outside(f: &Fixture) -> usize {
     let members = f.registry.inner.lock().unwrap();
     members.outside.load(Ordering::SeqCst)
@@ -677,7 +668,7 @@ fn a_stop_that_begins_while_a_restart_is_being_stamped_starts_nothing() {
             .recv_timeout(GRACE)
             .expect("the restart is stamped");
         let stopping = scope.spawn(|| f.registry.shutdown());
-        wait_for_stopping(&f);
+        wait_for_stopping(&f.registry);
         assert_eq!(held_outside(&f), 1, "the stop waits for the launch");
         release.send(()).unwrap();
         assert_eq!(restarting.join().unwrap(), []);
@@ -709,7 +700,7 @@ fn a_launch_refused_for_a_stop_that_began_in_its_stamp_reports_what_the_stamp_wr
             .recv_timeout(GRACE)
             .expect("the restart is stamped");
         let stopping = scope.spawn(|| f.registry.shutdown());
-        wait_for_stopping(&f);
+        wait_for_stopping(&f.registry);
         release.send(()).unwrap();
         stopping.join().unwrap();
         launching.join().unwrap().err().expect("nothing is started")

@@ -18,12 +18,14 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::vision_bundle;
+use rustix::net::{self, AddressFamily, SocketAddrAny, SocketFlags, SocketType};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tensorplate_agent::config::{
@@ -103,12 +105,23 @@ fn read_request_head(stream: &mut TcpStream) {
     }
 }
 
+/// The sockets [`unused_port`] holds.
+static HELD: Mutex<Vec<OwnedFd>> = Mutex::new(Vec::new());
+
+/// A port bound and not listening until the binary exits, and not passed to
+/// the processes it starts: a connection to it is refused, and neither
+/// another case nor another process can bind it. A port closed once it was
+/// picked could be given to another case's health stub, whose answer the
+/// case's worker that does not listen would then get.
 fn unused_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("bind")
-        .local_addr()
-        .expect("addr")
-        .port()
+    let (inet, stream) = (AddressFamily::INET, SocketType::STREAM);
+    let socket = net::socket_with(inet, stream, SocketFlags::CLOEXEC, None).expect("socket");
+    net::bind_v4(&socket, &SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("bind");
+    let SocketAddrAny::V4(bound) = net::getsockname(&socket).expect("addr") else {
+        panic!("an IPv4 socket bound to an IPv6 address");
+    };
+    HELD.lock().expect("lock").push(socket);
+    bound.port()
 }
 
 struct ProcessHarness {
@@ -264,6 +277,33 @@ fn read_response(stream: &mut TcpStream) -> String {
     let mut response = String::new();
     stream.read_to_string(&mut response).expect("read response");
     response
+}
+
+#[test]
+fn an_unused_port_refuses_a_connection_and_cannot_be_bound_again() {
+    let port = unused_port();
+
+    let connected = TcpStream::connect(("127.0.0.1", port));
+    assert!(connected.is_err(), "{connected:?}");
+    let bound = TcpListener::bind(("127.0.0.1", port));
+    assert!(bound.is_err(), "{bound:?}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unused_port_is_not_held_by_a_process_the_tests_start() {
+    unused_port();
+    let fd = HELD.lock().expect("lock").last().expect("held").as_raw_fd();
+
+    let script = format!("test ! -e /proc/$$/fd/{fd}");
+    let shell = std::process::Command::new("sh")
+        .args(["-c", &script])
+        .status();
+
+    assert!(
+        shell.expect("sh").success(),
+        "the shell holds descriptor {fd}"
+    );
 }
 
 #[test]

@@ -44,6 +44,9 @@ struct Stepped {
     on_failure: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Runs once, before the serving member is read.
     before_serving_member: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The next warm's budget, in place of the configured timeout, and
+    /// doubled until that warm has probed.
+    next_warm: Mutex<Option<Duration>>,
 }
 
 impl Stepped {
@@ -66,7 +69,11 @@ impl WorkerControl for Stepped {
         candidate: &CandidateRef,
         timeout: Duration,
     ) -> AgentResult<WorkerReadiness> {
-        self.f.registry.warm(tx, candidate, timeout)
+        let next = self.next_warm.lock().unwrap().take();
+        match next {
+            Some(budget) => self.f.warm_until_probed(tx, candidate, budget),
+            None => self.f.registry.warm(tx, candidate, timeout),
+        }
     }
     fn fence(&self, tx: &str, candidate: &CandidateRef) -> AgentResult<()> {
         if let Some(hook) = self.before_fence.lock().unwrap().take() {
@@ -161,6 +168,7 @@ fn wired_at(root: Arc<TempDir>, step: Step, configure: impl FnOnce(&mut AgentCon
         before_activate: Mutex::default(),
         on_failure: Mutex::default(),
         before_serving_member: Mutex::default(),
+        next_warm: Mutex::default(),
     });
     let failed = worker.clone();
     let sink: Arc<EventSink> = Arc::new(move |event: &WorkerEvent| {
@@ -352,15 +360,19 @@ fn a_restart_already_starting_when_a_deploy_takes_its_generation_is_older_and_yi
 
 #[test]
 fn a_deploy_after_one_whose_candidate_never_became_ready_takes_a_new_generation() {
-    let w = wired_with(Step::BeforePrepare, |config| {
-        config.worker.warm_timeout_ms = 40;
-    });
+    let w = wired();
     w.deploy("stt", STT).unwrap();
     w.f.probe.models.lock().unwrap().remove(&CANDIDATE_PORT);
+    *w.worker.next_warm.lock().unwrap() = Some(WAIT_OUT);
 
     let error = w.deploy("tts", TTS).unwrap_err();
 
     assert!(matches!(error, AgentError::WorkerNotReady), "{error}");
+    // Refused by its warm, not by the fence after a warm a stalled thread
+    // gave up and a repeat then found ready.
+    let state = w.store.snapshot().unwrap();
+    let entry = state.quarantined.last().expect("a quarantine entry");
+    assert_eq!(entry.phase, DeployState::Prepared);
     assert_eq!(w.named(), ["stt@1", "-", "3"]);
     // Its candidate, generation 2, runs until the next deploy displaces it.
     w.f.health(CANDIDATE_PORT, "tts");

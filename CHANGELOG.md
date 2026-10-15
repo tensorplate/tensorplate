@@ -8,6 +8,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The agent's member registry tests no longer fail now and then on a loaded
+  machine. One 40 ms budget served both the warms and port leases that must
+  succeed and the cases that wait out a worker that never becomes ready or a
+  lease that finds no free port; the ones that must succeed now have 10
+  seconds, which they end early, and only the nine that wait it out keep
+  40 ms. A short warm is repeated with its budget doubled until it has
+  probed, so a stalled thread cannot make it pass without judging the
+  worker. A case where a worker exits during its first readiness probe
+  gives the warm 1 second, as its probe must begin inside it. The cases that
+  stop the agent while a launch is held release the launch only once the
+  registry is stopping, not after a fixed wait, so the request can no
+  longer complete before the stop. The agent's deploy-failure tests keep
+  each port they need free bound, and not listening, until the test binary
+  exits, and do not pass it to the processes they start: a connection to it
+  is still refused, and another case's or another process's health stub
+  can no longer take it, which refused a configuration whose two worker
+  ports were equal or answered one case's probe for another deployment.
+  (V030-E03-F01-T03, V030-E04-F03-T02)
+
 - A speech sidecar's runner now ends itself once the serving worker that
   started it is gone. A worker killed while its backend held a job, as the
   agent's member registry kills a worker whose stop has not ended it within

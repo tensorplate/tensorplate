@@ -21,7 +21,12 @@ mod view;
 const ACTIVE_PORT: u16 = 41_080;
 const CANDIDATE_PORT: u16 = 41_081;
 const DRAIN: Duration = Duration::from_millis(60);
-const WARM: Duration = Duration::from_millis(40);
+/// Given to a port lease or a warm that succeeds or fails at once, which
+/// returns as soon as it does: longer than load makes either take.
+const WARM: Duration = Duration::from_secs(10);
+/// Waited out in full by a warm that is never ready or a lease that finds no
+/// free port.
+const WAIT_OUT: Duration = Duration::from_millis(40);
 /// On the fake clock: no test waits it out in real time.
 const RESTART_WARM: Duration = Duration::from_secs(30);
 /// Longer than any launch a test holds.
@@ -160,10 +165,13 @@ struct FakeProbe {
     models: Mutex<BTreeMap<u16, String>>,
     /// Runs inside each probe, before it answers.
     during: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// How many probes have been made.
+    probes: AtomicU64,
 }
 
 impl HealthProbe for FakeProbe {
     fn ready_model(&self, port: u16, _timeout: Duration) -> AgentResult<Option<String>> {
+        self.probes.fetch_add(1, Ordering::SeqCst);
         if let Some(during) = self.during.lock().unwrap().as_ref() {
             during();
         }
@@ -181,6 +189,15 @@ struct Fixture {
     next_generation: Arc<AtomicU64>,
     clock: Arc<FakeClock>,
     registry: MemberRegistry,
+}
+
+/// Waits, with a bound, until another thread's stop of `registry` has begun.
+fn wait_for_stopping(registry: &MemberRegistry) {
+    let deadline = Instant::now() + GRACE;
+    while !registry.stopping() {
+        assert!(Instant::now() < deadline, "shutdown never began");
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn settings(dir: &std::path::Path) -> RegistrySettings {
@@ -271,8 +288,31 @@ impl Fixture {
     fn prepare(&self, id: &str) -> AgentResult<()> {
         self.registry.prepare("tx", &candidate(id), WARM)
     }
+    fn prepare_briefly(&self, id: &str) -> AgentResult<()> {
+        self.registry.prepare("tx", &candidate(id), WAIT_OUT)
+    }
     fn warm(&self, id: &str) -> AgentResult<WorkerReadiness> {
         self.registry.warm("tx", &candidate(id), WARM)
+    }
+    fn warm_briefly(&self, id: &str) -> AgentResult<WorkerReadiness> {
+        self.warm_until_probed("tx", &candidate(id), WAIT_OUT)
+    }
+    /// Warms with `budget`, doubled until a warm has probed: a warm whose
+    /// thread stalls past its deadline returns not ready without one.
+    fn warm_until_probed(
+        &self,
+        tx: &str,
+        candidate: &CandidateRef,
+        mut budget: Duration,
+    ) -> AgentResult<WorkerReadiness> {
+        let probed = self.probe.probes.load(Ordering::SeqCst);
+        loop {
+            let readiness = self.registry.warm(tx, candidate, budget)?;
+            if readiness.ready || self.probe.probes.load(Ordering::SeqCst) > probed {
+                return Ok(readiness);
+            }
+            budget *= 2;
+        }
     }
     /// Make `/health` on `port` report `id` ready.
     fn health(&self, port: u16, id: &str) {
@@ -376,14 +416,23 @@ fn a_candidate_is_warm_only_with_health_ready_and_its_ledger_reported() {
 
     handle.set_contact(ControlContact::Pending);
     f.health(ACTIVE_PORT, "stt");
-    assert!(!f.warm("stt").unwrap().ready, "health alone is not warm");
+    assert!(
+        !f.warm_briefly("stt").unwrap().ready,
+        "health alone is not warm"
+    );
 
     handle.set_contact(ControlContact::Reporting);
     f.health(ACTIVE_PORT, "another-model");
-    assert!(!f.warm("stt").unwrap().ready, "ready for another model");
+    assert!(
+        !f.warm_briefly("stt").unwrap().ready,
+        "ready for another model"
+    );
 
     f.probe.silent.store(true, Ordering::SeqCst);
-    assert!(!f.warm("stt").unwrap().ready, "a ledger alone is not warm");
+    assert!(
+        !f.warm_briefly("stt").unwrap().ready,
+        "a ledger alone is not warm"
+    );
 
     f.probe.silent.store(false, Ordering::SeqCst);
     f.health(ACTIVE_PORT, "stt");
@@ -773,12 +822,17 @@ fn an_exit_during_the_last_probe_outranks_the_warm_deadline() {
     let f = fixture();
     f.prepare("stt").unwrap();
     let handle = f.launcher.handle(1);
+    // The first probe begins inside it, and outlasts it.
+    let budget = Duration::from_secs(1);
     *f.probe.during.lock().unwrap() = Some(Box::new(move || {
         handle.exited.store(true, Ordering::SeqCst);
-        std::thread::sleep(WARM * 2);
+        std::thread::sleep(budget);
     }));
 
-    let err = f.warm("stt").unwrap_err();
+    let err = f
+        .registry
+        .warm("tx", &candidate("stt"), budget)
+        .unwrap_err();
     assert!(matches!(err, AgentError::WorkerExited(_)), "{err}");
 }
 
