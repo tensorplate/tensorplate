@@ -369,7 +369,7 @@ def compare_lines(
     """One finding per field: unchanged, improved, regressed, changed, missing, new or note."""
     if not (math.isfinite(tolerance_pct) and tolerance_pct >= 0):
         raise IndexLineError(f"a tolerance of {tolerance_pct!r} percent compares nothing")
-    for field in ("row", "subject"):
+    for field in ("kind", "row", "subject"):
         if previous[field] != current[field]:
             raise IndexLineError(
                 f"{field} differs: {previous[field]!r} and {current[field]!r} are not comparable"
@@ -433,32 +433,55 @@ def verdict(findings: list[dict[str, Any]]) -> int:
 def select_previous(
     index: list[dict[str, Any]], line: dict[str, Any], current_ids: set[str]
 ) -> dict[str, Any] | None:
-    """The newest line for the same row and subject that is not one of the pass's own."""
+    """The newest line of the same kind, row and subject that is not one of the pass's own.
+
+    Kinds never compare: a validation pass first deploys from a dropped page cache, and
+    the runs behind evidence lines, standalone qualification runs among them, do not.
+    """
     matches = [
         other
         for other in index
-        if (other["row"], other["subject"]) == (line["row"], line["subject"])
+        if (other["kind"], other["row"], other["subject"])
+        == (line["kind"], line["row"], line["subject"])
         and other["run_id"] not in current_ids
     ]
     return matches[-1] if matches else None
 
 
+def other_kinds(
+    index: list[dict[str, Any]], line: dict[str, Any], current_ids: set[str]
+) -> list[str]:
+    """Kinds of the earlier lines for the line's row and subject, other than its own."""
+    return sorted(
+        {
+            other["kind"]
+            for other in index
+            if (other["row"], other["subject"]) == (line["row"], line["subject"])
+            and other["kind"] != line["kind"]
+            and other["run_id"] not in current_ids
+        }
+    )
+
+
 def missing_subjects(
     index: list[dict[str, Any]], current: list[dict[str, Any]]
-) -> list[tuple[str, str]]:
-    """Subjects the row's latest indexed session ran that the current lines do not have."""
+) -> list[tuple[str, str, str]]:
+    """(row, kind, subject) for each subject the latest indexed session of a row and kind
+    ran that the current lines of that row and kind do not have."""
     current_ids = {line["run_id"] for line in current}
-    missing: list[tuple[str, str]] = []
-    for row in sorted({line["row"] for line in current}):
+    missing: list[tuple[str, str, str]] = []
+    for row, kind in sorted({(line["row"], line["kind"]) for line in current}):
         earlier = [
-            line for line in index if line["row"] == row and line["run_id"] not in current_ids
+            line
+            for line in index
+            if (line["row"], line["kind"]) == (row, kind) and line["run_id"] not in current_ids
         ]
         if not earlier:
             continue
         session = (earlier[-1]["date"], earlier[-1]["session"])
         ran = {line["subject"] for line in earlier if (line["date"], line["session"]) == session}
-        have = {line["subject"] for line in current if line["row"] == row}
-        missing.extend((row, subject) for subject in sorted(ran - have))
+        have = {line["subject"] for line in current if (line["row"], line["kind"]) == (row, kind)}
+        missing.extend((row, kind, subject) for subject in sorted(ran - have))
     return missing
 
 

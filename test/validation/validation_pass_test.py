@@ -297,6 +297,7 @@ def check_comparison(lines: dict[str, dict]) -> None:
     assert index_mod.verdict(found) == index_mod.EXIT_MOVED
 
     refused(lambda: index_mod.compare_lines(lines["lifecycle"], base), "subject differs")
+    refused(lambda: index_mod.compare_lines(base, as_validation(base)), "kind differs")
     elsewhere = copy.deepcopy(base)
     elsewhere["row"] = "another-row"
     refused(lambda: index_mod.compare_lines(base, elsewhere), "row differs")
@@ -354,7 +355,7 @@ def check_index_file_and_cli(lines: dict[str, dict]) -> None:
         completed = run_tool("compare", "--previous", str(first), "--current", str(second))
         assert completed.returncode == 2, completed
         assert "regressed  metrics.runner_load_ms: 8838.3 -> 12650.4 (+43.1%)" in completed.stdout
-        assert "== lifecycle: missing; the previous session" in completed.stdout
+        assert "== lifecycle: missing; the previous evidence session" in completed.stdout
         assert "'failed (rollback)' -> 'ok (rollback)'" in completed.stdout
 
         whisper_only = write_index(tmp / "whisper-1.jsonl", [lines["stt-whisper-1"]])
@@ -403,14 +404,16 @@ def check_index_file_and_cli(lines: dict[str, dict]) -> None:
         kokoro_only = write_index(tmp / "kokoro.jsonl", [lines["tts-kokoro-1"]])
         arguments = ("compare", "--previous", str(whisper_only), "--current", str(kokoro_only))
         completed = run_tool(*arguments)
-        assert completed.returncode == 2 and "no earlier line" in completed.stdout, completed
+        assert completed.returncode == 2, completed
+        assert "no earlier evidence line" in completed.stdout, completed
         completed = run_tool(*arguments, "--new-subject", "tts-kokoro")
         assert completed.returncode == 2 and "stt-whisper: missing" in completed.stdout, completed
         empty = tmp / "empty.jsonl"
         empty.write_text("", encoding="utf-8")
         arguments = ("compare", "--previous", str(empty), "--current", str(kokoro_only))
         completed = run_tool(*arguments)
-        assert completed.returncode == 2 and "no earlier line" in completed.stdout, completed
+        assert completed.returncode == 2, completed
+        assert "no earlier evidence line" in completed.stdout, completed
         assert run_tool(*arguments, "--new-subject", "tts-kokoro").returncode == 0
         assert run_tool(*arguments, "--new-subject", "stt-whisper").returncode == 2
         completed = run_tool("compare", "--previous", str(first), "--current", str(empty))
@@ -592,6 +595,59 @@ def check_more_guards(lines: dict[str, dict]) -> None:
     index = [older, lines["stt-whisper-1"], lines["stt-whisper-2"]]
     for line in index[1:]:
         assert index_mod.select_previous(index, line, own) is older
+
+
+def as_validation(line: dict, run_id: str | None = None, **changes: object) -> dict:
+    """The line as a rolling pass would have indexed it."""
+    copied = copy.deepcopy(line)
+    copied.update(kind="validation", run_id=run_id or f"{line['run_id']}-pass", **changes)
+    return copied
+
+
+def check_kinds(lines: dict[str, dict]) -> None:
+    kokoro = lines["tts-kokoro-1"]
+    earlier_pass = as_validation(kokoro, date="2026-09-30", session="an earlier pass")
+    later_runs = [lines["tts-kokoro-2"], lines["stt-whisper-1"]]
+    this_pass = as_validation(kokoro, "2026-10-02-this-pass", date="2026-10-02", session="a pass")
+    own = {this_pass["run_id"]}
+    # The evidence lines appended after the earlier pass do not stand in for it.
+    index = [earlier_pass, *later_runs]
+    assert index_mod.select_previous(index, this_pass, own) is earlier_pass
+    assert index_mod.select_previous(index, kokoro, set()) is lines["tts-kokoro-2"]
+    assert index_mod.missing_subjects(index, [this_pass]) == []
+    assert index_mod.missing_subjects(index, [kokoro]) == [(ROW, "evidence", "stt-whisper")]
+    assert index_mod.other_kinds(index, this_pass, own) == ["evidence"]
+    assert index_mod.other_kinds([earlier_pass], this_pass, own) == []
+    whisper_pass = as_validation(
+        lines["stt-whisper-1"], date="2026-09-30", session="an earlier pass"
+    )
+    assert index_mod.missing_subjects([earlier_pass, whisper_pass], [this_pass]) == [
+        (ROW, "validation", "stt-whisper")
+    ]
+    # An evidence line of the subject does not pay what the pass owes.
+    owed = index_mod.missing_subjects([earlier_pass, whisper_pass], [this_pass, *later_runs])
+    assert owed == [(ROW, "validation", "stt-whisper")], owed
+    # Lines of the pass itself are not earlier lines of another kind.
+    both = {this_pass["run_id"], kokoro["run_id"]}
+    assert index_mod.other_kinds([this_pass, kokoro], this_pass, both) == []
+
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        tmp = Path(raw_tmp)
+        current = write_index(tmp / "current.jsonl", [this_pass])
+        history = write_index(tmp / "history.jsonl", index)
+        completed = run_tool("compare", "--previous", str(history), "--current", str(current))
+        assert completed.returncode == 0, completed
+        assert f"== tts-kokoro: {earlier_pass['run_id']} -> " in completed.stdout, completed
+
+        # Only standalone runs before: said so, and no verdict unless the subject is new.
+        runs_only = write_index(tmp / "runs-only.jsonl", later_runs)
+        arguments = ("compare", "--previous", str(runs_only), "--current", str(current))
+        completed = run_tool(*arguments)
+        assert completed.returncode == 2, completed
+        expected = f"no earlier validation line on {ROW}; not compared with its evidence lines"
+        assert expected in completed.stdout, completed
+        assert "missing" not in completed.stdout, completed
+        assert run_tool(*arguments, "--new-subject", "tts-kokoro").returncode == 0
 
 
 def check_more_cli(lines: dict[str, dict]) -> None:
@@ -985,6 +1041,7 @@ def main() -> int:
     check_index_file_and_cli(lines)
     check_more_guards(lines)
     check_more_cli(lines)
+    check_kinds(lines)
     check_streaming_line()
     print("validation pass: recorded runs index, compare and fail closed as expected")
     return 0
