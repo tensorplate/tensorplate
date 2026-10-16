@@ -320,7 +320,8 @@ class SpeechUnderTest final : public DispatchUnderTest {
                            BufferManagerConfig pool = {},
                            serving::SpeechDispatchOptions dispatch = {},
                            VoiceDetection voice = VoiceDetection::Off)
-      : buffers(BufferManager::create(std::move(pool)).value()),
+      : voice_(voice),
+        buffers(BufferManager::create(std::move(pool)).value()),
         fixture(std::make_shared<FixtureJobBridge>(*buffers, std::move(result), options)),
         bridge(counting(fixture, voice)),
         strategy(serving::SpeechJobDispatch::create(bridge, *buffers, clock,
@@ -379,8 +380,20 @@ class SpeechUnderTest final : public DispatchUnderTest {
     }
   }
   std::size_t held_sessions() const override { return strategy->stats().sessions; }
-  void hold_jobs() override { fixture->hold_jobs(); }
+  void hold_jobs() override {
+    if (voice_ == VoiceDetection::On) {
+      fixture->hold_jobs(JobClass::SttDecode);
+    } else {
+      fixture->hold_jobs();
+    }
+  }
   void release_jobs() override { fixture->release_jobs(); }
+  [[nodiscard]] std::optional<serving::VadProfile> voice_detection() const override {
+    if (voice_ == VoiceDetection::On) {
+      return serving::VadProfile{};
+    }
+    return std::nullopt;
+  }
 
   /// Buffers nobody has released. A release the pool refused is a second
   /// release of one buffer, so every reading also holds that there was none
@@ -407,6 +420,7 @@ class SpeechUnderTest final : public DispatchUnderTest {
   mutable std::mutex stalls_mu_;
   std::condition_variable stalls_cv_;
   std::vector<Error> stalls_;
+  const VoiceDetection voice_;
 
  public:
   /// Results the case's backend gave in a buffer it had released itself: the

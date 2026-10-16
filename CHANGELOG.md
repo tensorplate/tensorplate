@@ -328,6 +328,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The speech dispatch's contract test suite also runs it detecting voice,
+  holding every job but voice activity and sending each utterance's audio
+  long enough to be speech. The cases whose outcome voice detection changes
+  now assert the voice-detecting outcome: the endpoint is offered before
+  the decode and the finalization is reported once it was queued, the
+  30-second limit is reached once the frame that passes it was scored, the
+  audio after an endpoint is scored only after that utterance's final, and
+  an utterance shorter than the shortest speech run is silence.
+  (V030-E04-F03-T02)
+
 - The serving worker's speech dispatch ends utterances by voice detection
   when the backend runs `vad_frames`, as every `faster_whisper` deployment
   does. It cuts each audio session's audio into frames of 512 samples and
