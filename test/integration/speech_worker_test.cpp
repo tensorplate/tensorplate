@@ -177,9 +177,9 @@ struct Serving {
     return client;
   }
 
-  /// A client whose Open was answered by Ready. The worker serves one session
-  /// at a time, so the Open is asked again while the session before still
-  /// holds its place, and for no other refusal.
+  /// A client whose Open was answered by Ready. The worker serves the sessions
+  /// its config names, one by default, so the Open is asked again while the
+  /// sessions before still hold their places, and for no other refusal.
   [[nodiscard]] Client ready(wire::SessionMode mode, wire::Ready* ready_out = nullptr) const {
     Client client;
     std::string refusal;
@@ -328,6 +328,20 @@ class Reader {
   /// The sequence of the last input sent.
   [[nodiscard]] std::uint64_t last_input() const { return last_input_; }
 
+  /// Reads Accepted events until one shows every segment sent taken out of
+  /// the waiting ones: the dispatch has started the last of them.
+  void until_segments_taken() {
+    while (!accepted_.has_value() || accepted_->accepted_sequence() != last_input_ ||
+           accepted_->input_credit().waiting_segments().used() != 0) {
+      auto event = client_.read();
+      ASSERT_TRUE(event.has_value()) << "the stream ended before its segments were taken";
+      EXPECT_EQ(event->sequence(), ++sequence_) << event->ShortDebugString();
+      ASSERT_TRUE(event->has_accepted()) << event->ShortDebugString();
+      check(event->accepted());
+      accepted_ = event->accepted();
+    }
+  }
+
  private:
   void check(const wire::Accepted& accepted) const {
     SCOPED_TRACE(accepted.ShortDebugString());
@@ -446,9 +460,9 @@ void expect_segment(Events& client, std::uint64_t segment_id, std::size_t text_b
 }
 
 /// The rest of transcribes_one_utterance(), on a session that is ready.
-void transcribes_one_utterance(Client& client, const wire::Ready& ready) {
-  ASSERT_TRUE(client.send_audio(3 * kFrame, kFrame));
-  const auto asked = client.finalize();
+/// What the client reads of one utterance of three frames whose Finalize had
+/// the client sequence `asked`, to the session closed by its half-close.
+void hears_one_utterance(Client& client, const wire::Ready& ready, std::uint64_t asked) {
   Reader events{client, ready, 3, 2 * std::uint64_t{kFrame}};
 
   const auto endpoint = events.next();
@@ -481,6 +495,12 @@ void transcribes_one_utterance(Client& client, const wire::Ready& ready) {
   EXPECT_EQ(closed.totals().utterances_completed(), 1U);
   ASSERT_NO_FATAL_FAILURE(events.expect_all_input_taken());
   EXPECT_TRUE(end_of(client).ok());
+}
+
+void transcribes_one_utterance(Client& client, const wire::Ready& ready) {
+  ASSERT_TRUE(client.send_audio(3 * kFrame, kFrame));
+  const auto asked = client.finalize();
+  ASSERT_NO_FATAL_FAILURE(hears_one_utterance(client, ready, asked));
 }
 
 /// One speech-to-text exchange: Open, audio, a Finalize, the utterance's
@@ -1264,6 +1284,64 @@ TEST_F(SpeechWorkerScripted, ThePollAfterTheStopCountsTheSlotTheListenerLeftHeld
   (void)served.stop();
   EXPECT_EQ(ask(agent.get(), ipc::WorkerControlOp::LedgerStatus).ledger,
             (ipc::WorkerLedger{0, 0, 1, 1, {}}));
+}
+
+// A worker configured for two sessions answers the poll and activate with two,
+// serves two at once and refuses a third; the backend gets the second
+// session's job once the first one's has ended.
+TEST_F(SpeechWorkerScripted, AWorkerConfiguredForTwoSessionsServesTwoAndRefusesAThird) {
+  register_backend();
+  backend->hold();
+  auto config = streaming_config(speech_model());
+  config.streaming.max_sessions = 2;
+  tensorplate::testing::OwnedFd agent;
+  auto built = member(config, agent);
+  ASSERT_NE(built, nullptr);
+  const Serving served{std::move(built), kServed};
+  const auto ledger = [&] { return ask(agent.get(), ipc::WorkerControlOp::LedgerStatus).ledger; };
+  EXPECT_EQ(ledger(), (ipc::WorkerLedger{0, 0, 0, 2, {}}));
+  const auto activated = ask(agent.get(), ipc::WorkerControlOp::Activate);
+  EXPECT_EQ(activated.status, ipc::WorkerControlStatus::Ok);
+  ipc::WorkerQuota two_sessions;
+  two_sessions.session_count = 2;
+  two_sessions.domain_bytes.guest_ram = 0;
+  EXPECT_EQ(activated.quota, two_sessions);
+
+  wire::Ready audio_ready;
+  auto audio_client = served.ready(wire::SESSION_MODE_STT_STREAMING, &audio_ready);
+  ASSERT_TRUE(audio_client.send_audio(3 * kFrame, kFrame));
+  const auto asked = audio_client.finalize();
+  const auto decode = running_job();
+  ASSERT_NE(decode.value("job_id", std::uint64_t{0}), 0U);
+  wire::Ready text_ready;
+  auto text_client = served.ready(wire::SESSION_MODE_TTS_STREAMING, &text_ready);
+  const std::string text = "fifteen bytes!!";
+  ASSERT_TRUE(text_client.send_text(1, text));
+  Reader text_events{text_client, text_ready, 1, text.size()};
+  ASSERT_NO_FATAL_FAILURE(text_events.until_segments_taken());
+  EXPECT_FALSE(sidecar.lane().job_due);
+  EXPECT_EQ(sidecar.sent("job_submit", 1).size(), 1U);
+  const auto both = ledger();
+  ASSERT_TRUE(both.has_value());
+  EXPECT_EQ(both->active, 2U);
+  const auto third = served.refused(wire::SESSION_MODE_STT_STREAMING);
+  EXPECT_EQ(third.error_code(), grpc::StatusCode::RESOURCE_EXHAUSTED);
+  EXPECT_NE(third.error_message().find("FAILURE_REASON_SESSION_COUNT_LIMIT"), std::string::npos)
+      << third.error_message();
+
+  backend->release();
+  ASSERT_NO_FATAL_FAILURE(hears_one_utterance(audio_client, audio_ready, asked));
+  ASSERT_NO_FATAL_FAILURE(expect_segment(text_events, 1, text.size(), text_ready.output_format()));
+  ASSERT_TRUE(text_client.call->WritesDone());
+  EXPECT_EQ(closed_of(text_events.next()).state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_TRUE(end_of(text_client).ok());
+  const auto submits = sidecar.sent("job_submit", 2);
+  ASSERT_EQ(submits.size(), 2U);
+  EXPECT_EQ(submits[0].value("job_id", std::uint64_t{0}), decode.value("job_id", std::uint64_t{0}));
+  EXPECT_NE(submits[1].value("session_key", std::uint64_t{0}),
+            decode.value("session_key", std::uint64_t{0}));
+  EXPECT_EQ(ledger(), (ipc::WorkerLedger{0, 0, 0, 2, {}}));
+  (void)served.stop();
 }
 
 // The retire answers, asks for the stop and changes nothing else; the stop

@@ -57,11 +57,6 @@ nlohmann::json drain_end_fields(std::chrono::steady_clock::time_point end,
                                                                     : "worker_shutdown"}};
 }
 
-#if TP_ENABLE_STREAMING_GRPC
-/// One stream session at a time.
-constexpr std::uint32_t kStreamSessions = 1;
-#endif
-
 class SchedulerHealthSink final : public SchedulerEventSink {
  public:
   SchedulerHealthSink(HealthState& health, ServingMetrics& metrics, InferScheduler*& scheduler)
@@ -430,7 +425,7 @@ void ServingWorker::Impl::set_serving_state(ServingState state) noexcept {
 std::uint32_t ServingWorker::Impl::stream_session_ceiling() const noexcept {
 #if TP_ENABLE_STREAMING_GRPC
   if (speech_dispatch != nullptr) {
-    return kStreamSessions;
+    return config.streaming.max_sessions;
   }
 #endif
   return 0;
@@ -522,7 +517,7 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
   const auto defaults = serving::SessionLimits::defaults();
   auto limits = serving::SessionLimits::create(
       defaults.idle_timeout(), defaults.heartbeat_interval(), defaults.liveness_timeout(),
-      defaults.max_duration(), kStreamSessions);
+      defaults.max_duration(), config.streaming.max_sessions);
   if (!limits) {
     return unexpected(limits.error());
   }
