@@ -2,6 +2,7 @@
 //
 // A deploy that asks for streaming: what the agent renders for each
 // generation of it, what status reports, and the refusals before staging.
+// Qualification deploys of described bundles are in the registry's tests.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
@@ -16,12 +17,13 @@ use std::path::{Path, PathBuf};
 use common::{vision_bundle, write_bundle, BundleSpec, Harness};
 use registry_agent::{RegistryAgent, STREAM_RANGE};
 use serde_json::json;
+use tensorplate_agent::coordinator::Serving;
 use tensorplate_agent::error::{AgentError, AgentResult};
 use tensorplate_agent::recovery;
 use tensorplate_agent::{Coordinator, WorkerControl};
 use tensorplate_protocol::agent_control::DeploymentSummary;
 use tensorplate_protocol::agent_state::DeploymentRecord;
-use tensorplate_protocol::{ErrorCode, FEATURE_DEPLOY_STREAMING};
+use tensorplate_protocol::{ErrorCode, FEATURE_DEPLOY_QUALIFICATION, FEATURE_DEPLOY_STREAMING};
 
 fn speech_bundle(td: &Path, id: &str) -> PathBuf {
     let spec = BundleSpec {
@@ -32,9 +34,18 @@ fn speech_bundle(td: &Path, id: &str) -> PathBuf {
 }
 
 fn deploy(agent: &RegistryAgent, id: &str, bundle: &Path, streaming: bool) -> AgentResult<()> {
+    let serving = if streaming {
+        Serving::Streaming
+    } else {
+        Serving::Unary
+    };
+    serve(agent, id, bundle, serving)
+}
+
+fn serve(agent: &RegistryAgent, id: &str, bundle: &Path, serving: Serving) -> AgentResult<()> {
     let deployed = agent
         .coord
-        .deploy_with(id, bundle, BTreeMap::new(), None, None, streaming);
+        .deploy_with(id, bundle, BTreeMap::new(), None, None, serving);
     deployed.map(|_| ())
 }
 
@@ -187,12 +198,32 @@ fn streaming_is_refused_before_staging_by_an_agent_with_no_stream_ports() {
 }
 
 #[test]
-fn the_agent_lists_streaming_only_where_its_configuration_gives_stream_ports() {
+fn qualification_of_a_bundle_that_declares_no_session_bound_is_refused_before_staging() {
+    let h = Harness::new();
+    let agent = RegistryAgent::start_with_stream_ports(&h);
+    let format_0_1 = speech_bundle(h.td.path(), "stt");
+    let qualifying = Serving::Qualification { test_count: 1 };
+    let refused = serve(&agent, "stt", &format_0_1, qualifying);
+
+    match refused {
+        Err(err @ AgentError::BundleUnsupported(_)) => {
+            assert_eq!(err.to_record().code, ErrorCode::Unsupported);
+            assert!(err.to_string().contains("format `0.1`"), "{err}");
+        }
+        other => panic!("expected an unsupported refusal, got {other:?}"),
+    }
+    assert!(!staged(&h, "stt"));
+    assert_eq!(agent.workers.count(), 0);
+    deploy(&agent, "stt", &format_0_1, true).expect("streaming deploy");
+}
+
+#[test]
+fn the_agent_lists_streaming_and_qualification_only_where_its_configuration_gives_stream_ports() {
     let h = Harness::new();
     let features = |agent: RegistryAgent| agent.coord.status().unwrap().control_features;
     assert_eq!(
         features(RegistryAgent::start_with_stream_ports(&h)),
-        [FEATURE_DEPLOY_STREAMING]
+        [FEATURE_DEPLOY_STREAMING, FEATURE_DEPLOY_QUALIFICATION]
     );
     assert_eq!(
         features(RegistryAgent::start_packaged(&h)),
@@ -210,7 +241,14 @@ fn an_agent_that_does_not_start_its_workers_refuses_streaming_and_does_not_list_
     config.worker.serving_port_range = Some(STREAM_RANGE);
     let coord = Coordinator::new(config, h.store.clone(), h.worker.clone());
     let bundle = speech_bundle(h.td.path(), "stt");
-    let refused = coord.deploy_with("stt", &bundle, BTreeMap::new(), None, None, true);
+    let refused = coord.deploy_with(
+        "stt",
+        &bundle,
+        BTreeMap::new(),
+        None,
+        None,
+        Serving::Streaming,
+    );
 
     refused_as_config_invalid(refused.map(|_| ()));
     assert!(!staged(&h, "stt"));

@@ -3,10 +3,11 @@
 // Set-mutation requests over the control socket, before the agent can
 // execute any of them.
 //
-// `undeploy`, `recover`, `deploy` with `set_operation` `add`, qualification
-// admission or an evidence reference, and a rollback naming a member are
-// answered with a typed `unsupported` error before any transaction
-// starts, so nothing is staged and the next request is not `busy`. A
+// `undeploy`, `recover`, `deploy` with `set_operation` `add` or an evidence
+// reference, and a rollback naming a member are answered with a typed
+// `unsupported` error before any transaction starts, so nothing is staged
+// and the next request is not `busy`; qualification admission without
+// `streaming` is answered `config_invalid` the same way. A
 // request carrying a field the agent does not know, or a qualification
 // test count past the member session ceiling, is refused at decode.
 // With a committed resident set in the durable state, status projects it,
@@ -152,14 +153,6 @@ fn set_mutation_deploys_are_refused_before_any_transaction() {
         ),
         (
             DeployRequest {
-                admission_mode: Some(AdmissionMode::Qualification),
-                test_count: Some(2),
-                ..deploy(&bundle, "d1")
-            },
-            "qualification admission",
-        ),
-        (
-            DeployRequest {
                 evidence_ref: Some("evidence-7".into()),
                 ..deploy(&bundle, "d1")
             },
@@ -184,6 +177,22 @@ fn set_mutation_deploys_are_refused_before_any_transaction() {
         ),
     );
     assert_eq!(ok.status, ResponseStatus::Ok, "{ok:?}");
+    server.shutdown();
+}
+
+#[test]
+fn a_qualification_deploy_without_streaming_is_refused_as_invalid_before_any_transaction() {
+    let h = Harness::new();
+    let socket = h.config.socket_path.clone().expect("socket");
+    let mut server = Server::start(&h.config, h.coord.clone()).expect("start");
+    let payload = DeployRequest {
+        admission_mode: Some(AdmissionMode::Qualification),
+        test_count: Some(2),
+        ..deploy(&vision_bundle(h.td.path(), "d1"), "d1")
+    };
+    let response = exchange(&socket, &ControlRequest::deploy(corr(), payload));
+    assert_refused(&response, ErrorCode::ConfigInvalid, "needs `streaming`");
+    assert_untouched(&h);
     server.shutdown();
 }
 
@@ -258,9 +267,7 @@ fn a_test_count_past_the_member_session_ceiling_is_refused_at_decode() {
             },
         ),
     );
-    // Refused at decode, before dispatch, so as `config_invalid` rather
-    // than the `unsupported` qualification admission gets, and with no
-    // correlation id.
+    // Refused at decode, before dispatch, so with no correlation id.
     assert_eq!(response.status, ResponseStatus::Error, "{response:?}");
     let error = response.error.as_ref().expect("typed error");
     assert_eq!(error.code, ErrorCode::ConfigInvalid, "{response:?}");

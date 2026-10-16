@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://tensorplate.com/schemas/v0.1/deployment_descriptor.json",
   "title": "TensorPlate deployment descriptor",
-  "description": "What the agent verified for one generation of one deployment: the portable `configuration` a verified bundle resolves to on this runtime, identified by `configuration_digest`, and the generation-specific instance around it, identified by `descriptor_digest`. Both digests are `sha256:` and the lowercase hex SHA-256 of canonical JSON version 1 (docs/bundles/integrity.md): `configuration_digest` of the `configuration` object, `descriptor_digest` of this whole document without its `descriptor_digest` member. A restart of the same configuration keeps `configuration_digest` and changes `generation` and `descriptor_digest`. An absent optional field is omitted, never null, and every number is an integer. Validating this document needs `bundle_manifest.json`, `config/schemas/memory_budget_breakdown.json`, `backend_descriptor.json` and `worker_control.json` registered beside it. Beyond this schema, readers also require the text to have a canonical JSON form (no repeated key, and integers written without a fraction or an exponent, which this schema's `integer` does not require), both digests to match, the document to be written exactly as its reader re-serializes it (every budget line and `observable` written out), the configuration's format 0.2 fields to decode as a manifest's would, format 0.2 fields only on a format 0.2 bundle, `runner_profile` and `runner_environment` together or not at all, exactly one `model` artifact, unique artifact paths that stay inside the bundle root, every `warmup.fixtures` entry among the artifact paths, and a quota that passes the worker control channel's rules.",
+  "description": "What the agent verified for one generation of one deployment: the portable `configuration` a verified bundle resolves to on this runtime, identified by `configuration_digest`, and the generation-specific instance around it, identified by `descriptor_digest`. Both digests are `sha256:` and the lowercase hex SHA-256 of canonical JSON version 1 (docs/bundles/integrity.md): `configuration_digest` of the `configuration` object, `descriptor_digest` of this whole document without its `descriptor_digest` member. A restart of the same configuration keeps `configuration_digest` and changes `generation` and `descriptor_digest`. An absent optional field is omitted, never null, and every number is an integer. Validating this document needs `bundle_manifest.json`, `config/schemas/memory_budget_breakdown.json`, `backend_descriptor.json` and `worker_control.json` registered beside it. Beyond this schema, readers also require the text to have a canonical JSON form (no repeated key, and integers written without a fraction or an exponent, which this schema's `integer` does not require), both digests to match, the document to be written exactly as its reader re-serializes it (every budget line and `observable` written out), the configuration's format 0.2 fields to decode as a manifest's would, format 0.2 fields only on a format 0.2 bundle, `runner_profile` and `runner_environment` together or not at all, exactly one `model` artifact, unique artifact paths that stay inside the bundle root, every `warmup.fixtures` entry among the artifact paths, and a quota that passes the worker control channel's rules, except that a qualification test count may name no domain.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -60,6 +60,8 @@
       "description": "Identity of this generation's descriptor, covering `configuration_digest`."
     }
   },
+  "if": {"properties": {"admission_mode": {"const": "production"}}},
+  "then": {"properties": {"configuration": {"properties": {"quota": {"$ref": "https://tensorplate.com/schemas/v0.1/worker_control.json#/definitions/MemberQuota"}}}}},
   "definitions": {
     "sha256_digest": {
       "type": "string",
@@ -155,8 +157,14 @@
         },
         "speech": {"$ref": "https://tensorplate.com/schemas/v0.1/bundle_manifest.json#/definitions/speech_contract"},
         "quota": {
-          "$ref": "https://tensorplate.com/schemas/v0.1/worker_control.json#/definitions/MemberQuota",
-          "description": "The session count and per-domain quota bytes selected for this configuration; in qualification mode the session count is the operator's test count. Changing it changes the configuration."
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["session_count", "domain_bytes"],
+          "description": "The session count and per-domain quota bytes selected for this configuration, shaped as the worker control channel's `MemberQuota`. In production mode a positive count names the domains that back it. In qualification mode the session count is the operator's test count, which names no domain until what backs it is measured. Changing it changes the configuration.",
+          "properties": {
+            "session_count": {"$ref": "https://tensorplate.com/schemas/v0.1/worker_control.json#/definitions/MemberQuota/properties/session_count"},
+            "domain_bytes": {"$ref": "https://tensorplate.com/schemas/v0.1/worker_control.json#/definitions/DomainQuotaBytes"}
+          }
         },
         "acceptance_profile_digest": {
           "$ref": "#/definitions/sha256_digest",

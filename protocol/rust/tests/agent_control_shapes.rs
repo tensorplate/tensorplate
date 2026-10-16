@@ -26,8 +26,8 @@ use tensorplate_protocol::agent_state::decode_agent_state;
 use tensorplate_protocol::resident_set::{MemberState, ResidentSet};
 use tensorplate_protocol::{
     decode_with_version_check, AdmissionMode, ContactState, DecodeError, ProcessState, Readiness,
-    FEATURE_DEPLOY_STREAMING, FEATURE_MEMBER_ROLLBACK, FEATURE_SET_OPERATION_ADD,
-    MAX_MEMBER_SESSIONS,
+    FEATURE_DEPLOY_QUALIFICATION, FEATURE_DEPLOY_STREAMING, FEATURE_MEMBER_ROLLBACK,
+    FEATURE_SET_OPERATION_ADD, MAX_MEMBER_SESSIONS,
 };
 
 const GOLDEN: &str = "agent_control_singleton_lifecycle.jsonl";
@@ -380,6 +380,7 @@ fn the_control_features_are_spelled_as_the_schema_allows() {
         FEATURE_SET_OPERATION_ADD,
         FEATURE_MEMBER_ROLLBACK,
         FEATURE_DEPLOY_STREAMING,
+        FEATURE_DEPLOY_QUALIFICATION,
     ] {
         assert!(
             description.contains(&format!("`{feature}`")),
@@ -1257,7 +1258,7 @@ fn the_recorded_handover_names_the_update_without_a_generation_or_a_stream() {
     assert_eq!(status["in_flight_transaction"]["phase"], "promoted");
     assert_eq!(
         status["control_features"],
-        json!([FEATURE_DEPLOY_STREAMING])
+        json!([FEATURE_DEPLOY_STREAMING, FEATURE_DEPLOY_QUALIFICATION])
     );
 }
 
@@ -1272,7 +1273,7 @@ fn the_recorded_status_of_a_deployment_that_does_not_stream_names_no_stream() {
     }
     assert_eq!(
         status["control_features"],
-        json!([FEATURE_DEPLOY_STREAMING])
+        json!([FEATURE_DEPLOY_STREAMING, FEATURE_DEPLOY_QUALIFICATION])
     );
 }
 
@@ -1290,7 +1291,7 @@ fn the_recorded_status_before_anything_is_deployed_names_no_deployment() {
     }
     assert_eq!(
         status["control_features"],
-        json!([FEATURE_DEPLOY_STREAMING])
+        json!([FEATURE_DEPLOY_STREAMING, FEATURE_DEPLOY_QUALIFICATION])
     );
 }
 

@@ -35,7 +35,7 @@ use tensorplate_protocol::agent_control::{
     is_valid_deployment_id, singleton_slots, AgentRunState, AgentStatus, ContactState,
     DeployFailureSummary, DeployStatus, DeploymentSummary, MemberStatus, ProcessState,
     QuarantineSummary, Readiness, ResidentSetStatus, ResponseError, SupervisionStatusSummary,
-    FEATURE_DEPLOY_STREAMING,
+    FEATURE_DEPLOY_QUALIFICATION, FEATURE_DEPLOY_STREAMING,
 };
 use tensorplate_protocol::agent_state::{
     AgentState, DeploymentRecord, ErrorRecord, TransactionKind, TransactionRecord,
@@ -91,6 +91,24 @@ pub struct Coordinator {
     clear_failure_logged: AtomicBool,
     #[cfg(test)]
     pub(crate) restore_clear_logs: std::sync::atomic::AtomicUsize,
+}
+
+/// What every generation of a deployment serves beside its unary endpoint.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Serving {
+    #[default]
+    Unary,
+    /// Stream sessions, as many as the serving worker serves by default.
+    Streaming,
+    /// `test_count` stream sessions at once, admitted in qualification mode:
+    /// recorded as unqualified, never a serving claim.
+    Qualification { test_count: u32 },
+}
+
+impl Serving {
+    fn streams(self) -> bool {
+        self != Self::Unary
+    }
 }
 
 /// Result of a successful deploy/rollback.
@@ -308,18 +326,21 @@ impl Coordinator {
             labels,
             correlation_id,
             expected_bundle_digest,
-            false,
+            Serving::Unary,
         )
     }
 
-    /// [`Self::deploy`]; with `streaming`, every generation of the
-    /// deployment serves stream sessions.
+    /// [`Self::deploy`]; every generation of the deployment serves what
+    /// `serving` says.
     ///
     /// # Errors
     ///
-    /// As [`Self::deploy`], and [`AgentError::Config`] before anything is
-    /// staged when `streaming` is asked of a bundle whose class is not
-    /// `speech`, or of an agent whose configuration holds no stream ports.
+    /// As [`Self::deploy`], and before anything is staged:
+    /// [`AgentError::Config`] when stream sessions are asked of a bundle
+    /// whose class is not `speech` or of an agent whose configuration holds
+    /// no stream ports, or a qualification test count exceeds the sessions
+    /// the bundle declares; [`AgentError::BundleUnsupported`] when a
+    /// qualification deploy names a bundle that declares no session bound.
     #[allow(clippy::too_many_lines)]
     pub fn deploy_with(
         &self,
@@ -328,7 +349,7 @@ impl Coordinator {
         labels: std::collections::BTreeMap<String, String>,
         correlation_id: Option<String>,
         expected_bundle_digest: Option<&str>,
-        streaming: bool,
+        serving: Serving,
     ) -> AgentResult<DeployOutcome> {
         if !is_valid_deployment_id(deployment_id) {
             return Err(AgentError::Config(
@@ -405,8 +426,14 @@ impl Coordinator {
                 return self.fail(&transaction_id, deployment_id, err);
             }
         }
+        let streaming = serving.streams();
         if streaming {
             if let Err(err) = streaming_refusal(&verified, &self.config) {
+                return self.fail(&transaction_id, deployment_id, err);
+            }
+        }
+        if let Serving::Qualification { test_count } = serving {
+            if let Err(err) = qualification_refusal(&verified, test_count) {
                 return self.fail(&transaction_id, deployment_id, err);
             }
         }
@@ -467,6 +494,10 @@ impl Coordinator {
             artifact_relative_path: verified.manifest.model_artifact().map(|a| a.path.clone()),
             format_version: &verified.manifest.format_version,
             probes: &self.backend_probes,
+            test_count: match serving {
+                Serving::Qualification { test_count } => Some(test_count),
+                Serving::Unary | Serving::Streaming => None,
+            },
         };
         let worker = self.worker.as_ref();
         let in_hand = match crate::descriptor_store::start_deploy(&self.store, worker, &first) {
@@ -926,14 +957,16 @@ impl Coordinator {
         Ok(AgentStatus {
             resident_set,
             // This agent executes neither `set_operation` `add` nor a member
-            // rollback, and a streaming deploy only on stream ports.
-            control_features: self
-                .config
-                .worker
-                .holds_stream_ports()
-                .then(|| FEATURE_DEPLOY_STREAMING.to_string())
-                .into_iter()
-                .collect(),
+            // rollback, and a streaming or qualification deploy only on
+            // stream ports.
+            control_features: if self.config.worker.holds_stream_ports() {
+                vec![
+                    FEATURE_DEPLOY_STREAMING.to_string(),
+                    FEATURE_DEPLOY_QUALIFICATION.to_string(),
+                ]
+            } else {
+                Vec::new()
+            },
             agent_state,
             active,
             previous_active: previous,
@@ -1158,6 +1191,30 @@ fn streaming_refusal(verified: &VerifiedBundle, config: &AgentConfig) -> AgentRe
         return Err(AgentError::Config(
             "`streaming` needs the agent to start its serving workers (`worker.mode` `process`) with a stream port for each (`worker.serving_port_range`), and its configuration gives none".into(),
         ));
+    }
+    Ok(())
+}
+
+/// Why a qualification deploy cannot measure `test_count` sessions of this
+/// bundle: the count is checked against the session bound the bundle
+/// declares, which only a format 0.2 bundle does; a larger count is refused,
+/// never lowered.
+fn qualification_refusal(verified: &VerifiedBundle, test_count: u32) -> AgentResult<()> {
+    let manifest = &verified.manifest;
+    let declared = manifest.profile.as_ref();
+    let Some(declared) = declared.and_then(|profile| profile.max_concurrent_sessions) else {
+        return Err(AgentError::BundleUnsupported(
+            format!(
+                "qualification admission checks `test_count` against the `max_concurrent_sessions` a format 0.2 speech bundle declares, and this format `{}` bundle declares none",
+                manifest.format_version
+            )
+            .into(),
+        ));
+    };
+    if test_count > declared {
+        return Err(AgentError::Config(format!(
+            "`test_count` {test_count} exceeds the {declared} sessions the bundle declares (`max_concurrent_sessions`)"
+        )));
     }
     Ok(())
 }

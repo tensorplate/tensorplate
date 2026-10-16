@@ -9,6 +9,7 @@ use std::time::Instant;
 use tempfile::TempDir;
 
 use tensorplate_protocol::worker_control::{WorkerControlRequest, WorkerControlResponse, WorkerOp};
+use tensorplate_protocol::ErrorCode;
 use tensorplate_protocol::ValidatePayload;
 
 use crate::supervision::FakeClock;
@@ -68,6 +69,8 @@ struct Handle {
     hold_call: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
     /// When set, only an operation of this kind is held.
     held_op: Mutex<Option<WorkerOp>>,
+    /// Why the worker would not start with its configuration.
+    refused: Option<(ErrorCode, String)>,
 }
 
 /// What becomes of a runtime operation sent to a fake process.
@@ -237,6 +240,9 @@ impl MemberProcess for FakeProcess {
             let _ = started.send(());
             let _ = release.recv();
         }
+        if let Some((code, message)) = self.0.refused.clone() {
+            return AgentError::WorkerStartupFailed { code, message };
+        }
         AgentError::WorkerExited(format!("generation {}", self.0.spec.member.generation))
     }
     fn control(&self) -> ControlContact {
@@ -301,11 +307,12 @@ impl ProcessLauncher for FakeLauncher {
         }
         let config = serde_json::from_slice(&std::fs::read(&spec.config_path).unwrap()).unwrap();
         let ceiling = MemberTarget::ceiling_of(&config);
+        let refused = MemberTarget::startup_refusal(&config);
         let handle = Arc::new(Handle {
             spec: spec.clone(),
             config,
             calls: Mutex::new(Vec::new()),
-            exited: AtomicBool::new(false),
+            exited: AtomicBool::new(refused.is_some()),
             uninspectable: AtomicBool::new(false),
             obeys_terminate: AtomicBool::new(!self.stubborn.load(Ordering::SeqCst)),
             keeps_draining: AtomicBool::new(false),
@@ -317,6 +324,7 @@ impl ProcessLauncher for FakeLauncher {
             requests: Mutex::default(),
             hold_call: Mutex::new(None),
             held_op: Mutex::new(None),
+            refused,
         });
         self.launched.lock().unwrap().push(handle.clone());
         Ok(Box::new(FakeProcess(handle)))

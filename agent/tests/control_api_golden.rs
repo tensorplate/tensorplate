@@ -41,6 +41,7 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use tensorplate_agent::coordinator::Serving;
 use tensorplate_agent::server::Server;
 use tensorplate_protocol::agent_control::{
     ControlRequest, DeployRequest, RollbackRequest, StatusRequest,
@@ -303,7 +304,7 @@ fn the_status_between_a_streaming_updates_commit_and_its_activation_crosses_the_
     let first = speech_bundle(&h, "stt");
     agent
         .coord
-        .deploy_with("stt", &first, labels(), None, None, true)
+        .deploy_with("stt", &first, labels(), None, None, Serving::Streaming)
         .expect("deploy");
     let (at, is_at) = std::sync::mpsc::channel();
     let (go, gone) = std::sync::mpsc::channel::<()>();
@@ -319,7 +320,7 @@ fn the_status_between_a_streaming_updates_commit_and_its_activation_crosses_the_
         let updating = scope.spawn(|| {
             agent
                 .coord
-                .deploy_with("stt", &update, labels(), None, None, true)
+                .deploy_with("stt", &update, labels(), None, None, Serving::Streaming)
         });
         is_at.recv_timeout(HELD).expect("the update is committed");
         let lines = recorded_status(&h, &agent, "ctl-000001");
@@ -341,7 +342,7 @@ fn the_status_of_a_deployment_that_does_not_stream_crosses_the_socket_as_recorde
     let bundle = speech_bundle(&h, "stt");
     agent
         .coord
-        .deploy_with("stt", &bundle, BTreeMap::new(), None, None, false)
+        .deploy_with("stt", &bundle, BTreeMap::new(), None, None, Serving::Unary)
         .expect("deploy");
 
     let lines = recorded_status(&h, &agent, "ctl-000001");

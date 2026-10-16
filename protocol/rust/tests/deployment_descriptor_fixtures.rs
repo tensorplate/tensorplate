@@ -796,11 +796,18 @@ fn the_reader_refuses_each_document_for_its_own_reason() {
             false,
         ),
         (
-            "sessions without quota bytes",
-            STT,
+            "production sessions without quota bytes",
+            TTS,
             Box::new(set("/configuration/quota/domain_bytes", json!({}))),
             "Invalid(configuration.quota)",
             false,
+        ),
+        (
+            "qualification sessions without quota bytes, digests kept",
+            STT,
+            Box::new(set("/configuration/quota/domain_bytes", json!({}))),
+            "ConfigurationDigest",
+            true,
         ),
         (
             "speech contract on a vision bundle",
@@ -922,6 +929,35 @@ fn the_reader_refuses_each_document_for_its_own_reason() {
         assert_eq!(refusal_of(&err), want, "{name}: {err}");
         assert_eq!(validator().is_valid(&doc), schema_accepts, "{name}: schema");
     }
+}
+
+#[test]
+fn only_a_qualification_quota_may_count_sessions_no_domain_backs() {
+    let unmeasured = MemberQuota {
+        session_count: 2,
+        domain_bytes: DomainQuotaBytes::default(),
+    };
+    let profiles = installed_runner_profiles();
+    let qualifying = derive_with(STT, &profiles, |inputs| inputs.quota = unmeasured);
+    let qualifying = qualifying.expect("a qualification test count");
+    assert_eq!(qualifying.admission_mode, AdmissionMode::Qualification);
+    let mut doc = serde_json::to_value(&qualifying).expect("serialize");
+    assert!(validator().is_valid(&doc));
+    let text = serde_json::to_string(&doc).expect("text");
+    let back = DeploymentDescriptor::from_json(&text).expect("reads back");
+    assert_eq!(back, qualifying);
+
+    let production = derive_with(STT, &profiles, |inputs| {
+        inputs.admission_mode = AdmissionMode::Production;
+        inputs.quota = unmeasured;
+    });
+    let refused = production.expect_err("a production count names its domains");
+    assert_eq!(refusal_of(&refused), "Invalid(configuration.quota)");
+    doc["admission_mode"] = json!("production");
+    assert!(!validator().is_valid(&doc));
+    let text = serde_json::to_string(&doc).expect("text");
+    let refused = DeploymentDescriptor::from_json(&text).expect_err("production");
+    assert_eq!(refusal_of(&refused), "Invalid(configuration.quota)");
 }
 
 #[test]

@@ -1045,6 +1045,11 @@ pub fn route_deploy<O: Write, E: Write>(
     if opts.streaming {
         args.push("--streaming".to_string());
     }
+    if let Some(test_count) = opts.test_count {
+        args.push("--qualification".to_string());
+        args.push("--test-count".to_string());
+        args.push(test_count.to_string());
+    }
     let ctx = RemoteCtx {
         runner,
         entry,
@@ -1625,6 +1630,7 @@ mod tests {
             wait_timeout_ms: 1000,
             labels: vec![],
             streaming: false,
+            test_count: None,
         });
         assert!(matches!(
             build_remote_args(&deploy),
@@ -1647,6 +1653,7 @@ mod tests {
             wait_timeout_ms: 1000,
             labels: vec![],
             streaming: false,
+            test_count: None,
         };
         let runner = MockRunner::new(
             0,
@@ -1693,10 +1700,11 @@ mod tests {
         // accept the argv; nor is a deploy that does not ask for streaming.
         assert!(!args.contains(&"--set-operation".to_string()));
         assert!(!args.contains(&"--streaming".to_string()));
+        assert!(!args.contains(&"--qualification".to_string()));
     }
 
     #[test]
-    fn route_deploy_forwards_set_operation_add_and_streaming() {
+    fn route_deploy_forwards_set_operation_add_streaming_and_qualification() {
         let td = tempfile::TempDir::new().unwrap();
         let bundle = td.path().join("bundle");
         std::fs::create_dir_all(&bundle).unwrap();
@@ -1710,6 +1718,7 @@ mod tests {
             wait_timeout_ms: 1000,
             labels: vec![],
             streaming: true,
+            test_count: Some(3),
         };
         let runner = MockRunner::new(
             0,
@@ -1736,6 +1745,8 @@ mod tests {
         let args = runner.last_args();
         assert!(args.windows(2).any(|w| w == ["--set-operation", "add"]));
         assert!(args.contains(&"--streaming".to_string()));
+        assert!(args.contains(&"--qualification".to_string()));
+        assert!(args.windows(2).any(|w| w == ["--test-count", "3"]));
     }
 
     #[test]
@@ -1801,6 +1812,7 @@ mod tests {
             wait_timeout_ms: 1000,
             labels: vec![],
             streaming: false,
+            test_count: None,
         };
         let runner = MockRunner::new(0, "");
         let copier = MockCopier {

@@ -547,6 +547,8 @@ pub(crate) struct Deploy<'a> {
     /// The verified manifest's; only a format 0.2 bundle gets a descriptor.
     pub(crate) format_version: &'a str,
     pub(crate) probes: &'a BTreeMap<String, BackendProbeReport>,
+    /// Qualification mode's operator test count; none in production mode.
+    pub(crate) test_count: Option<u32>,
 }
 
 /// The reference a deploy starts its candidate from. For a format 0.2
@@ -556,7 +558,9 @@ pub(crate) struct Deploy<'a> {
 /// document; the reference names it, in hand under a hold on `worker`. A
 /// bundle of another format is referenced as it was before descriptors.
 ///
-/// The quota is the default: none is assigned yet, and it is not a limit.
+/// In production mode the quota is the default: none is assigned yet, and
+/// it is not a limit. In qualification mode its session count is the test
+/// count, and no domain backs it until one is measured.
 /// The runtime version is the one this agent runs, whatever its
 /// configuration gives the compatibility check to judge against.
 ///
@@ -606,12 +610,22 @@ pub(crate) fn start_deploy<'w>(
         }
         let generation = state.allocate_generation(1);
         let generation = generation.map_err(|e| underived(e.to_string()))?;
+        let (admission_mode, quota) = match deploy.test_count {
+            None => (AdmissionMode::Production, MemberQuota::default()),
+            Some(session_count) => (
+                AdmissionMode::Qualification,
+                MemberQuota {
+                    session_count,
+                    ..MemberQuota::default()
+                },
+            ),
+        };
         let inputs = DescriptorInputs {
             deployment_id: id,
             generation,
-            admission_mode: AdmissionMode::Production,
+            admission_mode,
             staged_path,
-            quota: MemberQuota::default(),
+            quota,
             runtime_version: tensorplate_protocol::version(),
             runner_profiles: &installed,
             acceptance_profile_digest: None,

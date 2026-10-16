@@ -143,23 +143,26 @@ deployment generation) is changed through the same operations:
   the status query, which refuses them at decode, and the serving worker's
   unary endpoint takes no admission field.
 
-This agent executes none of these yet. `undeploy`, `recover`, `add`,
-qualification admission, an `evidence_ref`, a rollback naming a member, and
-any deploy or rollback while the durable state records a resident set are
+This agent executes qualification admission of a singleton streaming
+deployment ([below](#qualification)) and none of the others yet.
+`undeploy`, `recover`, `add`, an `evidence_ref`, a rollback naming a member,
+and any deploy or rollback while the durable state records a resident set are
 answered with a typed `unsupported` error before any transaction starts, so
 nothing is staged and the agent does not become busy. The two requests the
 contract always refuses (`replace` naming a non-member, and a rollback naming
 nobody, in a set of more than one member) are refused with `config_invalid`
-first.
+first, and so is qualification admission without `streaming`.
 
 `agent_status.control_features` lists what the agent executes beyond the
-singleton deploy and rollback: `set_operation_add`, `member_rollback` and
-`deploy_streaming`. This agent lists `deploy_streaming` when its
-configuration gives stream ports, and neither of the others. An agent that
-predates `set_operation`, `rollback.deployment_id` or `deploy.streaming`
-ignores them and would act on the rest of the request, so a client sends
-`add`, a member rollback or a streaming deploy only to an agent that lists
-the matching feature; the CLI checks before sending and otherwise refuses
+singleton deploy and rollback: `set_operation_add`, `member_rollback`,
+`deploy_streaming` and `deploy_qualification`. This agent lists
+`deploy_streaming` and `deploy_qualification` when its configuration gives
+stream ports, and neither of the others. An agent that predates
+`set_operation`, `rollback.deployment_id` or `deploy.streaming` ignores them
+and would act on the rest of the request, and an earlier agent refuses
+qualification admission, so a client sends `add`, a member rollback, a
+streaming deploy or a qualification deploy only to an agent that lists the
+matching feature; the CLI checks before sending and otherwise refuses
 locally with `unsupported`.
 
 ### Streaming
@@ -188,6 +191,28 @@ descriptor. Status reports, on `active`, the `stream_endpoint` (a loopback
 `host:port`) and that `descriptor_digest` beside the `generation`, the three
 a stream Open names, while the generation serving the active deployment was
 started with streaming.
+
+### Qualification
+
+`admission_mode: qualification` with `test_count` N and `streaming` deploys
+a speech bundle to measure N stream sessions at once, as an unqualified
+deployment that grants no serving claim. Before anything is staged, after
+the streaming refusals, the agent refuses it with `unsupported` when the
+bundle declares no `max_concurrent_sessions` (a format 0.1 bundle, which
+gets no descriptor), and with `config_invalid` when N exceeds it. The
+deployment's descriptor records `admission_mode` `qualification` and the
+quota `{"session_count": N, "domain_bytes": {}}`: no domain backs the count
+until it is measured. Each generation started from that descriptor, the
+first, a restart's, a rollback's and the restore at the next start, is given
+`streaming.max_sessions` N in its serving config; the serving worker refuses
+a count it cannot serve (above 64 today) at start, and the deploy fails with
+the worker's `config_invalid` and its message. A production deploy renders
+no `max_sessions`, so its worker serves its default of one, and records
+`production` and the default quota, so a qualification deployment is never
+started again as a production one: deploying the same bundle in production
+takes a new transaction and a new descriptor. A serving worker that predates
+`streaming.max_sessions` refuses the key, so qualification needs a worker of
+the same release.
 
 ### Response shape
 
@@ -879,10 +904,13 @@ before the first document is written.
   `runtime_version`, an override the compatibility check reads, is not
   stated), the runner profile as the backend's probe report found it
   installed,
-  admission mode `production` and the default quota: no quota is assigned
+  admission mode `production` and the default quota (no quota is assigned
   to a member yet, the value is not a limit, and every configuration digest
-  changes when one is first assigned. A descriptor that cannot be derived
-  refuses the deploy at `capacity_checked`, with `unsupported` for a runner
+  changes when one is first assigned), or for a
+  [qualification](#qualification) deploy admission mode `qualification`
+  and the test count as the quota's session count. A descriptor that
+  cannot be derived refuses the deploy at `capacity_checked`, with
+  `unsupported` for a runner
   profile that is not installed or does not list the manifest's compute
   type and `config_invalid` otherwise. On a deployed agent the bundle
   verifier has refused those two before staging, since every available
@@ -1018,7 +1046,9 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   config file is named for the deployment and generation and is removed with
   the worker; files an earlier agent process left are removed at start. A
   deployment that asked for [streaming](#streaming) also gets its
-  `streaming` block and `deployment.descriptor_digest`. The
+  `streaming` block and `deployment.descriptor_digest`, and one admitted in
+  [qualification](#qualification) mode its descriptor's test count as
+  `streaming.max_sessions`. The
   runner profile in the config is the staged manifest's, read by `prepare`
   and before a restart. For a candidate that names a descriptor it is the
   descriptor's instead: `prepare` does not read the staged manifest, and

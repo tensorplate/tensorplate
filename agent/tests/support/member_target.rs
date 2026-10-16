@@ -36,10 +36,28 @@ impl MemberTarget {
     }
 
     /// The stream sessions a worker started with the serving `config`
-    /// serves once built. The worker has one only for a speech backend that
-    /// runs stream jobs; the agent renders streaming for no other.
+    /// serves once built: `streaming.max_sessions`, one by default. The
+    /// worker has them only for a speech backend that runs stream jobs; the
+    /// agent renders streaming for no other.
     pub fn ceiling_of(config: &serde_json::Value) -> u32 {
-        u32::from(config["streaming"]["enabled"] == serde_json::Value::Bool(true))
+        let streaming = &config["streaming"];
+        if streaming["enabled"] != serde_json::Value::Bool(true) {
+            return 0;
+        }
+        let sessions = streaming["max_sessions"].as_u64();
+        sessions.map_or(1, |sessions| u32::try_from(sessions).expect("a count"))
+    }
+
+    /// What a worker refuses to start with the serving `config`, as the
+    /// record ending its stderr says: `runtime/src/serving/config.cpp` serves
+    /// from 1 to 64 stream sessions.
+    pub fn startup_refusal(config: &serde_json::Value) -> Option<(ErrorCode, String)> {
+        let sessions = config["streaming"]["max_sessions"].as_u64()?;
+        (!(1..=64).contains(&sessions)).then(|| {
+            let message =
+                "serving config: streaming.max_sessions must be from 1 to 64 in this worker";
+            (ErrorCode::ConfigInvalid, message.to_owned())
+        })
     }
 
     /// The quota a worker with `sessions` stream sessions reports.

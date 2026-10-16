@@ -328,6 +328,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `tensorplate deploy --qualification --test-count <n>` deploys a speech
+  bundle in qualification mode, unqualified and with no serving claim:
+  every generation of the deployment serves `n` stream sessions at once
+  (`streaming.max_sessions` in its serving configuration), and its
+  deployment descriptor records admission mode `qualification` with `n` as
+  its quota's session count, so a restart, a rollback and the next start
+  serve the same count. It is a streaming deploy. The agent lists the
+  `deploy_qualification` control feature where it lists `deploy_streaming`,
+  and refuses the deploy before anything is staged without `streaming`
+  (`config_invalid`), for a bundle that declares no
+  `max_concurrent_sessions` (`unsupported`) and for a count above it
+  (`config_invalid`); a count the serving worker cannot serve (above 64)
+  fails the deploy with the worker's `config_invalid`. A production deploy
+  renders no count, so its workers serve one stream session. The
+  deployment descriptor schema accepts a qualification test count that no
+  memory domain backs yet. (V030-E05-F02-T01)
+
 - The Python sidecar runs `vad_frames` jobs on a lane of their own: a second
   thread that runs one voice-activity job at a time, with 8 waiting jobs
   apart from the decode lane's 8, so voice-activity frames never wait behind
@@ -355,8 +372,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   the decodes a half-close (up to four) or a retire or a stop (up to
   three) leaves owed; 120 seconds for text. A job that ends
   `backend_reset` now fails every stream session of the worker with
-  `backend_reset`, not only the job's. The agent does not set the count
-  yet. (V030-E04-F03-T02)
+  `backend_reset`, not only the job's. The agent sets the count only for a
+  qualification deploy. (V030-E04-F03-T02)
 - The Python SDK's streaming speech client finds its stream endpoint through
   the agent. `resolve_stream_target()` reads the agent's status through the
   CLI profile, as the unary clients' discovery does, and returns the active
