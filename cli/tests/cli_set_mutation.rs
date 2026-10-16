@@ -19,7 +19,8 @@ use common::{run_cli, write_bundle_dir, AgentStub, ServingStub};
 use serde_json::Value;
 use tensorplate_protocol::agent_control::{
     singleton_slots, AgentRunState, AgentStatus, ControlOp, ControlResponse, ResidentSetStatus,
-    ResponseError, FEATURE_DEPLOY_STREAMING, FEATURE_MEMBER_ROLLBACK, FEATURE_SET_OPERATION_ADD,
+    ResponseError, FEATURE_DEPLOY_QUALIFICATION, FEATURE_DEPLOY_STREAMING, FEATURE_MEMBER_ROLLBACK,
+    FEATURE_SET_OPERATION_ADD,
 };
 use tensorplate_protocol::agent_state::decode_agent_state;
 use tensorplate_protocol::ErrorCode;
@@ -675,6 +676,50 @@ fn streaming_is_refused_locally_unless_the_agent_lists_it() {
 }
 
 #[test]
+fn qualification_is_refused_locally_unless_the_agent_lists_it_and_is_sent_as_a_stream_deploy() {
+    let (_td, bundle) = write_bundle_dir();
+    let bundle = bundle.to_str().unwrap().to_string();
+    let args = [
+        "--output",
+        "json",
+        "deploy",
+        bundle.as_str(),
+        "--deployment-id",
+        "stt",
+        "--qualification",
+        "--test-count",
+        "3",
+        "--no-wait",
+    ];
+
+    let stub = AgentStub::start();
+    stub.enqueue(status_listing(&[FEATURE_DEPLOY_STREAMING]));
+    let (code, _stdout, stderr) = run_cli(&stub.socket, &args);
+    assert_eq!(code, 3, "stderr was {stderr}");
+    let body: Value = serde_json::from_str(&stderr).expect("json envelope");
+    assert_eq!(body["error"]["code"], "unsupported");
+    let hint = body["error"]["hint"].as_str().expect("a hint");
+    assert!(hint.contains("`deploy_qualification`"), "{hint}");
+    let sent = sent_json(&stub);
+    assert_eq!(sent.len(), 1, "only the feature query was sent");
+
+    let stub = AgentStub::start();
+    stub.enqueue(status_listing(&[FEATURE_DEPLOY_QUALIFICATION]));
+    stub.enqueue(ControlResponse {
+        transaction_id: Some("tx-1".into()),
+        ..ControlResponse::ok(Some("c".into()))
+    });
+    let (code, _stdout, stderr) = run_cli(&stub.socket, &args);
+    assert_eq!(code, 0, "stderr was {stderr}");
+    let sent = sent_json(&stub);
+    assert_eq!(sent.len(), 2);
+    let deploy = &sent[1]["deploy"];
+    assert_eq!(deploy["admission_mode"], "qualification");
+    assert_eq!(deploy["test_count"], 3);
+    assert_eq!(deploy["streaming"], true);
+}
+
+#[test]
 fn a_deploy_without_streaming_sends_no_streaming_field_and_asks_for_no_feature() {
     let stub = AgentStub::start();
     stub.enqueue(ControlResponse::ok(Some("c".into())));
@@ -691,5 +736,7 @@ fn a_deploy_without_streaming_sends_no_streaming_field_and_asks_for_no_feature()
     );
     let sent = stub.raw_history();
     assert_eq!(sent.len(), 1, "no feature query: {stderr}");
-    assert!(!sent[0].contains("streaming"), "{}", sent[0]);
+    for field in ["streaming", "admission_mode", "test_count"] {
+        assert!(!sent[0].contains(field), "{}", sent[0]);
+    }
 }

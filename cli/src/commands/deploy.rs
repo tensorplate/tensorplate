@@ -20,10 +20,11 @@ use serde_json::{json, Value};
 
 use tensorplate_protocol::agent_control::{
     is_valid_deployment_id, ControlRequest, ControlResponse, DeployRequest, DeployStatus,
-    ResponseStatus, SetOperation, FEATURE_DEPLOY_STREAMING, FEATURE_SET_OPERATION_ADD,
+    ResponseStatus, SetOperation, FEATURE_DEPLOY_QUALIFICATION, FEATURE_DEPLOY_STREAMING,
+    FEATURE_SET_OPERATION_ADD,
 };
 use tensorplate_protocol::deploy_transaction::DeployState;
-use tensorplate_protocol::MemberState;
+use tensorplate_protocol::{AdmissionMode, MemberState};
 
 use crate::args::DeployArgs;
 use crate::client::AgentClient;
@@ -76,13 +77,15 @@ pub fn run<W: Write, E: Write>(
             "`--set-operation add`",
         )?;
     }
-    if args.streaming {
-        crate::commands::member::require_control_feature(
-            client,
-            FEATURE_DEPLOY_STREAMING,
-            "`--streaming`",
-        )
-        .map_err(|err| match err {
+    // A qualification deploy's test count is a stream session count.
+    let streaming = args.streaming || args.test_count.is_some();
+    if streaming {
+        let (feature, what) = match args.test_count {
+            Some(_) => (FEATURE_DEPLOY_QUALIFICATION, "`--qualification`"),
+            None => (FEATURE_DEPLOY_STREAMING, "`--streaming`"),
+        };
+        let listed = crate::commands::member::require_control_feature(client, feature, what);
+        listed.map_err(|err| match err {
             CliError::Agent {
                 code,
                 message,
@@ -105,7 +108,9 @@ pub fn run<W: Write, E: Write>(
         expected_bundle_digest: args.expected_digest.clone(),
         labels,
         set_operation: args.set_operation,
-        streaming: args.streaming,
+        streaming,
+        admission_mode: args.test_count.map(|_| AdmissionMode::Qualification),
+        test_count: args.test_count,
         ..DeployRequest::default()
     };
     let request = ControlRequest::deploy(Some(correlation.clone()), deploy_payload);
@@ -509,6 +514,7 @@ mod tests {
             wait_timeout_ms: 5_000,
             labels: vec![],
             streaming: false,
+            test_count: None,
         }
     }
 

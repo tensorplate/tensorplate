@@ -15,6 +15,7 @@ tensorplate deploy <bundle-path>
   [--label key=value]               # may be repeated
   [--set-operation <replace|add>]   # default: replace
   [--streaming]
+  [--qualification --test-count <n>] # n from 1 to 2048
   [--output <human|json>]
 ```
 
@@ -40,6 +41,19 @@ with `config_invalid` (exit code `3`) for a bundle whose class is not
 `speech`. A speech worker serving streams refuses unary `/infer` requests;
 deploy without the flag for a deployment driven over `/infer`, as
 `tensorplate infer` and the qualification recipe are.
+
+`--qualification --test-count <n>` deploys a speech bundle in qualification
+mode to measure `n` stream sessions at once: an unqualified deployment that
+grants no serving claim. It is a streaming deploy, and every generation of the
+deployment serves `n` stream sessions. It is sent only to an agent that lists
+the `deploy_qualification` control feature, and refused locally with
+`unsupported` (exit code `3`) otherwise; an agent lists it where it lists
+`deploy_streaming`. Each flag is refused without the other. The agent refuses
+the deploy with `unsupported` for a bundle that declares no
+`max_concurrent_sessions` (format 0.1), and with `config_invalid` for an `n`
+above it or above what the serving worker serves (64 today). A `--streaming`
+deploy without `--qualification` is a production deploy whose workers serve
+one stream session, whatever the deployment was before.
 
 What else a streaming deployment means for an operator:
 

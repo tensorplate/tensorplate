@@ -282,7 +282,8 @@ endpoint and the deployment, or asks the agent for both
 a draft. A serving worker
 built with streaming support serves these sessions for a speech deployment
 when its config sets `streaming.enabled`, which the agent renders for a
-deployment made with `tensorplate deploy --streaming`; `tensorplate status`
+deployment made with `tensorplate deploy --streaming` or `--qualification`;
+`tensorplate status`
 then prints its `stream_endpoint` and the `descriptor_digest` an Open names
 beside its generation. This client's default tests run
 against an in-process server built from the same schema; an opt-in case
@@ -610,7 +611,7 @@ its `__cause__`. There is no default endpoint to fall back on.
 
 | Exception | Raised when |
 | --- | --- |
-| `NotStreamingError` | The generation serving the active deployment does not serve streams: it was deployed without `--streaming`, or the agent starts no deployment with streaming (it does not list the `deploy_streaming` control feature). |
+| `NotStreamingError` | The generation serving the active deployment does not serve streams: it was deployed without `--streaming` or `--qualification`, or the agent starts no deployment with streaming (it does not list the `deploy_streaming` control feature). |
 | `NotServingError` | No generation serves the active deployment now, or nothing is deployed. A deploy, a rollback or a restart may be between its steps. |
 | `ResidentSetError` | The agent serves more than one deployment, so no single one is active. Give the client the member's endpoint and target. |
 | `RemoteAgentError` | The profile reaches the agent at another host. Its stream endpoints are on that host's loopback interface; forward one and give the client that endpoint and the target. |

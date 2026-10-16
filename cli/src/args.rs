@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use tensorplate_protocol::agent_control::SetOperation;
+use tensorplate_protocol::MAX_MEMBER_SESSIONS;
 
 use crate::error::{CliError, CliResult};
 
@@ -90,6 +91,9 @@ pub struct DeployArgs {
     pub set_operation: SetOperation,
     /// `--streaming`: every generation of the deployment serves streams.
     pub streaming: bool,
+    /// `--qualification --test-count <n>`: admitted in qualification mode
+    /// to serve `n` stream sessions at once.
+    pub test_count: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -460,6 +464,8 @@ fn parse_deploy(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeployArg
     let mut labels = Vec::new();
     let mut set_operation = SetOperation::Replace;
     let mut streaming = false;
+    let mut qualification = false;
+    let mut test_count = None;
     let mut i = 0;
     while i < rest.len() {
         if parse_global_flag(rest, &mut i, global, true)? {
@@ -499,9 +505,25 @@ fn parse_deploy(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeployArg
                 streaming = true;
                 i += 1;
             }
+            "--qualification" => {
+                qualification = true;
+                i += 1;
+            }
+            "--test-count" => {
+                let v = require_value(rest, &mut i, a)?;
+                let count = parse_u64(&v, "--test-count")?;
+                test_count = u32::try_from(count)
+                    .ok()
+                    .filter(|count| (1..=MAX_MEMBER_SESSIONS).contains(count));
+                if test_count.is_none() {
+                    return Err(CliError::Usage(format!(
+                        "--test-count must be from 1 to {MAX_MEMBER_SESSIONS}"
+                    )));
+                }
+            }
             "-h" | "--help" => {
                 return Err(CliError::Usage(
-                    "deploy <bundle> [--deployment-id <id>] [--expected-digest <algo:hex>] [--no-wait] [--wait-timeout-ms <n>] [--label <k>=<v>] [--set-operation <replace|add>] [--streaming]"
+                    "deploy <bundle> [--deployment-id <id>] [--expected-digest <algo:hex>] [--no-wait] [--wait-timeout-ms <n>] [--label <k>=<v>] [--set-operation <replace|add>] [--streaming] [--qualification --test-count <n>]"
                         .into(),
                 ));
             }
@@ -521,6 +543,19 @@ fn parse_deploy(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeployArg
     }
     let bundle_path = bundle_path
         .ok_or_else(|| CliError::Usage("deploy requires a <bundle> path argument".into()))?;
+    match (qualification, test_count) {
+        (true, None) => {
+            return Err(CliError::Usage(
+                "--qualification requires --test-count <n>".into(),
+            ))
+        }
+        (false, Some(_)) => {
+            return Err(CliError::Usage(
+                "--test-count is given only with --qualification".into(),
+            ))
+        }
+        _ => {}
+    }
     Ok(DeployArgs {
         bundle_path,
         deployment_id,
@@ -530,6 +565,7 @@ fn parse_deploy(rest: &[String], global: &mut GlobalArgs) -> CliResult<DeployArg
         labels,
         set_operation,
         streaming,
+        test_count,
     })
 }
 
@@ -1170,6 +1206,33 @@ mod tests {
         assert_eq!(d.deployment_id.as_deref(), Some("d-1"));
         assert!(!d.wait);
         assert_eq!(d.labels, vec![("env".to_string(), "ci".to_string())]);
+    }
+
+    #[test]
+    fn deploy_takes_a_test_count_only_with_qualification() {
+        let deploy = |flags: &[&str]| {
+            let mut words = vec!["deploy", "/tmp/bundle"];
+            words.extend_from_slice(flags);
+            parse(&argv(&words)).map(|out| match out {
+                ParseOutcome::Run(ParsedArgs {
+                    subcommand: Subcommand::Deploy(d),
+                    ..
+                }) => d.test_count,
+                _ => panic!("expected Deploy"),
+            })
+        };
+        assert_eq!(deploy(&[]).unwrap(), None);
+        let qualifying = deploy(&["--qualification", "--test-count", "2048"]);
+        assert_eq!(qualifying.unwrap(), Some(2048));
+        for refused in [
+            &["--qualification"][..],
+            &["--test-count", "2"],
+            &["--qualification", "--test-count", "0"],
+            &["--qualification", "--test-count", "2049"],
+        ] {
+            let err = deploy(refused).unwrap_err();
+            assert!(matches!(err, CliError::Usage(_)), "{refused:?}");
+        }
     }
 
     #[test]
