@@ -359,6 +359,15 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   speech and silence. Wire, schema and adapter are unchanged
   (V030-E04-F03-T01).
 
+- A voice detection policy for audio stream sessions in the serving
+  worker, not wired yet: per-frame speech probabilities (512 samples at
+  16 kHz) become utterance onsets with 160 ms of leading audio after two
+  speech frames, endpoints after ten silence frames (320 ms), and splits
+  at the 30-second utterance limit. Offsets never reset across
+  utterances, and internal offsets convert to input samples and
+  microseconds with checked arithmetic. (V030-E05-F03-T01,
+  V030-E05-F03-T04)
+
 - The serving worker serves several stream sessions at a time:
   `streaming.max_sessions` in its configuration (1 to 2,048 in the schema,
   1 by default) sets how many, and it is the ledger's `ceiling` and the
