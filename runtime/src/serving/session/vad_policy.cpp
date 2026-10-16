@@ -121,8 +121,7 @@ VadFrameOutcome VadPolicy::in_silence(bool speech, std::uint64_t frame_start) no
   if (++run_frames_ < min_speech_frames_) {
     return {};
   }
-  const std::uint64_t start =
-      run_start_ - floor_ > leading_padding_ ? run_start_ - leading_padding_ : floor_;
+  const std::uint64_t start = padded(run_start_);
   utterance_start_ = start;
   run_frames_ = 0;
   VadFrameOutcome outcome;
@@ -163,6 +162,18 @@ Result<void> VadPolicy::reset(std::uint64_t end) {
 
 std::optional<std::uint64_t> VadPolicy::utterance_start() const noexcept {
   return utterance_start_;
+}
+
+std::uint64_t VadPolicy::earliest_utterance_start() const noexcept {
+  if (utterance_start_) {
+    return *utterance_start_;
+  }
+  // A speech run under way starts the onset; otherwise the next frame does.
+  return padded(run_frames_ > 0 ? run_start_ : next_frame_);
+}
+
+std::uint64_t VadPolicy::padded(std::uint64_t run_start) const noexcept {
+  return run_start - floor_ > leading_padding_ ? run_start - leading_padding_ : floor_;
 }
 
 Result<std::uint64_t> to_input_samples(std::uint64_t internal_end, std::uint32_t input_rate_hz) {

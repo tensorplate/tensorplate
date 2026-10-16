@@ -180,6 +180,27 @@ TEST(VadPolicy, SplitInTheFrameEndingTheSilenceRunEndsBothUtterances) {
   EXPECT_FALSE(policy.utterance_start());
 }
 
+TEST(VadPolicy, EarliestUtteranceStartIsWhereTheNextOnsetCouldStart) {
+  auto policy = make_policy();
+  EXPECT_EQ(policy.earliest_utterance_start(), 0U);
+  EXPECT_TRUE(feed(policy, kSilence, 10).empty());
+  EXPECT_EQ(policy.earliest_utterance_start(), 10 * kFrame - 2'560);
+  // A speech run under way holds it at the run's padding.
+  EXPECT_TRUE(feed(policy, kSpeech, 1).empty());
+  EXPECT_EQ(policy.earliest_utterance_start(), 10 * kFrame - 2'560);
+  EXPECT_EQ(feed(policy, kSpeech, 6), Outcomes{onset(10 * kFrame - 2'560)});
+  EXPECT_EQ(policy.earliest_utterance_start(), 10 * kFrame - 2'560);
+  EXPECT_EQ(feed(policy, kSilence, 10), Outcomes{endpoint(27 * kFrame)});
+  // Clamped at the endpoint until the padding fits after it.
+  EXPECT_EQ(policy.earliest_utterance_start(), 27 * kFrame);
+  EXPECT_TRUE(feed(policy, kSilence, 2).empty());
+  EXPECT_EQ(policy.earliest_utterance_start(), 27 * kFrame);
+  EXPECT_TRUE(feed(policy, kSilence, 4).empty());
+  EXPECT_EQ(policy.earliest_utterance_start(), 33 * kFrame - 2'560);
+  ASSERT_TRUE(policy.reset(33 * kFrame + 100));
+  EXPECT_EQ(policy.earliest_utterance_start(), 33 * kFrame + 100);
+}
+
 TEST(VadPolicy, ResetEndsTheUtteranceWhereTheDispatchEndedIt) {
   auto policy = make_policy();
   EXPECT_EQ(feed(policy, kSpeech, 2), Outcomes{onset(0)});
