@@ -1564,7 +1564,15 @@ test binary instantiates the suite once for each dispatch it builds,
 with what the dispatch serves, what it yields for given input and how
 its jobs are held. They take every frame size, sample width and limit
 from the terms the dispatch grants, and assert the order of what the
-sink shows rather than a count of it. The cases that need the synthetic
+sink shows rather than a count of it. The speech dispatch also runs them
+detecting voice: its hold then holds every job but voice activity, so
+frames are still scored; a frame that stands for an utterance's audio is
+as long as the shortest speech run; and the cases whose outcome voice
+detection changes say so and assert it: the endpoint offered before the
+decode, the 30-second limit reached once the frame that passes it was
+scored, the audio after an endpoint scored only after that utterance's
+final, and an utterance shorter than the shortest speech run heard as
+silence. The cases that need the synthetic
 dispatch's own gates or reason strings are its own, outside the suite.
 The binding can run a hook inside the sink call of a chosen transition,
 which is how a case releases a held job inside the manager call that

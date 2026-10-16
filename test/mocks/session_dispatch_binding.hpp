@@ -27,6 +27,7 @@
 #include "fake_scheduler_clock.hpp"
 #include "serving/session/dispatch.hpp"
 #include "serving/session/session_manager.hpp"
+#include "serving/session/vad_policy.hpp"
 
 namespace tensorplate::testing {
 
@@ -55,12 +56,16 @@ class DispatchUnderTest {
   /// Sessions the dispatch still keeps state for.
   [[nodiscard]] virtual std::size_t held_sessions() const = 0;
   /// From now until release_jobs(), a job that has started does not
-  /// complete.
+  /// complete, but for voice activity, which is still scored.
   virtual void hold_jobs() = 0;
   /// Returns without waiting on the manager: a case calls it from the sink.
   /// Whether a job released there is reported before the dispatch records
   /// the transition is the dispatch's own: it pins that in cases of its own.
   virtual void release_jobs() = 0;
+  /// The profile the dispatch detects voice activity with, if it does.
+  [[nodiscard]] virtual std::optional<serving::VadProfile> voice_detection() const {
+    return std::nullopt;
+  }
 };
 
 using DispatchFactory = std::unique_ptr<DispatchUnderTest> (*)(const SchedulerClock&);
@@ -336,25 +341,57 @@ class ReferenceBinding {
   void expect_final(std::uint64_t key, serving::EndpointReason reason, std::uint64_t utterance_id,
                     std::uint64_t first_sample, std::span<const std::byte> audio_bytes,
                     std::uint64_t finalize_sequence) {
+    ASSERT_NO_FATAL_FAILURE(expect_endpoint(key, reason, utterance_id, first_sample, audio_bytes));
+    expect_transcript(key, utterance_id, first_sample, audio_bytes, finalize_sequence);
+  }
+
+  /// The same for an utterance that held no speech: a final without segments.
+  void expect_silent_final(std::uint64_t key, serving::EndpointReason reason,
+                           std::uint64_t utterance_id, std::uint64_t first_sample,
+                           std::span<const std::byte> audio_bytes,
+                           std::uint64_t finalize_sequence) {
+    ASSERT_NO_FATAL_FAILURE(expect_endpoint(key, reason, utterance_id, first_sample, audio_bytes));
+    expect_transcript_of(key, utterance_id, first_sample, audio_bytes, finalize_sequence, {});
+  }
+
+  /// expect_final()'s endpoint alone.
+  void expect_endpoint(std::uint64_t key, serving::EndpointReason reason,
+                       std::uint64_t utterance_id, std::uint64_t first_sample,
+                       std::span<const std::byte> audio_bytes) {
     const auto endpoint = read_as<serving::EndpointDetectedOutput>(key);
     ASSERT_TRUE(endpoint.has_value());
-    const auto transcript = read_as<serving::FinalTranscriptOutput>(key);
-    ASSERT_TRUE(transcript.has_value());
-    const std::uint64_t end_sample =
-        first_sample + audio_bytes.size() / terms(key).audio_format.bytes_per_sample();
     EXPECT_EQ(endpoint->reason, reason);
     EXPECT_EQ(endpoint->utterance_id, utterance_id);
-    EXPECT_EQ(endpoint->end_sample_offset, end_sample);
+    EXPECT_EQ(endpoint->end_sample_offset, end_of(key, first_sample, audio_bytes));
+  }
+
+  /// expect_final()'s final alone.
+  void expect_transcript(std::uint64_t key, std::uint64_t utterance_id, std::uint64_t first_sample,
+                         std::span<const std::byte> audio_bytes, std::uint64_t finalize_sequence) {
+    expect_transcript_of(key, utterance_id, first_sample, audio_bytes, finalize_sequence,
+                         under_test->transcript(first_sample, audio_bytes));
+  }
+
+  void expect_transcript_of(std::uint64_t key, std::uint64_t utterance_id,
+                            std::uint64_t first_sample, std::span<const std::byte> audio_bytes,
+                            std::uint64_t finalize_sequence,
+                            const std::vector<serving::TranscriptSegment>& expected) {
+    const auto transcript = read_as<serving::FinalTranscriptOutput>(key);
+    ASSERT_TRUE(transcript.has_value());
     EXPECT_EQ(transcript->utterance_id, utterance_id);
-    EXPECT_EQ(transcript->end_sample_offset, end_sample);
+    EXPECT_EQ(transcript->end_sample_offset, end_of(key, first_sample, audio_bytes));
     EXPECT_EQ(transcript->finalize_sequence, finalize_sequence);
-    const auto expected = under_test->transcript(first_sample, audio_bytes);
     ASSERT_EQ(transcript->segments.size(), expected.size());
     for (std::size_t index = 0; index < expected.size(); ++index) {
       EXPECT_EQ(transcript->segments[index].text, expected[index].text);
       EXPECT_EQ(transcript->segments[index].start_us, expected[index].start_us);
       EXPECT_EQ(transcript->segments[index].end_us, expected[index].end_us);
     }
+  }
+
+  [[nodiscard]] std::uint64_t end_of(std::uint64_t key, std::uint64_t first_sample,
+                                     std::span<const std::byte> audio_bytes) {
+    return first_sample + audio_bytes.size() / terms(key).audio_format.bytes_per_sample();
   }
 
   /// Reads a whole segment and checks that its chunks are contiguous, hold
