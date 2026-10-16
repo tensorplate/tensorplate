@@ -1157,7 +1157,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `tts_synthesis`: a `vad_frames` job goes to the runner and its voice
   probabilities come back through the job bridge. A load that declares only
   classes the adapter does not know still fails with
-  `job_class_unsupported`. No runner in the tree declares `vad_frames` yet.
+  `job_class_unsupported`.
   (V030-E04-F03-T01)
 
 - A deploy or rollback that replaces a serving worker now tells that worker
