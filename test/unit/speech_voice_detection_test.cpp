@@ -747,6 +747,56 @@ TEST(SpeechVoiceDetection, ARefusedVoiceActivitySubmitLeavesItsPlaceToTheNext) {
   }
 }
 
+// The backend counts a job open until it reports it released, after its
+// result, and so does the voice-activity lane.
+TEST(SpeechVoiceDetection, AVoiceActivityJobHoldsItsSlotUntilTheBackendReleasesIt) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  speech.fixture->hold_job_releases();
+  std::vector<std::uint64_t> keys;
+  for (int session = 0; session < 8; ++session) {
+    keys.push_back(binding.open_audio());
+    binding.audio(keys.back(), voiced(1'024, 99));
+  }
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(speech.strategy->stats().jobs_completed, 8U);
+  for (const auto key : keys) {
+    binding.audio(key, voiced(1'024, 100));
+  }
+  keys.push_back(binding.open_audio());
+  binding.audio(keys.back(), voiced(1'024, 101));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(jobs_of(speech, JobClass::VadFrames).size(), 8U);
+
+  speech.fixture->let_job_releases_go();
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(jobs_of(speech, JobClass::VadFrames).size(), 17U);
+  EXPECT_EQ(speech.strategy->stats().jobs_failed, 0U);
+  for (const auto key : keys) {
+    EXPECT_EQ(binding.live_state(key), State::Active);
+  }
+}
+
+TEST(SpeechVoiceDetection, ALostBackendsUnreleasedJobsKeepNoSlotsTaken) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  speech.fixture->hold_jobs(JobClass::VadFrames);
+  std::vector<std::uint64_t> keys;
+  for (int session = 0; session < 8; ++session) {
+    keys.push_back(binding.open_audio());
+    binding.audio(keys.back(), voiced(1'024, 103));
+  }
+  ASSERT_TRUE(binding.settle());
+  speech.fixture->lose_backend();
+  for (const auto key : keys) {
+    ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  }
+  const auto next = binding.open_audio();
+  binding.audio(next, voiced(1'024, 104));
+  ASSERT_TRUE(binding.ends_as(next, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(next)->reason, "backend_unavailable");
+}
+
 TEST(SpeechVoiceDetection, ASessionThatEndedWhileWaitingForTheVoiceActivityLaneIsPassedOver) {
   Binding binding(&speech_dispatch_detecting_voice);
   SpeechUnderTest& speech = speech_of(binding);

@@ -332,19 +332,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   when the backend runs `vad_frames`, as every `faster_whisper` deployment
   does. It cuts each audio session's audio into frames of 512 samples and
   has them scored by `vad_frames` jobs beside the decode, one at a time for
-  a session and at most eight at once, and the voice detection policy ends
+  a session and at most eight at once; every job of the dispatch, a decode's
+  too, now holds its place until the backend releases it, so the backend
+  never holds more than nine of them open. The voice detection policy ends
   an utterance at a silence endpoint (320 ms of silence), at the 30-second
   limit, or at a client Finalize or half-close; the utterance starts 160 ms
   before its speech, and audio no utterance can take is dropped.
   EndpointDetected is sent when the utterance ends, before its decode. A
-  frame's input credit returns once all of it was scored, and the audio
-  that follows an utterance's end waits, its credit held, until that
-  utterance's final. A Finalize or half-close is answered once the frames
-  before it were scored; in silence its final has no segments and nothing
-  is decoded, as for an utterance that starts at a 30-second split and lies
-  wholly inside the silence run ending it. Each Finalize is answered by a
-  final of its own, in order. A `vad_frames` job that fails fails its
-  session. A backend that does not run `vad_frames` is served as before.
+  frame's input credit returns once all of it was scored, and the audio that
+  follows an utterance's end waits, its credit held, until that utterance's
+  final. A Finalize or half-close is answered once the frames before it were
+  scored; in silence its final has no segments and nothing is decoded, as
+  for an utterance that starts at a 30-second split and lies wholly inside
+  the silence run ending it. Each Finalize is answered by a final of its
+  own, in order. A `vad_frames` job that fails fails its session. A backend
+  that does not run `vad_frames` is otherwise served as before.
   (V030-E04-F03-T02)
 
 - Hosted amd64 CI builds and links the worker against pinned TensorRT and

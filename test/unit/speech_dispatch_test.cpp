@@ -721,6 +721,27 @@ TEST(SpeechJobDispatch, SessionsAreServedInTheOrderTheirWorkBecameReady) {
   EXPECT_EQ(submitted[2].identity().session_key, third);
 }
 
+// The backend counts a job open until it reports it released, after its
+// result: the lane is taken until then.
+TEST(SpeechJobDispatch, AJobThatEndedHoldsTheLaneUntilTheBackendReleasesIt) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto first = binding.open_audio();
+  const auto second = binding.open_audio();
+  speech.fixture->hold_job_releases();
+  one_utterance(binding, first);
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(first, EndpointReason::ClientFinalize, 1, 0,
+                                               patterned_bytes(kFrameBytes, 1), 1));
+  one_utterance(binding, second);
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
+
+  speech.fixture->let_job_releases_go();
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(second, EndpointReason::ClientFinalize, 1, 0,
+                                               patterned_bytes(kFrameBytes, 1), 1));
+  EXPECT_EQ(speech.bridge->submitted().size(), 2U);
+}
+
 // A session with more work goes behind the sessions that wait once its job
 // ends: one job per session in turn, not the order the utterances ended in.
 TEST(SpeechJobDispatch, ASessionWithSeveralUtterancesTakesItsJobsInTurn) {
@@ -766,6 +787,23 @@ TEST(SpeechJobDispatch, ABackendLostUnderAJobFailsItsSessionAsBackendReset) {
   EXPECT_EQ(speech.buffers_in_use(), 1U);
   speech.fixture->unload();
   EXPECT_EQ(speech.buffers_in_use(), 0U);
+}
+
+// Its job is released only by the unload, but the lost backend refuses every
+// submit: the next session learns of the loss at its first job.
+TEST(SpeechJobDispatch, ALostBackendsUnreleasedJobKeepsNoSessionWaitingForTheLane) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  speech.hold_jobs();
+  one_utterance(binding, key);
+  ASSERT_TRUE(binding.settle());
+  speech.fixture->lose_backend();
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  const auto next = binding.open_text();
+  binding.text(next, 1, "next");
+  ASSERT_TRUE(binding.ends_as(next, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(next)->reason, "backend_unavailable");
 }
 
 // The loss ends every session the backend served: the one whose job runs,

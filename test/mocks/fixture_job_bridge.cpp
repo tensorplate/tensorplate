@@ -216,9 +216,13 @@ void FixtureJobBridge::unload() {
     for (const std::uint64_t job_id : unreleased_) {
       rules_.queue_released(job_id);
     }
+    for (const std::uint64_t job_id : held_releases_) {
+      rules_.queue_released(job_id);
+    }
     open_.clear();
     empty_lanes_locked();
     unreleased_.clear();
+    held_releases_.clear();
     unloading_ = true;
   }
   // On this thread, so that nothing is owed once the unload has returned.
@@ -253,6 +257,20 @@ void FixtureJobBridge::release_jobs() {
 void FixtureJobBridge::release_jobs(JobClass job_class) {
   const std::lock_guard<std::mutex> lock(mutex_);
   lane_of(job_class).held = false;
+  wake_locked();
+}
+
+void FixtureJobBridge::hold_job_releases() {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  job_releases_held_ = true;
+}
+
+void FixtureJobBridge::let_job_releases_go() {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  job_releases_held_ = false;
+  for (const std::uint64_t job_id : std::exchange(held_releases_, {})) {
+    rules_.queue_released(job_id);
+  }
   wake_locked();
 }
 
@@ -340,7 +358,11 @@ void FixtureJobBridge::end_running_locked(Lane& lane) {
   } else {
     rules_.queue_failed(running, result.error());
   }
-  rules_.queue_released(running);
+  if (job_releases_held_) {
+    held_releases_.push_back(running);
+  } else {
+    rules_.queue_released(running);
+  }
   open_.erase(job);
   if (!lane.waiting.empty()) {
     lane.running = lane.waiting.front();

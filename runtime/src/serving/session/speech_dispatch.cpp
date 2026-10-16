@@ -126,10 +126,13 @@ struct SpeechJobDispatch::Command {
     bool task_output = false;
   };
   struct SessionReleased {};
+  struct JobReleased {
+    std::uint64_t job_id = 0;
+  };
 
   std::uint64_t session_key = 0;
   std::variant<Opened, Moved, AudioIn, WaitingSegment, FinalizeIn, Delivered, JobEnded,
-               SessionReleased>
+               SessionReleased, JobReleased>
       body;
 };
 
@@ -157,8 +160,13 @@ struct SpeechJobDispatch::Core final : JobEventSink {
   // NOLINTNEXTLINE(bugprone-exception-escape)
   void on_failed(const JobEvent& event) noexcept override { job_ended(event); }
   void on_cancel_acknowledged(const JobEvent& /*event*/) noexcept override {}
+  // NOLINTNEXTLINE(bugprone-exception-escape)
   void on_released(const JobEvent& event) noexcept override {
     (void)take_input(event.identity().job_id);
+    Command command;
+    command.session_key = event.identity().session_key;
+    command.body = Command::JobReleased{event.identity().job_id};
+    post(std::move(command));
   }
   // NOLINTNEXTLINE(bugprone-exception-escape)
   void on_session_released(std::uint64_t session_key,
@@ -508,6 +516,11 @@ void SpeechJobDispatch::handle(SessionManager& manager, Command command) {
     }
   } else if (const auto* transition = std::get_if<Moved>(&command.body)) {
     moved(manager, key, *transition);
+  } else if (const auto* released = std::get_if<Command::JobReleased>(&command.body)) {
+    // The backend counts a job open until it is released, and so do the lanes.
+    if (unreleased_vad_.erase(released->job_id) == 0 && unreleased_job_ == released->job_id) {
+      unreleased_job_.reset();
+    }
   }
   if (const auto it = sessions_.find(key); it != sessions_.end()) {
     hand_over(manager, key, it->second, command);
@@ -625,7 +638,8 @@ void SpeechJobDispatch::job_ended(SessionManager& manager, std::uint64_t key, Jo
       ++stats_.jobs_discarded;
       return;
     }
-    // The lane is free whatever became of the job's session.
+    // Its deadline no longer applies; its lane stays taken until it is
+    // released.
     in_flight_.reset();
   }
   Session* const served = serving_session(manager, key, ended, voice_activity);
@@ -796,7 +810,8 @@ void SpeechJobDispatch::want_vad(std::uint64_t key, Session& session) {
 }
 
 void SpeechJobDispatch::start_next(SessionManager& manager) {
-  while (!in_flight_ && !lane_.empty()) {
+  while (!(backend_lost_ ? in_flight_.has_value() : unreleased_job_.has_value()) &&
+         !lane_.empty()) {
     const std::uint64_t key = lane_.front();
     lane_.pop_front();
     const auto it = sessions_.find(key);
@@ -814,12 +829,14 @@ void SpeechJobDispatch::start_next(SessionManager& manager) {
     // Recorded before the submit: the job's events may overtake its return.
     core_->hold_input(job_id, std::move(input));
     in_flight_ = InFlight{job_id, key, clock_.now() + job_deadline(*request, session)};
+    unreleased_job_ = job_id;
     session.job = JobState::Running;
     const auto submitted = bridge_->submit(std::move(request).value());
     if (!submitted) {
       // No event follows a refused submit, `released` included.
       (void)core_->take_input(job_id);
       in_flight_.reset();
+      unreleased_job_.reset();
       session.job = JobState::None;
       fail_for_backend(manager, key, session, submitted.error());
       continue;
@@ -830,7 +847,8 @@ void SpeechJobDispatch::start_next(SessionManager& manager) {
 }
 
 void SpeechJobDispatch::start_voice_activity(SessionManager& manager) {
-  while (vad_in_flight_.size() < kVadJobsInFlight && !vad_lane_.empty()) {
+  while ((backend_lost_ ? vad_in_flight_.size() : unreleased_vad_.size()) < kVadJobsInFlight &&
+         !vad_lane_.empty()) {
     const std::uint64_t key = vad_lane_.front();
     vad_lane_.pop_front();
     const auto it = sessions_.find(key);
@@ -849,11 +867,13 @@ void SpeechJobDispatch::start_voice_activity(SessionManager& manager) {
     core_->hold_input(job_id, std::move(input));
     vad_in_flight_.emplace(job_id,
                            InFlight{job_id, key, clock_.now() + job_deadline(*request, session)});
+    unreleased_vad_.insert(job_id);
     detection.job = JobState::Running;
     const auto submitted = bridge_->submit(std::move(request).value());
     if (!submitted) {
       (void)core_->take_input(job_id);
       vad_in_flight_.erase(job_id);
+      unreleased_vad_.erase(job_id);
       detection.job = JobState::None;
       fail_for_backend(manager, key, session, submitted.error());
       continue;
@@ -1055,6 +1075,7 @@ void SpeechJobDispatch::fail(SessionManager& manager, std::uint64_t key, Session
 // The backend's reset ends every session it served, not only the job's; a
 // session whose cancel still waits for its release ends as failed instead.
 void SpeechJobDispatch::reset_every_session(SessionManager& manager, const Error& error) {
+  backend_lost_ = true;
   for (auto& [key, session] : sessions_) {
     session.ended = true;
     (void)manager.apply(key, Event::BackendReset, error);

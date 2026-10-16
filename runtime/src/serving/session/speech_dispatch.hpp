@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>
@@ -110,7 +111,11 @@ struct SpeechDispatchStats {
 ///   the order their work became ready; a session whose job ended goes behind
 ///   those waiting. Beside it, each session has at most one voice-activity
 ///   job in flight and the dispatch kVadJobsInFlight, sessions in turn. A job
-///   keeps its slot until the backend ends it, also once its session is gone.
+///   keeps its slot until the backend releases it, also once it ended or its
+///   session is gone, so the backend never holds more of the dispatch's jobs
+///   open than kVadJobsInFlight voice-activity jobs and one other. Once the
+///   backend is lost, which releases nothing before the unload, only a
+///   running job holds one.
 /// - A job still running at its deadline fails its session if that session
 ///   is live (`deadline_missed`), whose release then cancels it. A session
 ///   release that waits past its bound, the backend holding a job it does not
@@ -368,7 +373,8 @@ class SpeechJobDispatch final : public SessionDispatch {
   [[nodiscard]] SchedulerClock::Duration job_deadline(const JobRequest& request,
                                                       const Session& session) const;
   /// Submits the job of the session that has waited longest while the lane
-  /// is free, and voice-activity jobs while fewer than kVadJobsInFlight run.
+  /// is free, and voice-activity jobs while fewer than kVadJobsInFlight hold a
+  /// slot.
   void start_next(SessionManager& manager);
   void start_voice_activity(SessionManager& manager);
   /// The session's next job, its input buffer in `input` when it has one;
@@ -444,11 +450,19 @@ class SpeechJobDispatch final : public SessionDispatch {
   /// joined.
   std::map<std::uint64_t, Session> sessions_;
   std::deque<std::uint64_t> lane_;
+  /// The lane's job until it ends.
   std::optional<InFlight> in_flight_;
+  /// The lane's job until the backend releases it: the lane is taken till then.
+  std::optional<std::uint64_t> unreleased_job_;
   std::deque<std::uint64_t> vad_lane_;
-  /// By job id.
+  /// By job id, until each ends.
   std::map<std::uint64_t, InFlight> vad_in_flight_;
+  /// The slots taken: each job's until the backend releases it.
+  std::set<std::uint64_t> unreleased_vad_;
   std::uint64_t next_job_id_ = 1;
+  /// A lost backend releases its jobs only at the unload and refuses every
+  /// submit: from its first `backend_reset`, only a running job holds a place.
+  bool backend_lost_ = false;
   bool stalled_ = false;
   /// What the thread waits for between its steps.
   struct Waiting {

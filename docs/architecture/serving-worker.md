@@ -1660,18 +1660,19 @@ partial transcripts.
   sessions against the pool's size bounds it.
 - **One lane, and one for voice activity.** One decode or synthesis is in
   flight for the whole dispatch, and sessions are served in the order
-  their work became ready. A job keeps the lane until the backend ends
-  it, also when its session was cancelled meanwhile, or failed at the
-  job's deadline (below): that is where a cancel waits behind the
-  backend. With one such job in flight nothing else of its lane is
-  queued behind it in the backend. `vad_frames` jobs go beside it, never
-  behind it: one a session and at most eight across the dispatch
-  (`kVadJobsInFlight`), sessions in turn, which the sidecar's
-  voice-activity lane (one running, eight waiting) always takes. The
-  dispatch records the longest wait between a session's release and the
-  backend's acknowledgement (`stats()`), for measuring that cost. The
-  scheduler's public contract is not involved: no speech job passes
-  through `InferScheduler`.
+  their work became ready. A job keeps the lane until the backend
+  reports it released, which follows its result, also when its session
+  was cancelled meanwhile, or failed at the job's deadline (below): that
+  is where a cancel waits behind the backend. With one such job open
+  nothing else of its lane is queued behind it in the backend.
+  `vad_frames` jobs go beside it, never behind it: one a session in
+  flight and at most eight across the dispatch (`kVadJobsInFlight`), each
+  counted until the backend reports it released, sessions in turn, which
+  the sidecar's voice-activity lane (one running, eight waiting) always
+  takes. The dispatch records the longest wait between a session's
+  release and the backend's acknowledgement (`stats()`), for measuring
+  that cost. The scheduler's public contract is not involved: no speech
+  job passes through `InferScheduler`.
 
 **The job's deadline and the release's bound.** Both are
 **provisional**: `SpeechDispatchOptions` defaults, which no configuration
@@ -1783,13 +1784,18 @@ A job the backend's loss ends applies the `backend_reset` event to every
 session the dispatch holds, not only to the job's: a session whose cancel
 still waits for its release ends as failed and keeps its slot until the
 release is confirmed, and a session whose job waits in the lane never
-submits it. After a
+submits it. A lost backend releases its jobs only at the unload and
+refuses every submit, so from the first `backend_reset` only a running
+job holds a place in either lane. After a
 backend was lost with no job open, nothing is delivered: the
-session learns of it at its next job, from the refused submit. A
-capacity refusal is not a load condition here: at most one decode or
-synthesis and eight `vad_frames` jobs are in flight, fewer than the 16 the
-adapter keeps open, and the dispatch is the bridge's only submitter, so it
-means that invariant
+session learns of it at its next job, from the refused submit; a job
+whose result arrived just before such a loss is never reported released
+and keeps its place until the unload. A
+capacity refusal is not a load condition here: the dispatch counts a job
+until the backend reports it released, as the adapter does, so at most
+one decode or synthesis and eight `vad_frames` jobs are open, nine of the
+16 the adapter keeps open, and the dispatch is the bridge's only
+submitter, so it means that invariant
 was broken, and it fails the session the same way however it arrives.
 The table's last row covers the bridge's generic refusals, which pass
 through as they are and read on a stream as their code does:
@@ -2181,9 +2187,9 @@ charges what a session holds yet:
   outside it and the last one sent still encoded in the stream, up to
   8,192 bytes of text each. A decode copies its utterance into the
   buffer manager and frees the session's copy; that input stays until
-  the backend reports the job released, up to 960,000 bytes for each
-  decode not yet released, and up to 32,768 bytes for each `vad_frames`
-  job (the python_pytorch adapter keeps at most 16 jobs unreleased);
+  the backend reports the job released, up to 960,000 bytes for the one
+  decode not yet released, and up to 32,768 bytes for each of the at
+  most eight `vad_frames` jobs not yet released;
 - a text session holds the synthesized result of its segment, up to
   1,440,000 bytes (30 seconds at 24 kHz), in the buffer manager the worker
   shares with HTTP, 256 MiB by default, and up to 126,592 bytes outside
@@ -2194,8 +2200,8 @@ charges what a session holds yet:
   in the segment being synthesized and 8,192 waiting;
 - so 64 sessions hold at most about 353 MB of host memory, 64 x
   (3,951,104 + 1,440,000 + 126,592) bytes, counting both kinds for every
-  session although each holds one or the other, plus the input of each
-  decode not yet released; the buffer manager holds about 92 MB of it,
+  session although each holds one or the other, plus the input of the
+  jobs not yet released; the buffer manager holds about 92 MB of it,
   64 x 1,440,000 bytes, plus those inputs.
 
 The bound goes once that memory is charged against the deployment's
@@ -2213,7 +2219,8 @@ whose job ends goes behind the sessions that wait if it has more: one job
 per session in turn, never two of one session's jobs while another
 session waits. A session holds a waiting job or a running one, never
 both. Its `vad_frames` jobs take turns the same way in a lane of their
-own, one a session and at most eight across the dispatch.
+own, one a session and at most eight across the dispatch, each counted
+until the backend releases it.
 
 Each job a session owes therefore waits behind the jobs of the sessions
 ahead of it in the lane, up to `max_sessions - 1` of them, each bounded by
