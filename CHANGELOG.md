@@ -335,6 +335,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Add a private, independently tested TensorRT SDK loader with typed symbols,
+  version checks and shared library ownership. Hosted x86 SDK CI now follows
+  the speech runtime's CUDA family without nvcc or static TensorRT archives;
+  the adapter retains direct linkage and release builds are unchanged.
+
 - The serving worker's speech dispatch offers partial transcripts of every
   utterance it finds by voice activity, so every `faster_whisper`
   deployment now sends `PartialTranscript` events. While an utterance is
@@ -389,7 +394,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 - Hosted amd64 CI builds and links the worker against pinned TensorRT and
   CUDA development packages and runs device-free tests in an optional,
-  path-filtered workflow, with fresh SDK downloads and timing. (XE-01)
+  path-filtered workflow, with fresh SDK downloads and timing.
 
 - The `faster_whisper` runner profile runs `vad_frames` jobs with the Silero
   voice-activity model the faster-whisper wheel carries, on one ONNX Runtime
