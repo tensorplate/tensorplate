@@ -96,6 +96,7 @@ TEST(VadPolicy, OnsetNeedsTwoConsecutiveSpeechFrames) {
   EXPECT_TRUE(feed(policy, kSpeech, 1).empty());
   EXPECT_EQ(feed(policy, kSpeech, 1), Outcomes{onset(16 * kFrame - 2'560)});
   EXPECT_EQ(policy.utterance_start(), 16 * kFrame - 2'560);
+  EXPECT_EQ(policy.speech_start(), 16 * kFrame);
   EXPECT_EQ(policy.next_frame_start(), 18 * kFrame);
 }
 
@@ -116,6 +117,7 @@ TEST(VadPolicy, EndpointAfterTenSilenceFramesAndASpeechFrameRestartsIt) {
   // The endpoint is the end of the detecting silence run, 320 ms after speech.
   EXPECT_EQ(feed(policy, kSilence, 1), Outcomes{endpoint(22 * kFrame)});
   EXPECT_FALSE(policy.utterance_start());
+  EXPECT_FALSE(policy.speech_start());
   // Speech straight after the endpoint starts a new run.
   EXPECT_TRUE(feed(policy, kSpeech, 1).empty());
   EXPECT_EQ(feed(policy, kSpeech, 1), Outcomes{onset(22 * kFrame)});
@@ -128,6 +130,7 @@ TEST(VadPolicy, OnsetPaddingClampsAtThePreviousEndpointAndOffsetsStayAbsolute) {
   // Speech two frames after the endpoint: its padding would reach before it.
   EXPECT_TRUE(feed(policy, kSilence, 2).empty());
   EXPECT_EQ(feed(policy, kSpeech, 2), Outcomes{onset(12 * kFrame)});
+  EXPECT_EQ(policy.speech_start(), 14 * kFrame);
   EXPECT_EQ(feed(policy, kSilence, 10), Outcomes{endpoint(26 * kFrame)});
   // Speech seven frames after it: the whole padding fits.
   EXPECT_TRUE(feed(policy, kSilence, 7).empty());
@@ -142,6 +145,7 @@ TEST(VadPolicy, SplitsAtExactlyMaxUtteranceAndStaysInSpeech) {
   EXPECT_EQ(feed(policy, kSpeech, 1), Outcomes{split(kMaxUtterance)});
   EXPECT_EQ(policy.next_frame_start(), 938 * kFrame);
   EXPECT_EQ(policy.utterance_start(), kMaxUtterance);
+  EXPECT_EQ(policy.speech_start(), kMaxUtterance);
   // The next limit, 960,000, is a frame end: the frame reaching it splits.
   EXPECT_TRUE(feed(policy, kSpeech, 936).empty());
   EXPECT_EQ(policy.next_frame_start(), 2 * kMaxUtterance - kFrame);
@@ -218,6 +222,7 @@ TEST(VadPolicy, ResetEndsTheUtteranceWhereTheDispatchEndedIt) {
   const std::uint64_t end = 20 * kFrame + 100;
   ASSERT_TRUE(policy.reset(end));
   EXPECT_FALSE(policy.utterance_start());
+  EXPECT_FALSE(policy.speech_start());
   EXPECT_EQ(policy.next_frame_start(), end);
   // Frames follow from the end, and the next onset's padding stops there.
   EXPECT_EQ(feed(policy, kSpeech, 2), Outcomes{onset(end)});
