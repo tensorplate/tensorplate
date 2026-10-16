@@ -18,9 +18,11 @@ Threads
     admitted job but ``vad_frames`` waits in one FIFO for the calling thread,
     so its calls never overlap and run in arrival order. ``vad_frames`` jobs
     wait in a lane of their own for the VAD thread, which runs one at a time
-    beside them; a load or unload waits for the one running. At most 8 jobs in
-    each lane and 8 unary requests wait; one more is refused with
-    ``resource_exhausted``. The threads share the GIL: a VAD job runs during
+    beside them; a load or unload waits for the one running. ``serve_forever``
+    waits a bounded time for that thread, so it can return while ``run_vad``
+    still runs; the thread is a daemon, so the process can exit under that
+    call. At most 8 jobs in each lane and 8 unary requests wait; one more is
+    refused with ``resource_exhausted``. The threads share the GIL: a VAD job runs during
     a decode while the backend's native call releases it, as ONNX Runtime's
     and CTranslate2's do; a native call that keeps it stalls the VAD lane for
     the length of that call, and Python code on the two threads interleaves.
