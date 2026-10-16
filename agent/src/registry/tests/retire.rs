@@ -50,30 +50,57 @@ fn draining(f: &Fixture, generation: u64) -> Option<LiveMember> {
         .find(|m| m.member.generation == generation && m.role == MemberRole::Draining)
 }
 
+/// Whether the answer to the retire of `generation` was recorded.
+fn answered(f: &Fixture, generation: u64) -> bool {
+    let members = f.registry.members().unwrap();
+    let retiring = members.retiring.get(&generation).expect("retiring");
+    !matches!(retiring.phase, Retirement::Sent { .. })
+}
+
+fn port_of(handle: &Handle) -> serde_json::Value {
+    handle.config["bind"]["port"].clone()
+}
+
 #[test]
-fn a_replacing_activate_sends_the_old_member_its_retire_before_the_candidate_its_activate() {
+fn a_replacing_activate_queues_the_old_members_retire_before_the_candidates_activate() {
     let f = fixture();
     let old = fenced_for_tts(&f);
     let incoming = f.launcher.handle(2);
-    let (asked, answer) = old.hold_call();
+    let (parked, unpark) = park_next_thread(&f);
+    let (activating, activate) = incoming.hold_call_of(ACTIVATE);
 
     std::thread::scope(|scope| {
-        let answer = answer;
-        let activating = scope.spawn(|| activate_tts(&f));
-        asked.recv_timeout(GRACE).unwrap();
-        assert!(incoming.ops().is_empty());
-        answer.send(()).unwrap();
-        activating.join().unwrap();
+        let (unpark, activate) = (unpark, activate);
+        let promoting = scope.spawn(|| activate_tts(&f));
+        activating.recv_timeout(GRACE).unwrap();
+        assert_eq!(old.ops().last(), Some(&sent(RETIRE, "tx-2")));
+        activate.send(()).unwrap();
+        promoting.join().unwrap();
+        parked.recv_timeout(GRACE).unwrap();
+        unpark.send(()).unwrap();
     });
+    retires_answered(&f);
 
     assert_eq!(incoming.ops(), [sent(ACTIVATE, "tx-2")]);
     let retire = old.requests().pop().unwrap();
-    assert_eq!(
-        (retire.op, retire.transaction_id.as_str()),
-        (RETIRE, "tx-2")
-    );
     assert_eq!(retire.drain_timeout_ms, Some(30_000));
     assert!(old.calls().is_empty());
+}
+
+#[test]
+fn the_candidate_is_activated_while_the_old_member_has_not_answered_its_retire() {
+    let f = fixture();
+    let old = fenced_for_tts(&f);
+    let (asked, answer) = old.hold_call_of(RETIRE);
+
+    activate_tts(&f);
+    asked.recv_timeout(GRACE).unwrap();
+
+    assert_eq!(f.launcher.handle(2).ops(), [sent(ACTIVATE, "tx-2")]);
+    assert!(!answered(&f, 1));
+    answer.send(()).unwrap();
+    retires_answered(&f);
+    assert!(answered(&f, 1));
 }
 
 #[test]
@@ -83,11 +110,10 @@ fn an_activate_returns_while_the_old_member_drains_and_a_step_reaps_it_once_it_e
     old.keeps_draining.store(true, Ordering::SeqCst);
 
     activate_tts(&f);
+    retires_answered(&f);
 
     let listed = draining(&f, 1).expect("the old member is listed draining");
     assert_eq!(listed.http_port, ACTIVE_PORT);
-    let refused = f.prepare_briefly("third").unwrap_err();
-    assert!(matches!(refused, AgentError::NoFreePort(_)), "{refused}");
     step(&f, Duration::ZERO);
     assert!(draining(&f, 1).is_some());
     assert!(old.spec.config_path.exists());
@@ -98,7 +124,7 @@ fn an_activate_returns_while_the_old_member_drains_and_a_step_reaps_it_once_it_e
     assert_eq!(roles(&f), tts_serves());
     assert!(!old.spec.config_path.exists());
     f.prepare("third").unwrap();
-    assert_eq!(f.launcher.handle(3).config["bind"]["port"], ACTIVE_PORT);
+    assert_eq!(port_of(&f.launcher.handle(3)), ACTIVE_PORT);
     assert!(old.calls().is_empty());
 }
 
@@ -111,6 +137,7 @@ fn a_retiring_member_that_outlasts_its_drain_is_asked_to_stop_and_then_killed() 
     old.keeps_draining.store(true, Ordering::SeqCst);
     old.obeys_terminate.store(false, Ordering::SeqCst);
     activate_tts(&f);
+    retires_answered(&f);
 
     step(&f, Duration::from_secs(40) - TICK);
     assert!(old.calls().is_empty());
@@ -138,6 +165,7 @@ fn a_retire_not_acknowledged_is_followed_by_a_stop_at_once_and_a_kill_at_the_dea
         }
 
         activate_tts(&f);
+        retires_answered(&f);
 
         assert_eq!(old.ops().last(), Some(&sent(RETIRE, "tx-2")), "{case}");
         assert_eq!(old.calls(), ["terminate"], "{case}");
@@ -152,6 +180,40 @@ fn a_retire_not_acknowledged_is_followed_by_a_stop_at_once_and_a_kill_at_the_dea
     }
 }
 
+/// Retired by a promotion or by an unload; the thread that waits for the
+/// answer is held before it waits.
+#[test]
+fn a_member_whose_retire_answer_is_never_recorded_is_asked_to_stop_and_then_killed() {
+    for unloaded in [false, true] {
+        let f = fixture();
+        let old = if unloaded {
+            f.serve("stt")
+        } else {
+            fenced_for_tts(&f)
+        };
+        old.obeys_terminate.store(false, Ordering::SeqCst);
+        let (parked, unpark) = park_next_thread(&f);
+
+        if unloaded {
+            f.registry.unload("stt");
+        } else {
+            activate_tts(&f);
+        }
+        parked.recv_timeout(GRACE).unwrap();
+
+        step(&f, CONTROL_BUDGET + DRAIN - TICK);
+        assert!(old.calls().is_empty(), "unloaded {unloaded}");
+        step(&f, TICK);
+        assert_eq!(old.calls(), ["terminate"], "unloaded {unloaded}");
+        step(&f, DRAIN);
+        assert_eq!(old.calls(), ["terminate", "kill"], "unloaded {unloaded}");
+        assert!(draining(&f, 1).is_none(), "unloaded {unloaded}");
+        unpark.send(()).unwrap();
+        retires_answered(&f);
+        assert_eq!(old.calls(), ["terminate", "kill"], "unloaded {unloaded}");
+    }
+}
+
 #[test]
 fn shutdown_stops_a_member_still_draining_after_its_retire() {
     for stubborn in [false, true] {
@@ -160,6 +222,7 @@ fn shutdown_stops_a_member_still_draining_after_its_retire() {
         old.keeps_draining.store(true, Ordering::SeqCst);
         old.obeys_terminate.store(!stubborn, Ordering::SeqCst);
         activate_tts(&f);
+        retires_answered(&f);
 
         f.registry.shutdown();
 
@@ -178,18 +241,15 @@ fn shutdown_stops_a_member_still_draining_after_its_retire() {
 fn shutdown_while_a_retire_is_being_sent_stops_the_member_without_waiting_for_the_answer() {
     let f = fixture();
     let old = fenced_for_tts(&f);
-    let (asked, answer) = old.hold_call();
+    let (asked, answer) = old.hold_call_of(RETIRE);
 
-    std::thread::scope(|scope| {
-        let answer = answer;
-        let activating = scope.spawn(|| activate_tts(&f));
-        asked.recv_timeout(GRACE).unwrap();
-        f.registry.shutdown();
-        assert_eq!(old.calls(), ["terminate"]);
-        assert_eq!(roles(&f), []);
-        answer.send(()).unwrap();
-        activating.join().unwrap();
-    });
+    activate_tts(&f);
+    asked.recv_timeout(GRACE).unwrap();
+    f.registry.shutdown();
+    assert_eq!(old.calls(), ["terminate"]);
+    assert_eq!(roles(&f), []);
+    answer.send(()).unwrap();
+    retires_answered(&f);
 
     assert_eq!(old.calls(), ["terminate"]);
     assert!(f.registry.members().unwrap().retiring.is_empty());
@@ -217,8 +277,9 @@ fn unload_sends_the_serving_member_a_retire_of_its_own_and_stops_its_candidate()
     assert_eq!(f.registry.active_deployment_id().unwrap(), None);
 }
 
-/// Parks the next thread the supervision step sends an activate from;
-/// returns what tells that it is parked and what lets it send.
+/// Parks the next thread an operation is sent from or its answer waited
+/// for on: a supervision step's activate, or a retire's answer; returns
+/// what tells that it is parked and what lets it go on.
 fn park_next_thread(f: &Fixture) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
     let (parked, is_parked) = mpsc::channel();
     let (release, released) = mpsc::channel::<()>();

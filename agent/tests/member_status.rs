@@ -12,7 +12,7 @@ mod common;
 #[path = "support/registry_agent.rs"]
 mod registry_agent;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{vision_bundle, write_bundle, BundleSpec, Harness};
 use registry_agent::{RegistryAgent, HELD, MEMBER, PORTS, PREDECESSOR};
@@ -429,21 +429,19 @@ fn a_member_told_to_retire_is_draining_until_its_process_is_reaped() {
     let worker = agent.workers.last();
     let (is_retiring, release) = worker.hold_retire();
 
-    std::thread::scope(|scope| {
-        // Dropped if this closure panics, which lets what is held end.
-        let release = release;
-        let unloading = scope.spawn(|| agent.registry.unload(MEMBER.0));
-        is_retiring
-            .recv_timeout(HELD)
-            .expect("the member is told to retire");
+    agent.registry.unload(MEMBER.0);
+    is_retiring
+        .recv_timeout(HELD)
+        .expect("the member is told to retire");
+    assert_eq!(process(&member(&agent)), DRAINING);
+    release.send(()).unwrap();
 
-        assert_eq!(process(&member(&agent)), DRAINING);
-
-        release.send(()).unwrap();
-        unloading.join().unwrap();
-    });
-
-    assert!(!worker.running());
+    // It exits once it acknowledged the retire.
+    let deadline = Instant::now() + HELD;
+    while worker.running() {
+        assert!(Instant::now() < deadline, "the member never exited");
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert_eq!(process(&member(&agent)), DRAINING, "until it is reaped");
     agent.reap_retired();
     assert_eq!(process(&member(&agent)), STOPPED);

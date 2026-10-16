@@ -124,18 +124,23 @@ impl Handle {
 /// The control channel of a fake process: closed once the process exited.
 struct FakeCaller(Arc<Handle>);
 
-impl RuntimeCall for FakeCaller {
-    fn call(
-        &self,
-        command: RuntimeCommand,
-        _budget: Duration,
-    ) -> Result<WorkerControlResponse, ControlChannelError> {
+impl FakeCaller {
+    /// The request the worker reads, recorded as it is queued.
+    fn queued(&self, command: RuntimeCommand) -> Result<WorkerControlRequest, ControlChannelError> {
         let handle = &self.0;
         let request = command
             .request(handle.spec.member.clone(), "ctl-1".into())
             .validate_payload()
             .map_err(|_| ControlChannelError::InvalidRequest)?;
         handle.requests.lock().unwrap().push(request.clone());
+        Ok(request)
+    }
+
+    fn answer(
+        &self,
+        request: &WorkerControlRequest,
+    ) -> Result<WorkerControlResponse, ControlChannelError> {
+        let handle = &self.0;
         if handle.exited.load(Ordering::SeqCst) {
             return Err(ControlChannelError::Closed);
         }
@@ -150,7 +155,7 @@ impl RuntimeCall for FakeCaller {
         let reply = *handle.reply.lock().unwrap();
         match reply {
             Reply::Answered => {
-                let answer = handle.target.lock().unwrap().answer(&request);
+                let answer = handle.target.lock().unwrap().answer(request);
                 if request.op == WorkerOp::Retire
                     && answer.status == WorkerStatusOutcome::Ok
                     && !handle.keeps_draining.load(Ordering::SeqCst)
@@ -162,6 +167,21 @@ impl RuntimeCall for FakeCaller {
             Reply::Unanswered => Err(ControlChannelError::Deadline),
             Reply::Broken => Err(ControlChannelError::Closed),
         }
+    }
+}
+
+impl RuntimeCall for FakeCaller {
+    fn call(
+        &self,
+        command: RuntimeCommand,
+        _budget: Duration,
+    ) -> Result<WorkerControlResponse, ControlChannelError> {
+        self.answer(&self.queued(command)?)
+    }
+
+    fn queue(self: Box<Self>, command: RuntimeCommand, _budget: Duration) -> Answer {
+        let queued = self.queued(command);
+        Box::new(move || self.answer(&queued?))
     }
 }
 
@@ -185,6 +205,10 @@ impl RuntimeCall for Answering {
             .validate_payload()
             .map_err(|_| ControlChannelError::InvalidRequest)?;
         Ok(self.1.lock().unwrap().answer(&request))
+    }
+
+    fn queue(self: Box<Self>, command: RuntimeCommand, budget: Duration) -> Answer {
+        Box::new(move || self.call(command, budget))
     }
 }
 
@@ -341,6 +365,14 @@ fn activations_answered(f: &Fixture) {
     }
 }
 
+/// Waits for the answer to every retire sent so far to be recorded.
+fn retires_answered(f: &Fixture) {
+    let threads = std::mem::take(&mut *f.registry.retirements.lock().unwrap());
+    for thread in threads {
+        thread.join().unwrap();
+    }
+}
+
 /// Waits, with a bound, until another thread's stop of `registry` has begun.
 fn wait_for_stopping(registry: &MemberRegistry) {
     let deadline = Instant::now() + GRACE;
@@ -484,6 +516,7 @@ impl Fixture {
         self.health(port, id);
         assert!(self.warm(id).unwrap().ready);
         self.registry.promote("tx", &candidate(id)).unwrap();
+        retires_answered(self);
         handle
     }
     fn configs(&self) -> usize {

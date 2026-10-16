@@ -643,7 +643,7 @@ fn deploying_the_active_id_again_leaves_it_served() {
     let tx = replacing.transaction_id.expect("transaction id");
     let quota = serde_json::json!({"session_count": 0, "domain_bytes": {}});
     let configs = h.td.path().join("worker-configs");
-    let first_ops = control_ops(&configs.join("same-id-1.control.jsonl"));
+    let first_ops = ops_once_retired(&configs.join("same-id-1.control.jsonl"), &tx);
     let [activated, fenced, _] = first_ops.as_slice() else {
         panic!("the first worker was sent {first_ops:?}");
     };
@@ -692,6 +692,20 @@ fn control_ops(record: &Path) -> Vec<serde_json::Value> {
     ops
 }
 
+/// The ops recorded at `record` once the retire `tx` sent is: a deploy
+/// does not wait for its answer.
+fn ops_once_retired(record: &Path, tx: &str) -> Vec<serde_json::Value> {
+    let retired = |ops: &[serde_json::Value]| {
+        ops.iter()
+            .any(|op| op["request"]["op"] == "retire" && op["request"]["transaction_id"] == tx)
+    };
+    let context = || format!("recorded: {:?}", control_ops(record));
+    wait_for(Duration::from_secs(15), context, || {
+        retired(&control_ops(record))
+    });
+    control_ops(record)
+}
+
 /// The last of `ops`, which must be the retire `tx` sent, asking for a
 /// 30 s drain.
 fn last_retire<'a>(ops: &'a [serde_json::Value], tx: &str) -> &'a serde_json::Value {
@@ -726,7 +740,7 @@ fn a_replacing_deploy_returns_while_the_replaced_worker_drains_and_it_is_reaped_
     );
 
     let tx = replacing.transaction_id.expect("transaction id");
-    let ops = control_ops(&configs.join("drain-a-1.control.jsonl"));
+    let ops = ops_once_retired(&configs.join("drain-a-1.control.jsonl"), &tx);
     assert_eq!(last_retire(&ops, &tx)["answer"]["status"], "ok");
     assert_eq!(h.draining(), [("drain-a".to_string(), 1, first.port)]);
     assert!(configs.join("serving-drain-a-1.json").is_file());
@@ -759,7 +773,7 @@ fn a_replaced_worker_that_never_answers_its_retire_is_asked_to_stop() {
     );
 
     let tx = replacing.transaction_id.expect("transaction id");
-    let ops = control_ops(&configs.join("deaf-a-1.control.jsonl"));
+    let ops = ops_once_retired(&configs.join("deaf-a-1.control.jsonl"), &tx);
     assert_eq!(last_retire(&ops, &tx)["answer"], serde_json::Value::Null);
     // Written by the replaced worker on SIGTERM; a kill would leave none.
     let terminated = configs.join("deaf-a.terminated");

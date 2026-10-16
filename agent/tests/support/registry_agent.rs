@@ -20,7 +20,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tensorplate_agent::config::{AgentConfig, PortRange, WorkerControlMode};
-use tensorplate_agent::control_channel::{RuntimeCall, RuntimeCommand};
+use tensorplate_agent::control_channel::{Answer, RuntimeCall, RuntimeCommand};
 use tensorplate_agent::coordinator::{Coordinator, DeployOutcome};
 use tensorplate_agent::error::{AgentError, AgentResult, ControlChannelError};
 use tensorplate_agent::registry::{
@@ -33,7 +33,7 @@ use tensorplate_agent::worker::{
 };
 use tensorplate_protocol::agent_state::{decode_agent_state, ErrorRecord};
 use tensorplate_protocol::worker_control::{
-    CandidateRef, WorkerControlResponse, WorkerOp, WorkerStatusOutcome,
+    CandidateRef, WorkerControlRequest, WorkerControlResponse, WorkerOp, WorkerStatusOutcome,
 };
 use tensorplate_protocol::ValidatePayload;
 
@@ -137,12 +137,9 @@ struct Process(Arc<Worker>);
 /// `not_ready` to an activate while it loads.
 struct Channel(Arc<Worker>);
 
-impl RuntimeCall for Channel {
-    fn call(
-        &self,
-        command: RuntimeCommand,
-        _budget: Duration,
-    ) -> Result<WorkerControlResponse, ControlChannelError> {
+impl Channel {
+    /// The request the worker reads, recorded as it is queued.
+    fn queued(&self, command: RuntimeCommand) -> Result<WorkerControlRequest, ControlChannelError> {
         let worker = &self.0;
         let request = command
             .request(worker.spec.member.clone(), "ctl-1".into())
@@ -150,6 +147,14 @@ impl RuntimeCall for Channel {
             .map_err(|_| ControlChannelError::InvalidRequest)?;
         let sent = (request.op, request.transaction_id.clone());
         worker.ops.lock().unwrap().push(sent);
+        Ok(request)
+    }
+
+    fn answer(
+        &self,
+        request: &WorkerControlRequest,
+    ) -> Result<WorkerControlResponse, ControlChannelError> {
+        let worker = &self.0;
         if !worker.running() {
             return Err(ControlChannelError::Closed);
         }
@@ -159,13 +164,28 @@ impl RuntimeCall for Channel {
         let mut target = worker.target.lock().unwrap();
         let loading = worker.loading.load(Ordering::SeqCst);
         target.ceiling = (!loading).then(|| MemberTarget::ceiling_of(&worker.config));
-        let answer = target.answer(&request);
+        let answer = target.answer(request);
         // With no sessions to drain, a worker that acknowledged its retire
         // exits.
         if request.op == WorkerOp::Retire && answer.status == WorkerStatusOutcome::Ok {
             worker.exit();
         }
         Ok(answer)
+    }
+}
+
+impl RuntimeCall for Channel {
+    fn call(
+        &self,
+        command: RuntimeCommand,
+        _budget: Duration,
+    ) -> Result<WorkerControlResponse, ControlChannelError> {
+        self.answer(&self.queued(command)?)
+    }
+
+    fn queue(self: Box<Self>, command: RuntimeCommand, _budget: Duration) -> Answer {
+        let queued = self.queued(command);
+        Box::new(move || self.answer(&queued?))
     }
 }
 

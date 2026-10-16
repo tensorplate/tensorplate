@@ -1045,9 +1045,11 @@ for framing, deadlines, ownership and loss-of-contact behavior.
 - **Retire.** A serving member a promotion replaces, or one an unload
   stops, leaves the serving slot under the registry's lock and is held as
   retiring: listed as draining and holding its ports until it is reaped.
-  It is sent `retire` with a 30-second drain (`drain_timeout_ms` 30000),
-  after the commit and before the candidate is sent `activate`, with the
-  committing transaction's id (an unload's carries an id of its own). The
+  Its `retire`, with a 30-second drain (`drain_timeout_ms` 30000) and the
+  committing transaction's id (an unload's carries an id of its own), is
+  queued on its control channel after the commit and before the
+  candidate is sent `activate`; the answer is waited for on a thread of
+  its own, so the candidate's `activate` does not wait for it. The
   retire takes the member's fence record, so an `activate` a failed
   transaction still owed it, or a restart's, is not sent after the
   retire. A worker that
@@ -1057,7 +1059,9 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   (the drain, then 10 seconds to stop its sidecar and exit) is sent
   SIGTERM, and one still running 10 seconds after that is killed. One that
   does not answer `ok` within 3 seconds is sent SIGTERM at once and killed
-  10 seconds later, as any member that is stopped. A displaced or
+  10 seconds later, as any member that is stopped; one whose answer is
+  still not recorded 13 seconds after the retire was queued (the thread
+  that waits for it did not run) is sent SIGTERM then. A displaced or
   abandoned candidate and a member taken out of service are never sent
   `retire`.
 - **Promotion.** A candidate that exited after it was warmed is refused
@@ -1068,9 +1072,9 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   does not answer its fence `ok` fails the deploy the same way and is
   activated again. Once
   the commit is written the candidate takes the serving slot even if it
-  exited since, and the supervision step restarts it; the member it
-  replaces is sent its retire only after the commit, before the candidate
-  is sent `activate`.
+  exited since, and the supervision step restarts it; the retire of the
+  member it replaces is queued only after the commit, before the
+  candidate is sent `activate`.
 - **Supervision.** The agent's loop runs the coordinator's turn
   (`Coordinator::supervise`) every 100 ms and logs what it did: the
   registry's supervision step (`WorkerControl::supervise`), then, once a

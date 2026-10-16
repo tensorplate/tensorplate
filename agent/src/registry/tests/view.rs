@@ -342,37 +342,23 @@ fn a_member_promoted_over_is_draining_until_it_has_been_reaped() {
         in_contact: None,
         ..live("stt", 1, MemberRole::Draining, ACTIVE_PORT)
     };
+    let serving = live("tts", 2, MemberRole::Serving, CANDIDATE_PORT);
 
-    std::thread::scope(|scope| {
-        // Dropped if this closure panics, which lets what is held end.
-        let release = release;
-        let activating = scope.spawn(|| f.registry.activate("tx", &candidate("tts")));
-        is_retiring
-            .recv_timeout(GRACE)
-            .expect("the old member is sent its retire");
+    f.registry.activate("tx", &candidate("tts")).unwrap();
+    is_retiring
+        .recv_timeout(GRACE)
+        .expect("the old member is sent its retire");
 
-        // Sent its retire before the new member is activated.
-        assert_eq!(
-            view(&f),
-            [
-                LiveMember {
-                    effective_quota: None,
-                    ..live("tts", 2, MemberRole::Serving, CANDIDATE_PORT)
-                },
-                draining.clone(),
-            ]
-        );
-        assert_eq!(
-            f.registry.serving_member().unwrap().map(|s| s.member),
-            Some(MemberRef::new("tts", 2))
-        );
-
-        release.send(()).unwrap();
-        activating.join().unwrap().unwrap();
-    });
+    // Its retire is not answered yet.
+    assert_eq!(view(&f), [serving.clone(), draining.clone()]);
+    assert_eq!(
+        f.registry.serving_member().unwrap().map(|s| s.member),
+        Some(MemberRef::new("tts", 2))
+    );
+    release.send(()).unwrap();
+    retires_answered(&f);
 
     // It exited once it acknowledged the retire; the next step reaps it.
-    let serving = live("tts", 2, MemberRole::Serving, CANDIDATE_PORT);
     assert_eq!(view(&f), [serving.clone(), draining]);
     step(&f, Duration::ZERO);
     assert!(old.calls().is_empty());

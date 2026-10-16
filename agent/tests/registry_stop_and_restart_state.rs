@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use common::Harness;
 use tensorplate_agent::control::dispatch;
-use tensorplate_agent::control_channel::{RuntimeCall, RuntimeCommand};
+use tensorplate_agent::control_channel::{Answer, RuntimeCall, RuntimeCommand};
 use tensorplate_agent::coordinator::Coordinator;
 use tensorplate_agent::error::{AgentError, AgentResult, ControlChannelError};
 use tensorplate_agent::recovery;
@@ -76,6 +76,10 @@ impl RuntimeCall for Channel {
             self.exited.store(true, Ordering::SeqCst);
         }
         Ok(answer)
+    }
+
+    fn queue(self: Box<Self>, command: RuntimeCommand, budget: Duration) -> Answer {
+        Box::new(move || self.call(command, budget))
     }
 }
 
