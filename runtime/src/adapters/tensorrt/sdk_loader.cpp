@@ -10,20 +10,34 @@
 
 namespace tensorplate::adapters::tensorrt {
 
+std::string cuda_library_name() {
+  return "libcudart.so." + std::to_string(CUDART_VERSION / 1000);
+}
+
+std::string tensorrt_library_name() {
+  return "libnvinfer.so." + std::to_string(NV_TENSORRT_MAJOR);
+}
+
 Result<std::shared_ptr<const SdkLibraries>> SdkLibraries::load() {
-  return load({::dlopen, ::dlsym, ::dlclose});
+  return load({::dlopen, ::dlsym, ::dlclose, ::dlerror});
 }
 
 Result<std::shared_ptr<const SdkLibraries>> SdkLibraries::load(LibraryOps ops) {
-  const auto cuda_name = "libcudart.so." + std::to_string(CUDART_VERSION / 1000);
-  const auto infer_name = "libnvinfer.so." + std::to_string(NV_TENSORRT_MAJOR);
+  const auto cuda_name = cuda_library_name();
+  const auto infer_name = tensorrt_library_name();
   Handle cuda{ops.open(cuda_name.c_str(), RTLD_NOW | RTLD_LOCAL), ops.close};
   if (!cuda) {
-    return unexpected(Error::Code::Unsupported, "cannot load " + cuda_name);
+    const char* detail = ops.error();
+    return unexpected(
+        Error::Code::Unsupported,
+        "cannot load " + cuda_name + ": " + (detail != nullptr ? detail : "unknown loader error"));
   }
   Handle infer{ops.open(infer_name.c_str(), RTLD_NOW | RTLD_LOCAL), ops.close};
   if (!infer) {
-    return unexpected(Error::Code::Unsupported, "cannot load " + infer_name);
+    const char* detail = ops.error();
+    return unexpected(
+        Error::Code::Unsupported,
+        "cannot load " + infer_name + ": " + (detail != nullptr ? detail : "unknown loader error"));
   }
 
   SdkFunctions functions;

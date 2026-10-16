@@ -20,6 +20,8 @@ functions. The SDK declarations supply the function-pointer types. The inline
 pass its logger and `NV_TENSORRT_VERSION` to the internal C factory.
 
 Missing libraries or exports return `Unsupported`, naming the failing item.
+Library-open failures include the dynamic loader's diagnostic, distinguishing
+absence from an installed library with a missing dependency or incompatible format.
 The TensorRT major/minor/patch and CUDA major/minor must match the headers;
 these checks do not establish engine compatibility or compare package build
 revisions. Mismatches return `Unsupported`; a failed CUDA runtime-version
@@ -38,6 +40,7 @@ configuration surface; supplied operations must be valid for the owner's life.
 A separate unit executable tests absence of each library/export, both version
 checks, version-query failure, and ownership through the last shared reference.
 The SDK job also exercises the real POSIX loader with the pinned packages and
-no GPU. It never calls the TensorRT factory. Worker startup without NVIDIA
+no GPU, then uses `RTLD_NOLOAD` to verify both handles were released. It never
+calls the TensorRT factory. Worker startup without NVIDIA
 libraries, safe driverless adapter load, and successful GPU inference are not
 claims of these tests.

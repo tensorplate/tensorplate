@@ -4,7 +4,9 @@
 #include <NvInferRuntime.h>
 #include <cuda_runtime_api.h>
 
+#include <cstddef>
 #include <memory>
+#include <string>
 #include <utility>
 
 #include "tensorplate/core/result.hpp"
@@ -19,11 +21,12 @@ struct SdkFunctions {
   decltype(&cudaDriverGetVersion) driver_version = nullptr;
   decltype(&cudaGetDeviceCount) device_count = nullptr;
   decltype(&cudaGetErrorString) error_string = nullptr;
-  decltype(&cudaMalloc) malloc = nullptr;
-  decltype(&cudaFree) free = nullptr;
+  cudaError_t(CUDARTAPI* malloc)(void**, std::size_t) = nullptr;
+  cudaError_t(CUDARTAPI* free)(void*) = nullptr;
   decltype(&cudaStreamCreate) stream_create = nullptr;
   decltype(&cudaStreamDestroy) stream_destroy = nullptr;
-  decltype(&cudaMemcpyAsync) memcpy_async = nullptr;
+  cudaError_t(CUDARTAPI* memcpy_async)(void*, const void*, std::size_t, cudaMemcpyKind,
+                                       cudaStream_t) = nullptr;
   decltype(&cudaStreamSynchronize) stream_synchronize = nullptr;
 };
 
@@ -32,7 +35,11 @@ struct LibraryOps {
   void* (*open)(const char*, int);
   void* (*symbol)(void*, const char*);
   int (*close)(void*);
+  char* (*error)();
 };
+
+[[nodiscard]] std::string cuda_library_name();
+[[nodiscard]] std::string tensorrt_library_name();
 
 class SdkLibraries final {
  public:

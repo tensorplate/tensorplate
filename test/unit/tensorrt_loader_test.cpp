@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #if TP_HAS_TENSORRT_LOADER
+#include <cuda_runtime.h>
 #include <dlfcn.h>
 #include <gtest/gtest.h>
 
@@ -49,10 +50,10 @@ void* open_library(const char* name, int flags) {
   if (fake().missing == name) {
     return nullptr;
   }
-  if (std::string(name) == "libcudart.so." + std::to_string(CUDART_VERSION / 1000)) {
+  if (std::string(name) == cuda_library_name()) {
     return &fake().cuda;
   }
-  EXPECT_EQ(std::string(name), "libnvinfer.so." + std::to_string(NV_TENSORRT_MAJOR));
+  EXPECT_EQ(std::string(name), tensorrt_library_name());
   return &fake().infer;
 }
 void* symbol(void* handle, const char* name) {
@@ -80,7 +81,11 @@ int close_library(void* handle) {
   fake().closed.push_back(handle);
   return 0;
 }
-const LibraryOps kOps{open_library, symbol, close_library};
+char* loader_error() {
+  static std::string text = "synthetic dependency load failure";
+  return text.data();
+}
+const LibraryOps kOps{open_library, symbol, close_library, loader_error};
 const std::vector<std::string> kSymbols{"createInferRuntime_INTERNAL",
                                         "getInferLibVersion",
                                         "cudaRuntimeGetVersion",
@@ -124,13 +129,14 @@ TEST_F(TensorRTLoader, KeepsHandlesUntilLastOwnerAndResolvesEveryExport) {
 }
 
 TEST_F(TensorRTLoader, MissingLibrariesAreUnsupportedAndReleasePartialLoad) {
-  const std::vector<std::string> names{"libcudart.so." + std::to_string(CUDART_VERSION / 1000),
-                                       "libnvinfer.so." + std::to_string(NV_TENSORRT_MAJOR)};
+  const std::vector<std::string> names{cuda_library_name(), tensorrt_library_name()};
   for (const auto& name : names) {
     fake() = {};
     fake().missing = name;
     auto result = SdkLibraries::load(kOps);
     expect_unsupported(result, name);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_NE(result.error().message.find(loader_error()), std::string::npos);
     EXPECT_TRUE(fake().symbols.empty());
     EXPECT_EQ(fake().closed,
               name == names.front() ? std::vector<void*>{} : std::vector<void*>{&fake().cuda});
@@ -177,6 +183,14 @@ TEST_F(TensorRTLoader, InstalledSdkLoadsWithoutCreatingRuntime) {
   auto result = SdkLibraries::load();
   ASSERT_TRUE(result.has_value()) << result.error().message;
   EXPECT_EQ(result.value()->functions().infer_version(), NV_TENSORRT_VERSION);
+  result.value().reset();
+  for (const auto& name : {tensorrt_library_name(), cuda_library_name()}) {
+    void* handle = ::dlopen(name.c_str(), RTLD_NOLOAD | RTLD_NOW);
+    EXPECT_EQ(handle, nullptr) << name;
+    if (handle != nullptr) {
+      ::dlclose(handle);
+    }
+  }
 }
 
 }  // namespace
