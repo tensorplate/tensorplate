@@ -135,6 +135,8 @@ struct ServingWorker::Impl {
   /// Guards `stream` against a shutdown() that runs while start() sets it.
   /// Once set it stays until the worker is destroyed.
   std::mutex stream_mutex;
+  /// Declared before `control_target` and `control`, so it is destroyed after
+  /// them: the ledger reader bound to the target reads it until then.
   std::unique_ptr<serving::StreamListener> stream;
 #endif
   /// The drain of streams and of HTTP requests share it; it begins with

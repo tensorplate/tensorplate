@@ -1239,6 +1239,33 @@ TEST_F(SpeechWorkerScripted, ThePollCountsASessionFromItsAdmissionUntilItsReleas
   (void)served.stop();
 }
 
+// A poll after the stop reads the stopped listener: the cancelled session
+// whose job the backend still held when the listener stopped counts as
+// closing until the worker is gone.
+TEST_F(SpeechWorkerScripted, ThePollAfterTheStopCountsTheSlotTheListenerLeftHeld) {
+  register_backend();
+  backend->hold();
+  auto config = streaming_config(speech_model());
+  config.shutdown.drain_deadline = 300ms;
+  tensorplate::testing::OwnedFd agent;
+  auto built = member(config, agent);
+  ASSERT_NE(built, nullptr);
+  const Serving served{std::move(built), kServed};
+  auto client = served.ready(wire::SESSION_MODE_TTS_STREAMING);
+  ASSERT_TRUE(client.send_text(1, "held"));
+  ASSERT_NE(running_job().value("job_id", std::uint64_t{0}), 0U);
+  wire::ClientEvent cancel;
+  cancel.mutable_cancel();
+  ASSERT_TRUE(client.send(cancel));
+  const auto accepted = client.next();
+  ASSERT_TRUE(accepted.has_value());
+  ASSERT_TRUE(accepted->has_cancel_accepted()) << accepted->ShortDebugString();
+
+  (void)served.stop();
+  EXPECT_EQ(ask(agent.get(), ipc::WorkerControlOp::LedgerStatus).ledger,
+            (ipc::WorkerLedger{0, 0, 1, 1, {}}));
+}
+
 // The retire answers, asks for the stop and changes nothing else; the stop
 // main then runs, with no shutdown of its own, drains the session with the
 // retire's cause and window.
