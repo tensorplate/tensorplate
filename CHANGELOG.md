@@ -328,6 +328,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The `faster_whisper` runner profile runs `vad_frames` jobs with the Silero
+  voice-activity model the faster-whisper wheel carries, on one ONNX Runtime
+  CPU session per load with one intra-op and one inter-op thread and
+  telemetry events off. It takes the wheel's 512-sample frames and carries
+  Silero's recurrent state and the previous frame's last 64 samples from one
+  job of an utterance to the next, so an utterance scored over several jobs
+  gets the probabilities one call over all of it gives. A load fails with
+  `load_failed` when ONNX Runtime or the model is missing or the model does
+  not take that frame. The `speech-stt` development extra lists ONNX Runtime.
+  A `vad_frames` submit the sidecar answers with an `error_event` now resets
+  its session's next voice-activity job, as a refused one does
+  (V030-E05-F03-T01).
+
 - `tensorplate deploy --qualification --test-count <n>` deploys a speech
   bundle in qualification mode, unqualified and with no serving claim:
   every generation of the deployment serves `n` stream sessions at once
