@@ -629,6 +629,8 @@ mod tests {
                     serving_url: None,
                     stream_endpoint: None,
                     descriptor_digest: None,
+                    admission_mode: None,
+                    test_count: None,
                 }),
                 previous_active: None,
                 candidate: None,
@@ -670,6 +672,8 @@ mod tests {
                     serving_url: Some("http://127.0.0.1:18081/infer".into()),
                     stream_endpoint: None,
                     descriptor_digest: None,
+                    admission_mode: None,
+                    test_count: None,
                 }),
                 previous_active: None,
                 candidate: None,
@@ -703,6 +707,8 @@ mod tests {
             serving_url: serving_url.map(str::to_string),
             stream_endpoint: None,
             descriptor_digest: None,
+            admission_mode: None,
+            test_count: None,
         }
     }
 

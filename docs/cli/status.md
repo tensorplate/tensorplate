@@ -30,7 +30,15 @@ tensorplate status [--observability-snapshot <path>] [--no-quarantine] [--output
   `descriptor_digest=` under `active:`, the endpoint and digest a stream
   Open names with the generation; in JSON, `active`, `previous_active` and
   `candidate` always carry both keys, non-null only on `active` while its
-  serving generation streams. Not done yet: `severity` does not judge
+  serving generation streams. When the agent reports the mode the active
+  deployment was admitted under (from its deployment descriptor, which a
+  format 0.1 bundle has none of, or from its resident-set member), human
+  output adds `admission=production`, or
+  `admission=qualification (unqualified) test_count=<n>` for a deployment
+  made with `deploy --qualification --test-count <n>`, under `active:`; in
+  JSON, the three blocks always carry `admission_mode` and `test_count`
+  keys, non-null only on `active`, and `test_count` only in qualification
+  mode. Not done yet: `severity` does not judge
   `process` or `readiness`. It judges `contact`, and a member whose process
   is `stopped` or draining reports none, so a `serving` member whose process
   is `stopped` does not lower it.
@@ -109,6 +117,8 @@ worker from its actual state.
       "serving_url": "http://127.0.0.1:18081/infer",
       "stream_endpoint": null,
       "descriptor_digest": null,
+      "admission_mode": "production",
+      "test_count": null,
       …
     },
     "previous_active": null,

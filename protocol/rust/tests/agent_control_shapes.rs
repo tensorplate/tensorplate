@@ -19,15 +19,15 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 use tensorplate_protocol::agent_control::{
-    singleton_slots, ControlOp, ControlRequest, ControlResponse, DeployRequest, MemberRequest,
-    ResidentSetStatus, RollbackRequest, SetOperation, StatusRequest,
+    singleton_slots, ControlOp, ControlRequest, ControlResponse, DeployRequest, DeploymentSummary,
+    MemberRequest, ResidentSetStatus, RollbackRequest, SetOperation, StatusRequest,
 };
 use tensorplate_protocol::agent_state::decode_agent_state;
 use tensorplate_protocol::resident_set::{MemberState, ResidentSet};
 use tensorplate_protocol::{
-    decode_with_version_check, AdmissionMode, ContactState, DecodeError, ProcessState, Readiness,
-    FEATURE_DEPLOY_QUALIFICATION, FEATURE_DEPLOY_STREAMING, FEATURE_MEMBER_ROLLBACK,
-    FEATURE_SET_OPERATION_ADD, MAX_MEMBER_SESSIONS,
+    decode_with_version_check, AdmissionMode, ContactState, DecodeError, DomainQuotaBytes,
+    MemberQuota, ProcessState, Readiness, FEATURE_DEPLOY_QUALIFICATION, FEATURE_DEPLOY_STREAMING,
+    FEATURE_MEMBER_ROLLBACK, FEATURE_SET_OPERATION_ADD, MAX_MEMBER_SESSIONS,
 };
 
 const GOLDEN: &str = "agent_control_singleton_lifecycle.jsonl";
@@ -271,6 +271,10 @@ fn schema_enums_match_the_mirror() {
         defs["MemberStatus"]["properties"]["admission_mode"]["enum"],
         modes
     );
+    assert_eq!(
+        defs["DeploymentSummary"]["properties"]["admission_mode"]["enum"],
+        modes
+    );
     let states = [MemberState::Serving, MemberState::Quarantined];
     for state in states {
         match state {
@@ -350,6 +354,9 @@ fn the_test_count_and_the_quotas_share_the_member_session_ceiling() {
             .contains(&phrase),
         "the test_count description names the ceiling"
     );
+    let reported = &control["definitions"]["DeploymentSummary"]["properties"]["test_count"];
+    assert_eq!(reported["minimum"], json!(1));
+    assert_eq!(reported["maximum"], ceiling, "DeploymentSummary.test_count");
     for (file, schema) in [
         ("agent_control.json", &control),
         ("agent_state.json", &state),
@@ -1019,6 +1026,10 @@ fn a_size_one_set_projects_into_the_singleton_slots() {
     assert_ne!(member.generation, retained.generation);
     assert_eq!(active.generation, Some(member.generation));
     assert_eq!(previous.generation, Some(retained.generation));
+    assert_eq!(member.admission_mode, AdmissionMode::Production);
+    assert_eq!(active.admission_mode, Some(AdmissionMode::Production));
+    assert_eq!(active.test_count, None);
+    assert_eq!((previous.admission_mode, previous.test_count), (None, None));
     let response = json!({
         "schema_version": "0.1", "status": "ok",
         "agent_status": {
@@ -1028,6 +1039,128 @@ fn a_size_one_set_projects_into_the_singleton_slots() {
     });
     let errors = schema_error_paths(&response);
     assert!(errors.is_empty(), "schema errors at {errors:?}");
+}
+
+/// The restore-step fixture's set with its one member admitted in
+/// qualification mode under `quota`, as the state decoder reads it.
+fn qualification_set(quota: Value) -> ResidentSet {
+    let text = fixture("agent_state_0_2_restore_step.json");
+    let mut state: Value = serde_json::from_str(&text).expect("fixture");
+    let member = &mut state["resident_set"]["members"][0];
+    member["admission_mode"] = json!("qualification");
+    member["quota"] = quota;
+    decode_agent_state(&state.to_string())
+        .expect("the state decoder accepts it")
+        .resident_set
+        .expect("a set")
+}
+
+fn status_errors(
+    active: &DeploymentSummary,
+    previous: Option<&DeploymentSummary>,
+) -> BTreeSet<String> {
+    let mut status = json!({"agent_state": "ready", "active": active});
+    if let Some(previous) = previous {
+        status["previous_active"] = json!(previous);
+    }
+    schema_error_paths(&json!({"schema_version": "0.1", "status": "ok", "agent_status": status}))
+}
+
+#[test]
+fn a_qualification_member_projects_its_mode_and_test_count_into_active_only() {
+    let domains = json!({"guest_ram": 268_435_456, "device_vram": 1_073_741_824});
+    let set = qualification_set(json!({"session_count": 3, "domain_bytes": domains}));
+    let (active, previous) = singleton_slots(&set);
+    let active = active.expect("active");
+    assert_eq!(active.admission_mode, Some(AdmissionMode::Qualification));
+    assert_eq!(active.test_count, Some(3));
+    let previous = previous.expect("previous_active");
+    assert_eq!((previous.admission_mode, previous.test_count), (None, None));
+    let errors = status_errors(&active, Some(&previous));
+    assert!(errors.is_empty(), "schema errors at {errors:?}");
+}
+
+#[test]
+fn a_qualification_member_with_no_sessions_projects_no_admission() {
+    let set = qualification_set(json!({"session_count": 0, "domain_bytes": {}}));
+    let (active, _) = singleton_slots(&set);
+    let active = active.expect("active");
+    assert_eq!((active.admission_mode, active.test_count), (None, None));
+    let errors = status_errors(&active, None);
+    assert!(errors.is_empty(), "schema errors at {errors:?}");
+}
+
+#[test]
+fn a_summary_reports_only_an_admission_the_schema_can_carry() {
+    use AdmissionMode::{Production, Qualification};
+    let set = committed_set("agent_state_0_2_restore_step.json");
+    let (base, _) = singleton_slots(&set);
+    let base = base.expect("active");
+    let cases = [
+        (Production, 0, (Some(Production), None)),
+        (Production, 3, (Some(Production), None)),
+        (Qualification, 0, (None, None)),
+        (Qualification, 1, (Some(Qualification), Some(1))),
+        (
+            Qualification,
+            MAX_MEMBER_SESSIONS,
+            (Some(Qualification), Some(MAX_MEMBER_SESSIONS)),
+        ),
+        (Qualification, MAX_MEMBER_SESSIONS + 1, (None, None)),
+    ];
+    for (mode, session_count, expected) in cases {
+        let mut summary = base.clone();
+        let quota = MemberQuota {
+            session_count,
+            domain_bytes: DomainQuotaBytes::default(),
+        };
+        summary.set_admission(mode, &quota);
+        let reported = (summary.admission_mode, summary.test_count);
+        assert_eq!(reported, expected, "{mode:?} {session_count}");
+        let errors = status_errors(&summary, None);
+        assert!(errors.is_empty(), "{mode:?} {session_count}: {errors:?}");
+    }
+}
+
+#[test]
+fn the_schema_takes_a_summary_test_count_exactly_in_qualification_mode() {
+    let at = |path: &str| BTreeSet::from([path.to_string()]);
+    let cases = [
+        (json!({}), BTreeSet::new()),
+        (json!({"admission_mode": "production"}), BTreeSet::new()),
+        (
+            json!({"admission_mode": "qualification", "test_count": 3}),
+            BTreeSet::new(),
+        ),
+        (
+            json!({"admission_mode": "qualification"}),
+            at("/agent_status/active"),
+        ),
+        (
+            json!({"admission_mode": "production", "test_count": 3}),
+            at("/agent_status/active"),
+        ),
+        (json!({"test_count": 3}), at("/agent_status/active")),
+        (
+            json!({"admission_mode": "qualification", "test_count": 0}),
+            at("/agent_status/active/test_count"),
+        ),
+        (
+            json!({"admission_mode": "qualification", "test_count": MAX_MEMBER_SESSIONS + 1}),
+            at("/agent_status/active/test_count"),
+        ),
+    ];
+    for (fields, expected) in cases {
+        let mut active = json!({"deployment_id": "d1", "bundle_digest": "sha256:00"});
+        for (key, value) in fields.as_object().expect("fields") {
+            active[key] = value.clone();
+        }
+        let response = json!({
+            "schema_version": "0.1", "status": "ok",
+            "agent_status": {"agent_state": "ready", "active": active}
+        });
+        assert_eq!(schema_error_paths(&response), expected, "{fields}");
+    }
 }
 
 #[test]

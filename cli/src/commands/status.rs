@@ -249,6 +249,8 @@ fn summary_block(d: &DeploymentSummary) -> Value {
         "serving_url": d.serving_url,
         "stream_endpoint": d.stream_endpoint,
         "descriptor_digest": d.descriptor_digest,
+        "admission_mode": d.admission_mode,
+        "test_count": d.test_count,
     })
 }
 
@@ -492,6 +494,16 @@ fn render_human(
             ));
             if let Some(generation) = active.generation {
                 out.push_str(&format!("  generation={generation}\n"));
+            }
+            if let Some(mode) = active.admission_mode {
+                out.push_str(match mode {
+                    AdmissionMode::Production => "  admission=production",
+                    AdmissionMode::Qualification => "  admission=qualification (unqualified)",
+                });
+                if let Some(count) = active.test_count {
+                    out.push_str(&format!(" test_count={count}"));
+                }
+                out.push('\n');
             }
             if let Some(url) = active.serving_url.as_deref() {
                 out.push_str(&format!("  serving_url={url}\n"));
@@ -795,6 +807,8 @@ mod tests {
                 serving_url: None,
                 stream_endpoint: None,
                 descriptor_digest: None,
+                admission_mode: None,
+                test_count: None,
             }),
             previous_active: None,
             candidate: None,
@@ -939,6 +953,37 @@ mod tests {
             "unavailable_signal: name=power gate=load_bearing detail=power collector timed out"
         ));
         assert!(rendered.contains("degraded_reason=telemetry_degraded"));
+    }
+
+    #[test]
+    fn the_active_deployments_admission_is_rendered_as_the_agent_reports_it() {
+        let mut status = agent_status_with_active();
+        let block = agent_block(Some(&status));
+        assert_eq!(block["active"]["admission_mode"], Value::Null);
+        assert_eq!(block["active"]["test_count"], Value::Null);
+        let rendered = render_human(&profile(), Some(&status), None);
+        assert!(!rendered.contains("admission="), "{rendered}");
+
+        let active = status.active.as_mut().unwrap();
+        active.admission_mode = Some(AdmissionMode::Production);
+        let rendered = render_human(&profile(), Some(&status), None);
+        assert!(
+            rendered.contains("\n  admission=production\n"),
+            "{rendered}"
+        );
+        let block = agent_block(Some(&status));
+        assert_eq!(block["active"]["admission_mode"], "production");
+        assert_eq!(block["active"]["test_count"], Value::Null);
+
+        let active = status.active.as_mut().unwrap();
+        active.admission_mode = Some(AdmissionMode::Qualification);
+        active.test_count = Some(3);
+        let rendered = render_human(&profile(), Some(&status), None);
+        let line = "\n  admission=qualification (unqualified) test_count=3\n";
+        assert!(rendered.contains(line), "{rendered}");
+        let block = agent_block(Some(&status));
+        assert_eq!(block["active"]["admission_mode"], "qualification");
+        assert_eq!(block["active"]["test_count"], 3);
     }
 
     #[test]

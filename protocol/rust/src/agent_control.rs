@@ -584,6 +584,14 @@ pub struct DeploymentSummary {
     /// `stream_endpoint` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor_digest: Option<String>,
+    /// The mode the active deployment was admitted under, as its descriptor
+    /// or its resident-set member records it; only on `active`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_mode: Option<AdmissionMode>,
+    /// The operator's test count; present exactly when `admission_mode` is
+    /// `qualification`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_count: Option<u32>,
 }
 
 impl DeploymentSummary {
@@ -591,7 +599,7 @@ impl DeploymentSummary {
     /// `serving_url`.
     #[must_use]
     pub fn from_member(member: &ResidentMember, serving_url: Option<String>) -> Self {
-        Self {
+        let mut summary = Self {
             deployment_id: member.deployment_id.clone(),
             generation: Some(member.generation),
             bundle_digest: member.bundle_digest.clone(),
@@ -604,7 +612,11 @@ impl DeploymentSummary {
             serving_url,
             stream_endpoint: None,
             descriptor_digest: None,
-        }
+            admission_mode: None,
+            test_count: None,
+        };
+        summary.set_admission(member.admission_mode, &member.quota);
+        summary
     }
 
     /// The singleton summary of a retained generation.
@@ -623,7 +635,22 @@ impl DeploymentSummary {
             serving_url: None,
             stream_endpoint: None,
             descriptor_digest: None,
+            admission_mode: None,
+            test_count: None,
         }
+    }
+
+    /// Report `mode`, with `quota`'s session count as the test count in
+    /// qualification mode; neither for a count no test count can be.
+    pub fn set_admission(&mut self, mode: AdmissionMode, quota: &MemberQuota) {
+        let count = quota.session_count;
+        (self.admission_mode, self.test_count) = match mode {
+            AdmissionMode::Production => (Some(mode), None),
+            AdmissionMode::Qualification if (1..=MAX_MEMBER_SESSIONS).contains(&count) => {
+                (Some(mode), Some(count))
+            }
+            AdmissionMode::Qualification => (None, None),
+        };
     }
 }
 
