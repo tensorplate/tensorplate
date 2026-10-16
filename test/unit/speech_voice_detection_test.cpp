@@ -139,13 +139,20 @@ void expect_partial_held_before(const SpeechUnderTest& speech, std::uint64_t key
 }
 
 /// Releases the decodes expect_partial_held_before() saw held: the partial
-/// ends, its release lets the endpoint's own decode start, and that ends.
-/// False if any of it outlasts the patience.
+/// ends, its release lets the dispatch submit the endpoint's own decode, and
+/// that ends. It waits on the backend only: the dispatch takes that end
+/// through the manager its caller holds. False if any of it outlasts one
+/// patience.
 bool end_endpoints_decode(SpeechUnderTest& speech) {
+  const auto by = std::chrono::steady_clock::now() + Binding::kPatience;
+  const auto left = [by] {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(by -
+                                                                 std::chrono::steady_clock::now());
+  };
+  const std::size_t decodes = jobs_of(speech, JobClass::SttDecode).size();
   speech.fixture->release_jobs(JobClass::SttDecode);
-  return speech.fixture->settled(Binding::kPatience) &&
-         speech.strategy->wait_idle(Binding::kPatience) &&
-         speech.fixture->settled(Binding::kPatience);
+  return speech.bridge->handed(JobClass::SttDecode, decodes + 1, left()) &&
+         speech.fixture->settled(left());
 }
 
 void move_clock(Binding& binding, SchedulerClock::Duration by) {

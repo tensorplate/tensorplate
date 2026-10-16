@@ -176,7 +176,15 @@ class CountingJobBridge final : public BoundedJobBridge {
                                       "job_class_unsupported"));
       }
     }
+    const JobClass job_class = request.job_class();
     auto submitted = inner_->submit(std::move(request));
+    if (submitted) {
+      {
+        const std::lock_guard guard(mu_);
+        ++handed_[job_class];
+      }
+      gate_.notify_all();
+    }
     settle_if_told();
     return submitted;
   }
@@ -266,6 +274,12 @@ class CountingJobBridge final : public BoundedJobBridge {
     const auto found = releases_.find(session_key);
     return found == releases_.end() ? 0 : found->second;
   }
+  /// True once `count` jobs of `job_class` were handed to the backend.
+  [[nodiscard]] bool handed(JobClass job_class, std::size_t count,
+                            std::chrono::milliseconds patience) {
+    std::unique_lock lock(mu_);
+    return gate_.wait_for(lock, patience, [&] { return handed_[job_class] >= count; });
+  }
   /// Every request submit() was called with, in order, the refused too.
   [[nodiscard]] std::vector<JobRequest> submitted() const {
     const std::lock_guard guard(mu_);
@@ -298,6 +312,7 @@ class CountingJobBridge final : public BoundedJobBridge {
   std::shared_ptr<HeldAcknowledgements> acknowledgements_;
   std::map<std::uint64_t, std::uint64_t> releases_;
   std::vector<JobRequest> submitted_;
+  std::map<JobClass, std::size_t> handed_;
   std::vector<std::uint64_t> cancelled_;
   bool refuse_next_release_ = false;
   bool refuse_next_submit_ = false;
