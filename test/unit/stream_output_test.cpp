@@ -446,6 +446,47 @@ TEST(StreamOutput, TaskOutputIsEncodedWhenItIsTakenInTheSessionsFormat) {
   EXPECT_EQ(path.told, (std::vector<OutputKind>{OutputKind::Audio}));
 }
 
+// While a write is in flight, an unsent partial gives way to the newer
+// revision of its utterance and to the utterance's final.
+TEST(StreamOutput, AnUnsentPartialGivesWayToItsNewerRevisionAndToItsFinal) {
+  using tensorplate::serving::EndpointDetectedOutput;
+  using tensorplate::serving::FinalTranscriptOutput;
+  using tensorplate::serving::PartialTranscriptOutput;
+  Path path;
+  ASSERT_EQ(path.offer(PartialTranscriptOutput{1, 1, "syn"}), OutputOffer::Queued);
+  ASSERT_EQ(path.offer(PartialTranscriptOutput{1, 2, "synthetic"}), OutputOffer::Queued);
+  ASSERT_EQ(path.offer(PartialTranscriptOutput{1, 4, "synthetic words"}), OutputOffer::Replaced);
+  ASSERT_EQ(path.offer(EndpointDetectedOutput{1, 4'800, {}}), OutputOffer::Queued);
+  path.out->write_done(true);
+  path.out->write_done(true);
+  ASSERT_EQ(path.offer(FinalTranscriptOutput{1, {}, 4'800, 0}), OutputOffer::Queued);
+  ASSERT_EQ(path.offer(PartialTranscriptOutput{2, 1, "next"}), OutputOffer::Queued);
+  ASSERT_EQ(path.offer(EndpointDetectedOutput{2, 9'600, {}}), OutputOffer::Queued);
+  ASSERT_EQ(path.offer(FinalTranscriptOutput{2, {}, 9'600, 0}), OutputOffer::Queued);
+  ServerEvent terminal;
+  terminal.mutable_session_closed();
+  ASSERT_EQ(path.offer(terminal), OutputOffer::Queued);
+  for (int done = 0; done < 4; ++done) {
+    path.out->write_done(true);
+  }
+
+  const auto& written = path.writer.written;
+  ASSERT_EQ(written.size(), 7U);
+  EXPECT_EQ(path.writer.sequences(), (Sequences{1, 2, 3, 4, 5, 6, 7}));
+  ASSERT_TRUE(written[0].has_partial_transcript() && written[1].has_partial_transcript());
+  EXPECT_EQ(written[0].partial_transcript().revision(), 1U);
+  EXPECT_EQ(written[1].partial_transcript().revision(), 4U);
+  EXPECT_EQ(written[1].partial_transcript().text(), "synthetic words");
+  EXPECT_TRUE(written[2].has_endpoint_detected() && written[3].has_final_transcript());
+  EXPECT_TRUE(written[4].has_endpoint_detected() && written[5].has_final_transcript());
+  EXPECT_EQ(written[5].final_transcript().utterance_id(), 2U);
+  ASSERT_TRUE(written[6].has_session_closed());
+  EXPECT_EQ(written[6].session_closed().totals().utterances_completed(), 2U);
+  EXPECT_EQ(path.told,
+            (std::vector<OutputKind>{OutputKind::Partial, OutputKind::Partial, OutputKind::Result,
+                                     OutputKind::Result, OutputKind::Result, OutputKind::Result}));
+}
+
 TEST(StreamOutput, SessionClosedLeavesWithTheTotalsOfWhatWasTakenBeforeIt) {
   Path path{SessionBudgets::for_text_input(48'000).value()};
   tensorplate::serving::AudioChunkOutput chunk;

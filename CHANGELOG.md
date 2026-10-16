@@ -426,6 +426,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   and microseconds with checked arithmetic. (V030-E05-F03-T01,
   V030-E05-F03-T04)
 
+- The serving worker's stream binding sends `PartialTranscript` events for
+  a dispatch that offers partial transcripts: each the whole current
+  hypothesis of an utterance, its revision growing within the utterance.
+  A dispatch offers no partial of an utterance after its endpoint; while
+  unsent, a partial is replaced in place by the next partial of its
+  utterance and dropped when the utterance's final is queued, so a client
+  may miss revisions but never reads a partial after the endpoint. A
+  partial is charged to the session's metadata budget like a final. No
+  dispatch offers one yet; wire, schema and SDK are unchanged.
+  (V030-E05-F03-T01, V030-E05-F03-T04)
+
 - The serving worker serves several stream sessions at a time:
   `streaming.max_sessions` in its configuration (1 to 2,048 in the schema,
   1 by default) sets how many, and it is the ledger's `ceiling` and the

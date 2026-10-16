@@ -110,6 +110,14 @@ wire::EndpointReason wire_reason(EndpointReason reason) noexcept {
 struct TaskEvent {
   const StreamAudioFormat& format;
 
+  std::optional<wire::ServerEvent> operator()(const PartialTranscriptOutput& from) const {
+    wire::ServerEvent event;
+    auto& out = *event.mutable_partial_transcript();
+    out.set_utterance_id(from.utterance_id);
+    out.set_revision(from.revision);
+    out.set_text(from.text);
+    return event;
+  }
   std::optional<wire::ServerEvent> operator()(const EndpointDetectedOutput& from) const {
     wire::ServerEvent event;
     auto& out = *event.mutable_endpoint_detected();

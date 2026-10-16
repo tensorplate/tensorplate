@@ -1612,6 +1612,11 @@ TEST(SessionDispatch, TaskOutputItemsAreChargedByKind) {
   const auto answer = make_task_output_item(SynthesisCompletedOutput{1, 160, 7});
   EXPECT_EQ(answer.kind, OutputKind::Result);
   EXPECT_EQ(answer.bytes, kTaskOutputMessageUnits);
+
+  const auto partial = make_task_output_item(PartialTranscriptOutput{4, 2, "hello you"});
+  EXPECT_EQ(partial.kind, OutputKind::Partial);
+  EXPECT_EQ(partial.bytes, kTaskOutputMessageUnits + 9);
+  EXPECT_EQ(partial.replace_key, 4U);
 }
 }  // namespace
 }  // namespace tensorplate::testing

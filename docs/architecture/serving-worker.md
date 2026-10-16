@@ -295,16 +295,16 @@ line says `serves_sessions: false`.
   `Audio`, `TextSegment`, `Finalize`, `Cancel`, `Ping` (answered by `Pong`),
   `StatusRequest` (answered by `SessionStatus`) and a half-close, which
   drains and closes the session. To the client: `Ready`, `Accepted`,
-  `SessionStatus`, `Pong`, `CancelAccepted`, `EndpointDetected`,
-  `FinalTranscript`, `AudioChunk`, `SegmentCompleted`, `SynthesisCompleted`
-  and `SessionClosed`. No client event of the schema is refused as
-  unsupported. A message that does not parse as a client event (a
+  `SessionStatus`, `Pong`, `CancelAccepted`, `PartialTranscript`,
+  `EndpointDetected`, `FinalTranscript`, `AudioChunk`, `SegmentCompleted`,
+  `SynthesisCompleted` and `SessionClosed`. No client event of the schema is
+  refused as unsupported. A message that does not parse as a client event (a
   truncated one, or a `TextSegment` whose text is not UTF-8), a body the
   schema does not define, a second `Open`, or an event out of sequence or
-  naming another session fails the session with `invalid_event`, and
-  nothing behind it is read. No `PartialTranscript` is sent: the dispatch
-  contract has no partial result yet. `Ready` reports the deployment's
-  limits and the session's initial credit.
+  naming another session fails the session with `invalid_event`, and nothing
+  behind it is read. A `PartialTranscript` is sent only for a dispatch that
+  offers partial transcripts, and none does yet. `Ready` reports the
+  deployment's limits and the session's initial credit.
 - **Input.** The listener checks each `Audio` and `TextSegment` before it
   offers it to the manager, against the terms the dispatch granted and
   what the session accepted before. A check that fails fails the session
@@ -1471,7 +1471,8 @@ after the manager's call returns, outside its serialized section, so a
 drain can reach the dispatch first. A drain is not complete while the
 manager still counts accepted input that was not handed over or worked
 through, while an accepted client Finalize is still to be handed over,
-or while output of accepted work is undelivered. A binding therefore
+or while output of accepted work is undelivered, partial transcripts
+aside (see "Output"). A binding therefore
 hands over everything the manager accepted while the session lives,
 whatever happened in between; a hand-over that never arrives leaves the
 drain to the session's finalize deadline. For audio input, a client's
@@ -1501,15 +1502,24 @@ credit returns when its work starts and its active slot when the last
 item of its output was delivered.
 
 **Output.** The dispatch queues `TaskOutputBody` items only, as plain
-values the binding encodes: an utterance's endpoint and then its one
-final transcript; a segment's audio chunks and then its completion; and
-the answer to a text Finalize, once every segment accepted before it was
-delivered. `TaskOutput` will gain alternatives, a partial transcript
-first, so a binding's visitor over it has a default case. A chunk carries 20 ms of the session's audio format, the last
-of a segment possibly less. A result is charged its text plus a fixed
-number of budget units per message and per transcript segment. An offer
-answered `full` leaves the item with the dispatch, which produces nothing
-further for that session until the binding reports a delivery
+values the binding encodes: an utterance's partial transcripts, then its
+endpoint and then its one final transcript; a segment's audio chunks and
+then its completion; and the answer to a text Finalize, once every
+segment accepted before it was delivered. A partial transcript is the
+whole current hypothesis of an utterance, its revision growing within
+the utterance. A dispatch offers no partial of an utterance after its
+endpoint; while unsent, a partial is replaced in place by the next
+partial of its utterance and dropped when the utterance's final is
+queued, so a client may miss revisions but never reads a partial after
+the endpoint. A partial answered `replaced`, or dropped for its final,
+is never reported delivered, so a dispatch that waits for its output's
+delivery counts no partial. `TaskOutput` may gain alternatives, so a
+binding's visitor over it has a default case. A chunk carries 20 ms of the
+session's audio format, the last of a segment possibly less. A result or
+partial is charged its text plus a fixed number of budget units per
+message and per transcript segment. An offer answered `full` leaves the
+item with the dispatch, which produces nothing further for that session
+until the binding reports a delivery
 (`output_delivered`, after every confirmed delivery of any kind of
 item) and then offers it again; no timer covers a report the binding
 misses. Nothing is offered after `suppress_output`.
