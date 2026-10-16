@@ -213,7 +213,13 @@ class JobTable:
                     self._release_session(job_objects.read_session_release(header))
             except (job_objects.MalformedJob, job_objects.JobRefused) as exc:
                 self._refuse(header, getattr(exc, "reason", None))
+                self._reset_unrun(header)
             return True
+
+    def unrun(self, header: dict[str, Any]) -> None:
+        """Take note of a message the runner answers without the table: it runs nothing."""
+        with self._lock:
+            self._reset_unrun(header)
 
     def run(self, job: Job) -> None:
         """Run a job taken from a lane on the calling thread, then end and release it."""
@@ -286,6 +292,8 @@ class JobTable:
         if identity.job_id in self._jobs:
             # Not job messages: they would land in the live job's stream.
             self._refuse(header, "duplicate_job_id")
+            if job.vad:
+                self._reset_next(job.session)
         elif request is None:
             self._end(job, protocol.ERR_CONFIG_INVALID, refusal)
         elif request.job_class not in self._classes:
@@ -382,7 +390,22 @@ class JobTable:
         if following is not None:
             following.from_reset = True
         else:
-            self._vad_sessions.setdefault(job.session, _VadSession()).reset_next = True
+            self._reset_next(job.session)
+
+    def _reset_unrun(self, header: dict[str, Any]) -> None:
+        """A ``vad_frames`` submit that runs nothing resets its session's next job."""
+        if header.get("kind") != protocol.KIND_JOB_SUBMIT:
+            return
+        if header.get("job_class") != protocol.JOB_CLASS_VAD_FRAMES:
+            return
+        try:
+            session = job_objects.read_session(header)
+        except (job_objects.MalformedJob, job_objects.JobRefused):
+            return  # no session reads from it, so there is none to reset
+        self._reset_next(session)
+
+    def _reset_next(self, session: tuple[int, int]) -> None:
+        self._vad_sessions.setdefault(session, _VadSession()).reset_next = True
 
     def _release(self, job: Job) -> None:
         # The table lets go of the job and its buffers before it says so.

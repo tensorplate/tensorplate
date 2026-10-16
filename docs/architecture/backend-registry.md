@@ -986,7 +986,12 @@ and one that any entry file of those profiles can set.
   when a job ends without `job_completed`, the session's first job behind it
   in the lane starts from reset, or, with none waiting, its next admitted
   job does. A running job has every waiting job behind it; a refused one
-  never held a place, so the jobs ahead of it keep their state. Every
+  never held a place, so the jobs ahead of it keep their state. A
+  `vad_frames` submit answered with an `error_event` runs nothing either:
+  one the sidecar cannot read (its envelope included), one that arrives
+  while too many requests wait, or one that reuses an unreleased job's id.
+  It resets the session's next admitted job when its session key and
+  generation read; without them there is no session to reset. Every
   completed job stores what it returned. `session_released` and a load or
   unload drop the state. The backend keeps no per-session state.
 - **Admission.** `job_accepted` is sent when the job is admitted, not when it

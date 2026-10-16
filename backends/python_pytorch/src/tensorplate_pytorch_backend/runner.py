@@ -343,6 +343,7 @@ class SidecarRunner:
         elif kind in _JOB_KINDS and self._table.handle(frame):
             return
         else:
+            self._table.unrun(frame.header)
             if self._table.offer(frame, kind in (protocol.KIND_LOAD_MODEL, protocol.KIND_UNLOAD)):
                 return
             code = protocol.ERR_RESOURCE_EXHAUSTED

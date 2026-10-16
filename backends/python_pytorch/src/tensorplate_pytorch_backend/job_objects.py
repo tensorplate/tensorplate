@@ -181,6 +181,12 @@ def read_cancel(header: Mapping[str, Any]) -> JobIdentity:
     return read_identity(_fields(header, (*_ENVELOPE, *_IDENTITY)))
 
 
+def read_session(header: Mapping[str, Any]) -> tuple[int, int]:
+    """The session key and generation a job message names, whatever else it carries."""
+    session = read_identity({**{name: header.get(name) for name in _IDENTITY[1:]}, "job_id": 1})
+    return session.session_key, session.generation
+
+
 def read_session_release(header: Mapping[str, Any]) -> tuple[int, int]:
     """The session key and generation of a ``session_release``."""
     session = read_identity({**_fields(header, (*_ENVELOPE, *_IDENTITY[1:])), "job_id": 1})
@@ -458,6 +464,7 @@ __all__ = [
     "job_event",
     "read_cancel",
     "read_identity",
+    "read_session",
     "read_session_release",
     "read_submit",
     "render_result",

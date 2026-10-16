@@ -21,6 +21,7 @@ from test_speech_jobs_golden_replay import connect as connect  # the fixture
 from test_speech_jobs_runner import (
     ACCEPTED,
     ACKNOWLEDGED,
+    ERROR_EVENT,
     FAILED,
     SESSION_RELEASED,
     assert_quiet,
@@ -309,6 +310,69 @@ def test_a_job_that_ends_unscored_beside_a_running_one_resets_the_next_admitted_
     assert read(peer, 2) == ended(50)
     _completes(peer, 3, 4)
     carried = "after 1" if end.endswith("another session") else None
+    assert _Recording.given == [(1, None), (3, carried), (4, "after 3")]
+
+
+def _answered() -> list[Any]:
+    """Messages answered with ``error_event``: the error, and what session 1's next job gets."""
+    vad = vad_submit(2, frames=1)
+    cases: list[tuple[str, dict[str, Any], bytes | None, tuple[str, ...], str | None]] = [
+        ("unparsed", vad, b"", ("config_invalid",), None),
+        ("job-id-zero", {**vad, "job_id": 0}, None, ("config_invalid", "job_id_zero"), None),
+        ("unknown-field", {**vad, "unknown": 1}, None, ("config_invalid",), None),
+        ("schema-version", {**vad, "schema_version": "9.9"}, None, ("unsupported",), None),
+        ("no-message-id", {**vad, "message_id": ""}, None, ("config_invalid",), None),
+        (
+            "duplicate-id",
+            {**vad_submit(1), "message_id": "d1"},
+            None,
+            ("config_invalid", "duplicate_job_id"),
+            None,
+        ),
+        # These leave the state: no session reads, another session, or not a VAD submit.
+        (
+            "no-session",
+            {**vad, "session_key": 0},
+            None,
+            ("config_invalid", "session_key_zero"),
+            "after 1",
+        ),
+        ("other-generation", {**vad, "generation": 2}, b"", ("config_invalid",), "after 1"),
+        ("unparsed-decode", submit(2), b"", ("config_invalid",), "after 1"),
+        (
+            "duplicate-decode-id",
+            {**submit(1), "message_id": "d1"},
+            None,
+            ("config_invalid", "duplicate_job_id"),
+            "after 1",
+        ),
+        (
+            "cancel-naming-the-class",
+            message(protocol.KIND_JOB_CANCEL, 1, job_class="vad_frames"),
+            None,
+            ("config_invalid",),
+            "after 1",
+        ),
+    ]
+    return [pytest.param(*case[1:], id=case[0]) for case in cases]
+
+
+@pytest.mark.parametrize(("header", "payload", "error", "carried"), _answered())
+def test_a_vad_frames_submit_answered_with_error_event_resets_its_sessions_next_job(
+    connect: Callable[..., Peer],
+    monkeypatch: pytest.MonkeyPatch,
+    header: dict[str, Any],
+    payload: bytes | None,
+    error: tuple[str, ...],
+    carried: str | None,
+) -> None:
+    peer, gate = _recording(connect, monkeypatch)
+    # A submit without a message id is answered under a generated one.
+    answer = digest(exchange(peer, header, payload))
+    assert (answer[0], *answer[2:]) == (ERROR_EVENT, *error)
+    gate.set()
+    assert read(peer, 2) == ended(1)
+    _completes(peer, 3, 4)
     assert _Recording.given == [(1, None), (3, carried), (4, "after 3")]
 
 
