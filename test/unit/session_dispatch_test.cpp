@@ -770,7 +770,6 @@ TEST_P(SessionDispatchContract, AnEndpointDuringAnEndpointsFinalizationJoinsIt) 
     EXPECT_EQ(binding.live_state(key), State::Finalizing);
     EXPECT_EQ(binding.manager->status(key).value().input_credit_bytes.used(), sizes.longest_frame);
 
-    binding.under_test->release_jobs();
     // Both endpoints are offered at detection; the second utterance lies
     // wholly inside the silence run.
     const auto second = std::span{audio}.subspan(longest, scored - longest);
@@ -778,6 +777,7 @@ TEST_P(SessionDispatchContract, AnEndpointDuringAnEndpointsFinalizationJoinsIt) 
                                                     std::span{audio}.first(longest)));
     ASSERT_NO_FATAL_FAILURE(
         binding.expect_endpoint(key, EndpointReason::Silence, 2, longest / sizes.sample, second));
+    binding.under_test->release_jobs();
     ASSERT_NO_FATAL_FAILURE(
         binding.expect_transcript(key, 1, 0, std::span{audio}.first(longest), 0));
     ASSERT_NO_FATAL_FAILURE(
