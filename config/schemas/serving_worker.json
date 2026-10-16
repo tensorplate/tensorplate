@@ -23,6 +23,13 @@
           "maximum": 65535,
           "default": 0,
           "description": "TCP port of the stream listener, on bind.host and under the same loopback rule; with streaming enabled it must differ from bind.port. 0 requests an ephemeral port."
+        },
+        "max_sessions": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2048,
+          "default": 1,
+          "description": "Stream sessions the worker serves at one time, each holding its place until its backend release; it is the worker's ledger ceiling and the session count its activate answers. The serving worker refuses a value above 64 with config_invalid while a session's memory is not charged to the deployment's memory budget."
         }
       }
     },
