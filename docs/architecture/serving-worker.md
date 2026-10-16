@@ -2074,25 +2074,29 @@ schema allows 1 to 2,048, the control channel's bound. This worker
 refuses more than 64 with `config_invalid`, because no memory budget
 charges what a session holds yet:
 
-- an audio session holds at most 3,904,768 bytes outside the buffer
+- an audio session holds at most 3,915,008 bytes outside the buffer
   manager: three ended utterances waiting for their finals and the one
   being collected, each allocated at its longest, 960,000 bytes (30
   seconds), when its first frame arrives; up to one second of frames
-  handed to the dispatch and not yet taken (32,000 bytes); and its
-  transcripts, up to 16,384 bytes in its output queue as the queue
-  charges them and two outside it of up to 8,192 bytes of text each. A
-  decode copies its utterance into the buffer manager and frees the
-  session's copy; that input stays until the backend reports the job
-  released, up to 960,000 bytes for each decode not yet released;
+  handed to the dispatch and not yet taken (32,000 bytes) and the frame
+  being taken (up to 10,240 bytes); and its transcripts, up to 16,384
+  bytes in its output queue as the queue charges them, one waiting
+  outside it and the last one sent still encoded in the stream, up to
+  8,192 bytes of text each. A decode copies its utterance into the
+  buffer manager and frees the session's copy; that input stays until
+  the backend reports the job released, up to 960,000 bytes for each
+  decode not yet released (the python_pytorch adapter keeps at most 16
+  jobs unreleased);
 - a text session holds the synthesized result of its segment, up to
   1,440,000 bytes (30 seconds at 24 kHz), in the buffer manager the worker
-  shares with HTTP, 256 MiB by default, and up to 125,632 bytes outside
+  shares with HTTP, 256 MiB by default, and up to 126,592 bytes outside
   it: the 20 ms chunks copied from that result, two seconds of them in
-  its output queue until delivered (96,000 bytes) and the next one (960
-  bytes); up to 16,384 bytes of other messages in the queue; and its
-  text, 4,096 bytes in the segment being synthesized and 8,192 waiting;
-- so 64 sessions hold at most about 350 MB of host memory, 64 x
-  (3,904,768 + 1,440,000 + 125,632) bytes, counting both kinds for every
+  its output queue until delivered (96,000 bytes), the next one and the
+  last one sent, still encoded in the stream (960 bytes each); up to
+  16,384 bytes of other messages in the queue; and its text, 4,096 bytes
+  in the segment being synthesized and 8,192 waiting;
+- so 64 sessions hold at most about 351 MB of host memory, 64 x
+  (3,915,008 + 1,440,000 + 126,592) bytes, counting both kinds for every
   session although each holds one or the other, plus the input of each
   decode not yet released; the buffer manager holds about 92 MB of it,
   64 x 1,440,000 bytes, plus those inputs.
@@ -2100,8 +2104,9 @@ charges what a session holds yet:
 The bound goes once that memory is charged against the deployment's
 budget. 64 is also the streams one connection may carry, inside the
 listener's 256 connections: at 64, a client's 65th stream on a
-connection that already carries 64 waits in gRPC and fails at the
-client's deadline, while on a connection of its own it is refused
+connection that already carries 64 waits in gRPC until one of the 64
+ends or the client's deadline passes, while on a connection of its own
+it is refused
 `session_count_limit` at once; gRPC's subchannel pool may put two
 channels opened with equal arguments on one connection.
 

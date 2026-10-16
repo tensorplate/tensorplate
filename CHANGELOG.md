@@ -333,7 +333,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   1 by default) sets how many, and it is the ledger's `ceiling` and the
   session count `activate` answers. This worker refuses more than 64 with
   `config_invalid` until the memory a session holds is charged to the
-  deployment's budget (at most about 350 MB of host memory at 64, plus
+  deployment's budget (at most about 351 MB of host memory at 64, plus
   each decode's input until the backend releases the job). The sessions
   share the speech dispatch's one job in flight and take turns, one job
   per session. A session's jobs wait behind the other sessions', and its

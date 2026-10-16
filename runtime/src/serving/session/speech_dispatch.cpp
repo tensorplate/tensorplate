@@ -561,7 +561,7 @@ void SpeechJobDispatch::release(SessionManager& manager, std::uint64_t key, Sess
   session.waiting.clear();
   session.active.reset();
   session.ended_utterances.clear();
-  session.open_audio = {};
+  std::vector<std::byte>().swap(session.open_audio);
   session.release_asked = clock_.now();
   session.release_bound_at = release_due(key, session);
   // The bridge cancels the session's unfinished job with it.
@@ -773,7 +773,7 @@ std::optional<JobRequest> SpeechJobDispatch::next_request(SessionManager& manage
   std::copy(utterance.audio.begin(), utterance.audio.end(), bytes->begin());
   const std::size_t size = utterance.audio.size();
   // The buffer is what stays readable for the job from here on.
-  utterance.audio = {};
+  std::vector<std::byte>().swap(utterance.audio);
   JobOptions options;
   options.language = session.terms.language;
   auto decode = JobRequest::create(
