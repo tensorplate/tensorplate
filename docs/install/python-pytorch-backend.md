@@ -250,6 +250,11 @@ when ONNX Runtime cannot be imported, the model cannot be opened, or the
 model does not take the wheel's 512-sample frame with its 64-sample
 context.
 
+The sidecar's `stt_decode` jobs do not call `transcribe`: each is one pass
+over its window through faster-whisper's own padding, tokenizer, token
+suppression and word alignment (see `docs/architecture/backend-registry.md`),
+and a load fails with `load_failed` when those cannot be imported.
+
 The profile imports `faster_whisper`, `ctranslate2`, `onnxruntime` and
 `numpy` only when a model loads. `pip install ".[speech-stt]"` in
 `backends/python_pytorch/` installs faster-whisper, CTranslate2 and ONNX

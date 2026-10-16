@@ -1,0 +1,856 @@
+{
+ "recorded_with": {
+  "faster-whisper": "1.2.1",
+  "ctranslate2": "4.8.2",
+  "numpy": "2.5.4",
+  "tokenizers": "0.23.3",
+  "av": "15.1.0",
+  "python": "3.12.3"
+ },
+ "model": {
+  "device": "cpu",
+  "compute_type": "int8",
+  "loaded_compute_type": "int8_float32",
+  "cpu_threads": 4,
+  "omp_num_threads": null,
+  "files_sha256": {
+   "config.json": "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e",
+   "model.bin": "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da",
+   "preprocessor_config.json": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+   "tokenizer.json": "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd",
+   "vocabulary.json": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"
+  }
+ },
+ "clip": {
+  "sha256": "63a4b1e4c1dc655ac70961ffbf518acd249df237e5a0152faae9a4a836949715",
+  "pcm_sha256": "252fca5b7c2acd89dfd4c01b27c67e7e6a6f5ab7d9973e9963732f8307a744d3"
+ },
+ "job": {
+  "language": "en",
+  "start_sample": 160000,
+  "samples": 176000
+ },
+ "generate": {
+  "prompt": [
+   50258,
+   50259,
+   50360,
+   50364
+  ],
+  "options": {
+   "beam_size": 1,
+   "patience": 1,
+   "length_penalty": 1,
+   "repetition_penalty": 1,
+   "no_repeat_ngram_size": 0,
+   "max_length": 888,
+   "suppress_blank": true,
+   "suppress_tokens": [
+    1,
+    2,
+    7,
+    8,
+    9,
+    10,
+    14,
+    25,
+    26,
+    27,
+    28,
+    29,
+    31,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    90,
+    91,
+    92,
+    93,
+    359,
+    503,
+    522,
+    542,
+    873,
+    893,
+    902,
+    918,
+    922,
+    931,
+    1350,
+    1853,
+    1982,
+    2460,
+    2627,
+    3246,
+    3253,
+    3268,
+    3536,
+    3846,
+    3961,
+    4183,
+    4667,
+    6585,
+    6647,
+    7273,
+    9061,
+    9383,
+    10428,
+    10929,
+    11938,
+    12033,
+    12331,
+    12562,
+    13793,
+    14157,
+    14635,
+    15265,
+    15618,
+    16553,
+    16604,
+    18362,
+    18956,
+    20075,
+    21675,
+    22520,
+    26130,
+    26161,
+    26435,
+    28279,
+    29464,
+    31650,
+    32302,
+    32470,
+    36865,
+    42863,
+    47425,
+    49870,
+    50254,
+    50258,
+    50359,
+    50360,
+    50361,
+    50362,
+    50363
+   ]
+  },
+  "tokens": [
+   400,
+   370,
+   11,
+   452,
+   7177,
+   6280,
+   11,
+   1029,
+   406,
+   437,
+   428,
+   1941,
+   393,
+   360,
+   337,
+   291,
+   11,
+   1029,
+   437,
+   291,
+   393,
+   360,
+   337,
+   428,
+   1941,
+   13
+  ]
+ },
+ "align": {
+  "text_tokens": [
+   [
+    400,
+    370,
+    11,
+    452,
+    7177,
+    6280,
+    11,
+    1029,
+    406,
+    437,
+    428,
+    1941,
+    393,
+    360,
+    337,
+    291,
+    11,
+    1029,
+    437,
+    291,
+    393,
+    360,
+    337,
+    428,
+    1941,
+    13
+   ]
+  ],
+  "num_frames": 1100
+ },
+ "alignment": [
+  {
+   "word": " And",
+   "tokens": [
+    400
+   ],
+   "start": 0.0,
+   "end": 0.52,
+   "probability": 0.7876841425895691
+  },
+  {
+   "word": " so",
+   "tokens": [
+    370
+   ],
+   "start": 0.52,
+   "end": 0.86,
+   "probability": 0.9960141181945801
+  },
+  {
+   "word": ",",
+   "tokens": [
+    11
+   ],
+   "start": 0.86,
+   "end": 1.08,
+   "probability": 0.5467091798782349
+  },
+  {
+   "word": " my",
+   "tokens": [
+    452
+   ],
+   "start": 1.08,
+   "end": 1.2,
+   "probability": 0.9984837174415588
+  },
+  {
+   "word": " fellow",
+   "tokens": [
+    7177
+   ],
+   "start": 1.2,
+   "end": 1.54,
+   "probability": 0.9992351531982422
+  },
+  {
+   "word": " Americans",
+   "tokens": [
+    6280
+   ],
+   "start": 1.54,
+   "end": 2.12,
+   "probability": 0.9824764728546143
+  },
+  {
+   "word": ",",
+   "tokens": [
+    11
+   ],
+   "start": 2.12,
+   "end": 3.3,
+   "probability": 0.8554346561431885
+  },
+  {
+   "word": " ask",
+   "tokens": [
+    1029
+   ],
+   "start": 3.3,
+   "end": 3.78,
+   "probability": 0.9871857762336731
+  },
+  {
+   "word": " not",
+   "tokens": [
+    406
+   ],
+   "start": 3.78,
+   "end": 4.34,
+   "probability": 0.9801810383796692
+  },
+  {
+   "word": " what",
+   "tokens": [
+    437
+   ],
+   "start": 4.34,
+   "end": 5.56,
+   "probability": 0.9861578941345215
+  },
+  {
+   "word": " your",
+   "tokens": [
+    428
+   ],
+   "start": 5.56,
+   "end": 5.8,
+   "probability": 0.9943796992301941
+  },
+  {
+   "word": " country",
+   "tokens": [
+    1941
+   ],
+   "start": 5.8,
+   "end": 6.24,
+   "probability": 0.9992765784263611
+  },
+  {
+   "word": " can",
+   "tokens": [
+    393
+   ],
+   "start": 6.24,
+   "end": 6.62,
+   "probability": 0.9996010661125183
+  },
+  {
+   "word": " do",
+   "tokens": [
+    360
+   ],
+   "start": 6.62,
+   "end": 6.82,
+   "probability": 0.9996528625488281
+  },
+  {
+   "word": " for",
+   "tokens": [
+    337
+   ],
+   "start": 6.82,
+   "end": 7.06,
+   "probability": 0.9993821382522583
+  },
+  {
+   "word": " you",
+   "tokens": [
+    291
+   ],
+   "start": 7.06,
+   "end": 7.42,
+   "probability": 0.999735414981842
+  },
+  {
+   "word": ",",
+   "tokens": [
+    11
+   ],
+   "start": 7.42,
+   "end": 7.78,
+   "probability": 0.6343600153923035
+  },
+  {
+   "word": " ask",
+   "tokens": [
+    1029
+   ],
+   "start": 7.78,
+   "end": 8.52,
+   "probability": 0.9974908828735352
+  },
+  {
+   "word": " what",
+   "tokens": [
+    437
+   ],
+   "start": 8.52,
+   "end": 8.8,
+   "probability": 0.9994314312934875
+  },
+  {
+   "word": " you",
+   "tokens": [
+    291
+   ],
+   "start": 8.8,
+   "end": 9.04,
+   "probability": 0.9967442750930786
+  },
+  {
+   "word": " can",
+   "tokens": [
+    393
+   ],
+   "start": 9.04,
+   "end": 9.34,
+   "probability": 0.9998385906219482
+  },
+  {
+   "word": " do",
+   "tokens": [
+    360
+   ],
+   "start": 9.34,
+   "end": 9.56,
+   "probability": 0.9995655417442322
+  },
+  {
+   "word": " for",
+   "tokens": [
+    337
+   ],
+   "start": 9.56,
+   "end": 9.78,
+   "probability": 0.999738872051239
+  },
+  {
+   "word": " your",
+   "tokens": [
+    428
+   ],
+   "start": 9.78,
+   "end": 9.96,
+   "probability": 0.9993670582771301
+  },
+  {
+   "word": " country",
+   "tokens": [
+    1941
+   ],
+   "start": 9.96,
+   "end": 10.34,
+   "probability": 0.9998101592063904
+  },
+  {
+   "word": ".",
+   "tokens": [
+    13
+   ],
+   "start": 10.34,
+   "end": 10.58,
+   "probability": 0.9775665402412415
+  }
+ ],
+ "merged": [
+  {
+   "word": " And",
+   "tokens": [
+    400
+   ],
+   "start": 0.0,
+   "end": 0.52,
+   "probability": 0.7876841425895691
+  },
+  {
+   "word": " so,",
+   "tokens": [
+    370,
+    11
+   ],
+   "start": 0.52,
+   "end": 0.86,
+   "probability": 0.9960141181945801
+  },
+  {
+   "word": "",
+   "tokens": [],
+   "start": 0.86,
+   "end": 1.08,
+   "probability": 0.5467091798782349
+  },
+  {
+   "word": " my",
+   "tokens": [
+    452
+   ],
+   "start": 1.08,
+   "end": 1.2,
+   "probability": 0.9984837174415588
+  },
+  {
+   "word": " fellow",
+   "tokens": [
+    7177
+   ],
+   "start": 1.2,
+   "end": 1.54,
+   "probability": 0.9992351531982422
+  },
+  {
+   "word": " Americans,",
+   "tokens": [
+    6280,
+    11
+   ],
+   "start": 1.54,
+   "end": 2.12,
+   "probability": 0.9824764728546143
+  },
+  {
+   "word": "",
+   "tokens": [],
+   "start": 2.12,
+   "end": 3.3,
+   "probability": 0.8554346561431885
+  },
+  {
+   "word": " ask",
+   "tokens": [
+    1029
+   ],
+   "start": 3.3,
+   "end": 3.78,
+   "probability": 0.9871857762336731
+  },
+  {
+   "word": " not",
+   "tokens": [
+    406
+   ],
+   "start": 3.78,
+   "end": 4.34,
+   "probability": 0.9801810383796692
+  },
+  {
+   "word": " what",
+   "tokens": [
+    437
+   ],
+   "start": 4.34,
+   "end": 5.56,
+   "probability": 0.9861578941345215
+  },
+  {
+   "word": " your",
+   "tokens": [
+    428
+   ],
+   "start": 5.56,
+   "end": 5.8,
+   "probability": 0.9943796992301941
+  },
+  {
+   "word": " country",
+   "tokens": [
+    1941
+   ],
+   "start": 5.8,
+   "end": 6.24,
+   "probability": 0.9992765784263611
+  },
+  {
+   "word": " can",
+   "tokens": [
+    393
+   ],
+   "start": 6.24,
+   "end": 6.62,
+   "probability": 0.9996010661125183
+  },
+  {
+   "word": " do",
+   "tokens": [
+    360
+   ],
+   "start": 6.62,
+   "end": 6.82,
+   "probability": 0.9996528625488281
+  },
+  {
+   "word": " for",
+   "tokens": [
+    337
+   ],
+   "start": 6.82,
+   "end": 7.06,
+   "probability": 0.9993821382522583
+  },
+  {
+   "word": " you,",
+   "tokens": [
+    291,
+    11
+   ],
+   "start": 7.06,
+   "end": 7.42,
+   "probability": 0.999735414981842
+  },
+  {
+   "word": "",
+   "tokens": [],
+   "start": 7.42,
+   "end": 7.78,
+   "probability": 0.6343600153923035
+  },
+  {
+   "word": " ask",
+   "tokens": [
+    1029
+   ],
+   "start": 7.78,
+   "end": 8.52,
+   "probability": 0.9974908828735352
+  },
+  {
+   "word": " what",
+   "tokens": [
+    437
+   ],
+   "start": 8.52,
+   "end": 8.8,
+   "probability": 0.9994314312934875
+  },
+  {
+   "word": " you",
+   "tokens": [
+    291
+   ],
+   "start": 8.8,
+   "end": 9.04,
+   "probability": 0.9967442750930786
+  },
+  {
+   "word": " can",
+   "tokens": [
+    393
+   ],
+   "start": 9.04,
+   "end": 9.34,
+   "probability": 0.9998385906219482
+  },
+  {
+   "word": " do",
+   "tokens": [
+    360
+   ],
+   "start": 9.34,
+   "end": 9.56,
+   "probability": 0.9995655417442322
+  },
+  {
+   "word": " for",
+   "tokens": [
+    337
+   ],
+   "start": 9.56,
+   "end": 9.78,
+   "probability": 0.999738872051239
+  },
+  {
+   "word": " your",
+   "tokens": [
+    428
+   ],
+   "start": 9.78,
+   "end": 9.96,
+   "probability": 0.9993670582771301
+  },
+  {
+   "word": " country.",
+   "tokens": [
+    1941,
+    13
+   ],
+   "start": 9.96,
+   "end": 10.34,
+   "probability": 0.9998101592063904
+  },
+  {
+   "word": "",
+   "tokens": [],
+   "start": 10.34,
+   "end": 10.58,
+   "probability": 0.9775665402412415
+  }
+ ],
+ "result": {
+  "text": " And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.",
+  "tokens": [
+   400,
+   370,
+   11,
+   452,
+   7177,
+   6280,
+   11,
+   1029,
+   406,
+   437,
+   428,
+   1941,
+   393,
+   360,
+   337,
+   291,
+   11,
+   1029,
+   437,
+   291,
+   393,
+   360,
+   337,
+   428,
+   1941,
+   13
+  ],
+  "words": [
+   [
+    " And",
+    0,
+    1,
+    160000,
+    168320
+   ],
+   [
+    " so,",
+    1,
+    3,
+    168320,
+    173760
+   ],
+   [
+    " my",
+    3,
+    4,
+    177280,
+    179200
+   ],
+   [
+    " fellow",
+    4,
+    5,
+    179200,
+    184640
+   ],
+   [
+    " Americans,",
+    5,
+    7,
+    184640,
+    193920
+   ],
+   [
+    " ask",
+    7,
+    8,
+    212800,
+    220480
+   ],
+   [
+    " not",
+    8,
+    9,
+    220480,
+    229440
+   ],
+   [
+    " what",
+    9,
+    10,
+    229440,
+    248960
+   ],
+   [
+    " your",
+    10,
+    11,
+    248960,
+    252800
+   ],
+   [
+    " country",
+    11,
+    12,
+    252800,
+    259840
+   ],
+   [
+    " can",
+    12,
+    13,
+    259840,
+    265920
+   ],
+   [
+    " do",
+    13,
+    14,
+    265920,
+    269120
+   ],
+   [
+    " for",
+    14,
+    15,
+    269120,
+    272960
+   ],
+   [
+    " you,",
+    15,
+    17,
+    272960,
+    278720
+   ],
+   [
+    " ask",
+    17,
+    18,
+    284480,
+    296320
+   ],
+   [
+    " what",
+    18,
+    19,
+    296320,
+    300800
+   ],
+   [
+    " you",
+    19,
+    20,
+    300800,
+    304640
+   ],
+   [
+    " can",
+    20,
+    21,
+    304640,
+    309440
+   ],
+   [
+    " do",
+    21,
+    22,
+    309440,
+    312960
+   ],
+   [
+    " for",
+    22,
+    23,
+    312960,
+    316480
+   ],
+   [
+    " your",
+    23,
+    24,
+    316480,
+    319360
+   ],
+   [
+    " country.",
+    24,
+    26,
+    319360,
+    325440
+   ]
+  ]
+ }
+}

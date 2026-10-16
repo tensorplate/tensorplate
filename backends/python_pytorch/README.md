@@ -79,6 +79,10 @@ need none of them. To run the profile itself against the real engine:
 pip install -e ".[dev,speech-stt]"
 ```
 
+Its `stt_decode` jobs are also checked against a record of the real model
+(`tests/fixtures/whisper_window/`), which says how to run them against the
+real model too.
+
 The `kokoro` runner (`backends/kokoro.py`) synthesizes bounded text using
 verified local model and static voice artifacts. Its entry and tensor contract,
 PCM conversion, error behavior and deserialization threat review are documented
