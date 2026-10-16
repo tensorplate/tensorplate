@@ -297,7 +297,10 @@ backend by the in-tree sidecar runner's rules: `stt_decode` and
 one job runs and eight wait in submission order; one more ends with
 `failed` (`job_capacity_exhausted`) without `accepted`, as does a
 `vad_frames` job whose frames are not 512 samples (`job_not_permitted`),
-which is checked first; a job is `accepted` when it is taken in; a
+which is checked first; `submit` refuses a job (`job_capacity_exhausted`)
+while 16 are unreleased in both lanes together, as the adapter's job
+channel does, so with both lanes in use the seventeenth is refused before
+either lane is full; a job is `accepted` when it is taken in; a
 cancellation is acknowledged at once and ends a waiting job
 then, the running one when its work returns, both as `cancelled`; a session
 release cancels the session's unfinished jobs, the running one included; a
@@ -335,7 +338,7 @@ every callback for it has returned, an unload's on another thread
 included (`settled`), and read the events of the fixture's own backend
 that a job's order refused, which are none unless the fixture is wrong.
 
-It differs from the adapter with a real sidecar in six ways. A job starts
+It differs from the adapter with a real sidecar in five ways. A job starts
 at its submit when nothing runs in its lane, so the eight that wait are
 exact, where the runner counts a job its lane's thread has not taken yet
 among them. A
@@ -344,10 +347,9 @@ finds a started job before its work, which then does not run, or after its
 end, never in between; it comes before the work for certain while a test
 holds the jobs, and for a job cancelled by the callback that submitted it.
 An unload fails every unfinished job with `session_unloaded` at once, where
-the runner fails the waiting ones itself and lets the running ones end. The
-fake it wraps refuses a submit while 64 jobs are unreleased. A prime after
-an unload or a loss does not reopen it: there is no second load of one
-session. And `release_session` on a lost or unloaded backend answers
+the runner fails the waiting ones itself and lets the running ones end. A
+prime after an unload or a loss does not reopen it: there is no second load
+of one session. And `release_session` on a lost or unloaded backend answers
 `backend_unavailable` before it looks at the sink or the arguments.
 
 The fixture's results are held to the golden frames of the sidecar's job

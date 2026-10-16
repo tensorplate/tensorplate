@@ -13,6 +13,10 @@
 //     on another; in each lane one job runs and kWaitingJobs wait in
 //     submission order; one more ends with `failed`
 //     (`job_capacity_exhausted`) and is never `accepted`;
+//   - as the adapter's job channel does, submit() refuses a job
+//     (`job_capacity_exhausted`) while 16 are unreleased in both lanes
+//     together, so with both lanes in use the seventeenth is refused before
+//     either lane is full;
 //   - a `vad_frames` job whose frames are not kFixtureVadFrameSamples samples
 //     ends with `failed` (`job_not_permitted`) and is never `accepted`; no
 //     voice-activity state is kept from one job to the next;
@@ -32,7 +36,7 @@
 // into the other outcome the bridge header allows, and adds the one event the
 // runner's backends never deliver: `progress`, for a job that allows it.
 //
-// It differs from the adapter with a real sidecar in six ways:
+// It differs from the adapter with a real sidecar in five ways:
 //
 //   - a job starts at its submit when nothing runs in its lane, so the eight
 //     that wait are exact; the runner counts a job its lane's thread has not
@@ -45,7 +49,6 @@
 //   - an unload fails every unfinished job with `session_unloaded` at once,
 //     where the runner fails the waiting ones itself and lets the running
 //     ones end;
-//   - the wrapped fake refuses a submit while 64 jobs are unreleased;
 //   - a prime after an unload or a loss does not reopen it: there is no
 //     second load of one session;
 //   - release_session on a lost or unloaded backend answers

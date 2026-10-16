@@ -38,9 +38,9 @@ Error cancelled() {
   return Error::make(Error::Code::Cancelled, "the job was cancelled");
 }
 
-// Unreleased jobs the wrapped fake takes when kWaitingJobs is the bound that
-// turns a job away.
-constexpr std::size_t kUnreleasedJobs = 64;
+// Unreleased jobs the wrapped fake takes: the adapter's job channel refuses
+// the seventeenth (kMaxOpenJobs), before both of the runner's lanes are full.
+constexpr std::size_t kUnreleasedJobs = 16;
 
 }  // namespace
 

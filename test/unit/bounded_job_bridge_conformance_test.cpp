@@ -448,25 +448,63 @@ TEST(FixtureJobBridge, EachLaneFailsItsTenthJobUnaccepted) {
   bench.bridge.hold_jobs();
   for (std::uint64_t job_id = 1; job_id <= 9; ++job_id) {
     ASSERT_TRUE(bench.submit(decode(job_id, *bench.buffers)).has_value()) << job_id;
-    ASSERT_TRUE(bench.submit(vad(100 + job_id, *bench.buffers, 1)).has_value()) << job_id;
   }
-  ASSERT_TRUE(bench.submit(vad(110, *bench.buffers, 1)).has_value());
+  ASSERT_TRUE(bench.submit(vad(101, *bench.buffers, 1)).has_value());
   ASSERT_TRUE(bench.submit(decode(10, *bench.buffers)).has_value());
   ASSERT_TRUE(bench.bridge.settled(kPatience));
   EXPECT_EQ(bench.sink->kinds_for(9), Kinds{Accepted});
-  EXPECT_EQ(bench.sink->kinds_for(109), Kinds{Accepted});
-  for (const std::uint64_t job_id : {10U, 110U}) {
-    EXPECT_EQ(bench.sink->kinds_for(job_id), (Kinds{Failed, Released})) << job_id;
-    EXPECT_EQ(bench.event_of(job_id, Failed).error().value().context.value_or(""),
-              "job_capacity_exhausted");
-  }
+  EXPECT_EQ(bench.sink->kinds_for(101), Kinds{Accepted});
+  EXPECT_EQ(bench.sink->kinds_for(10), (Kinds{Failed, Released}));
+  EXPECT_EQ(bench.event_of(10, Failed).error().value().context.value_or(""),
+            "job_capacity_exhausted");
+  bench.bridge.release_jobs();
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
 
-  ASSERT_TRUE(bench.submit(vad(111, *bench.buffers, 1, 480)).has_value());
-  EXPECT_EQ(bench.event_of(111, Failed).error().value().context.value_or(""), "job_not_permitted");
+  bench.bridge.hold_jobs();
+  for (std::uint64_t job_id = 102; job_id <= 110; ++job_id) {
+    ASSERT_TRUE(bench.submit(vad(job_id, *bench.buffers, 1)).has_value()) << job_id;
+  }
+  ASSERT_TRUE(bench.submit(decode(11, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.submit(vad(111, *bench.buffers, 1)).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(110), Kinds{Accepted});
+  EXPECT_EQ(bench.sink->kinds_for(11), Kinds{Accepted});
+  EXPECT_EQ(bench.sink->kinds_for(111), (Kinds{Failed, Released}));
+  EXPECT_EQ(bench.event_of(111, Failed).error().value().context.value_or(""),
+            "job_capacity_exhausted");
+
+  ASSERT_TRUE(bench.submit(vad(112, *bench.buffers, 1, 480)).has_value());
+  EXPECT_EQ(bench.event_of(112, Failed).error().value().context.value_or(""), "job_not_permitted");
 
   bench.bridge.release_jobs();
   ASSERT_TRUE(bench.bridge.settled(kPatience));
-  EXPECT_EQ(bench.sink->kinds_for(109), (Kinds{Accepted, Completed, Released}));
+  EXPECT_EQ(bench.sink->kinds_for(110), (Kinds{Accepted, Completed, Released}));
+}
+
+// The adapter's job channel holds 16 jobs unreleased and refuses the next at
+// its submit, before both of the runner's lanes are full.
+TEST(FixtureJobBridge, SubmitRefusesTheSeventeenthUnreleasedJob) {
+  Bench bench;
+  bench.bridge.hold_jobs();
+  for (std::uint64_t job_id = 1; job_id <= 9; ++job_id) {
+    ASSERT_TRUE(bench.submit(decode(job_id, *bench.buffers)).has_value()) << job_id;
+  }
+  for (std::uint64_t job_id = 101; job_id <= 107; ++job_id) {
+    ASSERT_TRUE(bench.submit(vad(job_id, *bench.buffers, 1)).has_value()) << job_id;
+  }
+  const Result<void> seventeenth = bench.bridge.submit(vad(108, *bench.buffers, 1));
+  ASSERT_FALSE(seventeenth.has_value());
+  EXPECT_EQ(seventeenth.error().code, Error::Code::ResourceExhausted);
+  EXPECT_EQ(reason_of(seventeenth), "job_capacity_exhausted");
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(107), Kinds{Accepted});
+  EXPECT_TRUE(bench.sink->kinds_for(108).empty());
+
+  bench.bridge.release_jobs();
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  ASSERT_TRUE(bench.submit(vad(108, *bench.buffers, 1)).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(108), (Kinds{Accepted, Completed, Released}));
 }
 
 // backends/fixture.py: a frame's probability is its largest absolute sample
