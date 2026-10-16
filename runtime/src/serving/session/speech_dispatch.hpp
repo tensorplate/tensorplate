@@ -62,6 +62,7 @@ struct SpeechDispatchStats {
   std::size_t sessions = 0;
   std::uint64_t jobs_submitted = 0;
   std::uint64_t jobs_completed = 0;
+  /// Jobs the backend failed, the dropped partial decodes among them.
   std::uint64_t jobs_failed = 0;
   /// Job ends dropped: the session was ending or gone, or the job unknown.
   std::uint64_t jobs_discarded = 0;

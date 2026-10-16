@@ -602,6 +602,7 @@ void ServingWorker::Impl::stop_stream_listener() noexcept {
              {"jobs_discarded", stats.jobs_discarded},
              {"releases_refused", stats.releases_refused},
              {"jobs_past_deadline", stats.jobs_past_deadline},
+             {"partials_failed", stats.partials_failed},
              {"releases_past_bound", stats.releases_past_bound},
              {"longest_release_wait_ms",
               std::chrono::duration_cast<std::chrono::milliseconds>(stats.longest_release_wait)

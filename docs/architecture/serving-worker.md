@@ -1679,7 +1679,8 @@ that will own them.
   while it ran is dropped: no partial follows its utterance's endpoint.
   One the backend fails (a token limit, an inference failure, memory) is
   dropped too, the session going on, counted in `stats()`
-  (`partials_failed`) and reported through `on_partial_failed` at most
+  (`partials_failed`, and in `jobs_failed` with every job the backend
+  failed) and reported through `on_partial_failed` at most
   once an utterance, which the worker logs at `warn`. A refusal that would
   meet the final too (a job class or an option the backend refuses, a
   session it unloaded), a partial decode past its deadline, or one ended by
@@ -2156,9 +2157,11 @@ cancel is the listener's change.
 `serves_sessions`. Once the listener has stopped, `speech dispatch stopped`
 carries the dispatch's counters as of the last step of its thread:
 `jobs_submitted`, `jobs_completed`, `jobs_failed`, `jobs_discarded`,
-`releases_refused`, `jobs_past_deadline`, `releases_past_bound` and
-`longest_release_wait_ms`. The job counters include `vad_frames` jobs,
-up to one for every 512 samples of a session's audio. A job the unload
+`releases_refused`, `jobs_past_deadline`, `partials_failed`,
+`releases_past_bound` and `longest_release_wait_ms`. The job counters
+include `vad_frames` jobs, up to one for every 512 samples of a session's
+audio, and partial decodes: `jobs_failed` counts the partial decodes the
+backend failed, which `partials_failed` also counts. A job the unload
 ends is in none of `jobs_completed`, `jobs_failed`, `jobs_discarded` and
 `releases_refused`, and a job the bridge refuses when it is submitted is
 in none of the counters. No metric is exported for them. A stall adds

@@ -341,7 +341,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   utterance's endpoint, none starts once the session drains or a Finalize
   waits for its frames, and the final still decodes the whole utterance. A
   partial decode the backend fails is dropped and the session goes on: it
-  is counted in the dispatch's stats and logged at `warn` once an
+  is counted in the dispatch's stats, which the worker's `speech dispatch
+  stopped` line reports as `partials_failed`, and logged at `warn` once an
   utterance. A refusal that would meet the final too, such as a language
   the backend does not permit, still fails the session at its first job.
   A drain no longer waits for the delivery of a partial that gave way
