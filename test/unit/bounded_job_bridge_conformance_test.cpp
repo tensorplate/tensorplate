@@ -490,11 +490,14 @@ TEST(FixtureJobBridge, AVoiceActivityFrameScoresItsLargestAbsoluteSample) {
 // job before it is taken in.
 TEST(FixtureJobBridge, AVoiceActivityJobOfAnotherFrameSizeIsFailedAsNotPermitted) {
   Bench bench;
-  ASSERT_TRUE(bench.submit(vad(1, *bench.buffers, 2, 480)).has_value());
-  const Error refused = bench.event_of(1, Failed).error().value();
-  EXPECT_EQ(refused.code, Error::Code::Unsupported);
-  EXPECT_EQ(refused.context.value_or(""), "job_not_permitted");
-  EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Failed, Released}));
+  // Shorter and longer frames alike: the runner permits exactly 512.
+  for (const auto& [job_id, frame_samples] : {std::pair{1U, 480U}, std::pair{2U, 1'024U}}) {
+    ASSERT_TRUE(bench.submit(vad(job_id, *bench.buffers, 2, frame_samples)).has_value());
+    const Error refused = bench.event_of(job_id, Failed).error().value();
+    EXPECT_EQ(refused.code, Error::Code::Unsupported) << frame_samples;
+    EXPECT_EQ(refused.context.value_or(""), "job_not_permitted") << frame_samples;
+    EXPECT_EQ(bench.sink->kinds_for(job_id), (Kinds{Failed, Released})) << frame_samples;
+  }
 }
 
 // A lost backend and an unload end the voice-activity lane's running job too.
