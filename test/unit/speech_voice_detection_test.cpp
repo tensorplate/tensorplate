@@ -1537,6 +1537,25 @@ TEST(SpeechPartialTranscripts, OnePastItsDeadlineFailsItsSession) {
   EXPECT_EQ(binding.manager->tombstone(key)->reason, "deadline_missed");
 }
 
+TEST(SpeechPartialTranscripts, AReleaseIsBoundFromTheDeadlineOfOneRunning) {
+  Binding binding(&detecting_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(key, voiced(10 * kVadFrame, 110));
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(decodes_of(speech).size(), 1U);
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  // The partial's deadline is 1,160 ms away, so the bound 3,160 ms.
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 3160ms - 1ns));
+  EXPECT_TRUE(speech.stalls().empty());
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  EXPECT_EQ(speech.stalls().size(), 1U);
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(key, State::Closed));
+}
+
 TEST(SpeechPartialTranscripts, ACancelWaitsForOneRunningAsForAnyJob) {
   Binding binding(&speech_dispatch_detecting_voice);
   SpeechUnderTest& speech = speech_of(binding);
