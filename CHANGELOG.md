@@ -1205,6 +1205,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The `faster_whisper` runner profile decodes each `stt_decode` job in one
+  pass over its window: one encoder pass over the window padded to the
+  model's 30-second input, one greedy decode without timestamps, and the word
+  alignment over the same encoder output. faster-whisper's `transcribe`,
+  which `infer` requests still use, decodes again from the last timestamp of
+  a window that does not end on one. A job's transcript now carries a word
+  unit for each aligned word, with its token interval and its samples on the
+  session's timeline, and only text tokens. A decode returns at most 444
+  tokens; one that returns 444 never reached its end token, and the job
+  fails with `inference_failed`. That is a decode that never ends, a
+  repetition loop included (for example a session whose language does not
+  match the speech); `transcribe`, which `infer` uses, returns text there.
+  The pass does not apply `transcribe`'s no-speech skip. A
+  window under 40 ms, two encoder positions, returns an empty transcript
+  without a decode. (V030-E05-F03-T01, V030-E05-F03-T04)
+
 - `BoundedJobBridge` has a new pure virtual method, `runs(JobClass)`:
   whether the loaded backend runs a job class, `false` before a load and for
   a class `submit` refuses with `job_class_unsupported`; it never waits for
