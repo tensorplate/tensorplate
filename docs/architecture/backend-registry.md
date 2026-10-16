@@ -957,8 +957,10 @@ text, with the wheel's token suppression, and faster-whisper's word alignment
 over the same encoder output. CTranslate2 4.8.2 decodes at most
 `min(max_length / 2, max_length - prompt length + 1)` tokens and returns no
 end token, so the runner passes `max_length` 888, a budget of 444 tokens,
-and a hypothesis that fills it never ended: the job fails `inference_failed`
-before the alignment, which after a multilingual model's 4-token prompt fits
+and a hypothesis that fills it never ended (a repetition loop included, for
+example a session whose language does not match the speech; `transcribe`
+returns text there, its timestamp tokens ending each segment): the job fails
+`inference_failed` before the alignment, which after a multilingual model's 4-token prompt fits
 443 tokens and the end token in the decoder's 448 positions. The transcript
 carries the text tokens only (a special token the decoder emits is left out,
 as `transcribe` leaves it out of the alignment), and a word unit per aligned
@@ -971,7 +973,10 @@ than two encoder positions (the feature extractor's hop times the model's
 input stride each, 640 samples for the wheel's 160 and 2) returns an empty
 transcript without a decode: CTranslate2 aligns over half the window's
 frames, and with fewer than two positions it returned no alignment or times
-that are not finite. The runner
+that are not finite. The pass applies no
+fallback temperatures, language detection or voice-activity filter, and not
+`transcribe`'s no-speech skip (`no_speech_prob` above 0.6 unless
+`avg_logprob` is above -1.0). The runner
 permits a job in a language its entry declares whose audio fits one model
 input window. A Kokoro job returns the segment as one `audio_chunk`; the
 runner permits only its entry's language and voice at speed 1000. Either
