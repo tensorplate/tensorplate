@@ -125,10 +125,17 @@ Run it with the interpreter the SDK is installed in, with its `speech`
 extra. The sidecar runs on that interpreter too. Each case starts its own
 agent on six free loopback ports between 20000 and 30000. The four cases take
 about half a minute; the redeploy case waits 20 seconds of that on purpose.
-The agent's platform gate admits only a host one of the rows in
-`config/platform` describes. On a host none describes, for instance one
-with a GPU no row names, set `TENSORPLATE_PLATFORM_REGISTRY_DIR` to a copy
-of that directory with a row for the host.
+The agent's platform gate matches the host against the rows in
+`config/platform`. A host with a GPU no row names matches none. A plain
+Ubuntu 24.04 CPU development machine does match one, `ubuntu2404-x86-cpu`
+("Any x86_64 Ubuntu 24.04 host"), but a matched row can still refuse the
+deploy by its support level or by the admission posture in force. The
+deploy's error then gives the reason, as
+``platform cannot admit this deploy: platform is outside the validated environment for row `<row>` ``,
+or with ``platform row `<row>` is planned but not validated`` or
+``platform row `<row>` is experimental and not deployable`` after the
+colon. On such a host, set `TENSORPLATE_PLATFORM_REGISTRY_DIR` to a copy of
+that directory with a row that admits the host.
 
 ## Public hygiene (before every push)
 
