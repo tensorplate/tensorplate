@@ -209,7 +209,7 @@ impl DeploymentConfiguration {
             || self.speech.is_some()
     }
 
-    fn validate(&self) -> Result<(), DeploymentDescriptorError> {
+    fn validate(&self, admission_mode: AdmissionMode) -> Result<(), DeploymentDescriptorError> {
         let c = self;
         if c.bundle.name.is_empty() || c.bundle.version.is_empty() {
             return Err(invalid(
@@ -282,9 +282,11 @@ impl DeploymentConfiguration {
                 ));
             }
         }
-        c.quota
-            .validate()
-            .map_err(|e: MemberQuotaError| invalid("configuration.quota", e.to_string()))?;
+        let quota = match admission_mode {
+            AdmissionMode::Production => c.quota.validate(),
+            AdmissionMode::Qualification => c.quota.validate_test_count(),
+        };
+        quota.map_err(|e: MemberQuotaError| invalid("configuration.quota", e.to_string()))?;
         if let Some(digest) = &c.acceptance_profile_digest {
             if !is_sha256_digest(digest) {
                 return Err(invalid(
@@ -648,7 +650,7 @@ impl DeploymentDescriptor {
                 ),
             ));
         }
-        self.configuration.validate()?;
+        self.configuration.validate(self.admission_mode)?;
         if self.configuration.runner_profile.is_some() != self.runner_environment.is_some() {
             return Err(invalid(
                 "runner_environment",

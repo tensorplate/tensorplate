@@ -84,7 +84,8 @@ impl DomainQuotaBytes {
 /// only lower it. For a member admitted in qualification mode it records
 /// the operator's test count for the member. A member that serves no
 /// logical sessions (a vision or VLA deployment) carries zero sessions and
-/// no domain bytes. A positive count always names the domains that back it.
+/// no domain bytes. A positive count names the domains that back it, except
+/// a qualification test count before anything backing it is measured.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemberQuota {
@@ -100,11 +101,26 @@ impl MemberQuota {
     ///
     /// Returns [`MemberQuotaError`] naming the violated rule.
     pub fn validate(&self) -> Result<(), MemberQuotaError> {
+        self.check(true)
+    }
+
+    /// [`Self::validate`] for a member admitted in qualification mode, whose
+    /// positive count may name no domain: the operator's test count before
+    /// anything backing it is measured.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemberQuotaError`] naming the violated rule.
+    pub fn validate_test_count(&self) -> Result<(), MemberQuotaError> {
+        self.check(false)
+    }
+
+    fn check(&self, backed: bool) -> Result<(), MemberQuotaError> {
         self.domain_bytes.validate()?;
         if self.session_count > MAX_MEMBER_SESSIONS {
             return Err(MemberQuotaError::TooManySessions(self.session_count));
         }
-        if self.session_count > 0 && self.domain_bytes.is_empty() {
+        if backed && self.session_count > 0 && self.domain_bytes.is_empty() {
             return Err(MemberQuotaError::SessionsWithoutDomainBytes);
         }
         Ok(())
@@ -127,7 +143,7 @@ pub enum MemberQuotaError {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use super::{DomainQuotaBytes, MemberQuota, MemberQuotaError};
+    use super::{DomainQuotaBytes, MemberQuota, MemberQuotaError, MAX_MEMBER_SESSIONS};
     use crate::platform_memory_profile::BudgetDomainName;
 
     fn l4_quota() -> MemberQuota {
@@ -192,6 +208,29 @@ mod tests {
         assert_eq!(
             quota.validate(),
             Err(MemberQuotaError::SessionsWithoutDomainBytes)
+        );
+    }
+
+    #[test]
+    fn a_test_count_needs_no_domain_and_keeps_every_other_rule() {
+        let unmeasured = MemberQuota {
+            session_count: MAX_MEMBER_SESSIONS,
+            domain_bytes: DomainQuotaBytes::default(),
+        };
+        unmeasured.validate_test_count().expect("a test count");
+        let above = MemberQuota {
+            session_count: MAX_MEMBER_SESSIONS + 1,
+            ..unmeasured
+        };
+        assert_eq!(
+            above.validate_test_count(),
+            Err(MemberQuotaError::TooManySessions(MAX_MEMBER_SESSIONS + 1))
+        );
+        let mut mixed = l4_quota();
+        mixed.domain_bytes.shared_pool = Some(1);
+        assert_eq!(
+            mixed.validate_test_count(),
+            Err(MemberQuotaError::SharedPoolWithDiscreteDomain)
         );
     }
 
