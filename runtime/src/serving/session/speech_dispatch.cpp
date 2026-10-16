@@ -31,6 +31,10 @@ constexpr std::uint16_t kNormalSpeed = 1000;
 /// The utterances of a session that ended and have no final yet: the one
 /// being decoded and those behind it. One more fails the session.
 constexpr std::size_t kEndedUtterances = 3;
+/// The utterance key of every voice-activity job of a session: the backend
+/// keeps one state over the session's audio, across endpoints and Finalizes.
+/// A job that ends unscored ends its session, so no job needs a new key.
+constexpr std::uint64_t kVoiceActivityUtterance = 1;
 /// A voice-detected utterance is split where the session's longest one ends.
 static_assert(VadProfile{}.max_utterance == std::chrono::seconds{kLongestSeconds});
 constexpr std::uint64_t kMicrosPerSecond = 1'000'000;
@@ -1076,7 +1080,7 @@ std::optional<JobRequest> SpeechJobDispatch::next_vad_request(SessionManager& ma
   auto request = JobRequest::create(
       JobIdentity{next_job_id_++, key, options_.generation}, JobClass::VadFrames,
       VadFrames{kJobInputAudioFormat, PcmWindow{*buffer, 0, size},
-                static_cast<std::uint32_t>(frame_samples), frames, detection.utterance_id},
+                static_cast<std::uint32_t>(frame_samples), frames, kVoiceActivityUtterance},
       JobOptions{});
   if (!request) {
     fail(manager, key, session, request.error());
@@ -1394,7 +1398,6 @@ bool SpeechJobDispatch::observe_score(SessionManager& manager, std::uint64_t key
                            EndpointReason::Silence)) {
       return false;
     }
-    ++detection.utterance_id;
   }
   let_go(manager, key, session, detection.policy.next_frame_start());
   return !session.ended;
@@ -1424,7 +1427,6 @@ bool SpeechJobDispatch::end_as_asked(SessionManager& manager, std::uint64_t key,
   }
   detection.pending.pop_front();
   detection.submitted_end = asked.end_sample;
-  ++detection.utterance_id;
   end_utterance(session, first, asked.end_sample, asked.reason, asked.finalize_sequence);
   let_go(manager, key, session, asked.end_sample);
   return !session.ended;

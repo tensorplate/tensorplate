@@ -1628,9 +1628,14 @@ that will own them.
   backend's scores; every faster_whisper deployment runs it. The dispatch
   cuts each session's audio into frames of 512 samples, whatever the
   client's frames, and sends the frames not yet scored as one `vad_frames`
-  job, up to 32 frames, under one utterance key: a new key after a silence
-  endpoint, a Finalize or a half-close, so that the backend starts its
-  state afresh; the same key across a 30-second split. An utterance runs
+  job, up to 32 frames. Every job of a session carries one utterance key,
+  so the backend scores the session's audio in one state across its
+  endpoints, 30-second splits and Finalizes, as a stream: a soft onset
+  after a pause may score as speech only in the state the audio before it
+  left. A Finalize that ends inside a frame leaves that frame's samples
+  before it unscored, at most 511, and the state carries over them. A job
+  that ends unscored ends its session, so none of the session's jobs
+  follows one. An utterance runs
   from its onset to its endpoint, and its endpoint is offered as it ends,
   before its decode; the final follows. Audio before the earliest sample
   an onset could still name is dropped. A frame's input credit returns
