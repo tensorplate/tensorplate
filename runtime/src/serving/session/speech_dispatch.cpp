@@ -795,6 +795,10 @@ void SpeechJobDispatch::take_audio(SessionManager& manager, std::uint64_t key, S
   while (!frame.empty() && !session.ended) {
     const std::uint64_t room = longest - (session.samples_accepted - session.utterance_start);
     const auto part = frame.first(std::min<std::uint64_t>(frame.size(), room * width));
+    if (session.open_audio.empty()) {
+      // At its longest from the start, so it never grows past the audio it may hold.
+      session.open_audio.reserve(static_cast<std::size_t>(longest * width));
+    }
     session.open_audio.insert(session.open_audio.end(), part.begin(), part.end());
     session.samples_accepted += part.size() / width;
     frame = frame.subspan(part.size());
