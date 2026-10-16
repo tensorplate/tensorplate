@@ -336,17 +336,22 @@ fn a_member_promoted_over_is_draining_until_it_has_been_reaped() {
     f.prepare("tts").unwrap();
     f.health(CANDIDATE_PORT, "tts");
     assert!(f.warm("tts").unwrap().ready);
-    let (is_stopping, release) = hold_stop(&old);
+    f.registry.fence("tx", &candidate("tts")).unwrap();
+    let (is_retiring, release) = old.hold_call();
+    let draining = LiveMember {
+        in_contact: None,
+        ..live("stt", 1, MemberRole::Draining, ACTIVE_PORT)
+    };
 
     std::thread::scope(|scope| {
         // Dropped if this closure panics, which lets what is held end.
         let release = release;
-        let promoting = scope.spawn(|| f.registry.promote("tx", &candidate("tts")));
-        is_stopping
+        let activating = scope.spawn(|| f.registry.activate("tx", &candidate("tts")));
+        is_retiring
             .recv_timeout(GRACE)
-            .expect("the old member is asked to stop");
+            .expect("the old member is sent its retire");
 
-        // Asked to stop before the new member is activated.
+        // Sent its retire before the new member is activated.
         assert_eq!(
             view(&f),
             [
@@ -354,10 +359,7 @@ fn a_member_promoted_over_is_draining_until_it_has_been_reaped() {
                     effective_quota: None,
                     ..live("tts", 2, MemberRole::Serving, CANDIDATE_PORT)
                 },
-                LiveMember {
-                    in_contact: None,
-                    ..live("stt", 1, MemberRole::Draining, ACTIVE_PORT)
-                },
+                draining.clone(),
             ]
         );
         assert_eq!(
@@ -366,14 +368,15 @@ fn a_member_promoted_over_is_draining_until_it_has_been_reaped() {
         );
 
         release.send(()).unwrap();
-        promoting.join().unwrap().unwrap();
+        activating.join().unwrap().unwrap();
     });
 
-    assert_eq!(old.calls(), ["terminate"]);
-    assert_eq!(
-        view(&f),
-        [live("tts", 2, MemberRole::Serving, CANDIDATE_PORT)]
-    );
+    // It exited once it acknowledged the retire; the next step reaps it.
+    let serving = live("tts", 2, MemberRole::Serving, CANDIDATE_PORT);
+    assert_eq!(view(&f), [serving.clone(), draining]);
+    step(&f, Duration::ZERO);
+    assert!(old.calls().is_empty());
+    assert_eq!(view(&f), [serving]);
 }
 
 #[test]
@@ -409,7 +412,8 @@ fn a_draining_member_that_was_never_judged_ready_is_listed_not_ready() {
 fn a_member_killed_at_the_stop_deadline_leaves_the_view() {
     let f = fixture();
     f.launcher.stubborn.store(true, Ordering::SeqCst);
-    let stubborn = f.serve("stt");
+    f.prepare("stt").unwrap();
+    let stubborn = f.launcher.handle(1);
 
     f.registry.unload("stt");
 

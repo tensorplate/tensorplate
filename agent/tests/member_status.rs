@@ -97,6 +97,18 @@ const STOPPED: (
     None,
 );
 
+const DRAINING: (
+    Option<ProcessState>,
+    Option<Readiness>,
+    Option<bool>,
+    Option<ContactState>,
+) = (
+    Some(ProcessState::Running),
+    Some(Readiness::Ready),
+    Some(true),
+    None,
+);
+
 #[test]
 fn active_names_the_generation_serving_at_its_url_and_each_deploy_moves_both() {
     let h = Harness::new();
@@ -160,6 +172,7 @@ fn the_generation_is_withheld_while_another_deployment_serves_than_the_recorded_
     let h = Harness::new();
     let agent = RegistryAgent::start(&h);
     agent.deploy_member(&h);
+    agent.reap_retired();
     let recorded = h.store.snapshot().expect("state").active.expect("active");
 
     // Another deployment serves than the recorded one, as the outgoing
@@ -176,7 +189,7 @@ fn the_generation_is_withheld_while_another_deployment_serves_than_the_recorded_
 }
 
 #[test]
-fn a_same_id_update_is_recorded_before_the_replaced_worker_is_asked_to_stop() {
+fn a_same_id_update_is_recorded_before_the_replaced_worker_is_told_to_retire() {
     let h = Harness::new();
     let agent = RegistryAgent::start(&h);
     agent
@@ -192,15 +205,15 @@ fn a_same_id_update_is_recorded_before_the_replaced_worker_is_asked_to_stop() {
             ..BundleSpec::default()
         },
     );
-    let (is_stopping, release) = agent.workers.last().hold_stop();
+    let (is_retiring, release) = agent.workers.last().hold_retire();
 
     std::thread::scope(|scope| {
         // Dropped if this closure panics, which lets what is held end.
         let release = release;
         let deploying = scope.spawn(|| agent.deploy("stt", &replacement));
-        is_stopping
+        is_retiring
             .recv_timeout(HELD)
-            .expect("the replaced worker is asked to stop");
+            .expect("the replaced worker is told to retire");
 
         // The commit is written before the replaced worker hears of it.
         let during = active(&agent);
@@ -226,15 +239,15 @@ fn a_redeploy_of_the_recorded_bundle_under_its_id_reads_as_the_recorded_deployme
     agent.deploy("stt", &bundle).expect("the first deploy");
     let first = active(&agent);
     assert_eq!(first.generation, Some(1));
-    let (is_stopping, release) = agent.workers.last().hold_stop();
+    let (is_retiring, release) = agent.workers.last().hold_retire();
 
     std::thread::scope(|scope| {
         // Dropped if this closure panics, which lets what is held end.
         let release = release;
         let deploying = scope.spawn(|| agent.deploy("stt", &bundle));
-        is_stopping
+        is_retiring
             .recv_timeout(HELD)
-            .expect("the replaced worker is asked to stop");
+            .expect("the replaced worker is told to retire");
 
         // The record is the second deploy's, written before the replaced
         // worker hears of it.
@@ -408,37 +421,31 @@ fn a_member_whose_process_exited_is_stopped_and_stays_so_under_its_successor() {
 }
 
 #[test]
-fn a_member_asked_to_stop_is_draining_until_its_process_is_reaped() {
+fn a_member_told_to_retire_is_draining_until_its_process_is_reaped() {
     let h = Harness::new();
     let agent = RegistryAgent::start(&h);
     agent.deploy_member(&h);
     agent.commit_member_as_a_set(&h);
     let worker = agent.workers.last();
-    let (is_stopping, release) = worker.hold_stop();
+    let (is_retiring, release) = worker.hold_retire();
 
     std::thread::scope(|scope| {
         // Dropped if this closure panics, which lets what is held end.
         let release = release;
         let unloading = scope.spawn(|| agent.registry.unload(MEMBER.0));
-        is_stopping
+        is_retiring
             .recv_timeout(HELD)
-            .expect("the member is asked to stop");
+            .expect("the member is told to retire");
 
-        assert_eq!(
-            process(&member(&agent)),
-            (
-                Some(ProcessState::Running),
-                Some(Readiness::Ready),
-                Some(true),
-                None,
-            )
-        );
+        assert_eq!(process(&member(&agent)), DRAINING);
 
         release.send(()).unwrap();
         unloading.join().unwrap();
     });
 
     assert!(!worker.running());
+    assert_eq!(process(&member(&agent)), DRAINING, "until it is reaped");
+    agent.reap_retired();
     assert_eq!(process(&member(&agent)), STOPPED);
 }
 
@@ -447,10 +454,11 @@ fn a_committed_member_promoted_over_is_draining_then_stopped_and_its_successor_i
     let h = Harness::new();
     let agent = RegistryAgent::start(&h);
     agent.deploy_member(&h);
+    agent.reap_retired();
     let recorded = h.store.snapshot().expect("state").active.expect("active");
     agent.commit_member_as_a_set(&h);
     let committed = agent.workers.last();
-    let (is_stopping, release) = committed.hold_stop();
+    let (is_retiring, release) = committed.hold_retire();
     let successor = staged_as(MEMBER.0, &recorded);
     agent
         .registry
@@ -473,19 +481,11 @@ fn a_committed_member_promoted_over_is_draining_then_stopped_and_its_successor_i
         // Dropped if this closure panics, which lets what is held end.
         let release = release;
         let promoting = scope.spawn(|| agent.registry.promote("tx", &successor));
-        is_stopping
+        is_retiring
             .recv_timeout(HELD)
-            .expect("the committed generation is asked to stop");
+            .expect("the committed generation is told to retire");
 
-        assert_eq!(
-            process(&member(&agent)),
-            (
-                Some(ProcessState::Running),
-                Some(Readiness::Ready),
-                Some(true),
-                None,
-            )
-        );
+        assert_eq!(process(&member(&agent)), DRAINING);
         assert_eq!(projected(&agent), committed_slot);
 
         release.send(()).unwrap();
@@ -496,6 +496,8 @@ fn a_committed_member_promoted_over_is_draining_then_stopped_and_its_successor_i
     let serving = agent.registry.serving_member().expect("read").expect("one");
     assert_eq!(serving.member.generation, MEMBER.1 + 1);
     assert_ne!(Some(serving.serving_url), committed_slot.1);
+    assert_eq!(process(&member(&agent)), DRAINING, "until it is reaped");
+    agent.reap_retired();
     assert_eq!(process(&member(&agent)), STOPPED);
     assert_eq!(projected(&agent), committed_slot);
     assert_eq!(status(&agent).candidate, None);

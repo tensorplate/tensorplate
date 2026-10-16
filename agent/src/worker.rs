@@ -158,11 +158,13 @@ pub trait WorkerControl: Send + Sync {
     /// channel failed during the fence.
     fn fence(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()>;
 
-    /// Once the commit is durable: the candidate takes the serving slot and
-    /// is told so (`activate`), then the member it replaces is asked to stop
-    /// and reaped. A candidate that exited since [`Self::fence`] takes the
-    /// slot as a member that stopped; one that does not answer `activate`
-    /// with `ok` keeps the slot, and that is logged.
+    /// Once the commit is durable: the candidate takes the serving slot, the
+    /// member it replaces is told to retire, and the candidate is told it
+    /// serves (`activate`). The retired member drains and is reaped by
+    /// [`Self::supervise`], so this does not wait for it. A candidate that
+    /// exited since [`Self::fence`] takes the slot as a member that stopped;
+    /// one that does not answer `activate` with `ok` keeps the slot, and that
+    /// is logged.
     ///
     /// # Errors
     ///
@@ -204,9 +206,10 @@ pub trait WorkerControl: Send + Sync {
     /// End one [`Self::hold`].
     fn release(&self);
 
-    /// Unload `deployment_id` (the previous active) from the worker.
-    /// Best-effort: a failure here is logged but never replaces the
-    /// current active deployment.
+    /// Unload `deployment_id` (the previous active) from the worker: a
+    /// serving member is told to retire, as one replaced by
+    /// [`Self::activate`] is. Best-effort: a failure here is logged but never
+    /// replaces the current active deployment.
     fn unload(&self, deployment_id: &str);
 
     /// Inspect the worker's active deployment id. Recovery uses this to
@@ -236,7 +239,8 @@ pub trait WorkerControl: Send + Sync {
     }
 
     /// Look after the serving member: replace a generation that stopped
-    /// running. The agent calls this on every turn of its loop.
+    /// running, and reap the retired members, asking one whose drain is
+    /// over to stop. The agent calls this on every turn of its loop.
     fn supervise(&self) -> Vec<MemberEvent> {
         Vec::new()
     }
@@ -293,7 +297,7 @@ pub enum MemberRole {
     /// Prepared by a deploy that ended without promoting it; it runs until
     /// the next deploy displaces it.
     Abandoned,
-    /// Asked to stop, and not reaped yet.
+    /// Asked to stop or told to retire, and not reaped yet.
     Draining,
 }
 
@@ -309,7 +313,8 @@ pub struct LiveMember {
     /// restarted; it is not read again afterwards.
     pub ready: bool,
     /// Whether the generation's control channel is in contact; unknown for
-    /// a draining one, which the thread stopping it holds.
+    /// a draining one, which is held by the thread stopping it or, once
+    /// retired, by the registry until a supervision step reaps it.
     pub in_contact: Option<bool>,
     pub http_port: u16,
     /// Held for the generation's stream listener; nothing listens on it.

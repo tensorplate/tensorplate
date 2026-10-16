@@ -35,7 +35,7 @@ use tensorplate_agent::control::dispatch;
 use tensorplate_agent::coordinator::Coordinator;
 use tensorplate_agent::registry::{durable_generations, MemberRegistry};
 use tensorplate_agent::state::StateStore;
-use tensorplate_agent::worker::{agent_stderr_sink, WorkerStderrSink};
+use tensorplate_agent::worker::{agent_stderr_sink, MemberRole, WorkerStderrSink};
 use tensorplate_protocol::agent_control::{
     ControlRequest, ControlResponse, DeployRequest, ResponseStatus, RollbackRequest,
 };
@@ -237,6 +237,33 @@ impl ProcessHarness {
         let request = ControlRequest::rollback(None, RollbackRequest::default());
         dispatch(&self.coord, request).expect("dispatch rollback")
     }
+
+    /// The deployment id, generation and HTTP port of each member listed
+    /// as draining.
+    fn draining(&self) -> Vec<(String, u64, u16)> {
+        let live = self.coord.worker_client().live_members();
+        let live = live.expect("the registry reports");
+        live.into_iter()
+            .filter(|live| live.role == MemberRole::Draining)
+            .map(|live| {
+                (
+                    live.member.deployment_id,
+                    live.member.generation,
+                    live.http_port,
+                )
+            })
+            .collect()
+    }
+
+    /// Supervision steps, as the agent's loop runs them, until no member
+    /// is draining: a retired worker that exited is reaped by one.
+    fn reap_retired(&self) {
+        let listed = || format!("draining: {:?}", self.draining());
+        wait_for(Duration::from_secs(15), listed, || {
+            self.coord.supervise();
+            self.draining().is_empty()
+        });
+    }
 }
 
 fn assert_typed_load_failure(fixture: &str, code: ErrorCode, message: &str) {
@@ -377,6 +404,7 @@ fn rollback_right_after_a_failed_deploy_is_accepted() {
     assert_eq!(h.deploy("good-a").status, ResponseStatus::Ok);
     second.serve("good-b");
     assert_eq!(h.deploy("good-b").status, ResponseStatus::Ok);
+    h.reap_retired();
 
     let started = Instant::now();
     let failed = h.deploy("fail-kokoro_undeclared_voice");
@@ -447,6 +475,7 @@ fn a_rollback_whose_candidate_exits_fails_with_the_workers_code() {
     );
     second.serve("good-b");
     assert_eq!(h.deploy("good-b").status, ResponseStatus::Ok);
+    h.reap_retired();
     first.serve("");
 
     let started = Instant::now();
@@ -520,7 +549,7 @@ fn version_and_counter(path: &Path) -> (String, Option<u64>) {
 /// The stand-in worker refuses a poll that names another member than its
 /// config, so a deploy that succeeds was polled as the generation rendered.
 #[test]
-fn each_worker_is_started_as_a_new_durable_generation_and_stopped_by_request() {
+fn each_worker_is_started_as_a_new_durable_generation_and_retired_when_replaced() {
     let first = HealthPort::listen();
     let second = HealthPort::listen();
     let h = ProcessHarness::new(first.port, second.port);
@@ -544,8 +573,11 @@ fn each_worker_is_started_as_a_new_durable_generation_and_stopped_by_request() {
         h.store.snapshot().expect("snapshot").next_generation,
         Some(3)
     );
-    // Written by the replaced worker on SIGTERM; a kill would leave none.
-    assert!(configs.join("good-a.terminated").is_file());
+    h.reap_retired();
+    // Written by the replaced worker once its retire's drain ended; a stop
+    // or a kill would leave none.
+    assert!(configs.join("good-a-1.retired").is_file());
+    assert!(!configs.join("good-a.terminated").exists());
     assert!(!configs.join("serving-good-a-1.json").exists());
     assert!(configs.join("serving-good-b-2.json").is_file());
 
@@ -595,7 +627,7 @@ fn a_real_worker_is_polled_from_its_start_and_promoted_as_a_member() {
 
 /// The unload of the previous active id that follows a promotion must not
 /// reach the worker just promoted when the two ids are the same. Each
-/// worker's own record shows the fence and activate it was sent.
+/// worker's own record shows the fence, retire and activate it was sent.
 #[test]
 fn deploying_the_active_id_again_leaves_it_served() {
     let first = HealthPort::listen();
@@ -612,13 +644,14 @@ fn deploying_the_active_id_again_leaves_it_served() {
     let quota = serde_json::json!({"session_count": 0, "domain_bytes": {}});
     let configs = h.td.path().join("worker-configs");
     let first_ops = control_ops(&configs.join("same-id-1.control.jsonl"));
-    let [activated, fenced] = first_ops.as_slice() else {
+    let [activated, fenced, _] = first_ops.as_slice() else {
         panic!("the first worker was sent {first_ops:?}");
     };
     assert_eq!(activated["request"]["op"], "activate", "{first_ops:?}");
     assert_eq!(fenced["request"]["op"], "admission_fence", "{first_ops:?}");
     assert_eq!(fenced["request"]["transaction_id"], tx.as_str());
     assert_eq!(fenced["answer"]["status"], "ok");
+    assert_eq!(last_retire(&first_ops, &tx)["answer"]["status"], "ok");
     let second_ops = control_ops(&configs.join("same-id-2.control.jsonl"));
     let [activated] = second_ops.as_slice() else {
         panic!("the second worker was sent {second_ops:?}");
@@ -634,6 +667,7 @@ fn deploying_the_active_id_again_leaves_it_served() {
         active.serving_url,
         Some(format!("http://127.0.0.1:{}/infer", second.port))
     );
+    h.reap_retired();
     assert!(configs.join("serving-same-id-2.json").is_file());
     assert!(!configs.join("serving-same-id-1.json").exists());
 }
@@ -656,6 +690,112 @@ fn control_ops(record: &Path) -> Vec<serde_json::Value> {
     };
     ops.dedup_by(|again, first| key(again) == key(first));
     ops
+}
+
+/// The last of `ops`, which must be the retire `tx` sent, asking for a
+/// 30 s drain.
+fn last_retire<'a>(ops: &'a [serde_json::Value], tx: &str) -> &'a serde_json::Value {
+    let [.., retired] = ops else {
+        panic!("the replaced worker was sent nothing");
+    };
+    assert_eq!(retired["request"]["op"], "retire", "{ops:?}");
+    assert_eq!(retired["request"]["transaction_id"], tx, "{ops:?}");
+    assert_eq!(retired["request"]["drain_timeout_ms"], 30_000, "{ops:?}");
+    retired
+}
+
+/// `<id>.draining` stands for sessions the replaced worker still serves.
+#[test]
+fn a_replacing_deploy_returns_while_the_replaced_worker_drains_and_it_is_reaped_once_it_exits() {
+    let first = HealthPort::listen();
+    let second = HealthPort::listen();
+    let h = ProcessHarness::new(first.port, second.port);
+    let configs = h.td.path().join("worker-configs");
+    first.serve("drain-a");
+    assert_eq!(h.deploy("drain-a").status, ResponseStatus::Ok);
+    let sessions = configs.join("drain-a.draining");
+    std::fs::write(&sessions, "").expect("open sessions");
+
+    second.serve("good-b");
+    let replacing = h.deploy("good-b");
+    assert_eq!(
+        replacing.status,
+        ResponseStatus::Ok,
+        "{:?}",
+        replacing.error
+    );
+
+    let tx = replacing.transaction_id.expect("transaction id");
+    let ops = control_ops(&configs.join("drain-a-1.control.jsonl"));
+    assert_eq!(last_retire(&ops, &tx)["answer"]["status"], "ok");
+    assert_eq!(h.draining(), [("drain-a".to_string(), 1, first.port)]);
+    assert!(configs.join("serving-drain-a-1.json").is_file());
+    assert!(!configs.join("drain-a-1.retired").exists());
+    assert!(!configs.join("drain-a.terminated").exists());
+
+    std::fs::remove_file(&sessions).expect("end the sessions");
+    h.reap_retired();
+    assert!(!configs.join("serving-drain-a-1.json").exists());
+    assert!(configs.join("drain-a-1.retired").is_file());
+    assert!(!configs.join("drain-a.terminated").exists());
+}
+
+#[test]
+fn a_replaced_worker_that_never_answers_its_retire_is_asked_to_stop() {
+    let first = HealthPort::listen();
+    let second = HealthPort::listen();
+    let h = ProcessHarness::new(first.port, second.port);
+    let configs = h.td.path().join("worker-configs");
+    first.serve("deaf-a");
+    assert_eq!(h.deploy("deaf-a").status, ResponseStatus::Ok);
+
+    second.serve("good-b");
+    let replacing = h.deploy("good-b");
+    assert_eq!(
+        replacing.status,
+        ResponseStatus::Ok,
+        "{:?}",
+        replacing.error
+    );
+
+    let tx = replacing.transaction_id.expect("transaction id");
+    let ops = control_ops(&configs.join("deaf-a-1.control.jsonl"));
+    assert_eq!(last_retire(&ops, &tx)["answer"], serde_json::Value::Null);
+    // Written by the replaced worker on SIGTERM; a kill would leave none.
+    let terminated = configs.join("deaf-a.terminated");
+    let context = || "the replaced worker was not asked to stop".to_string();
+    wait_for(Duration::from_secs(15), context, || terminated.is_file());
+    h.reap_retired();
+    assert!(!configs.join("serving-deaf-a-1.json").exists());
+    assert!(!configs.join("deaf-a-1.retired").exists());
+}
+
+#[test]
+fn an_agent_stopped_while_a_replaced_worker_drains_asks_it_to_stop_and_reaps_it() {
+    let first = HealthPort::listen();
+    let second = HealthPort::listen();
+    let h = ProcessHarness::build_with(
+        pid_recording_worker(),
+        first.port,
+        second.port,
+        WARM_TIMEOUT,
+        None,
+    );
+    let configs = h.td.path().join("worker-configs");
+    first.serve("drain-a");
+    assert_eq!(h.deploy("drain-a").status, ResponseStatus::Ok);
+    std::fs::write(configs.join("drain-a.draining"), "").expect("open sessions");
+    second.serve("good-b");
+    assert_eq!(h.deploy("good-b").status, ResponseStatus::Ok);
+    let retiring = recorded_pid(&configs.join("serving-drain-a-1.json")).expect("pid file");
+    assert_eq!(h.draining(), [("drain-a".to_string(), 1, first.port)]);
+
+    h.coord.worker_client().shutdown();
+
+    assert!(configs.join("drain-a.terminated").is_file());
+    assert!(!configs.join("drain-a-1.retired").exists());
+    assert_eq!(h.coord.worker_client().live_members(), Some(Vec::new()));
+    assert!(is_gone(retiring));
 }
 
 fn copy_dir(from: &Path, to: &Path) {

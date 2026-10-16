@@ -144,6 +144,7 @@ fn a_rollback_to_a_streaming_deployment_streams_again_and_one_over_it_does_not()
     assert!(agent.workers.last().config.get("streaming").is_none());
     assert_eq!(active(&agent).stream_endpoint, None);
 
+    agent.reap_retired();
     agent.coord.rollback(None).expect("rollback");
     assert_streams(&agent, "stt");
 }

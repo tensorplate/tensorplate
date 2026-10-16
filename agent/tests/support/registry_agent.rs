@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tensorplate_agent::config::{AgentConfig, PortRange, WorkerControlMode};
 use tensorplate_agent::control_channel::{RuntimeCall, RuntimeCommand};
@@ -29,10 +29,12 @@ use tensorplate_agent::registry::{
 };
 use tensorplate_agent::supervision::FakeClock;
 use tensorplate_agent::worker::{
-    LiveMember, MemberEvent, ServingMember, WorkerControl, WorkerReadiness,
+    LiveMember, MemberEvent, MemberRole, ServingMember, WorkerControl, WorkerReadiness,
 };
 use tensorplate_protocol::agent_state::{decode_agent_state, ErrorRecord};
-use tensorplate_protocol::worker_control::{CandidateRef, WorkerControlResponse, WorkerOp};
+use tensorplate_protocol::worker_control::{
+    CandidateRef, WorkerControlResponse, WorkerOp, WorkerStatusOutcome,
+};
 use tensorplate_protocol::ValidatePayload;
 
 use super::common::{vision_bundle, Harness};
@@ -65,9 +67,10 @@ type Hold = (mpsc::Sender<()>, mpsc::Receiver<()>);
 fn held(hold: &Mutex<Option<Hold>>) {
     let hold = hold.lock().unwrap().take();
     if let Some((started, release)) = hold {
-        started.send(()).unwrap();
-        // The test ending without a release lets it finish too.
-        let _ = release.recv();
+        // A test that ended, or stopped waiting, lets it finish too.
+        if started.send(()).is_ok() {
+            let _ = release.recv();
+        }
     }
 }
 
@@ -90,6 +93,7 @@ pub struct Worker {
     loading: AtomicBool,
     contact: Mutex<ControlContact>,
     hold_stop: Mutex<Option<Hold>>,
+    hold_retire: Mutex<Option<Hold>>,
     target: Mutex<MemberTarget>,
     /// Each runtime operation sent, with its transaction id.
     ops: Mutex<Vec<(WorkerOp, String)>>,
@@ -120,6 +124,11 @@ impl Worker {
     pub fn hold_stop(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
         hold(&self.hold_stop)
     }
+    /// Hold this worker's answer to a retire; returns what tells that the
+    /// retire arrived and what lets the worker answer it.
+    pub fn hold_retire(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        hold(&self.hold_retire)
+    }
 }
 
 struct Process(Arc<Worker>);
@@ -144,10 +153,19 @@ impl RuntimeCall for Channel {
         if !worker.running() {
             return Err(ControlChannelError::Closed);
         }
+        if request.op == WorkerOp::Retire {
+            held(&worker.hold_retire);
+        }
         let mut target = worker.target.lock().unwrap();
         let loading = worker.loading.load(Ordering::SeqCst);
         target.ceiling = (!loading).then(|| MemberTarget::ceiling_of(&worker.config));
-        Ok(target.answer(&request))
+        let answer = target.answer(&request);
+        // With no sessions to drain, a worker that acknowledged its retire
+        // exits.
+        if request.op == WorkerOp::Retire && answer.status == WorkerStatusOutcome::Ok {
+            worker.exit();
+        }
+        Ok(answer)
     }
 }
 
@@ -235,6 +253,7 @@ impl ProcessLauncher for Workers {
             loading: AtomicBool::new(self.start_loading.load(Ordering::SeqCst)),
             contact: Mutex::new(ControlContact::Reporting),
             hold_stop: Mutex::new(None),
+            hold_retire: Mutex::new(None),
             target: Mutex::new(MemberTarget::built(MemberTarget::ceiling_of(&config))),
             ops: Mutex::default(),
         });
@@ -424,6 +443,24 @@ impl RegistryAgent {
     pub fn step(&self, after: Duration) {
         self.clock.advance(after);
         self.registry.supervise();
+    }
+
+    /// Supervision steps, as the agent's loop runs them, until no member
+    /// is draining: a retired worker that exited is reaped by one.
+    pub fn reap_retired(&self) {
+        let deadline = Instant::now() + HELD;
+        loop {
+            self.step(Duration::ZERO);
+            let live = self.registry.live_members().expect("the registry reports");
+            if live
+                .iter()
+                .all(|member| member.role != MemberRole::Draining)
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "never reaped: {live:?}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     /// Deploy the bundle at `bundle` as `id`.

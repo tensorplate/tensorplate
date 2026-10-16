@@ -13,7 +13,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
@@ -72,8 +72,16 @@ pub const RESTART_DELAYS: [Duration; 3] = [
 /// How long a restart counts against its member.
 pub const RESTART_WINDOW: Duration = Duration::from_secs(300);
 
-/// How long a member is given to answer an admission fence or an activate.
+/// How long a member is given to answer an admission fence, an activate or
+/// a retire.
 pub const CONTROL_BUDGET: Duration = Duration::from_secs(3);
+
+/// The drain a retired serving member is asked to give its sessions.
+pub const RETIRE_DRAIN: Duration = Duration::from_secs(30);
+
+/// How long past its drain a retired member that acknowledged the retire is
+/// given to stop its sidecar and exit before it is asked to stop.
+pub const RETIRE_CLEANUP: Duration = Duration::from_secs(10);
 
 /// What a member's control channel has shown so far.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -300,6 +308,8 @@ struct ControlState {
     /// What the member's worker answered its last `activate` with, until
     /// one is answered `error`.
     quota: Mutex<Option<MemberQuota>>,
+    /// Set under `fenced_by` by the retire: its worker admits nothing again.
+    retired: AtomicBool,
 }
 
 impl ControlState {
@@ -339,8 +349,8 @@ struct Reach {
 }
 
 impl Reach {
-    /// `role` names the member in what is logged: `serving`, `candidate`
-    /// or `restarted`.
+    /// `role` names the member in what is logged: `serving`, `candidate`,
+    /// `restarted` or `retiring`.
     fn of(member: &Member, role: &str) -> Self {
         Self {
             name: format!(
@@ -366,10 +376,24 @@ impl Reach {
         self.caller.call(command, CONTROL_BUDGET)
     }
 
+    /// Takes the member's fence, and with it an activate a failed
+    /// transaction still owes the member, and marks it retired, which a
+    /// restart's activate reads: none is sent after the retire.
+    fn retire(&self, transaction_id: &str) -> Result<WorkerControlResponse, ControlChannelError> {
+        let mut fenced_by = lock(&self.control.fenced_by);
+        *fenced_by = None;
+        self.control.retired.store(true, Ordering::SeqCst);
+        let command = RuntimeCommand::Retire {
+            transaction_id: transaction_id.to_owned(),
+            drain_timeout_ms: u64::try_from(RETIRE_DRAIN.as_millis()).unwrap_or(u64::MAX),
+        };
+        self.caller.call(command, CONTROL_BUDGET)
+    }
+
     fn activate(&self, transaction_id: &str, unless_fenced: bool) {
         let fenced_by = lock(&self.control.fenced_by);
         // The transaction that fenced it re-activates it or retires it.
-        if unless_fenced && fenced_by.is_some() {
+        if unless_fenced && (fenced_by.is_some() || self.control.retired.load(Ordering::SeqCst)) {
             return;
         }
         if let Err(failed) = self.send_activate(transaction_id) {
@@ -511,7 +535,7 @@ mod leaving {
     #[derive(Default)]
     pub(super) struct DrainingSet(Arc<Mutex<BTreeMap<u64, Draining>>>);
 
-    /// A member on its way to be stopped: `retire` takes nothing else, and
+    /// A member on its way to be stopped: `stop` takes nothing else, and
     /// one is only made by recording the member as draining.
     pub(super) struct Stopping {
         member: Member,
@@ -575,10 +599,31 @@ mod leaving {
 
 use leaving::{DrainingSet, Stopping};
 
+/// A serving member told to retire, held until its process is reaped.
+struct Retiring {
+    stopping: Stopping,
+    phase: Retirement,
+}
+
+/// How far a retiring member's stop has gone.
+#[derive(Clone, Copy)]
+enum Retirement {
+    /// Its retire is being sent.
+    Sent,
+    /// It acknowledged the retire; unless it exits first, it is asked to
+    /// stop at `stop_at`.
+    Acknowledged { stop_at: Instant },
+    /// It was asked to stop; unless it exits first, it is killed at
+    /// `kill_at`.
+    Terminated { kill_at: Instant },
+}
+
 #[derive(Default)]
 struct Members {
     by_generation: BTreeMap<u64, Member>,
     draining: DrainingSet,
+    /// Recorded as draining as well, by generation.
+    retiring: BTreeMap<u64, Retiring>,
     serving: Option<u64>,
     candidate: Option<u64>,
     /// The candidate's deploy gave up on it; it is not promoted any more.
@@ -661,6 +706,9 @@ pub struct MemberRegistry {
     /// The threads the supervision step sent an activate from.
     #[cfg(test)]
     activations: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Runs once, on the next of those threads, before it sends.
+    #[cfg(test)]
+    before_thread_sends: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl MemberRegistry {
@@ -685,6 +733,8 @@ impl MemberRegistry {
             before_staged_read: Mutex::new(None),
             #[cfg(test)]
             activations: Mutex::default(),
+            #[cfg(test)]
+            before_thread_sends: Mutex::new(None),
         }
     }
 
@@ -803,6 +853,19 @@ impl Members {
     /// Record `member`, which left the map under this lock, as draining.
     fn stopping(&self, member: Member) -> Stopping {
         self.draining.record(member)
+    }
+
+    /// Hold `member`, which left the serving slot under this lock, as
+    /// retiring until the supervision step reaps it; returns what sends it
+    /// the retire.
+    fn retire_later(&mut self, member: Member) -> (u64, Reach) {
+        let generation = member.generation;
+        let reach = Reach::of(&member, "retiring");
+        let stopping = self.stopping(member);
+        let phase = Retirement::Sent;
+        self.retiring
+            .insert(generation, Retiring { stopping, phase });
+        (generation, reach)
     }
 
     fn live(&mut self, generation: u64, role: MemberRole) -> Option<LiveMember> {
@@ -1092,9 +1155,78 @@ impl MemberRegistry {
 
     /// Stop `members`: ask each to drain, then kill whatever is still
     /// running when the one stop deadline they share passes.
-    fn retire(&self, mut members: Vec<Stopping>) {
+    fn stop(&self, mut members: Vec<Stopping>) {
         let deadline = self.ask_to_stop(&mut members);
         reap(members, deadline);
+    }
+
+    /// Send the member [`Members::retire_later`] holds as `generation` its
+    /// retire. One that does not acknowledge it within [`CONTROL_BUDGET`]
+    /// is asked to stop at once, as any other member is.
+    fn send_retire(&self, generation: u64, reach: &Reach, transaction_id: &str) {
+        let refused = match reach.retire(transaction_id) {
+            Ok(answer) if answer.status == WorkerStatusOutcome::Ok => None,
+            Ok(answer) => Some(format!("refused: {}", refusal(&answer))),
+            Err(err) => Some(format!("not answered: {err}")),
+        };
+        let now = self.clock.now();
+        let Ok(mut members) = self.members() else {
+            return;
+        };
+        // Gone once it was reaped, or taken by the registry's stop.
+        let Some(retiring) = members.retiring.get_mut(&generation) else {
+            return;
+        };
+        retiring.phase = match refused {
+            None => Retirement::Acknowledged {
+                stop_at: later(now, RETIRE_DRAIN + RETIRE_CLEANUP),
+            },
+            Some(why) => {
+                eprintln!("{}: retire {why}; asked to stop", reach.name);
+                retiring.stopping.member().process.terminate();
+                Retirement::Terminated {
+                    kill_at: later(now, self.settings.stop_deadline),
+                }
+            }
+        };
+    }
+
+    /// Reap the retiring members that exited; ask one whose drain and
+    /// cleanup are over to stop, and kill one past its stop deadline.
+    fn watch_retiring(&self, now: Instant) {
+        let mut done = Vec::new();
+        {
+            let Ok(mut members) = self.members() else {
+                return;
+            };
+            for (generation, mut retiring) in std::mem::take(&mut members.retiring) {
+                let member = retiring.stopping.member();
+                if matches!(member.process.exited(), Ok(true)) {
+                    done.push(retiring.stopping);
+                    continue;
+                }
+                match retiring.phase {
+                    Retirement::Acknowledged { stop_at } if now >= stop_at => {
+                        eprintln!(
+                            "retiring worker `{}` generation {generation} did not exit within {} ms of its retire; asked to stop",
+                            member.deployment_id,
+                            (RETIRE_DRAIN + RETIRE_CLEANUP).as_millis()
+                        );
+                        member.process.terminate();
+                        retiring.phase = Retirement::Terminated {
+                            kill_at: later(now, self.settings.stop_deadline),
+                        };
+                    }
+                    Retirement::Terminated { kill_at } if now >= kill_at => {
+                        done.push(retiring.stopping);
+                        continue;
+                    }
+                    _ => {}
+                }
+                members.retiring.insert(generation, retiring);
+            }
+        }
+        reap(done, Instant::now());
     }
 
     /// Ask each of `members` to drain; returns the stop deadline they share.
@@ -1346,9 +1478,17 @@ impl MemberRegistry {
     #[cfg_attr(not(test), allow(clippy::unused_self))]
     fn activate_on_thread(&self, reach: Reach, send: impl FnOnce(&Reach) + Send + 'static) {
         let name = reach.name.clone();
+        #[cfg(test)]
+        let before = lock(&self.before_thread_sends).take();
         let spawned = std::thread::Builder::new()
             .name("member-activate".into())
-            .spawn(move || send(&reach));
+            .spawn(move || {
+                #[cfg(test)]
+                if let Some(before) = before {
+                    before();
+                }
+                send(&reach);
+            });
         match spawned {
             #[cfg(test)]
             Ok(thread) => lock(&self.activations).push(thread),
@@ -1555,7 +1695,7 @@ impl MemberRegistry {
                 Err(_) => {}
             }
         }
-        self.retire(yielded.into_iter().collect());
+        self.stop(yielded.into_iter().collect());
     }
 }
 
@@ -1655,7 +1795,7 @@ impl WorkerControl for MemberRegistry {
             displaced.map(|(_, member)| members.stopping(member))
         };
         let _preparing = Preparing(self);
-        self.retire(displaced.into_iter().collect());
+        self.stop(displaced.into_iter().collect());
 
         let staged_profile = if described {
             None
@@ -1680,7 +1820,7 @@ impl WorkerControl for MemberRegistry {
                 (displaced, false)
             }
         };
-        self.retire(displaced.into_iter().collect());
+        self.stop(displaced.into_iter().collect());
         if stopped {
             return Err(AgentError::Stopping);
         }
@@ -1753,7 +1893,7 @@ impl WorkerControl for MemberRegistry {
                 ));
                 let prepared = members.take_candidate().map(|(_, m)| members.stopping(m));
                 drop(members);
-                self.retire(prepared.into_iter().collect());
+                self.stop(prepared.into_iter().collect());
                 return Err(err);
             }
         }
@@ -1783,16 +1923,14 @@ impl WorkerControl for MemberRegistry {
             members.forget_restart();
             let activated = members.by_generation.get(&generation);
             let activated = activated.map(|member| Reach::of(member, "candidate"));
-            (old.map(|member| members.stopping(member)), activated)
+            (old.map(|member| members.retire_later(member)), activated)
         };
-        let mut retired: Vec<Stopping> = retired.into_iter().collect();
-        // Asked before the activate is sent: a stop of the agent, which waits
-        // for this member only as long as for any other, never waits on it.
-        let deadline = self.ask_to_stop(&mut retired);
+        if let Some((generation, reach)) = retired {
+            self.send_retire(generation, &reach, transaction_id);
+        }
         if let Some(reach) = activated {
             reach.activate(transaction_id, false);
         }
-        reap(retired, deadline);
         Ok(())
     }
 
@@ -1878,10 +2016,11 @@ impl WorkerControl for MemberRegistry {
 
     fn unload(&self, deployment_id: &str) {
         let mut stopped = Vec::new();
+        let mut retired = None;
         if let Ok(mut members) = self.members() {
             if members.names(members.serving, deployment_id) {
                 let serving = members.take_serving();
-                stopped.extend(serving.map(|member| members.stopping(member)));
+                retired = serving.map(|member| members.retire_later(member));
             }
             if members.names(members.candidate, deployment_id) {
                 let candidate = members.take_candidate();
@@ -1891,7 +2030,12 @@ impl WorkerControl for MemberRegistry {
                 members.forget_restart();
             }
         }
-        self.retire(stopped);
+        if let Some((generation, reach)) = retired {
+            // An unload commits nothing; its retire has an id of its own.
+            let transaction_id = format!("tx-{}", uuid::Uuid::new_v4());
+            self.send_retire(generation, &reach, &transaction_id);
+        }
+        self.stop(stopped);
     }
 
     fn active_deployment_id(&self) -> AgentResult<Option<String>> {
@@ -1957,6 +2101,7 @@ impl WorkerControl for MemberRegistry {
     fn supervise(&self) -> Vec<MemberEvent> {
         let mut events = Vec::new();
         let now = self.clock.now();
+        self.watch_retiring(now);
         self.watch_serving(now, &mut events);
         self.retry_reopen(now);
         self.start_owed_restart(now, &mut events);
@@ -1981,13 +2126,15 @@ impl WorkerControl for MemberRegistry {
             members.stopping = true;
             members.serving = None;
             members.candidate = None;
-            let stopped: Vec<Stopping> = std::mem::take(&mut members.by_generation)
+            let mut stopped: Vec<Stopping> = std::mem::take(&mut members.by_generation)
                 .into_values()
                 .map(|member| members.stopping(member))
                 .collect();
+            let retiring = std::mem::take(&mut members.retiring).into_values();
+            stopped.extend(retiring.map(|retiring| retiring.stopping));
             (stopped, members.outside.clone())
         };
-        self.retire(members);
+        self.stop(members);
         // What another thread was starting or stopping when the flag was
         // set: it ends stopped, by that thread, within the stop deadline.
         // A launch held in its generation write outlasts the wait, and
@@ -2021,11 +2168,13 @@ impl Drop for MemberRegistry {
                 .get_mut()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
-        let stopped = std::mem::take(&mut members.by_generation)
+        let mut stopped: Vec<Stopping> = std::mem::take(&mut members.by_generation)
             .into_values()
             .map(|member| members.stopping(member))
             .collect();
-        self.retire(stopped);
+        let retiring = std::mem::take(&mut members.retiring).into_values();
+        stopped.extend(retiring.map(|retiring| retiring.stopping));
+        self.stop(stopped);
     }
 }
 

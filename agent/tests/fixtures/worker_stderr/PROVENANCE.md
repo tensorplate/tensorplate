@@ -44,8 +44,21 @@ serving worker with a deployment generation keeps (see
 `docs/architecture/serving-worker.md`, "Control channel"). It appends
 each request and its answer to `<endpoint>-<generation>.control.jsonl`
 beside the serving config before it sends the answer, so a test reads what
-the worker process was sent. `stub-worker.sh` runs it with `python3`, which
-these tests need on `PATH`.
+the worker process was sent. It retires as the serving worker does
+(`runtime/src/serving/member_control.cpp`, and `begin_retirement` in
+`runtime/src/serving/worker.cpp`): the first retire closes admission for
+good and starts a drain of the retire's `drain_timeout_ms`, at most 30 s,
+after which the worker exits by itself; a retire again is answered `ok`
+without starting the drain again, an activate after it is refused
+`member_retiring`, and a stop ends the drain early. The stand-in has no
+sessions, so its drain ends at once, unless the test leaves
+`<endpoint>.draining` beside the config, which it reads as open sessions
+until the file is removed. A worker that drained leaves
+`<endpoint>-<generation>.retired` and exits 0; one asked to stop leaves
+`<endpoint>.terminated`. An endpoint starting `deaf-` records each retire
+with a `null` answer and never answers it, so the agent's wait for the
+answer runs out. `stub-worker.sh` runs it with `python3`, which these tests
+need on `PATH`.
 
 `pid-recording-worker.sh` is not a recording either. It writes its process
 id beside the serving config and then runs `stub-worker.sh` in the same

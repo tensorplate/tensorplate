@@ -7,6 +7,7 @@ use super::*;
 
 const FENCE: WorkerOp = WorkerOp::AdmissionFence;
 const ACTIVATE: WorkerOp = WorkerOp::Activate;
+const RETIRE: WorkerOp = WorkerOp::Retire;
 
 fn sent(op: WorkerOp, transaction_id: &str) -> (WorkerOp, String) {
     (op, transaction_id.to_owned())
@@ -43,7 +44,7 @@ fn fence_of(control: &ControlState) -> Option<(String, bool)> {
 
 /// `stt` serving as generation 1, fenced by `tx-2` and owed its activate
 /// after that transaction failed and its first activate was not answered.
-fn owed_a_reopen(f: &Fixture) -> Arc<Handle> {
+pub(super) fn owed_a_reopen(f: &Fixture) -> Arc<Handle> {
     let serving = f.serve("stt");
     ready_candidate(f, "tts");
     f.registry.fence("tx-2", &candidate("tts")).unwrap();
@@ -93,7 +94,13 @@ fn a_replacing_promotion_fences_the_serving_member_and_activates_the_candidate_a
 
     assert_eq!(incoming.ops(), [sent(ACTIVATE, "tx-2")]);
     assert_eq!(quota_of(&f, 2), Some(MemberTarget::quota(0)));
-    assert_eq!(serving.calls(), ["terminate"]);
+    let retired = [
+        sent(ACTIVATE, "tx"),
+        sent(FENCE, "tx-2"),
+        sent(RETIRE, "tx-2"),
+    ];
+    assert_eq!(serving.ops(), retired);
+    assert!(serving.calls().is_empty());
 }
 
 #[test]
@@ -306,7 +313,7 @@ fn a_restarted_member_a_transaction_fenced_is_left_to_that_transaction_to_reopen
 }
 
 #[test]
-fn the_replaced_member_is_asked_to_stop_before_the_new_one_is_activated() {
+fn the_replaced_member_is_sent_its_retire_before_the_new_one_is_activated() {
     let f = fixture();
     let serving = f.serve("stt");
     ready_candidate(&f, "tts");
@@ -318,12 +325,13 @@ fn the_replaced_member_is_asked_to_stop_before_the_new_one_is_activated() {
         let answer = answer;
         let activate = scope.spawn(|| f.registry.activate("tx-2", &candidate("tts")));
         asked.recv_timeout(GRACE).unwrap();
-        assert_eq!(serving.calls(), ["terminate"]);
+        assert_eq!(serving.ops().last(), Some(&sent(RETIRE, "tx-2")));
         answer.send(()).unwrap();
         activate.join().unwrap().unwrap();
     });
 
     assert_eq!(incoming.ops(), [sent(ACTIVATE, "tx-2")]);
+    assert!(serving.calls().is_empty());
 }
 
 #[test]
@@ -498,8 +506,12 @@ fn a_transaction_that_fences_a_member_owed_a_reopen_takes_it_over() {
     activations_answered(&f);
 
     let ops = serving.ops();
-    let taken_over = [sent(ACTIVATE, "tx-2"), sent(FENCE, "tx-4")];
-    assert_eq!(ops[ops.len() - 2..], taken_over, "{ops:?}");
+    let taken_over = [
+        sent(ACTIVATE, "tx-2"),
+        sent(FENCE, "tx-4"),
+        sent(RETIRE, "tx-4"),
+    ];
+    assert_eq!(ops[ops.len() - 3..], taken_over, "{ops:?}");
     let served = f.registry.active_deployment_id().unwrap();
     assert_eq!(served.as_deref(), Some("tts"));
 }

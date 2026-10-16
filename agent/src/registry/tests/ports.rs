@@ -143,6 +143,7 @@ fn the_ports_of_a_reaped_member_are_given_to_the_next() {
     assert_eq!(http_port(&first), ACTIVE_PORT);
     assert_eq!(http_port(&second), CANDIDATE_PORT);
 
+    f.registry.supervise();
     f.prepare("third").unwrap();
 
     assert_eq!(http_port(&f.launcher.handle(3)), ACTIVE_PORT);
@@ -154,38 +155,30 @@ fn the_ports_of_a_reaped_member_are_given_to_the_next() {
 fn a_draining_members_ports_are_not_given_out_until_it_is_reaped() {
     let f = fixture();
     let old = f.serve("stt");
+    old.keeps_draining.store(true, Ordering::SeqCst);
     f.prepare("tts").unwrap();
     f.health(CANDIDATE_PORT, "tts");
     assert!(f.warm("tts").unwrap().ready);
-    let (started, is_draining) = mpsc::channel();
-    let (release, released) = mpsc::channel();
-    *old.hold_terminate.lock().unwrap() = Some((started, released));
+    f.registry.promote("tx", &candidate("tts")).unwrap();
 
-    std::thread::scope(|scope| {
-        let release = release;
-        let promoting = scope.spawn(|| f.registry.promote("tx", &candidate("tts")));
-        is_draining
-            .recv_timeout(GRACE)
-            .expect("the old member is asked to stop");
+    let refused = f.prepare_briefly("third").unwrap_err();
+    assert!(matches!(refused, AgentError::NoFreePort(_)), "{refused}");
+    assert_eq!(
+        refused.code(),
+        tensorplate_protocol::ErrorCode::ResourceExhausted
+    );
+    assert!(refused.to_record().recoverable);
+    assert_eq!(f.launcher.count(), 2);
+    assert_eq!(f.next_generation.load(Ordering::SeqCst), 3);
 
-        let refused = f.prepare_briefly("third").unwrap_err();
-        assert!(matches!(refused, AgentError::NoFreePort(_)), "{refused}");
-        assert_eq!(
-            refused.code(),
-            tensorplate_protocol::ErrorCode::ResourceExhausted
-        );
-        assert!(refused.to_record().recoverable);
-        assert_eq!(f.launcher.count(), 2);
-        assert_eq!(f.next_generation.load(Ordering::SeqCst), 3);
+    // Its process is gone; its ports are held until a step reaps it.
+    exit(&old);
+    let refused = f.prepare_briefly("third").unwrap_err();
+    assert!(matches!(refused, AgentError::NoFreePort(_)), "{refused}");
+    assert_eq!(f.launcher.count(), 2);
 
-        let waiting = scope.spawn(|| f.registry.prepare("tx", &candidate("third"), GRACE));
-        std::thread::sleep(DRAIN);
-        assert_eq!(f.launcher.count(), 2);
-        release.send(()).unwrap();
-        promoting.join().unwrap().unwrap();
-        waiting.join().unwrap().unwrap();
-    });
-
+    f.registry.supervise();
+    f.prepare("third").unwrap();
     assert_eq!(http_port(&f.launcher.handle(3)), ACTIVE_PORT);
 }
 
