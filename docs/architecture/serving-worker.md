@@ -1914,8 +1914,57 @@ The profile (`VadProfile`) also carries the initial decode accumulation
 (320 ms) and the decode stride (160 ms), which the partial decode windows
 read (`WindowScheduler`, in the same directory, pure like the policy), and
 the following audio kept after an endpoint (1 second), which nothing
-reads yet. A profile is checked once, at `VadPolicy::create`
-(`config_invalid`, `invalid_vad_profile`).
+reads yet, and the number of decodes that must agree before a word
+commits (3, at least 2), which the transcript commitment reads. A profile
+is checked once, at `VadPolicy::create` (`config_invalid`,
+`invalid_vad_profile`).
+
+### Transcript commitment
+
+`TranscriptCommitment` (`runtime/src/serving/session/transcript_commitment.hpp`,
+internal) is the per-utterance rule that turns successive decodes of a
+bounded window into a transcript whose prefix never changes. It is pure (no
+clock, no thread, no job) and is not wired yet: the speech dispatch still
+decodes each utterance whole. Offsets are absolute samples at 16 kHz.
+
+- Every decode covers `[ring_start(), end)`. Its first words must repeat
+  the committed words after the ring start, one to one and in order: the
+  same word once the spaces and punctuation around it, ASCII case, Arabic
+  tatweel (U+0640) and short vowels (U+064B to U+0652) are set aside, ending
+  within 160 ms of where it was committed. Starts are not compared there:
+  after a pause a word's start moves with the window's start. One word
+  before them may be the committed word that ends at the ring start, heard
+  again where the window cut it, if it ends within 160 ms of the ring start;
+  a word that could be that word or the first repeated one is ambiguous. A
+  decode that does not repeat them is not reconciled: it commits nothing and
+  leaves the last suffix in place, and the next decode is compared with the
+  last reconciled ones.
+- The words after them are compared with those of the reconciled decodes
+  before it, as many as the profile's agreement count less one, the oldest
+  first. The longest leading run that has the same tokens and, compared as
+  above, the same text in all of them, whose starts and ends lie within
+  160 ms of one another, and that ends at least 320 ms before the oldest
+  decode's end, is committed as the latest decode placed it. Committed words never
+  change; a partial is the committed words followed by the last reconciled
+  decode's others (`suffix()`).
+- The ring then starts at the latest committed word end that leaves at
+  least one second of committed audio after it. `admit(end)` refuses audio
+  that would take the window past eight seconds from the ring start
+  (`resource_exhausted`, `unstable_transcript_window`): nothing committed
+  lets the ring move far enough.
+- `finalize()` takes the decode of the retained tail at the utterance's
+  end: the committed words followed by the tail's words after the ones it
+  repeats. A tail that does not repeat them fails (`inference_failed`,
+  `ambiguous_final_overlap`) rather than lose or repeat a word.
+- A window that is not the ring's, or a decode whose words leave the
+  window, run backwards or name tokens it lacks, is refused (`internal`).
+
+`test/unit/transcript_commitment_test.cpp` covers the rules with built
+decodes. `test/unit/transcript_commitment_record_test.cpp` replays decodes
+of real speech that `test/unit/fixtures/transcript_commitment/record.py`
+recorded from the Whisper model of the speech provisioning, on a CPU, for
+exactly the windows the commitment asked for, with the utterances the voice
+activity policy found in the sidecar's own voice activity scores.
 
 ### The speech dispatch in the worker
 

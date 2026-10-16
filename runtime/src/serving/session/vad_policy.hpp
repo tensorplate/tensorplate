@@ -28,6 +28,9 @@ struct VadProfile {
   std::chrono::milliseconds max_utterance{30000};
   /// Samples per frame of the voice-activity model.
   std::uint32_t frame_samples = 512;
+  /// Successive reconciled decodes that must agree on a word before it
+  /// commits; carried for the transcript commitment.
+  std::uint32_t commit_agreement = 3;
 
   friend bool operator==(const VadProfile& lhs, const VadProfile& rhs) noexcept = default;
 };
@@ -58,8 +61,8 @@ class VadPolicy {
   /// @return ConfigInvalid with context "invalid_vad_profile" unless the
   ///   threshold is in (0, 1], frame_samples fits one VadFrames payload,
   ///   max_utterance is in (0, 30 s], every other duration is in
-  ///   (0, max_utterance], and leading padding plus the minimum speech run
-  ///   is shorter than max_utterance.
+  ///   (0, max_utterance], leading padding plus the minimum speech run is
+  ///   shorter than max_utterance, and commit_agreement is at least 2.
   [[nodiscard]] static Result<VadPolicy> create(VadProfile profile);
 
   /// Takes the next frame's speech probability. The caller observes each

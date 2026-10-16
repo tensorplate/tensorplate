@@ -81,6 +81,7 @@ TEST(VadPolicy, DefaultsAreTheInitialAlgorithmProfile) {
   EXPECT_EQ(profile.endpoint_retention, 1000ms);
   EXPECT_EQ(profile.max_utterance, 30000ms);
   EXPECT_EQ(profile.frame_samples, 512U);
+  EXPECT_EQ(profile.commit_agreement, 3U);
   EXPECT_EQ(make_policy().profile(), profile);
 }
 
@@ -293,6 +294,7 @@ TEST(VadPolicy, AcceptsProfilesAtTheirBounds) {
   EXPECT_TRUE(accepted([](VadProfile& p) { p.frame_samples = 16'384; }));
   EXPECT_TRUE(accepted([](VadProfile& p) { p.frame_samples = 1; }));
   EXPECT_TRUE(accepted([](VadProfile& p) { p.endpoint_retention = 30000ms; }));
+  EXPECT_TRUE(accepted([](VadProfile& p) { p.commit_agreement = 2; }));
   EXPECT_TRUE(accepted([](VadProfile& p) {
     p.max_utterance = 225ms;
     p.min_speech = 50ms;
@@ -327,6 +329,7 @@ TEST(VadPolicy, RefusesInvalidProfiles) {
   EXPECT_TRUE(refused([](VadProfile& p) { p.decode_stride = 0ms; }));
   EXPECT_TRUE(refused([](VadProfile& p) { p.endpoint_retention = 0ms; }));
   EXPECT_TRUE(refused([](VadProfile& p) { p.endpoint_retention = 30001ms; }));
+  EXPECT_TRUE(refused([](VadProfile& p) { p.commit_agreement = 1; }));
   // 160 ms of padding and 50 ms of speech, rounded to two frames, fill 224 ms.
   EXPECT_TRUE(refused([](VadProfile& p) {
     p.max_utterance = 224ms;

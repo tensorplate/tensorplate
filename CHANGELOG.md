@@ -459,6 +459,24 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   and microseconds with checked arithmetic. (V030-E05-F03-T01,
   V030-E05-F03-T04)
 
+- A transcript commitment rule for rolling speech-to-text windows in the
+  serving worker, not wired yet. Three successive reconciled decodes of a
+  window, a count the voice detection profile carries, commit the longest
+  leading run of uncommitted words they agree on (the same tokens and text, starts and ends within
+  160 ms of one another, ending at least 320 ms before the oldest decode's
+  end), and committed words never change. The window then starts
+  at the latest committed word end that keeps one second of committed audio
+  after it, and each decode must repeat those words, compared without the
+  punctuation around them, ASCII case or Arabic tatweel and short vowels and
+  ending within 160 ms; the word cut at the window's start may be heard
+  again once. Audio more than eight seconds past the window's start is
+  refused as an unstable transcript window, and a final decode of the tail
+  that does not repeat the committed words fails as an ambiguous final
+  overlap rather than lose or repeat a word. Replay tests hold it to
+  English and Arabic speech decoded by the speech provisioning's Whisper
+  model on a CPU, in the windows it asked for and the utterances the voice
+  detection policy found. (V030-E05-F03-T01, V030-E05-F03-T04)
+
 - The serving worker's stream binding sends `PartialTranscript` events for
   a dispatch that offers partial transcripts: each the whole current
   hypothesis of an utterance, its revision growing within the utterance.

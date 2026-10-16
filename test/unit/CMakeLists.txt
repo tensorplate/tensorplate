@@ -65,6 +65,8 @@ add_executable(tp_test_unit
   session_dispatch_test.cpp
   speech_dispatch_test.cpp
   speech_voice_detection_test.cpp
+  transcript_commitment_test.cpp
+  transcript_commitment_record_test.cpp
   vad_policy_test.cpp
   window_scheduler_test.cpp
   control_channel_test.cpp
