@@ -771,6 +771,24 @@ TEST(SpeechVoiceDetection, ASessionThatEndedWhileWaitingForTheVoiceActivityLaneI
   }
 }
 
+// A frame the stream accepted before the session's cancel and handed over
+// after it: the ended session keeps none of it.
+TEST(SpeechVoiceDetection, AFrameHandedOverAfterItsSessionEndedReturnsItsCredit) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes late = voiced(1'024, 102);
+  ASSERT_TRUE(binding.manager->accept_input(key, late.size()).has_value());
+  speech.bridge->refuse_next_release();
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(queue_depth(binding, key), 1U);
+  binding.dispatch().audio(key, late);
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(queue_depth(binding, key), 0U);
+  EXPECT_TRUE(jobs_of(speech, JobClass::VadFrames).empty());
+}
+
 TEST(SpeechVoiceDetection, AudioToASessionThatTakesTextFailsIt) {
   Binding binding(&speech_dispatch_detecting_voice);
   const auto text_key = binding.open_text();

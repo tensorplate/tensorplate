@@ -521,8 +521,9 @@ void SpeechJobDispatch::hand_over(SessionManager& manager, std::uint64_t key, Se
   const bool takes_audio = session.terms.input_kind == SessionInputKind::Audio;
   if (const auto* input = std::get_if<Command::AudioIn>(&command.body)) {
     // On a session that takes text the credit refuses this as
-    // wrong_input_kind; with voice detection it returns once it was scored.
-    if (session.detection) {
+    // wrong_input_kind; with voice detection it returns once it was scored,
+    // or at once, the frame dropped, when the session has ended.
+    if (session.detection && !session.ended) {
       keep_audio(session, input->frame);
     } else if (manager.release_audio_input(key, 1, input->frame.size())) {
       take_audio(manager, key, session, input->frame);
