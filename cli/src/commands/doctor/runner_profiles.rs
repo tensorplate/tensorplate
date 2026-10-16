@@ -325,7 +325,7 @@ struct Requirements {
 fn requirements(profile_id: &str) -> Option<Requirements> {
     match profile_id {
         "faster_whisper" => Some(Requirements {
-            modules: &["ctranslate2", "faster_whisper", "av"],
+            modules: &["ctranslate2", "faster_whisper", "av", "onnxruntime"],
             libraries: &["libcublas.so.12"],
         }),
         "kokoro" => Some(Requirements {
@@ -798,6 +798,7 @@ mod tests {
                 "ctranslate2": {"version": "4.8.2"},
                 "faster_whisper": {"version": "1.2.1"},
                 "av": {"version": "18.1.0"},
+                "onnxruntime": {"version": "1.30.0"},
             },
             "libraries": {"libcublas.so.12": {"mapped": ["/opt/env/lib/libcublas.so.12"]}},
             "ctranslate2": ctranslate2_facts,
@@ -825,6 +826,7 @@ mod tests {
                 "ctranslate2 4.8.2",
                 "faster_whisper 1.2.1",
                 "av 18.1.0",
+                "onnxruntime 1.30.0",
                 "`libcublas.so.12` from `/opt/env/lib/libcublas.so.12`",
                 "CTranslate2 sees 1 CUDA device and supports float16, int8_float16",
             ]
@@ -957,6 +959,7 @@ mod tests {
             [
                 "`ctranslate2` was not checked",
                 "`av` was not checked",
+                "`onnxruntime` was not checked",
                 "`libcublas.so.12` was not checked",
                 "CTranslate2's CUDA support was not checked",
             ]

@@ -13,9 +13,13 @@ site = Path(sys.prefix) / "lib" / f"python3.{sys.version_info.minor}" / "site-pa
 # CTranslate2 loads cuBLAS by name from the runner's library search path.
 assert (site / "nvidia" / "cublas" / "lib" / "libcublas.so.12").is_file()
 import ctranslate2  # noqa: E402
-import faster_whisper  # noqa: E402, F401
+import faster_whisper.utils  # noqa: E402
+import onnxruntime  # noqa: E402
 
 assert ctranslate2.__version__ == importlib.metadata.version("ctranslate2")
+assert onnxruntime.__version__ == importlib.metadata.version("onnxruntime")
+# Every faster_whisper load opens the voice activity model the wheel carries.
+assert (Path(faster_whisper.utils.get_assets_path()) / "silero_vad_v6.onnx").is_file()
 
 # misaki fetches this spaCy model at first use when it is not installed.
 importlib.metadata.version("en_core_web_sm")

@@ -37,7 +37,7 @@ interpreter_query="$(cat "$src/protocol/rust/src/backend_probe_interpreter.py")"
 dependency_query="$(cat "$src/cli/src/commands/doctor/runner_profile_dependencies.py")"
 # The lists `requirements` holds in cli/src/commands/doctor/runner_profiles.rs;
 # a test there fails when these two lines differ from them.
-faster_whisper='{"libraries":["libcublas.so.12"],"modules":["ctranslate2","faster_whisper","av"]}'
+faster_whisper='{"libraries":["libcublas.so.12"],"modules":["ctranslate2","faster_whisper","av","onnxruntime"]}'
 kokoro='{"libraries":[],"modules":["torch","kokoro","misaki","en_core_web_sm","espeakng_loader"]}'
 
 # One query in the environment the sidecar launcher sets.
