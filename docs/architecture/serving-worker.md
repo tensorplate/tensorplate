@@ -1772,6 +1772,42 @@ twice a wake and no more often than its next bound allows: once in 1010 ms
 while that bound is 1010 ms away, once a millisecond while the clock stands
 1 ns short of it.
 
+### Voice detection policy
+
+`VadPolicy` (`runtime/src/serving/session/vad_policy.hpp`, internal) is
+the per-session rule that turns voice-activity probabilities into
+utterance boundaries. Nothing calls it yet: the speech dispatch above
+still ends an utterance only on a client Finalize, a half-close or the
+30-second limit. It is pure (no clock, no thread, no allocation) and
+reads one probability per frame of 512 samples at 16 kHz, the frames
+back to back from sample zero or from where a reset put them.
+
+- A frame with probability 0.5 or more is speech. Two consecutive speech
+  frames (64 ms) start an utterance 160 ms before the first of them, but
+  never before the previous utterance's end.
+- Ten consecutive silence frames (320 ms) end it, at the end of the
+  tenth: that endpoint is the utterance's exclusive end and the floor of
+  the next onset. A final transcript's segment times come from its
+  aligned words, never from the endpoint.
+- An utterance in speech that reaches 30 seconds (480,000 samples) ends
+  there, mid-frame when the limit falls inside one, and the next
+  utterance starts at that sample, still in speech. The silence run
+  carries across the split, so a frame can end both: the 30-second
+  utterance at the limit and the next one at the frame's end.
+- `reset(end)` is the dispatch ending an utterance itself: the policy
+  returns to silence and its next frame and next onset start at `end`.
+- Offsets are absolute and never reset across utterances. An internal
+  end b is `ceil(b * R / 16000)` samples at the input rate R (8,000 or
+  16,000), and an internal interval [a, b) is
+  `[floor(a * 10^6 / 16000), ceil(b * 10^6 / 16000))` microseconds,
+  both with checked arithmetic.
+
+The profile (`VadProfile`) also carries the initial decode accumulation
+(320 ms), the decode stride (160 ms) and the following audio kept after
+an endpoint (1 second) for the rolling decode windows that will read
+them. A profile is checked once, at `VadPolicy::create`
+(`config_invalid`, `invalid_vad_profile`).
+
 ### The speech dispatch in the worker
 
 In a feature-ON build, a worker with `streaming.enabled` whose
