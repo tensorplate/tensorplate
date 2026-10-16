@@ -70,8 +70,8 @@ namespace tensorplate {
 ///     its reservations stay held.
 ///
 /// Obligations of the sink: a callback returns promptly without blocking or
-/// throwing. It may call submit(), cancel() and release_session() on the
-/// bridge, whose events then arrive after it returns; it never calls
+/// throwing. It may call submit(), cancel(), release_session() and runs() on
+/// the bridge, whose events then arrive after it returns; it never calls
 /// health() or set_event_sink(). A callback never unloads or destroys the
 /// backend session the bridge belongs to, and never destroys the bridge. A
 /// receiver releases the buffer of every AudioChunkResult it receives exactly
