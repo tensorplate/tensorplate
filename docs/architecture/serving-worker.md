@@ -77,8 +77,10 @@ In a feature-ON build with `streaming.enabled`, `start()` opens the gRPC
 (`protocol/proto/tensorplate/stream/v1/session.proto`) on
 `bind.host`:`streaming.port`, after the HTTP listener, and logs the bound port
 as `stream listener bound`. The listener (`runtime/src/serving/stream/`, all
-internal) owns a `SessionManager` that admits one session at a time with the
-protocol's default timers, and drives the [session
+internal) owns a `SessionManager` that admits `streaming.max_sessions`
+sessions at a time, one by default ([Several stream
+sessions](#several-stream-sessions)), with the protocol's default timers,
+and drives the [session
 dispatch](#session-dispatch) it is given. For a speech deployment on a
 backend that builds its session with a job bridge the worker gives it the
 speech dispatch
@@ -645,7 +647,7 @@ listener is opened. The binary's exit codes are:
 | 64   | Configuration parse / validation failure. |
 | 65   | Component build / session load failure. |
 | 66   | Listener bind / accept failure. |
-| 70   | Internal error, and a worker that stopped itself because its speech backend stalled ([A stalled speech backend](#a-stalled-speech-backend)), also when the stall came during a stop it was asked for. |
+| 70   | Internal error, and a worker that stopped itself because its speech backend stalled ("A stalled speech backend" in [the speech dispatch in the worker](#the-speech-dispatch-in-the-worker)), also when the stall came during a stop it was asked for. |
 
 With `enable_stderr_logs`, the worker writes one JSON record per stderr
 line (`runtime/src/serving/stderr_log.cpp`), each record and its newline in
@@ -925,27 +927,27 @@ status, and no listener was ever opened.
 
 **The control thread.** `ControlChannel` starts next, before the model
 loads, so that the agent's polls are answered during a long load. It is
-the only code that reads the socket, and it never calls into an
-execution session: a backend job that does not return cannot delay an
-answer. Requests are `worker_control.json` frames, one JSON object per
-line, at most 65,536 bytes each. A request that names another deployment
-or generation is answered `member_mismatch` with this worker's member
-and goes no further. `ledger_status` and the other five operations are
+the only code that reads the socket, and it never calls into an execution
+session: a backend job that does not return cannot delay an answer.
+Requests are `worker_control.json` frames, one JSON object per line, at
+most 65,536 bytes each. A request that names another deployment or
+generation is answered `member_mismatch` with this worker's member and
+goes no further. `ledger_status` and the other five operations are
 answered through `ControlTarget`, whose methods return at once;
-`ledger_status` waits only for the stream listener's and session
-manager's short locked sections. The longest is the closing of
-admission at a retire or a stop: the listener holds its lock while
-the manager starts each live session's drain and hands each change to
-the session's sink, which is short at a ceiling of one session and
-grows with the sessions held. The worker's target
-(`MemberControlTarget`, `runtime/src/serving/member_control.hpp`)
-implements the admission fence, activate and retire below, reports the
-stream sessions' ledger (**The ledger** below) and refuses
-`quota_assign` and `pressure_directive` as `unsupported`, so the agent
-is never told that those took effect. An answer the wire format refuses
-is sent as an `error`. A complete frame that does not decode is skipped;
-a line longer than the frame limit ends the channel, and so does a
-response the agent does not take within one second.
+`ledger_status` waits only for the stream listener's and session manager's
+short locked sections. The longest is the closing of admission at a retire
+or a stop: the listener holds its lock while the manager starts each live
+session's drain and hands each change to the session's sink, which is
+short at a ceiling of one session and grows with the sessions held, up to
+`streaming.max_sessions`. The worker's target (`MemberControlTarget`,
+`runtime/src/serving/member_control.hpp`) implements the admission fence,
+activate and retire below, reports the stream sessions' ledger (**The
+ledger** below) and refuses `quota_assign` and `pressure_directive` as
+`unsupported`, so the agent is never told that those took effect. An
+answer the wire format refuses is sent as an `error`. A complete frame
+that does not decode is skipped; a line longer than the frame limit ends
+the channel, and so does a response the agent does not take within one
+second.
 
 **Fence, activate and retire.** Each is idempotent by the state it leaves:
 a repeat of the latest request gets the same answer, and no record of
@@ -963,8 +965,9 @@ correlation ids is kept.
   manager, the `Open` itself, its terms and their budgets, still comes
   first.
 - `activate` opens admission again and answers with the quota in force:
-  the stream sessions the worker serves at one time (1 for a speech
-  deployment that serves streams), and `guest_ram`, the domain the
+  the stream sessions the worker serves at one time
+  (`streaming.max_sessions` for a speech deployment that serves streams),
+  and `guest_ram`, the domain the
   sessions' buffers live in, at 0 bytes: none is reserved per session
   yet, and deriving the bytes is a later change. A worker that serves no
   stream session answers 0 sessions and no domain. An `activate` before
@@ -1009,26 +1012,26 @@ bounds the HTTP drain, up to 30 s instead of the 5 s
 `tombstone()` still have no caller: a worker serves one generation and a
 later client message names none, and no status reads the tombstones yet.
 
-**The ledger.** `ledger_status` answers with the stream sessions'
-ledger, which `SessionManager::ledger()` takes under the manager's one
-lock. `reserved` counts sessions in `opening`; `active` those `active`
-or `finalizing`; `closing` those `draining`, `cancel_requested` or
-`failed`, each of which keeps its place until the backend acknowledges
-its release. `ceiling` is the manager's `max_sessions`, 1 for a speech
-deployment that serves streams. `admission_monotonic_ns` lists, oldest
-first, the time each reserved or active session was opened on the
+**The ledger.** `ledger_status` answers with the stream sessions' ledger,
+which `SessionManager::ledger()` takes under the manager's one lock.
+`reserved` counts sessions in `opening`; `active` those `active` or
+`finalizing`; `closing` those `draining`, `cancel_requested` or `failed`,
+each of which keeps its place until the backend acknowledges its release.
+`ceiling` is the manager's `max_sessions`: `streaming.max_sessions` for a
+speech deployment that serves streams. `admission_monotonic_ns` lists,
+oldest first, the time each reserved or active session was opened on the
 worker's scheduler clock, the host's `CLOCK_MONOTONIC`, sorted; a
 finalization does not move it. Every ledger is one the wire format
 accepts, by construction rather than by a check: each slot the manager
-holds is counted once, and a session takes one only below
-`max_sessions`, which `SessionLimits` bounds by the wire's 2,048. A
-session leaves `opening` inside the open that admits it, so `reserved`
-is 0 today. A worker that serves no stream session reports the empty
-ledger, ceiling 0, as its `activate` quota says; so does a worker that
-serves them until its listener has started, although its `activate`
-already answers 1. Once the listener has stopped, the sessions that
-still held a place then count as `closing` until the worker exits. The
-worker's status does not carry the ledger.
+holds is counted once, and a session takes one only below `max_sessions`,
+which `SessionLimits` bounds by the wire's 2,048. A session leaves
+`opening` inside the open that admits it, so `reserved` is 0 today. A
+worker that serves no stream session reports the empty ledger, ceiling 0,
+as its `activate` quota says; so does a worker that serves them until its
+listener has started, although its `activate` already answers the
+configured count. Once the listener has stopped, the sessions that still
+held a place then count as `closing` until the worker exits. The worker's
+status does not carry the ledger.
 
 **Contact.** The agent is in contact from the start. Three seconds
 without a decodable request is loss of contact, which the next request
@@ -1649,11 +1652,12 @@ long input will resize them.
   of its request or, when its job is the one in flight, of that job's
   deadline, whichever is later. The bound is fixed when the release is
   asked, so a job that ends before the backend acknowledges the release
-  does not bring it forward. A release the bridge refused counts as
-  never acknowledged. When a release passes its bound the dispatch calls
+  does not bring it forward. A release the bridge refused counts as never
+  acknowledged. When a release passes its bound the dispatch calls
   `on_stall` once, on its thread, and the slot stays held: only the
   backend's acknowledgement frees it, or the backend's reset that the
-  worker then performs ([A stalled speech backend](#a-stalled-speech-backend)).
+  worker then performs ("A stalled speech backend" in [the speech dispatch
+  in the worker](#the-speech-dispatch-in-the-worker)).
 - The bounds are read on the manager's clock. The thread waits for the
   next command or the next bound; a test that moves the clock by hand
   calls `notify_clock_advanced()`. A timed wait that ends short of its
@@ -1717,15 +1721,17 @@ fails the session with a cause whose reason is the stream's:
 
 | Bridge outcome | Session failure |
 |---|---|
-| `failed`, `unavailable` / `backend_reset` | the `backend_reset` event, reason `backend_reset` |
+| `failed`, `unavailable` / `backend_reset` | the `backend_reset` event, reason `backend_reset`, for every session the dispatch holds |
 | `failed`, `unavailable` / `session_unloaded`; `submit` refused `backend_unavailable` | `backend_unavailable` |
 | `job_class_unsupported` or `job_not_permitted`, from `submit` or as `failed` | `backend_unsupported_capability` |
 | `job_capacity_exhausted`, from `submit` or as `failed` | the bridge's error unchanged (`resource_exhausted`; `internal` on a stream) |
 | any other failure | the bridge's error unchanged; its code decides the stream's reason |
 
-A job the backend's loss ends while its session's cancel still waits
-for the release applies the `backend_reset` event too: that session ends
-as failed, and keeps its slot until the release is confirmed. After a
+A job the backend's loss ends applies the `backend_reset` event to every
+session the dispatch holds, not only to the job's: a session whose cancel
+still waits for its release ends as failed and keeps its slot until the
+release is confirmed, and a session whose job waits in the lane never
+submits it. After a
 backend was lost with no job open, nothing is delivered: the
 session learns of it at its next job, from the refused submit. A
 capacity refusal is not a load condition here: one job is in flight and
@@ -1818,22 +1824,26 @@ the stream listener, so it left no failure of its own to return, and
 without the refusal a later `start()` would open the stream listener over
 the unloaded session.
 
-It is **provisional**, as the dispatch is. The worker serves one stream
-session at a time. It grants both input kinds whatever the model runs: its
-configuration does not say which job classes a deployment has, so a session
-whose mode the backend does not run is admitted and fails at its first job:
-the bridge refuses a job of a class the backend did not declare when it is
-submitted, and the session ends as `backend_unsupported_capability`.
-Nothing is refused at negotiation beyond what a job request could not
-carry, and one job is in flight. The dispatch's two bounds on a session
-(`utterance_backlog_exceeded`, `synthesis_audio_limit_exceeded`) have no
-reason of their own in the stream schema: the listener's mapping names such
-a failure `internal`, which no test drives through a worker.
+It is **provisional**, as the dispatch is. The worker serves
+`streaming.max_sessions` stream sessions at a time, one by default, with
+one job in flight across them ([Several stream
+sessions](#several-stream-sessions)). It grants both input kinds whatever
+the model runs: its configuration does not say which job classes a
+deployment has, so a session whose mode the backend does not run is
+admitted and fails at its first job: the bridge refuses a job of a class
+the backend did not declare when it is submitted, and the session ends as
+`backend_unsupported_capability`. Nothing is refused at negotiation beyond
+what a job request could not carry, and one job is in flight. The
+dispatch's two bounds on a session (`utterance_backlog_exceeded`,
+`synthesis_audio_limit_exceeded`) have no reason of their own in the
+stream schema: the listener's mapping names such a failure `internal`,
+which no test drives through a worker.
 
-**What one client can hold.** With one session at a time, the client whose
-session is open holds the worker's only place, and every other `Open` is
-refused with `session_count_limit` until that place is free. What bounds
-it today, for three clients:
+**What one client can hold.** Each session holds one of the worker's
+`streaming.max_sessions` places, and an `Open` while every place is held
+is refused with `session_count_limit` until one is free; with the default
+of one, the client whose session is open holds the only place. What bounds
+a place today, for three clients:
 
 - *One that opens and then only pings* holds the place until the maximum
   session duration, 60 minutes by default: a ping restarts both the idle
@@ -1845,8 +1855,9 @@ it today, for three clients:
   the release's bound, 20 s and 50 ms for a decode of 100 ms of audio and
   35 s for a synthesis or a 30-second utterance. A session that was
   cancelled or has failed has no timer of the session manager's left; the
-  dispatch's bound is what ends the wait, by stopping the worker ([A
-  stalled speech backend](#a-stalled-speech-backend)).
+  dispatch's bound is what ends the wait, by stopping the worker ("A
+  stalled speech backend" in [the speech dispatch in the
+  worker](#the-speech-dispatch-in-the-worker)).
 - *One that reads a chunk every few seconds* never meets the 5-second
   no-progress limit, whose clock restarts at every write that completes.
   Once it has sent a Finalize or closed its sending half, the finalize
@@ -1855,8 +1866,8 @@ it today, for three clients:
   duration. Until then it holds the place and the synthesis result of the
   segment it is reading.
 
-Neither the first client nor the third is bounded by the dispatch: more
-than one session per worker is what would keep either from holding the
+Neither the first client nor the third is bounded by the dispatch; a
+worker configured for more than one session keeps either from holding the
 only place.
 
 **A stalled speech backend.** The worker gives the dispatch its
@@ -2051,6 +2062,92 @@ outside. Step 3 is declared as the registry's header describes a pair
 destroyed in order. That the `speech dispatch stopped` line is written
 after the listener's stop, not before it, has no case either: no case moves
 a counter during that stop.
+
+### Several stream sessions
+
+`streaming.max_sessions` in the worker's configuration is how many stream
+sessions it serves at one time: 1 by default. It is the listener's
+`SessionLimits::max_sessions`, the ledger's `ceiling` and the
+`session_count` `activate` answers, and it holds for the worker's life: a
+different count is a new deploy, never a change to a live quota. The
+schema allows 1 to 2,048, the control channel's bound. This worker
+refuses more than 64 with `config_invalid`, because no memory budget
+charges what a session holds yet:
+
+- an audio session holds at most 3,915,008 bytes outside the buffer
+  manager: three ended utterances waiting for their finals and the one
+  being collected, each allocated at its longest, 960,000 bytes (30
+  seconds), when its first frame arrives; up to one second of frames
+  handed to the dispatch and not yet taken (32,000 bytes) and the frame
+  being taken (up to 10,240 bytes); and its transcripts, up to 16,384
+  bytes in its output queue as the queue charges them, one waiting
+  outside it and the last one sent still encoded in the stream, up to
+  8,192 bytes of text each. A decode copies its utterance into the
+  buffer manager and frees the session's copy; that input stays until
+  the backend reports the job released, up to 960,000 bytes for each
+  decode not yet released (the python_pytorch adapter keeps at most 16
+  jobs unreleased);
+- a text session holds the synthesized result of its segment, up to
+  1,440,000 bytes (30 seconds at 24 kHz), in the buffer manager the worker
+  shares with HTTP, 256 MiB by default, and up to 126,592 bytes outside
+  it: the 20 ms chunks copied from that result, two seconds of them in
+  its output queue until delivered (96,000 bytes), the next one and the
+  last one sent, still encoded in the stream (960 bytes each); up to
+  16,384 bytes of other messages in the queue; and its text, 4,096 bytes
+  in the segment being synthesized and 8,192 waiting;
+- so 64 sessions hold at most about 351 MB of host memory, 64 x
+  (3,915,008 + 1,440,000 + 126,592) bytes, counting both kinds for every
+  session although each holds one or the other, plus the input of each
+  decode not yet released; the buffer manager holds about 92 MB of it,
+  64 x 1,440,000 bytes, plus those inputs.
+
+The bound goes once that memory is charged against the deployment's
+budget. 64 is also the streams one connection may carry, inside the
+listener's 256 connections: at 64, a client's 65th stream on a
+connection that already carries 64 waits in gRPC until one of the 64
+ends or the client's deadline passes, while on a connection of its own
+it is refused
+`session_count_limit` at once; gRPC's subchannel pool may put two
+channels opened with equal arguments on one connection.
+
+The sessions share the dispatch's one job in flight. Sessions take turns
+in the order their work became ready, and a session whose job ends goes
+behind the sessions that wait if it has more: one job per session in
+turn, never two of one session's jobs while another session waits. A
+session holds a waiting job or a running one, never both.
+
+Each job a session owes therefore waits behind the jobs of the sessions
+ahead of it in the lane, up to `max_sessions - 1` of them, each bounded by
+its own deadline (10 s plus 0.5 s per second of audio, 25 s for a
+30-second utterance), and the wait counts against the session's finalize
+deadline:
+
+- a `Finalize` owes one decode, within 10 s of it;
+- a half-close owes up to four decodes, one after another: the three
+  ended utterances still waiting for their finals, then the one it ends,
+  all within 10 s of it. A retire or a stop drains every session at once
+  under the same 10 s, each owing up to three: the open utterance is not
+  transcribed;
+- text input owes a synthesis for each accepted segment, up to three, each
+  begun only once the segment before it was delivered, within 120 s of the
+  `Finalize` or half-close.
+
+A job still waiting when its session's deadline passes fails the session
+with `finalize_timeout`, also while the job has not left the lane. A count
+is safe only if what its sessions can owe at once ends within those
+deadlines on the deployment's GPU. That measurement sizes the count;
+nothing in the worker checks it.
+
+A job that ends `backend_reset` fails every session the dispatch holds
+with `backend_reset`, the job's and the others. That includes a session
+whose cancel waits for its release and one whose drain completed and waits
+for its release, which then ends failed instead of closed. A backend lost
+while no job runs is learned by each session at its next submit
+(`backend_unavailable`). A stalled backend stops the worker, which ends
+every session ("A stalled speech backend" above).
+
+The agent does not set the count yet: a deployment it starts serves one
+stream session.
 
 ## Test surface
 

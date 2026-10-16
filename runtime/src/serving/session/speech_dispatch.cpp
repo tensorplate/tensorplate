@@ -561,7 +561,7 @@ void SpeechJobDispatch::release(SessionManager& manager, std::uint64_t key, Sess
   session.waiting.clear();
   session.active.reset();
   session.ended_utterances.clear();
-  session.open_audio = {};
+  std::vector<std::byte>().swap(session.open_audio);
   session.release_asked = clock_.now();
   session.release_bound_at = release_due(key, session);
   // The bridge cancels the session's unfinished job with it.
@@ -592,12 +592,14 @@ void SpeechJobDispatch::job_ended(SessionManager& manager, std::uint64_t key, Jo
   in_flight_.reset();
   const auto it = sessions_.find(key);
   const auto* error = std::get_if<Error>(&ended.outcome);
-  if (it == sessions_.end() || it->second.ended) {
+  const bool served = it != sessions_.end() && !it->second.ended;
+  if (error != nullptr && backend_was_reset(*error)) {
+    ++(served ? stats_.jobs_failed : stats_.jobs_discarded);
+    reset_every_session(manager, *error);
+    return;
+  }
+  if (!served) {
     ++stats_.jobs_discarded;
-    // A cancel that still waits for its release ends as failed instead.
-    if (it != sessions_.end() && error != nullptr && backend_was_reset(*error)) {
-      (void)manager.apply(key, Event::BackendReset, *error);
-    }
     return;
   }
   Session& session = it->second;
@@ -771,7 +773,7 @@ std::optional<JobRequest> SpeechJobDispatch::next_request(SessionManager& manage
   std::copy(utterance.audio.begin(), utterance.audio.end(), bytes->begin());
   const std::size_t size = utterance.audio.size();
   // The buffer is what stays readable for the job from here on.
-  utterance.audio = {};
+  std::vector<std::byte>().swap(utterance.audio);
   JobOptions options;
   options.language = session.terms.language;
   auto decode = JobRequest::create(
@@ -793,6 +795,10 @@ void SpeechJobDispatch::take_audio(SessionManager& manager, std::uint64_t key, S
   while (!frame.empty() && !session.ended) {
     const std::uint64_t room = longest - (session.samples_accepted - session.utterance_start);
     const auto part = frame.first(std::min<std::uint64_t>(frame.size(), room * width));
+    if (session.open_audio.empty()) {
+      // At its longest from the start, so it never grows past the audio it may hold.
+      session.open_audio.reserve(static_cast<std::size_t>(longest * width));
+    }
     session.open_audio.insert(session.open_audio.end(), part.begin(), part.end());
     session.samples_accepted += part.size() / width;
     frame = frame.subspan(part.size());
@@ -850,6 +856,15 @@ void SpeechJobDispatch::fail(SessionManager& manager, std::uint64_t key, Session
                              Error cause) {
   session.ended = true;
   (void)manager.apply(key, Event::Fail, std::move(cause));
+}
+
+// The backend's reset ends every session it served, not only the job's; a
+// session whose cancel still waits for its release ends as failed instead.
+void SpeechJobDispatch::reset_every_session(SessionManager& manager, const Error& error) {
+  for (auto& [key, session] : sessions_) {
+    session.ended = true;
+    (void)manager.apply(key, Event::BackendReset, error);
+  }
 }
 
 void SpeechJobDispatch::fail_for_backend(SessionManager& manager, std::uint64_t key,

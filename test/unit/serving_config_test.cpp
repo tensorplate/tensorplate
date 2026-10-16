@@ -4,10 +4,13 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <string>
 
+#include "tensorplate/ipc/worker_control.hpp"
 #include "tensorplate/serving/config.hpp"
 
 namespace {
@@ -53,7 +56,12 @@ TEST(ServingConfig, StreamingSchemaDeclaresOptionalFields) {
   EXPECT_EQ(port.at("minimum"), 0);
   EXPECT_EQ(port.at("maximum"), 65535);
   EXPECT_EQ(port.at("default"), ServingConfig{}.streaming.port);
-  EXPECT_EQ(streaming.at("properties").size(), 2U);
+  const auto& max_sessions = streaming.at("properties").at("max_sessions");
+  EXPECT_EQ(max_sessions.at("type"), "integer");
+  EXPECT_EQ(max_sessions.at("minimum"), 1);
+  EXPECT_EQ(max_sessions.at("maximum"), ipc::kWorkerControlMaxSessions);
+  EXPECT_EQ(max_sessions.at("default"), ServingConfig{}.streaming.max_sessions);
+  EXPECT_EQ(streaming.at("properties").size(), 3U);
   EXPECT_FALSE(streaming.contains("required"));
   for (const auto& required : schema.at("required")) {
     EXPECT_NE(required, "streaming");
@@ -111,6 +119,17 @@ TEST(ServingConfig, StreamingRejectsMalformedConfiguration) {
   }
 }
 
+TEST(ServingConfig, StreamingRejectsAMalformedSessionCount) {
+  for (const char* value : {"0", "2049", "-1", R"("2")", "1.5", "null", "true"}) {
+    SCOPED_TRACE(value);
+    const auto parsed = ServingConfig::parse_json(
+        std::string{R"({"schema_version":"0.1","streaming":{"max_sessions":)"} + value + "}}");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, Error::Code::ConfigInvalid);
+    EXPECT_NE(parsed.error().message.find("streaming accepts only"), std::string::npos);
+  }
+}
+
 TEST(ServingConfig, StreamingPortAloneRoundTripsInEitherBuild) {
   const auto parsed =
       ServingConfig::parse_json(R"({"schema_version":"0.1","streaming":{"port":65535}})");
@@ -121,6 +140,51 @@ TEST(ServingConfig, StreamingPortAloneRoundTripsInEitherBuild) {
   ASSERT_TRUE(again.has_value());
   EXPECT_EQ(again->streaming.port, 65535);
   EXPECT_FALSE(again->streaming.enabled);
+}
+
+TEST(ServingConfig, StreamingServesOneSessionByDefault) {
+  EXPECT_EQ(ServingConfig{}.streaming.max_sessions, 1U);
+  const auto parsed = ServingConfig::parse_json(R"({"schema_version":"0.1","streaming":{}})");
+  ASSERT_TRUE(parsed.has_value());
+  EXPECT_EQ(parsed->streaming.max_sessions, 1U);
+}
+
+// The schema's bound is the control channel's; this worker refuses more than
+// 64 in either build, with streaming on or off.
+TEST(ServingConfig, StreamingMaxSessionsIsAtMostSixtyFourInThisWorker) {
+  const auto with = [](std::uint32_t count) {
+    return std::string{R"({"schema_version":"0.1","streaming":{"max_sessions":)"} +
+           std::to_string(count) + "}}";
+  };
+  const auto most = ServingConfig::parse_json(with(64));
+  ASSERT_TRUE(most.has_value()) << most.error().message;
+  EXPECT_EQ(most->streaming.max_sessions, 64U);
+  const auto again = ServingConfig::parse_json(most->to_json());
+  ASSERT_TRUE(again.has_value());
+  EXPECT_EQ(again->streaming.max_sessions, 64U);
+  EXPECT_FALSE(again->streaming.enabled);
+
+  for (const std::uint32_t count : {65U, ipc::kWorkerControlMaxSessions}) {
+    SCOPED_TRACE(count);
+    const auto parsed = ServingConfig::parse_json(with(count));
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, Error::Code::ConfigInvalid);
+    EXPECT_NE(parsed.error().message.find("streaming.max_sessions must be from 1 to 64"),
+              std::string::npos)
+        << parsed.error().message;
+  }
+
+  for (const std::uint32_t count : {0U, 65U}) {
+    SCOPED_TRACE(count);
+    ServingConfig config;
+    config.streaming.max_sessions = count;
+    const auto refused = config.validate();
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.error().code, Error::Code::ConfigInvalid);
+  }
+  ServingConfig two;
+  two.streaming.max_sessions = 2;
+  EXPECT_TRUE(two.validate().has_value());
 }
 
 TEST(ServingConfig, StreamingRefusesAMemberWithoutADigestABadDeploymentIdAndTheHttpPort) {

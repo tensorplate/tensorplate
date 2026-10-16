@@ -90,8 +90,9 @@ struct SpeechDispatchStats {
 ///   SessionTerms::max_synthesis_audio fails the session
 ///   (`synthesis_audio_limit_exceeded`).
 /// - One job is in flight for the whole dispatch, sessions in the order their
-///   work became ready. A job keeps the lane until the backend ends it, also
-///   once its session is gone.
+///   work became ready; a session whose job ended goes behind those waiting.
+///   A job keeps the lane until the backend ends it, also once its session is
+///   gone.
 /// - A job still running at its deadline fails its session if that session
 ///   is live (`deadline_missed`), whose release then cancels it. A session
 ///   release that waits past its bound, the backend holding a job it does not
@@ -107,10 +108,11 @@ struct SpeechDispatchStats {
 /// was refused, on its caller's thread, once that thread has ended. The
 /// bridge's callbacks only queue for it, so they never wait on the manager, a
 /// queue or the backend. A session failure carries the stream's reason:
-/// `backend_reset` for a job the backend's loss ended (applied as the
-/// `backend_reset` event), `backend_unavailable` for a backend that is gone or
-/// unloaded, `backend_unsupported_capability` for a job class or an option
-/// the backend refuses, and the bridge's own error for anything else.
+/// `backend_reset`, for every session, once a job ends with the backend's loss
+/// (applied as the `backend_reset` event), `backend_unavailable` for a backend
+/// that is gone or unloaded, `backend_unsupported_capability` for a job class
+/// or an option the backend refuses, and the bridge's own error for anything
+/// else.
 ///
 /// Every session opened here is released through the bridge once: at its
 /// cleanup, or at stop(). Each audio result's buffer is released once,
@@ -337,6 +339,7 @@ class SpeechJobDispatch final : public SessionDispatch {
   /// Fails the session with what the stream names the bridge's `error`.
   static void fail_for_backend(SessionManager& manager, std::uint64_t key, Session& session,
                                const Error& error);
+  void reset_every_session(SessionManager& manager, const Error& error);
 
   const std::shared_ptr<BoundedJobBridge> bridge_;
   /// Shared with the bridge as its event sink.

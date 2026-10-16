@@ -47,7 +47,8 @@ struct StreamListenerOptions {
   /// 0 and empty on a worker that serves no generation.
   std::uint64_t generation = 0;
   std::string descriptor_digest;
-  /// Session timers and the session count; the worker serves one at a time.
+  /// Session timers and the session count, which the worker takes from
+  /// `streaming.max_sessions`.
   SessionLimits limits = SessionLimits::defaults();
   /// Places for refused calls that are not done; the listener's own 4,096
   /// when unset, which the worker keeps. Set by tests only.

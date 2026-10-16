@@ -194,6 +194,9 @@ struct StreamingConfig {
   /// loopback rule; not `bind.port`. 0 requests an ephemeral port, which the
   /// worker logs.
   std::uint16_t port = 0;
+
+  /// Stream sessions served at one time: 1 to 64 (the schema allows up to 2048); 1 by default.
+  std::uint32_t max_sessions = 1;
 };
 
 /// Full serving worker runtime configuration. Validated by

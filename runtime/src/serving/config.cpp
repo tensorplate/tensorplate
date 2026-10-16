@@ -13,6 +13,8 @@
 #include <string_view>
 #include <utility>
 
+#include "tensorplate/ipc/worker_control.hpp"
+
 namespace tensorplate {
 
 namespace {
@@ -108,8 +110,16 @@ std::optional<MetricsMode> metrics_mode_from_string(std::string_view name) noexc
 }
 
 namespace {
+/// Below the schema's bound: the memory a stream session holds is not yet
+/// charged to the deployment's budget (docs/architecture/serving-worker.md).
+constexpr std::uint32_t kMaxStreamSessions = 64;
+
 Result<void> validate_streaming(const StreamingConfig& streaming,
                                 const ActiveDeploymentConfig& deployment, std::uint16_t http_port) {
+  if (streaming.max_sessions == 0 || streaming.max_sessions > kMaxStreamSessions) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "serving config: streaming.max_sessions must be from 1 to 64 in this worker");
+  }
   if (!streaming.enabled) {
     return {};
   }
@@ -261,6 +271,31 @@ T value_or_default(const json& obj, std::string_view key, T fallback) {
   return fallback;
 }
 
+/// The streaming object, held to the schema's types and bounds.
+Result<StreamingConfig> parse_streaming(const json& streaming) {
+  const auto unsigned_within = [](const json& value, std::uint64_t least, std::uint64_t most) {
+    return value.is_number_unsigned() && value.get<std::uint64_t>() >= least &&
+           value.get<std::uint64_t>() <= most;
+  };
+  const auto has = [&streaming](const char* key) { return streaming.contains(key); };
+  if (!streaming.is_object() || (has("enabled") && !streaming.at("enabled").is_boolean()) ||
+      (has("port") && !unsigned_within(streaming.at("port"), 0U, 65535U)) ||
+      (has("max_sessions") &&
+       !unsigned_within(streaming.at("max_sessions"), 1U, ipc::kWorkerControlMaxSessions)) ||
+      streaming.size() > static_cast<std::size_t>(has("enabled")) +
+                             static_cast<std::size_t>(has("port")) +
+                             static_cast<std::size_t>(has("max_sessions"))) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "serving config: streaming accepts only a boolean enabled field, a port "
+                      "from 0 to 65535 and max_sessions from 1 to 2048");
+  }
+  StreamingConfig parsed;
+  parsed.enabled = streaming.value("enabled", parsed.enabled);
+  parsed.port = streaming.value("port", parsed.port);
+  parsed.max_sessions = streaming.value("max_sessions", parsed.max_sessions);
+  return parsed;
+}
+
 }  // namespace
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -280,21 +315,11 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
     cfg.schema_version = value_or_default<std::string>(root, "schema_version", "0.1");
 
     if (root.contains("streaming")) {
-      const auto& streaming = root.at("streaming");
-      const auto port_valid = [](const json& port) {
-        return port.is_number_unsigned() && port.get<std::uint64_t>() <= 65535U;
-      };
-      if (!streaming.is_object() ||
-          (streaming.contains("enabled") && !streaming.at("enabled").is_boolean()) ||
-          (streaming.contains("port") && !port_valid(streaming.at("port"))) ||
-          streaming.size() > static_cast<std::size_t>(streaming.contains("enabled")) +
-                                 static_cast<std::size_t>(streaming.contains("port"))) {
-        return unexpected(Error::Code::ConfigInvalid,
-                          "serving config: streaming accepts only a boolean enabled field and a "
-                          "port from 0 to 65535");
+      auto streaming = parse_streaming(root.at("streaming"));
+      if (!streaming) {
+        return unexpected(streaming.error());
       }
-      cfg.streaming.enabled = streaming.value("enabled", false);
-      cfg.streaming.port = static_cast<std::uint16_t>(streaming.value("port", 0U));
+      cfg.streaming = *streaming;
     }
 
     if (root.contains("bind") && root["bind"].is_object()) {
@@ -454,8 +479,11 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
 std::string ServingConfig::to_json() const {
   json root;
   root["schema_version"] = schema_version;
-  if (streaming.enabled || streaming.port != 0) {
-    root["streaming"] = {{"enabled", streaming.enabled}, {"port", streaming.port}};
+  if (streaming.enabled || streaming.port != 0 ||
+      streaming.max_sessions != StreamingConfig{}.max_sessions) {
+    root["streaming"] = {{"enabled", streaming.enabled},
+                         {"port", streaming.port},
+                         {"max_sessions", streaming.max_sessions}};
   }
   root["bind"] = {
       {"host", bind.host}, {"port", bind.port}, {"allow_non_loopback", bind.allow_non_loopback}};
