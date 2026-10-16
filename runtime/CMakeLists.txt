@@ -170,7 +170,24 @@ if(TP_ENABLE_TENSORRT)
     HINTS ENV TENSORRT_ROOT ENV TENSORRT_INSTALL_DIR
     PATH_SUFFIXES include)
   # The runtime package supplies the versioned DSO; no static development archive.
-  find_library(TP_TENSORRT_NVINFER_LIB NAMES nvinfer libnvinfer.so.10
+  set(tp_tensorrt_library_names nvinfer)
+  if(EXISTS "${TP_TENSORRT_INCLUDE_DIR}/NvInferVersion.h")
+    file(STRINGS "${TP_TENSORRT_INCLUDE_DIR}/NvInferVersion.h" tp_tensorrt_major_line
+      REGEX "^#define NV_TENSORRT_MAJOR +[A-Za-z0-9_]+")
+    string(REGEX REPLACE "^#define NV_TENSORRT_MAJOR +([A-Za-z0-9_]+).*" "\\1"
+      tp_tensorrt_major "${tp_tensorrt_major_line}")
+    # Newer headers alias the public major to TRT_MAJOR_ENTERPRISE.
+    if(tp_tensorrt_major MATCHES "^[A-Za-z_][A-Za-z0-9_]*$")
+      file(STRINGS "${TP_TENSORRT_INCLUDE_DIR}/NvInferVersion.h" tp_tensorrt_major_line
+        REGEX "^#define ${tp_tensorrt_major} +[0-9]+")
+      string(REGEX REPLACE "^#define [A-Za-z0-9_]+ +([0-9]+).*" "\\1"
+        tp_tensorrt_major "${tp_tensorrt_major_line}")
+    endif()
+    if(tp_tensorrt_major MATCHES "^[0-9]+$")
+      list(APPEND tp_tensorrt_library_names "libnvinfer.so.${tp_tensorrt_major}")
+    endif()
+  endif()
+  find_library(TP_TENSORRT_NVINFER_LIB NAMES ${tp_tensorrt_library_names}
     HINTS ENV TENSORRT_ROOT ENV TENSORRT_INSTALL_DIR
     PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu lib/aarch64-linux-gnu)
   if(TP_TENSORRT_INCLUDE_DIR AND TP_CUDA_INCLUDE_DIR AND
