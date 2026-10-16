@@ -17,8 +17,6 @@
 #include <utility>
 #include <vector>
 
-#include "tensorplate/core/job_request.hpp"
-
 #include "serving/session/dispatch.hpp"
 #include "serving/session/session_manager.hpp"
 #include "serving/session/timers.hpp"
@@ -117,7 +115,8 @@ struct AudioSizes {
   std::size_t longest_utterance = 0;
   /// A frame shorter than the shortest granted.
   std::size_t short_frame = 0;
-  /// The frames voice activity is scored in; none without voice detection.
+  /// The frames voice activity is scored in, the profile's frame of input
+  /// samples as the dispatch submits it; none without voice detection.
   std::size_t scored_frame = 0;
   /// A frame that is speech to a dispatch detecting voice, as long as its
   /// shortest speech run; the shortest frame without voice detection.
@@ -143,8 +142,7 @@ AudioSizes sizes_of(Binding& binding, std::uint64_t key) {
   sizes.short_frame = sizes.shortest_frame / 2 / sizes.sample * sizes.sample;
   sizes.spoken_frame = sizes.shortest_frame;
   if (const auto voice = binding.under_test->voice_detection()) {
-    sizes.scored_frame = voice->frame_samples * terms.audio_format.sample_rate_hz /
-                         kJobInputSampleRateHz * sizes.sample;
+    sizes.scored_frame = voice->frame_samples * sizes.sample;
     sizes.spoken_frame =
         std::max(sizes.shortest_frame, scored_length(sizes, audio_bytes(terms, voice->min_speech)));
   }
