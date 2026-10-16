@@ -23,6 +23,7 @@
 #include "fake_scheduler_clock.hpp"
 #include "fixture_job_bridge.hpp"
 #include "serving/session/dispatch.hpp"
+#include "serving/session/timers.hpp"
 #include "session_dispatch_binding.hpp"
 #include "speech_dispatch_binding.hpp"
 
@@ -688,6 +689,33 @@ TEST(SpeechJobDispatch, SessionsAreServedInTheOrderTheirWorkBecameReady) {
   EXPECT_EQ(submitted[2].identity().session_key, third);
 }
 
+// A session with more work goes behind the sessions that wait once its job
+// ends: one job per session in turn, not the order the utterances ended in.
+TEST(SpeechJobDispatch, ASessionWithSeveralUtterancesTakesItsJobsInTurn) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto busy = binding.open_audio();
+  const auto other = binding.open_audio();
+  const Bytes utterance = utterance_at_the_limit(binding, busy, 3);
+  speech.hold_jobs();
+  for (int ended = 0; ended < 3; ++ended) {
+    ASSERT_TRUE(binding.audio_in_long_frames(busy, utterance));
+  }
+  ASSERT_TRUE(binding.settle());
+  one_utterance(binding, other);
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(speech.bridge->submitted().size(), 1U);
+
+  speech.release_jobs();
+  ASSERT_TRUE(binding.eventually([&] { return speech.bridge->submitted().size() == 4U; }));
+  const auto submitted = speech.bridge->submitted();
+  ASSERT_EQ(submitted.size(), 4U);
+  EXPECT_EQ(submitted[0].identity().session_key, busy);
+  EXPECT_EQ(submitted[1].identity().session_key, other);
+  EXPECT_EQ(submitted[2].identity().session_key, busy);
+  EXPECT_EQ(submitted[3].identity().session_key, busy);
+}
+
 TEST(SpeechJobDispatch, ABackendLostUnderAJobFailsItsSessionAsBackendReset) {
   Binding binding(&speech_dispatch);
   SpeechUnderTest& speech = speech_of(binding);
@@ -704,6 +732,45 @@ TEST(SpeechJobDispatch, ABackendLostUnderAJobFailsItsSessionAsBackendReset) {
   ASSERT_TRUE(binding.settle());
   // The job is released only by the unload, and its input is kept until then.
   EXPECT_EQ(speech.buffers_in_use(), 1U);
+  speech.fixture->unload();
+  EXPECT_EQ(speech.buffers_in_use(), 0U);
+}
+
+// The loss ends every session the backend served: the one whose job runs,
+// one whose job waits in the lane, one with nothing asked, and another
+// session whose cancel still waits for the acknowledgement of its release.
+TEST(SpeechJobDispatch, ABackendLostUnderAJobFailsEverySessionAsBackendReset) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto running = binding.open_audio();
+  const auto waiting = binding.open_text();
+  const auto idle = binding.open_audio();
+  const auto cancelled = binding.open_text();
+  speech.hold_jobs();
+  one_utterance(binding, running);
+  ASSERT_TRUE(binding.settle());
+  binding.text(waiting, 1, "queued");
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(speech.bridge->submitted().size(), 1U);
+  speech.bridge->hold_acknowledgements();
+  ASSERT_TRUE(binding.manager->apply(cancelled, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.eventually([&] { return speech.bridge->releases(cancelled) == 1U; }));
+
+  speech.fixture->lose_backend();
+  for (const auto key : {running, waiting, idle}) {
+    SCOPED_TRACE(key);
+    ASSERT_TRUE(binding.ends_as(key, State::Failed));
+    EXPECT_EQ(binding.manager->tombstone(key)->reason, "backend_reset");
+    EXPECT_EQ(speech.bridge->releases(key), 1U);
+  }
+  ASSERT_TRUE(binding.eventually([&] { return binding.live_state(cancelled) == State::Failed; }));
+  speech.bridge->let_acknowledgements_go();
+  ASSERT_TRUE(binding.ends_as(cancelled, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(cancelled)->reason, "backend_reset");
+  EXPECT_EQ(speech.bridge->releases(cancelled), 1U);
+  EXPECT_EQ(binding.manager->held_slots(), 0U);
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
   speech.fixture->unload();
   EXPECT_EQ(speech.buffers_in_use(), 0U);
 }
@@ -1189,6 +1256,38 @@ std::unique_ptr<DispatchUnderTest> speech_dispatch_with_short_bounds(const Sched
   options.release_bound = 2s;
   return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{}, result_following_input,
                                            BufferManagerConfig{}, std::move(options));
+}
+
+std::unique_ptr<DispatchUnderTest> speech_dispatch_with_long_jobs(const SchedulerClock& clock) {
+  SpeechDispatchOptions options;
+  options.job_deadline_base = 1h;
+  return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{}, result_following_input,
+                                           BufferManagerConfig{}, std::move(options));
+}
+
+// The finalize deadline counts from the Finalize, so the wait behind another
+// session's job is part of it: a decode that never left the lane fails it.
+TEST(SpeechJobDispatch, AFinalWaitingBehindAnotherSessionsJobKeepsItsDeadline) {
+  Binding binding(&speech_dispatch_with_long_jobs);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto ahead = binding.open_text();
+  const auto behind = binding.open_audio();
+  speech.hold_jobs();
+  binding.text(ahead, 1, "held");
+  ASSERT_TRUE(binding.settle());
+  one_utterance(binding, behind);
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(speech.bridge->submitted().size(), 1U);
+
+  binding.clock.advance(finalize_deadline(SessionInputKind::Audio));
+  binding.manager->notify_clock_advanced();
+  ASSERT_TRUE(binding.ends_as(behind, State::Closed));
+  EXPECT_EQ(binding.manager->tombstone(behind)->reason, "finalize_timeout");
+  EXPECT_EQ(binding.live_state(ahead), State::Active);
+  speech.release_jobs();
+  ASSERT_NO_FATAL_FAILURE(binding.expect_segment(ahead, 1, "held"));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
 }
 
 /// Moves the clock the manager and the dispatch share, and lets the dispatch

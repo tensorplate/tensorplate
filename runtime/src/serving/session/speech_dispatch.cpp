@@ -592,12 +592,14 @@ void SpeechJobDispatch::job_ended(SessionManager& manager, std::uint64_t key, Jo
   in_flight_.reset();
   const auto it = sessions_.find(key);
   const auto* error = std::get_if<Error>(&ended.outcome);
-  if (it == sessions_.end() || it->second.ended) {
+  const bool served = it != sessions_.end() && !it->second.ended;
+  if (error != nullptr && backend_was_reset(*error)) {
+    ++(served ? stats_.jobs_failed : stats_.jobs_discarded);
+    reset_every_session(manager, *error);
+    return;
+  }
+  if (!served) {
     ++stats_.jobs_discarded;
-    // A cancel that still waits for its release ends as failed instead.
-    if (it != sessions_.end() && error != nullptr && backend_was_reset(*error)) {
-      (void)manager.apply(key, Event::BackendReset, *error);
-    }
     return;
   }
   Session& session = it->second;
@@ -850,6 +852,15 @@ void SpeechJobDispatch::fail(SessionManager& manager, std::uint64_t key, Session
                              Error cause) {
   session.ended = true;
   (void)manager.apply(key, Event::Fail, std::move(cause));
+}
+
+// The backend's reset ends every session it served, not only the job's; a
+// session whose cancel still waits for its release ends as failed instead.
+void SpeechJobDispatch::reset_every_session(SessionManager& manager, const Error& error) {
+  for (auto& [key, session] : sessions_) {
+    session.ended = true;
+    (void)manager.apply(key, Event::BackendReset, error);
+  }
 }
 
 void SpeechJobDispatch::fail_for_backend(SessionManager& manager, std::uint64_t key,

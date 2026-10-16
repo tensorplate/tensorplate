@@ -95,8 +95,9 @@ inline constexpr std::size_t kFixtureSpeechBytesPerTextByte = 160;
 /// Where the bridge header allows a backend two outcomes: which one the
 /// fixture produces. The defaults are the runner's.
 struct FixtureJobBridgeOptions {
-  /// submit() refuses a job (`job_capacity_exhausted`) while 1 + kWaitingJobs
-  /// are unreleased, as the adapter's job table does; none is failed for it.
+  /// submit() refuses a job (`job_capacity_exhausted`) while 1 + kWaitingJobs,
+  /// the runner's count, are unreleased, as the adapter's job table refuses at
+  /// its own count of 16; none is failed for it.
   bool submit_refuses_at_capacity = false;
   /// A cancellation comes too late for its job, started or not: the job runs
   /// to its end and completes, with no `cancel_acknowledged`.
