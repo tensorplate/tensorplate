@@ -122,3 +122,12 @@ if(TP_ENABLE_STREAMING_GRPC)
     PROPERTIES LABELS "T1" ${_tp_stream_output_test_properties}
     DISCOVERY_MODE PRE_TEST)
 endif()
+
+if(TARGET tp_tensorrt_loader)
+  add_executable(tp_test_tensorrt_loader tensorrt_loader_test.cpp)
+  target_link_libraries(tp_test_tensorrt_loader PRIVATE tp_tensorrt_loader GTest::gtest_main)
+  tp_apply_warnings(tp_test_tensorrt_loader)
+  tp_apply_sanitizers(tp_test_tensorrt_loader)
+  gtest_discover_tests(tp_test_tensorrt_loader
+    PROPERTIES LABELS "T1" TIMEOUT 30 DISCOVERY_MODE PRE_TEST)
+endif()
