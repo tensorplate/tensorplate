@@ -244,6 +244,22 @@ def test_a_session_that_raises_fails_the_job_by_class_and_message(
     assert refused.__cause__ is error
 
 
+@needs_numpy
+def test_the_state_keeps_a_copy_of_the_last_frames_tail_not_a_view_of_the_job() -> None:
+    class Passing:
+        def run(self, _: Any, feeds: dict[str, Any]) -> Any:
+            rows = feeds["input"].shape[0]
+            return _NUMPY.zeros((rows, 1), dtype=_NUMPY.float32), feeds["h"], feeds["c"]
+
+    vad = SileroVad(
+        Passing(), _NUMPY, frame_samples=_FRAME, context_samples=64, state_shape=(2, 1, 128)
+    )
+    _, state = vad.run(bytes(2 * _FRAME * 3), None)
+    # A view would pin the job's whole frame array for as long as the session holds the state.
+    assert state.context.base is None
+    assert state.context.shape == (64,)
+
+
 # ----------------------------------------------------------------------
 # the real model
 # ----------------------------------------------------------------------
