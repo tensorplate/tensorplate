@@ -277,11 +277,11 @@ class JobTable:
         except job_objects.JobRefused as exc:
             refusal = exc.reason
         identity = job_objects.read_identity(header)
+        vad = header.get("job_class") == protocol.JOB_CLASS_VAD_FRAMES
         if request is None:
-            job = Job(identity, job_objects.JobEventSequence(identity))
+            job = Job(identity, job_objects.JobEventSequence(identity), vad=vad)
         else:
             sequence = job_objects.JobEventSequence.for_request(request)
-            vad = request.job_class == protocol.JOB_CLASS_VAD_FRAMES
             job = Job(identity, sequence, request, backend, vad=vad)
         if identity.job_id in self._jobs:
             # Not job messages: they would land in the live job's stream.

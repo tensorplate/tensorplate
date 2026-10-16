@@ -282,7 +282,7 @@ def _completes(peer: Peer, *job_ids: int) -> None:
         assert read(peer, 3) == [(ACCEPTED, job_id), *ended(job_id)]
 
 
-@pytest.mark.parametrize("end", ["cancelled", "refused", "refused in another session"])
+@pytest.mark.parametrize("end", ["cancelled", "refused", "refused in another session", "malformed"])
 def test_a_job_that_ends_unscored_beside_a_running_one_resets_the_next_admitted_job(
     connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch, end: str
 ) -> None:
@@ -291,6 +291,11 @@ def test_a_job_that_ends_unscored_beside_a_running_one_resets_the_next_admitted_
         _queue(peer, 2)
         peer.send(message(protocol.KIND_JOB_CANCEL, 2))
         assert read(peer, 3) == [(ACKNOWLEDGED, 2), *ended(2, FAILED, "cancelled")]
+    elif end == "malformed":
+        malformed = vad_submit(2, frames=1)
+        malformed["input"]["utterance_id"] = 0
+        peer.send(malformed)
+        assert read(peer, 2) == ended(2, FAILED, "config_invalid", "utterance_id_zero")
     else:
         session = 2 if end.endswith("another session") else 1
         refused = vad_submit(2, session_key=session, frames=1)
