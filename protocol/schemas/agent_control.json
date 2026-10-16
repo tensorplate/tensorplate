@@ -616,12 +616,30 @@
           "type": "string",
           "pattern": "^sha256:[0-9a-f]{64}$",
           "description": "The digest a stream Open names for the active worker: the deployment descriptor's digest, or for a format 0.1 bundle the manifest's digest. The worker echoes it and verifies nothing. Present exactly when `stream_endpoint` is."
+        },
+        "admission_mode": {
+          "type": "string",
+          "enum": ["production", "qualification"],
+          "description": "The mode the active deployment was admitted under, as its deployment descriptor records it, or for a slot projected from a resident set as the member does. `qualification` is unqualified: admitted under an operator test count, never a support claim. Present only for the active deployment, and absent when it has no descriptor (a format 0.1 bundle), when its descriptor cannot be read, and when it records a qualification session count outside 1 to 2048."
+        },
+        "test_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2048,
+          "description": "The operator's test count a qualification deployment was admitted under: its session count. Present exactly when `admission_mode` is `qualification`."
         }
       },
       "dependencies": {
         "stream_endpoint": ["descriptor_digest", "generation"],
         "descriptor_digest": ["stream_endpoint"]
-      }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"admission_mode": {"const": "qualification"}}, "required": ["admission_mode"]},
+          "then": {"required": ["test_count"]},
+          "else": {"not": {"required": ["test_count"]}}
+        }
+      ]
     },
     "QuarantineRecord": {
       "type": "object",

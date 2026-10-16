@@ -822,6 +822,10 @@ impl Coordinator {
         // Without an active record nothing is read from the serving member,
         // so a registry that cannot answer for it does not fail the status.
         if let (Some(recorded), Some(summary)) = (state.active.as_ref(), active.as_mut()) {
+            let admitted = crate::descriptor_store::recorded_admission(&self.store, recorded);
+            if let Some((mode, quota)) = admitted {
+                summary.set_admission(mode, &quota);
+            }
             if let Some(serving) = self.worker.serving_member()? {
                 // The record is committed before its worker takes the
                 // serving slot: until then the member serving is the one it
@@ -1235,6 +1239,8 @@ fn deployment_summary(d: &DeploymentRecord) -> DeploymentSummary {
         serving_url: None,
         stream_endpoint: None,
         descriptor_digest: None,
+        admission_mode: None,
+        test_count: None,
     }
 }
 

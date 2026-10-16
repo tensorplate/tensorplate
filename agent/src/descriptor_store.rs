@@ -393,6 +393,18 @@ fn named_by(state: &AgentState) -> AgentResult<BTreeSet<String>> {
     Ok(kept)
 }
 
+/// The admission mode and quota recorded by the descriptor `record` names;
+/// none when it names none or that descriptor does not read back as named.
+pub(crate) fn recorded_admission(
+    store: &StateStore,
+    record: &DeploymentRecord,
+) -> Option<(AdmissionMode, MemberQuota)> {
+    let identity = record.descriptor_identity().ok()??;
+    let descriptors = DescriptorStore::new(store.state_dir());
+    let descriptor = descriptors.read(&record.deployment_id, identity).ok()?;
+    Some((descriptor.admission_mode, descriptor.configuration.quota))
+}
+
 /// Remove, at a start, every document that neither file of the state pair
 /// names. The two differ after a write that stopped between its renames,
 /// and a later start reads the backup once the primary is damaged.

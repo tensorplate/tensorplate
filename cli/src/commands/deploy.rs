@@ -549,6 +549,8 @@ mod tests {
             serving_url: None,
             stream_endpoint: None,
             descriptor_digest: None,
+            admission_mode: None,
+            test_count: None,
         };
         let agent_status = AgentStatus {
             resident_set: None,

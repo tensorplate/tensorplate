@@ -164,6 +164,27 @@ pub struct DeployRequest {
     pub streaming: bool,
 }
 
+impl DeployRequest {
+    /// The test count, checked as the decoder checks it: present exactly in
+    /// qualification mode, and from 1 to [`MAX_MEMBER_SESSIONS`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ControlRequestError`] naming the violated rule.
+    pub fn qualification_test_count(&self) -> Result<Option<u32>, ControlRequestError> {
+        let qualification = self.admission_mode == Some(AdmissionMode::Qualification);
+        match (qualification, self.test_count) {
+            (true, None) => Err(ControlRequestError::QualificationWithoutTestCount),
+            (false, Some(_)) => Err(ControlRequestError::TestCountWithoutQualification),
+            (true, Some(0)) => Err(ControlRequestError::ZeroTestCount),
+            (true, Some(count)) if count > MAX_MEMBER_SESSIONS => {
+                Err(ControlRequestError::TestCountAboveMemberCeiling(count))
+            }
+            (_, count) => Ok(count),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RollbackRequest {
@@ -388,16 +409,7 @@ fn validate_deploy(d: &DeployRequest) -> Result<(), ControlRequestError> {
             return Err(ControlRequestError::InvalidExpectedDigest);
         }
     }
-    let qualification = d.admission_mode == Some(AdmissionMode::Qualification);
-    match (qualification, d.test_count) {
-        (true, None) => return Err(ControlRequestError::QualificationWithoutTestCount),
-        (false, Some(_)) => return Err(ControlRequestError::TestCountWithoutQualification),
-        (true, Some(0)) => return Err(ControlRequestError::ZeroTestCount),
-        (true, Some(count)) if count > MAX_MEMBER_SESSIONS => {
-            return Err(ControlRequestError::TestCountAboveMemberCeiling(count));
-        }
-        _ => {}
-    }
+    let qualification = d.qualification_test_count()?.is_some();
     if let Some(evidence) = &d.evidence_ref {
         if qualification {
             return Err(ControlRequestError::EvidenceWithQualification);
@@ -584,6 +596,14 @@ pub struct DeploymentSummary {
     /// `stream_endpoint` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor_digest: Option<String>,
+    /// The mode the active deployment was admitted under, as its descriptor
+    /// or its resident-set member records it; only on `active`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission_mode: Option<AdmissionMode>,
+    /// The operator's test count; present exactly when `admission_mode` is
+    /// `qualification`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_count: Option<u32>,
 }
 
 impl DeploymentSummary {
@@ -591,7 +611,7 @@ impl DeploymentSummary {
     /// `serving_url`.
     #[must_use]
     pub fn from_member(member: &ResidentMember, serving_url: Option<String>) -> Self {
-        Self {
+        let mut summary = Self {
             deployment_id: member.deployment_id.clone(),
             generation: Some(member.generation),
             bundle_digest: member.bundle_digest.clone(),
@@ -604,7 +624,11 @@ impl DeploymentSummary {
             serving_url,
             stream_endpoint: None,
             descriptor_digest: None,
-        }
+            admission_mode: None,
+            test_count: None,
+        };
+        summary.set_admission(member.admission_mode, &member.quota);
+        summary
     }
 
     /// The singleton summary of a retained generation.
@@ -623,7 +647,22 @@ impl DeploymentSummary {
             serving_url: None,
             stream_endpoint: None,
             descriptor_digest: None,
+            admission_mode: None,
+            test_count: None,
         }
+    }
+
+    /// Report `mode`, with `quota`'s session count as the test count in
+    /// qualification mode; neither for a count no test count can be.
+    pub fn set_admission(&mut self, mode: AdmissionMode, quota: &MemberQuota) {
+        let count = quota.session_count;
+        (self.admission_mode, self.test_count) = match mode {
+            AdmissionMode::Production => (Some(mode), None),
+            AdmissionMode::Qualification if (1..=MAX_MEMBER_SESSIONS).contains(&count) => {
+                (Some(mode), Some(count))
+            }
+            AdmissionMode::Qualification => (None, None),
+        };
     }
 }
 
