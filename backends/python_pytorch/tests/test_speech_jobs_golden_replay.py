@@ -1,7 +1,7 @@
 """The golden speech-job frames, replayed against a live runner over a socketpair.
 
 Each file under ``protocol/rust/tests/fixtures`` is one connection, and
-``_REPLAYS`` maps each to how it is replayed. Four are replayed whole: the
+``_REPLAYS`` maps each to how it is replayed. Seven are replayed whole: the
 adapter's frames are sent in file order and every frame the sidecar answers
 with is compared with the file's, field for field. Two fields are the
 sidecar's own: the ``message_id`` of a message it originates, checked as the
@@ -22,8 +22,9 @@ from typing import Any
 
 import pytest
 
-from tensorplate_pytorch_backend import codec, jobs, protocol
+from tensorplate_pytorch_backend import codec, protocol
 from tensorplate_pytorch_backend.backends import Backend, FixtureBackend, SmolVLABackend
+from tensorplate_pytorch_backend.job_objects import JobRequest, VadResult
 from tensorplate_pytorch_backend.runner import SidecarRunner
 
 _FIXTURES = Path(__file__).resolve().parents[3] / "protocol" / "rust" / "tests" / "fixtures"
@@ -36,6 +37,7 @@ _ADAPTER_KINDS = {
 }
 #: Bound of every wait on the runner: a socket read, an event, a thread join.
 WAIT_S = 5.0
+VAD = protocol.JOB_CLASS_VAD_FRAMES
 #: How one golden file is replayed, given the ``connect`` fixture.
 _Replay = Callable[[Callable[..., "Peer"]], None]
 
@@ -86,9 +88,9 @@ class Peer:
         return backend
 
     def hold(self, backend: FixtureBackend) -> threading.Event:
-        """Hold the fixture's jobs open until the returned gate, or close(), is set."""
+        """Hold the fixture's jobs of both lanes open until the returned gate, or close(), is set."""
         gate = threading.Event()
-        backend.job_gate = gate
+        backend.job_gate = backend.vad_gate = gate
         self.gates.append(gate)
         return gate
 
@@ -149,11 +151,14 @@ def replay(
     has acknowledged the cancellation, as in the trace the file carries.
     """
     gate = peer.hold(backend) if held else None
+    started = backend.job_started
     originated = 0
     for want in frames:
         if want["kind"] in _ADAPTER_KINDS:
-            if held and want["kind"] != protocol.KIND_JOB_SUBMIT:
-                assert backend.job_started.wait(WAIT_S)
+            if want["kind"] == protocol.KIND_JOB_SUBMIT:
+                started = backend.vad_started if want["job_class"] == VAD else started
+            elif held:
+                assert started.wait(WAIT_S)
             peer.send(want)
             continue
         originated += 1
@@ -167,11 +172,16 @@ def test_every_golden_file_on_disk_is_replayed() -> None:
     assert sorted(on_disk) == sorted(_REPLAYS)
 
 
-def _whole(name: str, held: bool = False, languages: frozenset[str] | None = None) -> _Replay:
-    """The replay of a whole file by a fixture that permits ``languages`` (None: any)."""
+def _whole(
+    name: str,
+    held: bool = False,
+    languages: frozenset[str] | None = None,
+    runner: type[FixtureBackend] = FixtureBackend,
+) -> _Replay:
+    """The replay of a whole file by a ``runner`` that permits ``languages`` (None: any)."""
 
     def replay_whole(connect: Callable[..., Peer]) -> None:
-        peer = connect()
+        peer = connect({"fixture": runner})
         backend = peer.enable_jobs()
         backend.job_languages = languages
         replay(peer, golden(name), backend, held=held)
@@ -179,20 +189,25 @@ def _whole(name: str, held: bool = False, languages: frozenset[str] | None = Non
     return replay_whole
 
 
+class _GoldenWhisper(FixtureBackend):
+    """Declares the classes of the files' Whisper runner, and scores frames as the files do."""
+
+    def job_classes(self) -> tuple[str, ...]:
+        return (protocol.JOB_CLASS_STT_DECODE, VAD)
+
+    def run_vad(self, request: JobRequest, state: object | None) -> tuple[VadResult, object]:
+        result, state = super().run_vad(request, state)
+        assert list(result.probabilities) == [0.0] * request.frame_count  # the files' silence
+        return VadResult(golden("vad_frames")[2]["result"]["probabilities"]), state
+
+
 def _negotiation(connect: Callable[..., Peer]) -> None:
     ready, load, response = golden("negotiation")
-    peer = connect()
+    peer = connect({"fixture": _GoldenWhisper})
     peer.runner.announce_ready()
     expect_frame(peer, ready, 1)
     peer.send(load)
-    got = peer.read().header
-    # The frame's runner declares vad_frames, which no lane runs yet, so the
-    # classes compared are the loaded fixture's. Replay the frame's own once
-    # this fails.
-    assert protocol.JOB_CLASS_VAD_FRAMES not in jobs.LANE_JOB_CLASSES
-    assert protocol.JOB_CLASS_VAD_FRAMES in response.pop("job_classes")
-    assert got.pop("job_classes") == list(FixtureBackend().job_classes())
-    assert got == response
+    expect_frame(peer, response, None)
 
 
 def _negotiation_refused(connect: Callable[..., Peer]) -> None:
@@ -205,40 +220,6 @@ def _negotiation_refused(connect: Callable[..., Peer]) -> None:
     assert got.pop("error")["code"] == response.pop("error")["code"] == protocol.ERR_UNSUPPORTED
     assert got == response
     assert peer.runner.state.backend is None
-
-
-def _session_release(connect: Callable[..., Peer]) -> None:
-    frames = golden("session_release")
-    # No lane runs vad_frames yet, so the session's job is the stt_decode
-    # golden submit, which has the same identity; every other frame is the file's.
-    submit = golden("stt_decode")[0]
-    identity = ("job_id", "session_key", "generation")
-    assert frames[0]["job_class"] == protocol.JOB_CLASS_VAD_FRAMES
-    assert [frames[0][name] for name in identity] == [submit[name] for name in identity]
-    peer = connect()
-    replay(peer, [submit, *frames[1:]], peer.enable_jobs(), held=True)
-
-
-def _vad_frames_is_refused_until_it_has_a_lane(connect: Callable[..., Peer]) -> None:
-    submit = golden("vad_frames")[0]
-    peer = connect()
-    peer.enable_jobs()
-    peer.send(submit)
-    identity = {name: submit[name] for name in ("job_id", "session_key", "generation")}
-    failed = peer.read().header
-    assert failed.pop("error") == {
-        "schema_version": protocol.SCHEMA_VERSION,
-        "code": protocol.ERR_UNSUPPORTED,
-        "message": "the request is not supported",
-        "context": "job_class_unsupported",
-    }
-    envelope = {"schema_version": protocol.SCHEMA_VERSION, **identity}
-    assert failed == {**envelope, "message_id": "s1", "kind": protocol.KIND_JOB_FAILED}
-    assert peer.read().header == {
-        **envelope,
-        "message_id": "s2",
-        "kind": protocol.KIND_JOB_RELEASED,
-    }
 
 
 def _interleaved_progress_submits_yield_no_progress(connect: Callable[..., Peer]) -> None:
@@ -272,10 +253,10 @@ _REPLAYS: dict[str, _Replay] = {
     "negotiation": _negotiation,
     "negotiation_refused": _negotiation_refused,
     "refused": _whole("refused", languages=frozenset({"ar"})),
-    "session_release": _session_release,
+    "session_release": _whole("session_release", held=True),
     "stt_decode": _whole("stt_decode"),
     "tts_synthesis": _whole("tts_synthesis"),
-    "vad_frames": _vad_frames_is_refused_until_it_has_a_lane,
+    "vad_frames": _whole("vad_frames", runner=_GoldenWhisper),
 }
 
 

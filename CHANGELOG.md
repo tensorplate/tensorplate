@@ -328,6 +328,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The Python sidecar runs `vad_frames` jobs on a lane of their own: a second
+  thread that runs one voice-activity job at a time, with 8 waiting jobs
+  apart from the decode lane's 8, so voice-activity frames never wait behind
+  a decode, a synthesis or a unary request (both threads share the GIL, so a
+  VAD job overlaps a decode while the backend's native call releases it). A
+  runner advertises `vad_frames` only by implementing `run_vad`. The job
+  table keeps each session's voice-activity state for its utterance: a job
+  of a new `utterance_id` starts from reset, and so does the session's next
+  job in lane order after one that ends without `job_completed`; the
+  session's release and a load or unload drop it. The
+  fixture runner scores 512-sample frames by their peak, so tests script
+  speech and silence. Wire, schema and adapter are unchanged
+  (V030-E04-F03-T01).
+
 - The serving worker serves several stream sessions at a time:
   `streaming.max_sessions` in its configuration (1 to 2,048 in the schema,
   1 by default) sets how many, and it is the ledger's `ceiling` and the
@@ -1143,7 +1157,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `tts_synthesis`: a `vad_frames` job goes to the runner and its voice
   probabilities come back through the job bridge. A load that declares only
   classes the adapter does not know still fails with
-  `job_class_unsupported`. No runner in the tree declares `vad_frames` yet.
+  `job_class_unsupported`.
   (V030-E04-F03-T01)
 
 - A deploy or rollback that replaces a serving worker now tells that worker

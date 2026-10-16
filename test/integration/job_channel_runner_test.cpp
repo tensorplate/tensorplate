@@ -83,7 +83,8 @@ class JobChannelRunner : public ::testing::Test {
     request.python_exe = python();
     const auto loaded = h.connect(default_fork_exec_launcher(), request, artifact);
     ASSERT_TRUE(loaded.has_value()) << loaded.error().message;
-    EXPECT_EQ(loaded.value().at("job_classes"), Json::array({"stt_decode", "tts_synthesis"}));
+    EXPECT_EQ(loaded.value().at("job_classes"),
+              Json::array({"stt_decode", "tts_synthesis", "vad_frames"}));
     ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
     const auto primed = h.unary("prime");
     ASSERT_TRUE(primed.has_value()) << primed.error().message;

@@ -21,11 +21,19 @@ Jobs
     ``job_delay_ms`` in the entry JSON holds every job open that long, for a
     test that drives the sidecar from another process: a test hook, and one
     that any entry file of the fixture profiles can set.
+
+    It runs ``vad_frames`` jobs of 512-sample frames, Silero's at 16 kHz,
+    and nothing else. A frame's probability is its largest absolute sample
+    over 32768, so a test scripts speech and silence with constant
+    amplitudes; it keeps no state. ``vad_started`` and ``vad_gate`` are the
+    job hooks for them; ``job_delay_ms`` and ``fail_job`` do not apply.
 """
 
 from __future__ import annotations
 
+import array
 import contextlib
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -43,6 +51,7 @@ from tensorplate_pytorch_backend.job_objects import (
     JobRequest,
     JobResult,
     TranscriptResult,
+    VadResult,
     WordUnit,
 )
 from tensorplate_pytorch_backend.protocol import (
@@ -51,9 +60,12 @@ from tensorplate_pytorch_backend.protocol import (
     ERR_SHAPE_MISMATCH,
     JOB_CLASS_STT_DECODE,
     JOB_CLASS_TTS_SYNTHESIS,
+    JOB_CLASS_VAD_FRAMES,
 )
 
 _MAX_JOB_DELAY_MS: Final[int] = 60_000
+#: Samples in one ``vad_frames`` frame.
+VAD_FRAME_SAMPLES: Final[int] = 512
 
 
 class FixtureBackend(Backend):
@@ -70,6 +82,8 @@ class FixtureBackend(Backend):
         self.fail_job: tuple[str, str] | None = None
         self.job_started = threading.Event()
         self.job_gate: threading.Event | None = None
+        self.vad_started = threading.Event()
+        self.vad_gate: threading.Event | None = None
         #: Whether a job or an infer ever started while another was running.
         self.overlapped = False
         self._busy = False
@@ -134,10 +148,24 @@ class FixtureBackend(Backend):
         self._primed = False
 
     def job_classes(self) -> tuple[str, ...]:
-        return (JOB_CLASS_STT_DECODE, JOB_CLASS_TTS_SYNTHESIS)
+        return (JOB_CLASS_STT_DECODE, JOB_CLASS_TTS_SYNTHESIS, JOB_CLASS_VAD_FRAMES)
 
     def permits_job(self, request: JobRequest) -> bool:
+        if request.job_class == JOB_CLASS_VAD_FRAMES:
+            return request.frame_samples == VAD_FRAME_SAMPLES
         return self.job_languages is None or request.language in self.job_languages
+
+    def run_vad(self, request: JobRequest, state: object | None) -> tuple[VadResult, object]:
+        self.vad_started.set()
+        if self.vad_gate is not None:
+            self.vad_gate.wait(timeout=_MAX_JOB_DELAY_MS / 1000)
+        samples = array.array("h")
+        samples.frombytes(request.payload)
+        if sys.byteorder == "big":
+            samples.byteswap()
+        size = request.frame_samples
+        frames = (samples[start : start + size] for start in range(0, len(samples), size))
+        return VadResult([max(abs(sample) for sample in frame) / 32768 for frame in frames]), None
 
     def run_job(self, request: JobRequest) -> JobResult:
         with self._exclusive():

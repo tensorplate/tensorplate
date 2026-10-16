@@ -93,8 +93,7 @@ class RunnerBridgeUnderTest final : public BridgeUnderTest {
   ~RunnerBridgeUnderTest() override { unload(); }
 
   Choices choices() const override {
-    return {.refuses_vad_frames = true,
-            .largest_job_id = adapters::python_pytorch::kMaxWireInteger};
+    return {.largest_job_id = adapters::python_pytorch::kMaxWireInteger};
   }
   BoundedJobBridge& bridge() override { return *built_.bridge; }
   BufferManager& buffers() override { return *buffers_; }
