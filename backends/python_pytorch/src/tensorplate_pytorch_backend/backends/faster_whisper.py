@@ -11,8 +11,10 @@ input window long, as a one-dimensional ``int16`` tensor named
 ``audio_frames``, and its language tag as the candidate-only ``text_utf8``
 tensor. The transcript comes back as the candidate-only ``result_json`` tensor.
 
-It also runs ``vad_frames`` jobs with the Silero model the faster-whisper wheel
-carries (``silero_vad``), which every load opens beside the Whisper model.
+Its ``stt_decode`` jobs decode one window each in a single pass
+(``whisper_window``), with word units aligned to the window's tokens. It also
+runs ``vad_frames`` jobs with the Silero model the faster-whisper wheel carries
+(``silero_vad``), which every load opens beside the Whisper model.
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from tensorplate_pytorch_backend.backends.base import (
     RuntimeCapability,
 )
 from tensorplate_pytorch_backend.backends.silero_vad import SileroVad, open_silero_vad
+from tensorplate_pytorch_backend.backends.whisper_window import WhisperWindow, open_whisper_window
 from tensorplate_pytorch_backend.configuration import ArtifactConfigError, read_artifact_config
 from tensorplate_pytorch_backend.job_objects import JobRequest, TranscriptResult, VadResult
 from tensorplate_pytorch_backend.protocol import (
@@ -60,7 +63,7 @@ logger = logging.getLogger("tensorplate.sidecar")
 
 AUDIO_FRAMES: Final[str] = "audio_frames"
 
-#: What every request decodes with: one deterministic greedy pass in the
+#: What every ``infer`` request decodes with: deterministic greedy passes in the
 #: request's language, with word alignment and no prompt history. Voice
 #: activity belongs to the serving layer, so faster-whisper's filter stays off.
 DECODE_OPTIONS: Final[Mapping[str, Any]] = MappingProxyType(
@@ -299,6 +302,7 @@ class _Loaded:
     languages: frozenset[str]
     sample_rate_hz: int
     max_samples: int
+    window: WhisperWindow
     vad: SileroVad
     runtime: Mapping[str, str]
     load_timings_us: Mapping[str, int]
@@ -387,6 +391,7 @@ class FasterWhisperBackend(Backend):
             loaded_compute_type, max_samples = _inspect(
                 model, compute_type=compute_type, languages=languages, rate=rate
             )
+            window = open_whisper_window(model, numpy)
             vad = open_silero_vad()
         except BaseException:
             _release(model)
@@ -398,6 +403,7 @@ class FasterWhisperBackend(Backend):
             languages=frozenset(languages),
             sample_rate_hz=rate,
             max_samples=max_samples,
+            window=window,
             vad=vad,
             runtime=MappingProxyType(
                 {
@@ -481,11 +487,15 @@ class FasterWhisperBackend(Backend):
         )
 
     def run_job(self, request: JobRequest) -> TranscriptResult:
-        # Provisional mapping: one batch decode per job. Words are empty because the
-        # engine's word records carry no token intervals.
-        decoded = _decode(self._require_loaded(), request.payload, request.language)
-        text = "".join(segment["text"] for segment in decoded)
-        return TranscriptResult(text, [token for segment in decoded for token in segment["tokens"]])
+        window = self._require_loaded().window
+        try:
+            return window.decode(request.payload, request.language, request.start_sample)
+        except BackendError:
+            raise
+        except Exception as exc:
+            raise BackendError(
+                _failure_code(exc, ERR_INFERENCE_FAILED), "the audio could not be transcribed"
+            ) from exc
 
     def run_vad(self, request: JobRequest, state: object | None) -> tuple[VadResult, object]:
         probabilities, after = self._require_loaded().vad.run(request.payload, state)

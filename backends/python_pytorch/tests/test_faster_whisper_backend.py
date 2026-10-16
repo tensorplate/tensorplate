@@ -7,10 +7,12 @@ attributes the runner reads, so CI runs the whole profile without any engine ins
 from __future__ import annotations
 
 import contextlib
+import copy
 import dataclasses
 import io
 import json
 import logging
+import math
 import shutil
 import socket
 import struct
@@ -33,7 +35,16 @@ from tensorplate_pytorch_backend.backends.faster_whisper import (
     DECODE_OPTIONS,
     FasterWhisperBackend,
 )
-from tensorplate_pytorch_backend.job_objects import JobIdentity, JobRequest, TranscriptResult
+from tensorplate_pytorch_backend.backends.whisper_window import (
+    APPEND_PUNCTUATIONS,
+    PREPEND_PUNCTUATIONS,
+)
+from tensorplate_pytorch_backend.job_objects import (
+    JobIdentity,
+    JobRequest,
+    TranscriptResult,
+    WordUnit,
+)
 from tensorplate_pytorch_backend.runner import SidecarRunner, default_backend_factories
 from tensorplate_pytorch_backend.speech_payload import (
     TEXT_UTF8,
@@ -66,6 +77,7 @@ CANARY = "tp-canary-7f3a9c"
 _CANARY_BYTES = CANARY.encode()
 _WHISPER_LANGUAGES = ("en", "ar", "fr", "yue")
 _ABSENT = object()
+_DECODER_POSITIONS = 448
 
 
 @dataclass
@@ -95,6 +107,36 @@ def _default_segments() -> list[_Segment]:
             [_Word(0.0, 0.52, " Hello", 0.75), _Word(0.52, 1.1, " there.", 0.5)],
         ),
         _Segment(1.1, 2.675, " Bye.", [4621, 13], [_Word(1.29, 2.675, " Bye.", 0.25)]),
+    ]
+
+
+# The large-v3 tokenizer's special tokens, as the wheel's Tokenizer reads them.
+EOT, SOT, TRANSCRIBE, NO_TIMESTAMPS = 50257, 50258, 50360, 50364
+_LANGUAGE_TOKENS = {"<|en|>": 50259, "<|ar|>": 50272, "<|fr|>": 50265}
+SUPPRESSED = [1, 2, 7, 50257, 50358]
+_PIECES = {400: " And", 370: " so", 11: ",", 452: " my"}
+HYPOTHESIS = [400, 370, 11, 452]
+
+
+def _item(word: str, tokens: list[int], start: float, end: float) -> dict[str, Any]:
+    return {"word": word, "tokens": tokens, "start": start, "end": end, "probability": 0.5}
+
+
+def _default_alignment() -> list[dict[str, Any]]:
+    return [
+        _item(" And", [400], 0.0, 0.52),
+        _item(" so", [370], 0.52, 0.86),
+        _item(",", [11], 0.86, 1.08),
+        _item(" my", [452], 1.08, 1.2),
+    ]
+
+
+def _default_merged() -> list[dict[str, Any]]:
+    return [
+        _item(" And", [400], 0.0, 0.52),
+        _item(" so,", [370, 11], 0.52, 0.86),
+        _item("", [], 0.86, 1.08),
+        _item(" my", [452], 1.08, 1.2),
     ]
 
 
@@ -144,6 +186,16 @@ class _Engine:
     vad_error: BaseException | None = None
     vad_events: list[str] = field(default_factory=list)
     vad_sessions: list[tuple[str, Any, list[str]]] = field(default_factory=list)
+    # A job's single pass: what generate emits before it would end, the alignment's
+    # items, what merge_punctuations makes of them, and each call the runner made.
+    n_mels: int = 128
+    hypothesis: list[int] = field(default_factory=lambda: list(HYPOTHESIS))
+    alignment: list[dict[str, Any]] = field(default_factory=_default_alignment)
+    merged: list[dict[str, Any]] = field(default_factory=_default_merged)
+    decoded: dict[tuple[int, ...], str] = field(default_factory=dict)
+    generate_error: BaseException | None = None
+    passes: list[tuple[str, Any]] = field(default_factory=list)
+    waveforms: list[list[float]] = field(default_factory=list)
 
 
 class _Array:
@@ -224,17 +276,122 @@ def _wheel_vad(engine: _Engine) -> ModuleType:
     return _module("faster_whisper.vad", __getattr__=wrapper)
 
 
+class _Features:
+    """Log-mel features, ``width`` frames of which the first ``content`` hold audio."""
+
+    def __init__(self, mels: int, width: int, content: int | None = None) -> None:
+        self.mels, self.width = mels, width
+        self.content = width if content is None else content
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (self.mels, self.width)
+
+    def __getitem__(self, key: tuple[slice, slice]) -> _Features:
+        rows, columns = key
+        assert rows == slice(None)
+        return _Features(self.mels, len(range(self.width)[columns]))
+
+
+@dataclass(frozen=True)
+class _Encoded:
+    content: int
+
+
+class _FeatureExtractor:
+    """The wheel's extractor: 160-sample hops over the audio padded by one hop."""
+
+    def __init__(self, engine: _Engine) -> None:
+        self.sampling_rate = engine.sampling_rate
+        self.n_samples = engine.n_samples
+        self.hop_length = 160
+        self._engine = engine
+
+    def __call__(self, waveform: _Array) -> _Features:
+        self._engine.waveforms.append(waveform.values)
+        return _Features(self._engine.n_mels, (len(waveform.values) + 160) // 160)
+
+
+def _pad_or_trim(features: _Features, length: int = 3000) -> _Features:
+    return _Features(features.mels, length, min(features.width, length))
+
+
+def _wheel_decoding(engine: _Engine) -> dict[str, ModuleType]:
+    """The wheel's tokenizer, padding and punctuation helpers the single pass calls."""
+
+    class Tokenizer:
+        def __init__(
+            self, hf_tokenizer: Any, multilingual: bool, task: str | None, language: str | None
+        ) -> None:
+            assert task == "transcribe"
+            self.language = hf_tokenizer.token_to_id(f"<|{language}|>")
+            assert self.language is not None
+            self.sot_sequence = (SOT, self.language, TRANSCRIBE) if multilingual else (SOT,)
+            self.eot, self.no_timestamps = EOT, NO_TIMESTAMPS
+
+        def decode(self, tokens: list[int]) -> str:
+            text = tuple(token for token in tokens if token < EOT)
+            if text in engine.decoded:
+                return engine.decoded[text]
+            return "".join(_PIECES.get(token, f"<{token}>") for token in text)
+
+    def get_suppressed_tokens(tokenizer: Tokenizer, suppress_tokens: list[int]) -> list[int]:
+        assert suppress_tokens == [-1]
+        return list(SUPPRESSED)
+
+    def merge_punctuations(alignment: list[dict[str, Any]], prepended: str, appended: str) -> None:
+        engine.passes.append(("merge", (prepended, appended)))
+        # In place and item for item, as the wheel's function merges.
+        if alignment == engine.alignment:
+            assert len(engine.merged) == len(alignment)
+            alignment[:] = copy.deepcopy(engine.merged)
+
+    return {
+        "audio": _module("faster_whisper.audio", pad_or_trim=_pad_or_trim),
+        "tokenizer": _module("faster_whisper.tokenizer", Tokenizer=Tokenizer),
+        "transcribe": _module(
+            "faster_whisper.transcribe",
+            get_suppressed_tokens=get_suppressed_tokens,
+            merge_punctuations=merge_punctuations,
+        ),
+    }
+
+
 def _whisper_model_class(engine: _Engine) -> type:
     class Tokenizer:
         def token_to_id(self, token: str) -> int | None:
             if engine.tokenizer_error is not None:
                 raise engine.tokenizer_error
-            return 50259 if token in engine.tokens else None
+            return _LANGUAGE_TOKENS.get(token, 50259) if token in engine.tokens else None
 
     class CTranslate2Whisper:
         def __init__(self, compute_type: str) -> None:
             self.compute_type = compute_type
             self.is_multilingual = engine.multilingual
+
+        def generate(
+            self, features: Any, prompts: list[list[int]], **options: Any
+        ) -> list[SimpleNamespace]:
+            # Features rather than encoder output would cost another encoder pass.
+            assert isinstance(features, _Encoded)
+            (prompt,) = prompts
+            engine.passes.append(("generate", (list(prompt), options)))
+            if engine.generate_error is not None:
+                raise engine.generate_error
+            # CTranslate2 4.8.2: the prompt but its last token is the decoder's state, then
+            # min(max_length / 2, max_length - that state) steps; the end token is not returned.
+            max_length, state = options["max_length"], len(prompt) - 1
+            steps = min(max_length // 2, max_length - state)
+            if steps <= 0:
+                raise ValueError("The maximum decoding length must be > 0")
+            emitted: list[int] = []
+            for step in range(steps):
+                if state + step >= _DECODER_POSITIONS:
+                    raise RuntimeError("No position encodings are defined for positions >= 448")
+                if step == len(engine.hypothesis):
+                    break
+                emitted.append(engine.hypothesis[step])
+            return [SimpleNamespace(sequences_ids=[emitted])]
 
         def unload_model(self) -> None:
             engine.released += 1
@@ -252,10 +409,34 @@ def _whisper_model_class(engine: _Engine) -> type:
                 kwargs["compute_type"], kwargs["compute_type"]
             )
             self.model = CTranslate2Whisper(engine.loaded_compute_type or resolved)
-            self.feature_extractor = SimpleNamespace(
-                sampling_rate=engine.sampling_rate, n_samples=engine.n_samples
-            )
+            self.feature_extractor = _FeatureExtractor(engine)
+            self.input_stride = 2
             self.hf_tokenizer = Tokenizer()
+
+        def encode(self, features: _Features) -> _Encoded:
+            engine.passes.append(("encode", features.shape))
+            # CTranslate2 takes n_mels rows and at most twice its 1500 encoder positions.
+            assert features.mels == engine.n_mels
+            assert features.width <= 3000
+            return _Encoded(features.content)
+
+        def get_prompt(
+            self, tokenizer: Any, previous_tokens: list[int], without_timestamps: bool = False
+        ) -> list[int]:
+            assert previous_tokens == []
+            return [*tokenizer.sot_sequence, *([NO_TIMESTAMPS] if without_timestamps else [])]
+
+        def find_alignment(
+            self, tokenizer: Any, text_tokens: list[list[int]], encoder_output: Any, num_frames: int
+        ) -> list[list[dict[str, Any]]]:
+            assert isinstance(encoder_output, _Encoded)
+            assert num_frames <= encoder_output.content
+            engine.passes.append(("align", ([list(tokens) for tokens in text_tokens], num_frames)))
+            for tokens in text_tokens:
+                # It feeds the start sequence, no-timestamps, the text and the end token.
+                if len(tokenizer.sot_sequence) + len(tokens) + 2 > _DECODER_POSITIONS:
+                    raise RuntimeError("No position encodings are defined for positions >= 448")
+            return [copy.deepcopy(engine.alignment) for _ in text_tokens]
 
         @property
         def supported_languages(self) -> list[str]:
@@ -289,6 +470,7 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> _Engine:
             "faster_whisper",
             __version__="1.2.1",
             WhisperModel=_whisper_model_class(state),
+            **_wheel_decoding(state),
             vad=_wheel_vad(state),
             utils=_module("faster_whisper.utils", get_assets_path=lambda: VAD_ASSETS),
         ),
@@ -1330,12 +1512,19 @@ def test_a_transcript_reaches_the_result_and_no_other_surface(
 # jobs
 # ----------------------------------------------------------------------
 
-_TOKENS = [50365, 2425, 456, 13, 4621, 13]
 
-
-def _job(language: str = "ar", samples: list[int] | None = None) -> JobRequest:
+def _job(
+    language: str = "ar", samples: list[int] | None = None, start_sample: int = 0
+) -> JobRequest:
     payload = _audio(_THREE_SECONDS if samples is None else samples).payload
-    return JobRequest(JobIdentity(1, 1, 1), protocol.JOB_CLASS_STT_DECODE, 0, payload, language)
+    return JobRequest(
+        JobIdentity(1, 1, 1),
+        protocol.JOB_CLASS_STT_DECODE,
+        0,
+        payload,
+        language,
+        start_sample=start_sample,
+    )
 
 
 def _job_peer(connect: Callable[..., Peer], entry_path: Path) -> tuple[Peer, dict[str, Any]]:
@@ -1343,6 +1532,10 @@ def _job_peer(connect: Callable[..., Peer], entry_path: Path) -> tuple[Peer, dic
     peer = connect()
     load = _load_frame(entry_path).header
     return peer, exchange(peer, {**load, "capabilities": [protocol.CAPABILITY_SPEECH_JOBS_V1]})
+
+
+def _passes(engine: _Engine) -> list[str]:
+    return [name for name, _ in engine.passes]
 
 
 def test_stt_decode_and_vad_frames_are_declared_for_a_loaded_model_at_the_job_input_rate(
@@ -1371,41 +1564,258 @@ def test_a_job_is_permitted_in_a_declared_language_within_one_input_window(
     assert not backend.permits_job(_job("ar", [7]))
 
 
-def test_run_job_returns_the_text_and_tokens_of_the_decode_infer_runs(
+def test_a_job_encodes_decodes_and_aligns_its_window_once_each(
     engine: _Engine, tmp_path: Path
 ) -> None:
     backend = _loaded(tmp_path)
     samples = [0, 16384, -32768, 32767, *_THREE_SECONDS[4:]]
-    result = backend.run_job(_job("ar", samples))
-    assert result == TranscriptResult(" Hello there. Bye.", _TOKENS)
-    assert result.text == read_result_json(backend.infer(_request("ar", samples)))["text"]
-    job_decode, infer_decode = engine.transcribed
-    assert job_decode == infer_decode
-    assert job_decode[0][:4] == [0.0, 0.5, -1.0, 32767 / 32768]
-    assert job_decode[1] == {"language": "ar", **DECODE_OPTIONS}
+    result = backend.run_job(_job("ar", samples, start_sample=160_000))
+    (waveform,) = engine.waveforms
+    assert waveform[:4] == [0.0, 0.5, -1.0, 32767 / 32768]
+    assert engine.passes == [
+        ("encode", (128, 3000)),
+        (
+            "generate",
+            (
+                [SOT, 50272, TRANSCRIBE, NO_TIMESTAMPS],
+                {
+                    "beam_size": 1,
+                    "patience": 1,
+                    "length_penalty": 1,
+                    "repetition_penalty": 1,
+                    "no_repeat_ngram_size": 0,
+                    "max_length": 888,
+                    "suppress_blank": True,
+                    "suppress_tokens": SUPPRESSED,
+                },
+            ),
+        ),
+        ("align", ([HYPOTHESIS], 300)),  # three seconds of 10 ms frames
+        ("merge", (PREPEND_PUNCTUATIONS, APPEND_PUNCTUATIONS)),
+    ]
+    assert engine.transcribed == []
+    # The attached comma's placeholder is dropped; samples are on the session's timeline.
+    assert result == TranscriptResult(
+        " And so, my",
+        HYPOTHESIS,
+        [
+            WordUnit(" And", 0, 1, 160_000, 168_320),
+            WordUnit(" so,", 1, 3, 168_320, 173_760),
+            WordUnit(" my", 3, 4, 177_280, 179_200),
+        ],
+    )
     assert _refusal(lambda: FasterWhisperBackend().run_job(_job())).code == protocol.ERR_NOT_READY
+
+
+def test_an_english_only_model_is_prompted_without_a_language_or_task(
+    engine: _Engine, tmp_path: Path
+) -> None:
+    engine.multilingual = False
+    _loaded(tmp_path, languages=["en"]).run_job(_job("en"))
+    _, (prompt, _options) = engine.passes[1]
+    assert prompt == [SOT, NO_TIMESTAMPS]
+
+
+def test_word_samples_end_with_the_windows_audio(engine: _Engine, tmp_path: Path) -> None:
+    result = _loaded(tmp_path).run_job(_job("en", [0] * 16_000, start_sample=32_000))
+    assert [(word.start_sample, word.end_sample) for word in result.words] == [
+        (32_000, 40_320),
+        (40_320, 45_760),
+        (48_000, 48_000),  # aligned at 1.08 s to 1.2 s, in the window's padding
+    ]
+    assert engine.passes[2] == ("align", ([HYPOTHESIS], 100))
+
+
+def test_an_aligned_time_is_rounded_to_the_nearest_sample(engine: _Engine, tmp_path: Path) -> None:
+    # In floating point, 4.02 s is 64319.99... samples and 8.06 s is 128960.00...01.
+    engine.merged[1]["end"] = engine.merged[3]["start"] = 4.02
+    engine.merged[3]["end"] = 8.06
+    result = _loaded(tmp_path).run_job(_job("en", [0] * 144_000))
+    assert [(word.start_sample, word.end_sample) for word in result.words[1:]] == [
+        (8320, 64_320),
+        (64_320, 128_960),
+    ]
+
+
+def test_a_whole_input_window_is_one_pass(engine: _Engine, tmp_path: Path) -> None:
+    _loaded(tmp_path).run_job(_job("en", [0] * 480_000))
+    assert _passes(engine) == ["encode", "generate", "align", "merge"]
+    assert engine.passes[0] == ("encode", (128, 3000))
+    assert engine.passes[2] == ("align", ([HYPOTHESIS], 3000))
+
+
+@pytest.mark.parametrize("multilingual", [True, False], ids=["multilingual", "english-only"])
+@pytest.mark.parametrize("hypothesis", [443, 444, 500])
+def test_a_hypothesis_that_fills_the_token_budget_fails_typed(
+    engine: _Engine, tmp_path: Path, hypothesis: int, multilingual: bool
+) -> None:
+    engine.multilingual = multilingual
+    engine.hypothesis = [400] * hypothesis
+    engine.alignment = engine.merged = [_item(" And", [400] * 443, 0.0, 1.0)]
+    languages = {} if multilingual else {"languages": ["en"]}
+    backend = _loaded(tmp_path, **languages)
+    if hypothesis < 444:
+        # The longest hypothesis that can still end on the end token.
+        assert backend.run_job(_job("en")).words == [WordUnit(" And", 0, 443, 0, 16_000)]
+        assert _passes(engine) == ["encode", "generate", "align", "merge"]
+        return
+    refused = _refusal(lambda: backend.run_job(_job("en")))
+    assert (refused.code, refused.code_message) == (
+        protocol.ERR_INFERENCE_FAILED,
+        "the transcript reached the job's token limit",
+    )
+    assert _passes(engine) == ["encode", "generate"]
+
+
+def test_special_tokens_a_decode_emits_are_left_out_of_the_transcript(
+    engine: _Engine, tmp_path: Path
+) -> None:
+    engine.hypothesis = [400, 370, 50365, 11, 452, EOT + 1]
+    result = _loaded(tmp_path).run_job(_job())
+    assert (result.text, result.tokens) == (" And so, my", HYPOTHESIS)
+    assert engine.passes[2] == ("align", ([HYPOTHESIS], 300))
+
+
+@pytest.mark.parametrize("samples", [1, 319, 320, 639, 640])
+def test_a_window_under_two_encoder_positions_is_not_decoded(
+    engine: _Engine, tmp_path: Path, samples: int
+) -> None:
+    result = _loaded(tmp_path).run_job(_job("en", [7] * samples))
+    if samples < 640:  # two encoder positions of two 160-sample frames each
+        assert result == TranscriptResult("", [], [])
+        assert (engine.waveforms, engine.passes) == ([], [])
+    else:
+        assert result.tokens == HYPOTHESIS
+        assert _passes(engine) == ["encode", "generate", "align", "merge"]
+
+
+def test_a_special_token_counts_toward_the_token_budget(engine: _Engine, tmp_path: Path) -> None:
+    engine.hypothesis = [*[400] * 443, NO_TIMESTAMPS + 1]
+    engine.alignment = engine.merged = [_item(" And", [400] * 443, 0.0, 1.0)]
+    refused = _refusal(lambda: _loaded(tmp_path).run_job(_job("en")))
+    assert (refused.code, refused.code_message) == (
+        protocol.ERR_INFERENCE_FAILED,
+        "the transcript reached the job's token limit",
+    )
+
+
+def test_a_window_without_speech_has_no_tokens_and_is_not_aligned(
+    engine: _Engine, tmp_path: Path
+) -> None:
+    engine.hypothesis = []
+    assert _loaded(tmp_path).run_job(_job()) == TranscriptResult("", [], [])
+    assert _passes(engine) == ["encode", "generate", "merge"]
+
+
+def _uncovered(engine: _Engine) -> None:
+    engine.merged[3] = _item("", [], 1.08, 1.2)
+
+
+def _overcovered(engine: _Engine) -> None:
+    engine.merged[3]["tokens"] = [452, 13]
+
+
+def _time(value: object) -> Callable[[_Engine], None]:
+    def change(engine: _Engine) -> None:
+        engine.merged[1]["start"] = value
+
+    return change
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (_uncovered, "the word alignment does not cover the transcript's tokens"),
+        (_overcovered, "the word alignment does not cover the transcript's tokens"),
+        *(
+            pytest.param(
+                _time(value),
+                "the model returned a time that is not a non-negative number",
+                id=f"start-{value!r}",
+            )
+            for value in (-0.02, math.nan, math.inf, True, "0.5", None)
+        ),
+    ],
+)
+def test_an_alignment_the_runner_cannot_place_fails_the_job(
+    engine: _Engine, tmp_path: Path, change: Callable[[_Engine], None], message: str
+) -> None:
+    change(engine)
+    refused = _refusal(lambda: _loaded(tmp_path).run_job(_job()))
+    assert (refused.code, refused.code_message) == (protocol.ERR_INFERENCE_FAILED, message)
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (RuntimeError(f"decode of {CANARY} failed"), protocol.ERR_INFERENCE_FAILED),
+        (RuntimeError("CUDA failed with error out of memory"), protocol.ERR_OOM_ERROR),
+        (MemoryError(), protocol.ERR_OOM_ERROR),
+    ],
+)
+def test_an_engine_error_fails_the_job_by_class_and_message(
+    engine: _Engine, tmp_path: Path, error: BaseException, code: str
+) -> None:
+    engine.generate_error = error
+    refused = _refusal(lambda: _loaded(tmp_path).run_job(_job()))
+    assert (refused.code, refused.code_message) == (code, "the audio could not be transcribed")
+    assert refused.__cause__ is error
+
+
+@pytest.mark.parametrize("helper", ["audio", "tokenizer", "transcribe"])
+def test_a_load_without_the_wheels_decoding_helpers_fails_and_releases_the_model(
+    engine: _Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, helper: str
+) -> None:
+    monkeypatch.delattr(sys.modules["faster_whisper"], helper)
+    monkeypatch.setitem(sys.modules, f"faster_whisper.{helper}", None)
+    refused = _refusal(lambda: _loaded(tmp_path))
+    assert (refused.code, refused.code_message) == (
+        protocol.ERR_LOAD_FAILED,
+        "faster-whisper's decoding helpers are not importable",
+    )
+    assert engine.released == 1
 
 
 def test_a_live_runner_declares_its_job_classes_and_runs_a_permitted_job(
     engine: _Engine, connect: Callable[..., Peer], tmp_path: Path
 ) -> None:
-    engine.segments = engine.segments[:1]  # the golden submit is one second long
     peer, loaded = _job_peer(connect, _bundle(tmp_path))
     assert (loaded["status"], loaded["job_classes"]) == (
         protocol.STATUS_OK,
         ["stt_decode", "vad_frames"],
     )
-    peer.send(submit(1))
+    peer.send(submit(1))  # one second of audio from sample 0
     frames = [peer.read().header for _ in range(3)]
     assert [digest(frame) for frame in frames] == [(ACCEPTED, 1), *ended(1)]
     assert frames[1]["result"] == {
         "type": "transcript",
-        "text": " Hello there.",
-        "tokens": _TOKENS[:4],
-        "words": [],
+        "text": " And so, my",
+        "tokens": HYPOTHESIS,
+        "words": [
+            {
+                "text": " And",
+                "token_begin": 0,
+                "token_end": 1,
+                "start_sample": 0,
+                "end_sample": 8320,
+            },
+            {
+                "text": " so,",
+                "token_begin": 1,
+                "token_end": 3,
+                "start_sample": 8320,
+                "end_sample": 13_760,
+            },
+            {
+                "text": " my",
+                "token_begin": 3,
+                "token_end": 4,
+                "start_sample": 16_000,
+                "end_sample": 16_000,
+            },
+        ],
     }
-    ((decoded, options),) = engine.transcribed
-    assert (len(decoded), options) == (16_000, {"language": "en", **DECODE_OPTIONS})
+    assert engine.passes[2] == ("align", ([HYPOTHESIS], 100))
     peer.send(submit(2, options={"language": "fr"}))
     assert read(peer, 2) == ended(2, FAILED, "unsupported", "job_not_permitted")
     # A model at another rate declares no class, so its job-enabled load is refused.
@@ -1417,7 +1827,7 @@ def test_a_live_runner_declares_its_job_classes_and_runs_a_permitted_job(
 def test_a_failed_job_whose_error_carries_a_canary_reaches_no_surface(
     engine: _Engine, connect: Callable[..., Peer], tmp_path: Path
 ) -> None:
-    engine.iteration_error = RuntimeError(f"decode of {CANARY} failed")
+    engine.generate_error = RuntimeError(f"decode of {CANARY} failed")
     peer, loaded = _job_peer(connect, _canary_bundle(tmp_path))
     with _edge_log() as log:
         peer.send(submit(1))
@@ -1429,5 +1839,4 @@ def test_a_failed_job_whose_error_carries_a_canary_reaches_no_surface(
     ]
     assert frames[2]["error"]["message"] == "the audio could not be transcribed"
     assert frames[4]["health"]["last_error"] == "the audio could not be transcribed"
-    assert "withheld a WARNING record from faster_whisper" in log.getvalue()
     assert CANARY not in json.dumps(frames) + log.getvalue()

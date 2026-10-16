@@ -948,15 +948,36 @@ checks it, and every message the sidecar sends for a job passes the
 
 Of the runner profiles, the fixture profiles run `stt_decode`,
 `tts_synthesis` and `vad_frames`. `faster_whisper` runs `stt_decode` and
-`vad_frames`, and `kokoro` runs `tts_synthesis`; a decode or a synthesis is
-one batch call per job. A Whisper transcript carries the text and the tokens
-and no word units; the runner
+`vad_frames`, and `kokoro` runs `tts_synthesis`, a synthesis as one batch call
+per job. A Whisper job is one pass over its window, where the `transcribe`
+call that serves `infer` decodes again from the last timestamp of a window
+that does not end on one: the encoder over the window's mel frames padded to
+the model's 30-second input, one greedy decode without timestamps or earlier
+text, with the wheel's token suppression, and faster-whisper's word alignment
+over the same encoder output. CTranslate2 4.8.2 decodes at most
+`min(max_length / 2, max_length - prompt length + 1)` tokens and returns no
+end token, so the runner passes `max_length` 888, a budget of 444 tokens,
+and a hypothesis that fills it never ended: the job fails `inference_failed`
+before the alignment, which after a multilingual model's 4-token prompt fits
+443 tokens and the end token in the decoder's 448 positions. The transcript
+carries the text tokens only (a special token the decoder emits is left out,
+as `transcribe` leaves it out of the alignment), and a word unit per aligned
+word with punctuation attached as `transcribe` attaches it. A word's token
+interval is where its tokens sit in the transcript's, and its samples are the
+job's `start_sample` plus its aligned times at 16 kHz, cut at the end of the
+window's audio; `transcribe`'s clamps on word durations at sentence ends and
+after a pause, and its rounding to 0.01 s, are not applied. A window shorter
+than two encoder positions (the feature extractor's hop times the model's
+input stride each, 640 samples for the wheel's 160 and 2) returns an empty
+transcript without a decode: CTranslate2 aligns over half the window's
+frames, and with fewer than two positions it returned no alignment or times
+that are not finite. The runner
 permits a job in a language its entry declares whose audio fits one model
 input window. A Kokoro job returns the segment as one `audio_chunk`; the
 runner permits only its entry's language and voice at speed 1000. Either
 declares its classes only when the model's sample rate is the job seam's, so a
 load that enables the capability for a model at another rate is answered
-`unsupported`. Both mappings are provisional. `faster_whisper` runs
+`unsupported`. The Kokoro mapping is provisional. `faster_whisper` runs
 `vad_frames` with the Silero model the faster-whisper wheel carries, on one
 ONNX Runtime CPU session that every load opens (intra- and inter-op threads
 1, telemetry events off, fatal errors only in its log). Its frame and the
