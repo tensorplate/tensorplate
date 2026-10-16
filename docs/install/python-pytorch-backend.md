@@ -242,9 +242,18 @@ failure, which it raises as a plain `RuntimeError`, is `oom_error` in a
 load or a request; any other failure is `load_failed` or
 `inference_failed`.
 
-The profile imports `faster_whisper`, `ctranslate2` and `numpy` only when
-a model loads. `pip install ".[speech-stt]"` in `backends/python_pytorch/`
-installs faster-whisper and CTranslate2, unpinned, for development.
+A load also opens the voice-activity model the faster-whisper wheel
+carries, on ONNX Runtime's CPU provider with one intra-op and one inter-op
+thread, for the sidecar's `vad_frames` jobs (see
+`docs/architecture/backend-registry.md`). It fails with `load_failed`
+when ONNX Runtime cannot be imported, the model cannot be opened, or the
+model does not take the wheel's 512-sample frame with its 64-sample
+context.
+
+The profile imports `faster_whisper`, `ctranslate2`, `onnxruntime` and
+`numpy` only when a model loads. `pip install ".[speech-stt]"` in
+`backends/python_pytorch/` installs faster-whisper, CTranslate2 and ONNX
+Runtime, unpinned, for development.
 
 ## Candidate speech runner profile: `kokoro`
 

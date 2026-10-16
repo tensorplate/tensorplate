@@ -1,7 +1,7 @@
-"""The faster_whisper runner profile, with faster-whisper, CTranslate2 and NumPy faked.
+"""The faster_whisper runner profile, with faster-whisper, CTranslate2, ONNX Runtime and NumPy faked.
 
-The fakes mirror the faster-whisper 1.2.1 and CTranslate2 4.8 attributes the
-runner reads, so CI runs the whole profile without either engine installed.
+The fakes mirror the faster-whisper 1.2.1, CTranslate2 4.8 and ONNX Runtime 1.30
+attributes the runner reads, so CI runs the whole profile without any engine installed.
 """
 
 from __future__ import annotations
@@ -134,6 +134,16 @@ class _Engine:
     exhausted: bool = False
     released: int = 0
     queried: int = 0
+    # The wheel's Silero wrapper's frame and context, and its ONNX model's inputs.
+    vad_frame: Any = 512
+    vad_context: Any = 64
+    vad_inputs: dict[str, list[Any]] = field(
+        default_factory=lambda: {"input": ["seq_len", 576], "h": [1, 1, 128], "c": [1, 1, 128]}
+    )
+    vad_outputs: int = 3
+    vad_error: BaseException | None = None
+    vad_events: list[str] = field(default_factory=list)
+    vad_sessions: list[tuple[str, Any, list[str]]] = field(default_factory=list)
 
 
 class _Array:
@@ -160,6 +170,58 @@ def _module(name: str, **attributes: Any) -> ModuleType:
     for key, value in attributes.items():
         setattr(module, key, value)
     return module
+
+
+VAD_ASSETS = "/wheel/faster_whisper/assets"
+
+
+def _onnxruntime(engine: _Engine) -> ModuleType:
+    class SessionOptions:
+        pass
+
+    class InferenceSession:
+        def __init__(self, path: str, *, sess_options: Any, providers: list[str]) -> None:
+            engine.vad_events.append("session")
+            if engine.vad_error is not None:
+                raise engine.vad_error
+            engine.vad_sessions.append((path, sess_options, providers))
+
+        def get_inputs(self) -> list[SimpleNamespace]:
+            return [SimpleNamespace(name=n, shape=s) for n, s in engine.vad_inputs.items()]
+
+        def get_outputs(self) -> list[SimpleNamespace]:
+            return [SimpleNamespace(name=f"o{n}", shape=[]) for n in range(engine.vad_outputs)]
+
+    def disable_telemetry_events() -> None:
+        engine.vad_events.append("telemetry_off")
+
+    return _module(
+        "onnxruntime",
+        __version__="1.30.0",
+        SessionOptions=SessionOptions,
+        InferenceSession=InferenceSession,
+        disable_telemetry_events=disable_telemetry_events,
+    )
+
+
+def _wheel_vad(engine: _Engine) -> ModuleType:
+    def wrapper(name: str) -> type:
+        if name != "SileroVADModel":
+            raise AttributeError(name)
+
+        class SileroVADModel:
+            def __call__(
+                self,
+                audio: Any,
+                num_samples: Any = engine.vad_frame,
+                context_size_samples: Any = engine.vad_context,
+            ) -> Any:
+                raise AssertionError("the runner calls the ONNX session, not the wrapper")
+
+        return SileroVADModel
+
+    # Built when read, so a test's frame and context reach the wrapper's signature.
+    return _module("faster_whisper.vad", __getattr__=wrapper)
 
 
 def _whisper_model_class(engine: _Engine) -> type:
@@ -223,8 +285,15 @@ def engine(monkeypatch: pytest.MonkeyPatch) -> _Engine:
     monkeypatch.setitem(
         sys.modules,
         "faster_whisper",
-        _module("faster_whisper", __version__="1.2.1", WhisperModel=_whisper_model_class(state)),
+        _module(
+            "faster_whisper",
+            __version__="1.2.1",
+            WhisperModel=_whisper_model_class(state),
+            vad=_wheel_vad(state),
+            utils=_module("faster_whisper.utils", get_assets_path=lambda: VAD_ASSETS),
+        ),
     )
+    monkeypatch.setitem(sys.modules, "onnxruntime", _onnxruntime(state))
 
     def get_cuda_device_count() -> int:
         state.queried += 1
@@ -1276,13 +1345,13 @@ def _job_peer(connect: Callable[..., Peer], entry_path: Path) -> tuple[Peer, dic
     return peer, exchange(peer, {**load, "capabilities": [protocol.CAPABILITY_SPEECH_JOBS_V1]})
 
 
-def test_stt_decode_is_declared_for_a_loaded_model_at_the_job_input_rate(
+def test_stt_decode_and_vad_frames_are_declared_for_a_loaded_model_at_the_job_input_rate(
     engine: _Engine, tmp_path: Path
 ) -> None:
     backend = FasterWhisperBackend()
     assert backend.job_classes() == ()
     backend.load(_spec(_bundle(tmp_path)))
-    assert backend.job_classes() == (protocol.JOB_CLASS_STT_DECODE,)
+    assert backend.job_classes() == (protocol.JOB_CLASS_STT_DECODE, protocol.JOB_CLASS_VAD_FRAMES)
     engine.sampling_rate = 8000
     assert _loaded(tmp_path, under="other", sample_rate_hz=8000).job_classes() == ()
 
@@ -1317,12 +1386,15 @@ def test_run_job_returns_the_text_and_tokens_of_the_decode_infer_runs(
     assert _refusal(lambda: FasterWhisperBackend().run_job(_job())).code == protocol.ERR_NOT_READY
 
 
-def test_a_live_runner_declares_stt_decode_and_runs_a_permitted_job(
+def test_a_live_runner_declares_its_job_classes_and_runs_a_permitted_job(
     engine: _Engine, connect: Callable[..., Peer], tmp_path: Path
 ) -> None:
     engine.segments = engine.segments[:1]  # the golden submit is one second long
     peer, loaded = _job_peer(connect, _bundle(tmp_path))
-    assert (loaded["status"], loaded["job_classes"]) == (protocol.STATUS_OK, ["stt_decode"])
+    assert (loaded["status"], loaded["job_classes"]) == (
+        protocol.STATUS_OK,
+        ["stt_decode", "vad_frames"],
+    )
     peer.send(submit(1))
     frames = [peer.read().header for _ in range(3)]
     assert [digest(frame) for frame in frames] == [(ACCEPTED, 1), *ended(1)]

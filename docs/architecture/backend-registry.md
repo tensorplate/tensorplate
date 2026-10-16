@@ -932,15 +932,25 @@ checks it, and every message the sidecar sends for a job passes the
 `JobEventSequence` rules first.
 
 Of the runner profiles, the fixture profiles run `stt_decode`,
-`tts_synthesis` and `vad_frames`. `faster_whisper` runs `stt_decode` and `kokoro` runs
-`tts_synthesis`, each as one batch decode or synthesis per job. A Whisper
-transcript carries the text and the tokens and no word units; the runner
+`tts_synthesis` and `vad_frames`. `faster_whisper` runs `stt_decode` and
+`vad_frames`, and `kokoro` runs `tts_synthesis`; a decode or a synthesis is
+one batch call per job. A Whisper transcript carries the text and the tokens
+and no word units; the runner
 permits a job in a language its entry declares whose audio fits one model
 input window. A Kokoro job returns the segment as one `audio_chunk`; the
 runner permits only its entry's language and voice at speed 1000. Either
-declares its class only when the model's sample rate is the job seam's, so a
+declares its classes only when the model's sample rate is the job seam's, so a
 load that enables the capability for a model at another rate is answered
-`unsupported`. Both mappings are provisional. The fixture profiles take
+`unsupported`. Both mappings are provisional. `faster_whisper` runs
+`vad_frames` with the Silero model the faster-whisper wheel carries, on one
+ONNX Runtime CPU session that every load opens (intra- and inter-op threads
+1, telemetry events off, fatal errors only in its log). Its frame and the
+context before each frame are the sizes the wheel's own wrapper uses, 512
+and 64 samples, checked against the model's input when it loads; it permits
+only that frame. A job's frames are one session call that continues from the
+state the utterance's previous job returned: Silero's recurrent state and
+the last 64 samples of that job's last frame, which the wheel's wrapper
+zeroes on every call. The fixture profiles take
 `vad_frames` jobs of 512-sample frames, Silero's frame at 16 kHz, and refuse
 any other frame size with `job_not_permitted`; a frame's probability is its
 largest absolute sample over 32768 (silence 0, amplitude 16384 gives 0.5,

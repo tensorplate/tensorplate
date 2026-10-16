@@ -10,6 +10,9 @@ A request is one mono clip of 16-bit PCM at the entry's rate, at most one model
 input window long, as a one-dimensional ``int16`` tensor named
 ``audio_frames``, and its language tag as the candidate-only ``text_utf8``
 tensor. The transcript comes back as the candidate-only ``result_json`` tensor.
+
+It also runs ``vad_frames`` jobs with the Silero model the faster-whisper wheel
+carries (``silero_vad``), which every load opens beside the Whisper model.
 """
 
 from __future__ import annotations
@@ -32,8 +35,9 @@ from tensorplate_pytorch_backend.backends.base import (
     NamedTensor,
     RuntimeCapability,
 )
+from tensorplate_pytorch_backend.backends.silero_vad import SileroVad, open_silero_vad
 from tensorplate_pytorch_backend.configuration import ArtifactConfigError, read_artifact_config
-from tensorplate_pytorch_backend.job_objects import JobRequest, TranscriptResult
+from tensorplate_pytorch_backend.job_objects import JobRequest, TranscriptResult, VadResult
 from tensorplate_pytorch_backend.protocol import (
     ERR_CONFIG_INVALID,
     ERR_INFERENCE_FAILED,
@@ -43,6 +47,7 @@ from tensorplate_pytorch_backend.protocol import (
     ERR_SHAPE_MISMATCH,
     ERR_UNSUPPORTED,
     JOB_CLASS_STT_DECODE,
+    JOB_CLASS_VAD_FRAMES,
     LIMIT_JOB_INPUT_SAMPLE_RATE_HZ,
 )
 from tensorplate_pytorch_backend.speech_payload import (
@@ -294,6 +299,7 @@ class _Loaded:
     languages: frozenset[str]
     sample_rate_hz: int
     max_samples: int
+    vad: SileroVad
     runtime: Mapping[str, str]
     load_timings_us: Mapping[str, int]
 
@@ -381,16 +387,18 @@ class FasterWhisperBackend(Backend):
             loaded_compute_type, max_samples = _inspect(
                 model, compute_type=compute_type, languages=languages, rate=rate
             )
+            vad = open_silero_vad()
         except BaseException:
             _release(model)
             raise
-        inspected = time.monotonic_ns()
+        ready = time.monotonic_ns()
         self._loaded = _Loaded(
             model=model,
             numpy=numpy,
             languages=frozenset(languages),
             sample_rate_hz=rate,
             max_samples=max_samples,
+            vad=vad,
             runtime=MappingProxyType(
                 {
                     "device": device,
@@ -401,7 +409,7 @@ class FasterWhisperBackend(Backend):
             ),
             load_timings_us=MappingProxyType(
                 {
-                    "load": (inspected - started) // 1000,
+                    "load": (ready - started) // 1000,
                     "artifact_verify": (verified - verifying) // 1000,
                     "model_build": (built - verified) // 1000,
                 }
@@ -459,10 +467,12 @@ class FasterWhisperBackend(Backend):
     def job_classes(self) -> tuple[str, ...]:
         loaded = self._loaded
         at_rate = loaded is not None and loaded.sample_rate_hz == LIMIT_JOB_INPUT_SAMPLE_RATE_HZ
-        return (JOB_CLASS_STT_DECODE,) if at_rate else ()
+        return (JOB_CLASS_STT_DECODE, JOB_CLASS_VAD_FRAMES) if at_rate else ()
 
     def permits_job(self, request: JobRequest) -> bool:
         loaded = self._loaded  # read once: the reader thread calls this
+        if loaded is not None and request.job_class == JOB_CLASS_VAD_FRAMES:
+            return request.frame_samples == loaded.vad.frame_samples
         return (
             loaded is not None
             and request.job_class == JOB_CLASS_STT_DECODE
@@ -476,6 +486,10 @@ class FasterWhisperBackend(Backend):
         decoded = _decode(self._require_loaded(), request.payload, request.language)
         text = "".join(segment["text"] for segment in decoded)
         return TranscriptResult(text, [token for segment in decoded for token in segment["tokens"]])
+
+    def run_vad(self, request: JobRequest, state: object | None) -> tuple[VadResult, object]:
+        probabilities, after = self._require_loaded().vad.run(request.payload, state)
+        return VadResult(probabilities), after
 
     def _require_loaded(self) -> _Loaded:
         if self._loaded is None:
