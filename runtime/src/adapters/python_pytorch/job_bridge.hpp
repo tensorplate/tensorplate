@@ -55,6 +55,10 @@ class JobBridge final : public BoundedJobBridge {
   /// beyond what a JobRequest can hold.
   [[nodiscard]] Result<void> submit(JobRequest request) override;
 
+  /// JobChannel::runs(): the classes the session's load declared that the adapter knows,
+  /// until the session stops its sidecar (an unload, or a failed exchange with it).
+  [[nodiscard]] bool runs(JobClass job_class) const noexcept override;
+
   [[nodiscard]] Result<void> cancel(std::uint64_t job_id) override;
 
   /// A zero key or generation is refused first, whatever the channel's state;

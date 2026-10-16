@@ -1677,10 +1677,11 @@ long input will resize them.
 
 **What it cannot refuse before admission.** `negotiate` refuses an input
 kind the dispatch was not built for, an audio format other than the one
-above, and a language or voice that a job request could not carry. The
-bridge has no query for what the loaded profile permits, so a job class,
-a language or a voice the backend refuses fails the session at its first
-job, after it was reported ready.
+above, and a language or voice that a job request could not carry. It
+does not ask the bridge which job classes the backend runs (`runs`), and
+the bridge has no query for the languages or voices the loaded profile
+permits, so a job class, a language or a voice the backend refuses fails
+the session at its first job, after it was reported ready.
 
 **Threads.** One thread of the dispatch makes every report to the
 manager, every offer to an output queue and every bridge call but two:

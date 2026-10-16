@@ -14,7 +14,8 @@
 //   - a frame whose header is not a JSON object ends the connection;
 //   - a load is refused as the runner refuses it (an empty `capabilities`
 //     list, a capability it did not list, a runner with no job class a lane
-//     runs), and one it takes declares the classes a lane runs and no other;
+//     runs), and one it takes declares the classes a lane runs and no other,
+//     as the runner does for a backend without `vad_frames`;
 //   - `health_check` is answered at once; any other unary request and every
 //     admitted job wait in one FIFO, and a load or an unload fails the jobs
 //     still waiting when it arrives;
@@ -32,10 +33,14 @@
 //
 //   - of a submit's input it checks the type and the payload's length only,
 //     and keeps the payload for the test to read;
+//   - a `vad_frames` job, which only Options::declares_any_job_class lets a
+//     load declare, waits in the one FIFO, where the runner gives those jobs
+//     a lane of their own;
 //   - it has no backend: a job ends as the test says. The thread that plays
 //     one (job_bridge_harness.hpp) always completes a job with the fixture
-//     bridge's result. It never raises and reports no progress, and a submit
-//     is refused as not permitted only when a test arms it;
+//     bridge's result, a `vad_frames` job of any frame size included. It
+//     never raises and reports no progress, and a submit is refused as not
+//     permitted only when a test arms it;
 //   - that thread lets a job it holds go once an unload waits behind it. A
 //     runner's job may end so; it may also outlast the unload's bound, which
 //     that thread never plays and no conformance case reaches;
@@ -113,8 +118,8 @@ class ScriptedSidecar {
     /// `capabilities` key, and it lists nothing a load could enable.
     bool lists_capabilities = true;
     /// The job classes of the loaded "runner". A load with jobs declares those
-    /// of them a lane runs (`stt_decode`, `tts_synthesis`) and is refused when
-    /// that leaves none.
+    /// of them the runner declares for a backend without `vad_frames`
+    /// (`stt_decode`, `tts_synthesis`) and is refused when that leaves none.
     std::vector<std::string> job_classes{"stt_decode", "tts_synthesis"};
     /// True declares `job_classes` as given, whether a lane runs them or not,
     /// which no runner does.
@@ -182,12 +187,12 @@ class ScriptedSidecar {
 
   // -- The backend. --------------------------------------------------------------
 
-  /// A job the backend took, with the header and the payload size of its
-  /// submit; `job_id` is zero when none came.
+  /// A job the backend took, with the header and the payload of its submit;
+  /// `job_id` is zero when none came.
   struct TakenJob {
     std::uint64_t job_id = 0;
     Json submit = Json::object();
-    std::size_t payload_bytes = 0;
+    std::vector<std::byte> payload{};
   };
 
   /// Waits up to `patience` for a job at the head of the FIFO with none
@@ -200,7 +205,7 @@ class ScriptedSidecar {
     running_ = std::get<std::uint64_t>(lane_.front());
     lane_.pop_front();
     const Job& job = jobs_.at(running_);
-    return TakenJob{running_, job.submit, job.payload_bytes};
+    return TakenJob{running_, job.submit, job.payload};
   }
 
   /// take() with this sidecar's patience.
@@ -440,7 +445,7 @@ class ScriptedSidecar {
     std::uint64_t generation = 0;
     bool cancelled = false;
     Json submit = Json::object();
-    std::size_t payload_bytes = 0;
+    std::vector<std::byte> payload{};
   };
 
   static constexpr std::size_t kLaneDepth = 8;
@@ -599,7 +604,7 @@ class ScriptedSidecar {
   // Acts on one frame of the adapter's, then records it: a test that has
   // seen a frame in sent() knows this sidecar acted on it.
   void route(const Json& header, std::vector<std::byte> payload) {
-    act_on(header, payload.size());
+    act_on(header, payload);
     {
       std::lock_guard<std::mutex> lock(log_mutex_);
       sent_.push_back(header);
@@ -608,7 +613,7 @@ class ScriptedSidecar {
     log_changed_.notify_all();
   }
 
-  void act_on(const Json& header, std::size_t payload_bytes) {
+  void act_on(const Json& header, const std::vector<std::byte>& payload) {
     const std::string kind = text_of(header, "kind");
     if (text_of(header, "schema_version") != "0.1" || text_of(header, "message_id").empty() ||
         kind.empty()) {
@@ -632,7 +637,7 @@ class ScriptedSidecar {
     std::lock_guard<std::mutex> lock(table_mutex_);
     const bool job_kind = kind == "job_submit" || kind == "job_cancel" || kind == "session_release";
     if (job_kind && (jobs_open_ || (kind != "job_submit" && !jobs_.empty()))) {
-      handle_locked(header, kind, payload_bytes);
+      handle_locked(header, kind, payload);
     } else {
       if (kind == "load_model" || kind == "unload") {
         // It replaces or unloads the backend: no more jobs, waiting ones fail.
@@ -748,8 +753,9 @@ class ScriptedSidecar {
     return response;
   }
 
-  // The classes a load with jobs declares: as the runner does, those of its
-  // classes that have a lane, in lane order and once each.
+  // The classes a load with jobs declares: as the runner does for a backend
+  // without `vad_frames`, those of its classes that have a lane, in lane order
+  // and once each.
   std::vector<std::string> declared_classes() const {
     if (options_.declares_any_job_class) {
       return options_.job_classes;
@@ -778,7 +784,8 @@ class ScriptedSidecar {
            length->get<std::size_t>() == payload_bytes;
   }
 
-  void handle_locked(const Json& header, const std::string& kind, std::size_t payload_bytes) {
+  void handle_locked(const Json& header, const std::string& kind,
+                     const std::vector<std::byte>& payload) {
     const auto field = [&](const char* name) {
       const auto it = header.find(name);
       return it != header.end() && it->is_number_unsigned() ? it->get<std::uint64_t>() : 0;
@@ -788,7 +795,7 @@ class ScriptedSidecar {
     const auto job = jobs_.find(job_id);
     if (named.session_key == 0 || named.generation == 0 ||
         (kind != "session_release" && job_id == 0) ||
-        (kind == "job_submit" && !input_matches(header, payload_bytes))) {
+        (kind == "job_submit" && !input_matches(header, payload.size()))) {
       write_frame(refusal(header, "error_event", "config_invalid", nullptr), 0);
     } else if (kind == "session_release") {
       releasing_.insert({named.session_key, named.generation});
@@ -812,7 +819,7 @@ class ScriptedSidecar {
       // Not job messages: they would land in the live job's stream.
       write_frame(refusal(header, "error_event", "config_invalid", "duplicate_job_id"), 0);
     } else {
-      jobs_.emplace(job_id, Job{named.session_key, named.generation, false, header, payload_bytes});
+      jobs_.emplace(job_id, Job{named.session_key, named.generation, false, header, payload});
       const std::vector<std::string> declared = declared_classes();
       const bool runs = std::find(declared.begin(), declared.end(),
                                   header.value("job_class", "")) != declared.end();

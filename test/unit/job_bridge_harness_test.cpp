@@ -13,17 +13,22 @@ TEST(JobBridgeHarness, FeatureFlagDisabled) {
 }
 #else
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "tensorplate/core/error.hpp"
 #include "tensorplate/core/job_event.hpp"
+#include "tensorplate/core/job_request.hpp"
+#include "tensorplate/core/job_result.hpp"
 #include "tensorplate/core/model_spec.hpp"
 #include "tensorplate/core/result.hpp"
 
@@ -262,9 +267,43 @@ TEST_F(JobBridgeHarnessTest, ABackendIsIdleWithTheJobItHoldsAndNotWhileOneItHasN
   EXPECT_TRUE(h.wait_kinds(2, {Accepted, Completed, Released}));
 }
 
+// The fixture runner's rule for a load that declares `vad_frames`: of each frame, its largest
+// absolute sample over 32768.
+TEST(JobBridgeScriptedBackend, ScoresEachVoiceActivityFrameByItsLargestSample) {
+  ScriptedSidecar peer(ScriptedSidecar::Options{.job_classes = {"stt_decode", "vad_frames"},
+                                                .declares_any_job_class = true});
+  JobBridgeHarness h{patient(), peer.launcher()};
+  ScriptedBackend backend{peer};
+  ASSERT_TRUE(
+      h.session
+          ->load(ModelSpec::create("speech", ModelClass::Speech, "/dev/null", "python_pytorch")
+                     .value())
+          .has_value());
+  ASSERT_TRUE(h.session->prime().has_value());
+  constexpr std::uint32_t kFrameSamples = 512;
+  const BufferRef buffer = h.manager->allocate(4U * kFrameSamples).value();
+  const auto pcm = h.manager->data(buffer).value();
+  std::fill(pcm.begin(), pcm.end(), std::byte{0});
+  pcm[2 * 7 + 1] = std::byte{0x40};                    // 16384 in the first frame
+  pcm[2 * (kFrameSamples + 3) + 1] = std::byte{0x80};  // -32768 in the second
+  ASSERT_TRUE(h.submit(JobRequest::create(
+                           JobIdentity{1, 1, 1}, JobClass::VadFrames,
+                           VadFrames{kJobInputAudioFormat, PcmWindow{buffer, 0, 4U * kFrameSamples},
+                                     kFrameSamples, 2, 1})
+                           .value())
+                  .has_value());
+  ASSERT_TRUE(h.wait_kinds(1, {Accepted, Completed, Released}));
+  for (const JobEvent& event : h.sink->events()) {
+    if (event.kind() == Completed) {
+      EXPECT_EQ(std::get<VadResult>(event.result().value().payload()).probabilities,
+                (std::vector<float>{0.5F, 1.0F}));
+    }
+  }
+}
+
 // -- The scripted sidecar. -------------------------------------------------------------
 
-TEST(JobBridgeScriptedSidecar, DeclaresTheClassesALaneRunsInLaneOrderAndOnceEach) {
+TEST(JobBridgeScriptedSidecar, DeclaresWhatABackendWithoutVadRunsInLaneOrderAndOnceEach) {
   ScriptedSidecar peer(ScriptedSidecar::Options{
       .job_classes = {"tts_synthesis", "vad_frames", "stt_decode", "tts_synthesis"}});
   JobChannelHarness h;

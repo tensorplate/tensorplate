@@ -22,6 +22,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -77,11 +78,7 @@ class FakeBoundedJobBridge final : public BoundedJobBridge {
       next_submit_error_.reset();
       return unexpected(std::move(error));
     }
-    bool served = false;
-    for (const JobClass job_class : served_) {
-      served = served || job_class == request.job_class();
-    }
-    if (!served) {
+    if (!runs(request.job_class())) {
       return refuse(Error::Code::Unsupported, "job_class_unsupported");
     }
     const JobIdentity identity = request.identity();
@@ -98,6 +95,10 @@ class FakeBoundedJobBridge final : public BoundedJobBridge {
     jobs_.emplace(identity.job_id, Job{identity, JobEventSequence(request)});
     submitted_.push_back(std::move(request));
     return {};
+  }
+
+  bool runs(JobClass job_class) const noexcept override {
+    return std::find(served_.begin(), served_.end(), job_class) != served_.end();
   }
 
   Result<void> cancel(std::uint64_t job_id) override {
@@ -350,7 +351,7 @@ class FakeBoundedJobBridge final : public BoundedJobBridge {
 
   mutable std::mutex mu_;
   std::mutex delivery_mu_;  // Held across a whole deliver(): serializes callbacks.
-  std::vector<JobClass> served_;
+  const std::vector<JobClass> served_;
   std::size_t max_unreleased_jobs_;
   std::shared_ptr<JobEventSink> sink_;
   std::unordered_map<std::uint64_t, Job> jobs_;

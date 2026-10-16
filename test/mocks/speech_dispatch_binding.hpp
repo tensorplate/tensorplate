@@ -51,9 +51,13 @@ namespace tensorplate::testing {
 
 /// A fixture backend whose results follow their input, so that the wrong
 /// bytes of the right size are caught: a decode's text is the digest of its
-/// window, a synthesis's PCM follows its text.
+/// window, a synthesis's PCM follows its text, and voice activity is the
+/// fixture's, which follows each frame's samples.
 [[nodiscard]] inline Result<JobResult> result_following_input(const JobRequest& request,
                                                               BufferManager& buffers) {
+  if (std::holds_alternative<VadFrames>(request.payload())) {
+    return fixture_job_result(request, buffers);
+  }
   if (const auto* audio = std::get_if<AudioFrames>(&request.payload())) {
     const auto held = buffers.data(audio->pcm.buffer);
     if (!held) {
@@ -170,6 +174,15 @@ class CountingJobBridge final : public BoundedJobBridge {
     auto submitted = inner_->submit(std::move(request));
     settle_if_told();
     return submitted;
+  }
+  [[nodiscard]] bool runs(JobClass job_class) const noexcept override {
+    {
+      const std::lock_guard guard(mu_);
+      if (refused_class_ == job_class) {
+        return false;
+      }
+    }
+    return inner_->runs(job_class);
   }
   [[nodiscard]] Result<void> cancel(std::uint64_t job_id) override {
     {

@@ -176,8 +176,7 @@ Result<void> JobChannel::start(ipc::UnixSocket& socket, const std::vector<JobCla
   if (!socket.is_open()) {
     return refuse(Error::Code::Internal, "socket_closed");
   }
-  job_classes_ = job_classes;
-  if (job_classes_.empty()) {
+  if (job_classes.empty()) {
     return refuse(Error::Code::Unsupported, "job_class_unsupported");
   }
   socket_ = &socket;
@@ -198,6 +197,8 @@ Result<void> JobChannel::start(ipc::UnixSocket& socket, const std::vector<JobCla
     return unexpected(Error::make(Error::Code::Internal, "job channel threads could not start",
                                   "job_channel_thread_unavailable"));
   }
+  // Set once the start can no longer fail, so that runs() never answers for a failed one.
+  job_classes_ = job_classes;
   phase_ = Phase::Started;
   return Result<void>{};
 }
@@ -374,6 +375,13 @@ Result<void> JobChannel::submit(const JobRequest& request) {
                 Job{identity, JobEventSequence(request), std::move(message_id), std::string{}});
   queue_locked(QueuedFor::Submit, identity.job_id, std::move(frame).value());
   return Result<void>{};
+}
+
+bool JobChannel::runs(JobClass job_class) const noexcept {
+  // As in admit_jobs(): the lock throws only on a system error, which terminate() then ends.
+  std::lock_guard<std::mutex> lock(mutex_);
+  return phase_ != Phase::Stopped &&
+         std::find(job_classes_.begin(), job_classes_.end(), job_class) != job_classes_.end();
 }
 
 Result<void> JobChannel::cancel(std::uint64_t job_id) {

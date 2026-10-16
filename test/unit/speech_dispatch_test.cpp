@@ -973,6 +973,9 @@ TEST(SpeechJobDispatch, AJobClassTheBackendDoesNotRunFailsTheSessionAtItsFirstJo
   Binding binding(&speech_dispatch);
   SpeechUnderTest& speech = speech_of(binding);
   speech.bridge->refuse_class(JobClass::TtsSynthesis);
+  // The double answers as it refuses.
+  EXPECT_FALSE(speech.bridge->runs(JobClass::TtsSynthesis));
+  EXPECT_TRUE(speech.bridge->runs(JobClass::SttDecode));
   const auto refused = binding.open_text();
   binding.text(refused, 1, "hi");
   ASSERT_TRUE(binding.ends_as(refused, State::Failed));
@@ -985,6 +988,22 @@ TEST(SpeechJobDispatch, AJobClassTheBackendDoesNotRunFailsTheSessionAtItsFirstJo
   one_utterance(binding, served);
   ASSERT_TRUE(binding.read_as<EndpointDetectedOutput>(served).has_value());
   EXPECT_TRUE(binding.read_as<FinalTranscriptOutput>(served).has_value());
+}
+
+// The bindings' default result function scores voice activity as the fixture backend does.
+TEST(ResultFollowingInput, ScoresVoiceActivityAsTheFixtureBackendDoes) {
+  const auto buffers = BufferManager::create({}).value();
+  const BufferRef pcm = buffers->allocate(2 * kFixtureVadFrameSamples).value();
+  const auto held = buffers->data(pcm).value();
+  std::fill(held.begin(), held.end(), std::byte{0});
+  held[1] = std::byte{0x40};
+  const JobRequest request =
+      JobRequest::create(JobIdentity{1, 1, 1}, JobClass::VadFrames,
+                         VadFrames{kJobInputAudioFormat, PcmWindow{pcm, 0, held.size()},
+                                   kFixtureVadFrameSamples, 1, 1})
+          .value();
+  const JobResult scored = result_following_input(request, *buffers).value();
+  EXPECT_EQ(std::get<VadResult>(scored.payload()).probabilities, std::vector<float>{0.5F});
 }
 
 Result<JobResult> nothing_heard(const JobRequest& /*request*/, BufferManager& /*buffers*/) {

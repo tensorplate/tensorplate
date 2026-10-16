@@ -70,8 +70,8 @@ namespace tensorplate {
 ///     its reservations stay held.
 ///
 /// Obligations of the sink: a callback returns promptly without blocking or
-/// throwing. It may call submit(), cancel() and release_session() on the
-/// bridge, whose events then arrive after it returns; it never calls
+/// throwing. It may call submit(), cancel(), release_session() and runs() on
+/// the bridge, whose events then arrive after it returns; it never calls
 /// health() or set_event_sink(). A callback never unloads or destroys the
 /// backend session the bridge belongs to, and never destroys the bridge. A
 /// receiver releases the buffer of every AudioChunkResult it receives exactly
@@ -154,6 +154,11 @@ class BoundedJobBridge {
   ///     an identity above what its wire represents or a buffer it does not
   ///     hold.
   [[nodiscard]] virtual Result<void> submit(JobRequest request) = 0;
+
+  /// Whether the loaded backend runs jobs of `job_class`: false before a load and for a
+  /// class submit() refuses as "job_class_unsupported". Never waits for the backend. A
+  /// snapshot, not a promise: after a true answer an unload still makes submit() refuse.
+  [[nodiscard]] virtual bool runs(JobClass job_class) const noexcept = 0;
 
   /// Requests cancellation of a submitted job. Idempotent: repeating it, or
   /// cancelling a job whose terminal event was already delivered, succeeds

@@ -91,8 +91,10 @@
 
 namespace tensorplate::adapters::python_pytorch {
 
-/// Most jobs the channel holds unreleased; the sidecar runs one and lets
-/// eight wait. It bounds the message-id correlation as well.
+/// Most jobs the channel holds unreleased. The sidecar takes in up to 18 (on
+/// each of its two lanes one running and eight waiting), so with both lanes
+/// busy the channel refuses first. It bounds the message-id correlation as
+/// well.
 inline constexpr std::size_t kMaxOpenJobs = 16;
 
 /// Most sessions whose release the sidecar has not acknowledged yet: the
@@ -308,6 +310,10 @@ class JobChannel {
   ///   Error::Code::ConfigInvalid, "pcm_buffer_invalid" (the buffer manager
   ///   does not hold the request's window); ipc::encode_frame()'s refusal.
   [[nodiscard]] Result<void> submit(const JobRequest& request);
+
+  /// Whether `job_class` is among the `job_classes` the latest start() was given: false
+  /// before the first and after stop().
+  [[nodiscard]] bool runs(JobClass job_class) const noexcept;
 
   /// Queues a `job_cancel`, once per job; a repeat, or a job that already has
   /// its terminal event, changes nothing. The sidecar answers nothing for a

@@ -65,10 +65,10 @@ class FixtureBridgeUnderTest final : public BridgeUnderTest {
     EXPECT_TRUE(bridge_.refusals().empty());
   }
 
-  // With late cancels it states nothing more than its hold and the class it
-  // refuses: one binding that the cases must pass on the header alone.
+  // With late cancels it states nothing more than its hold: one binding that
+  // the cases must pass on the header alone.
   Choices choices() const override {
-    Choices stated{.holds_started_jobs = holds_, .refuses_vad_frames = true};
+    Choices stated{.holds_started_jobs = holds_};
     if (!options_.cancels_arrive_late) {
       stated.runs_one_job_at_a_time = true;
       stated.ends_a_waiting_job_at_its_cancel = true;
@@ -109,7 +109,8 @@ BridgeCase fixture_case(std::string name, FixtureJobBridgeOptions options, bool 
           [options, holds] { return std::make_unique<FixtureBridgeUnderTest>(options, holds); }};
 }
 
-// The depth of the runner's job queue (GPU_LANE_QUEUE_DEPTH in jobs.py).
+// The depth of each of the runner's lanes (GPU_LANE_QUEUE_DEPTH and
+// VAD_LANE_QUEUE_DEPTH in jobs.py).
 static_assert(FixtureJobBridge::kWaitingJobs == 8);
 
 #if TP_ENABLE_PYTHON_PYTORCH_SIDECAR
@@ -201,6 +202,19 @@ JobRequest decode(std::uint64_t job_id, BufferManager& buffers, std::uint32_t pr
   return JobRequest::create(JobIdentity{job_id, session_key, kGeneration}, JobClass::SttDecode,
                             AudioFrames{kJobInputAudioFormat, PcmWindow{buffer, 0, 3'200}, 0},
                             JobOptions{.language = "en"}, progress_limit)
+      .value();
+}
+
+/// `frames` silent frames of `frame_samples` samples.
+JobRequest vad(std::uint64_t job_id, BufferManager& buffers, std::uint32_t frames,
+               std::uint32_t frame_samples = kFixtureVadFrameSamples) {
+  const std::size_t bytes = std::size_t{2} * frames * frame_samples;
+  const BufferRef buffer = buffers.allocate(bytes).value();
+  const auto pcm = buffers.data(buffer).value();
+  std::fill(pcm.begin(), pcm.end(), std::byte{0});
+  return JobRequest::create(
+             JobIdentity{job_id, 5, kGeneration}, JobClass::VadFrames,
+             VadFrames{kJobInputAudioFormat, PcmWindow{buffer, 0, bytes}, frame_samples, frames, 1})
       .value();
 }
 
@@ -380,6 +394,174 @@ TEST(FixtureJobBridge, TheTenthJobIsFailedUnacceptedAndTheNineRunInSubmissionOrd
   bench.bridge.release_jobs();
   ASSERT_TRUE(bench.bridge.settled(kPatience));
   EXPECT_EQ(ran, (std::vector<std::uint64_t>{1, 2, 3, 4, 5, 6, 7, 8, 9}));
+}
+
+// jobs.py: `vad_frames` jobs have a lane of their own, so one runs beside a
+// running decode: cancelled, it ends only when its work returns.
+TEST(FixtureJobBridge, AVoiceActivityJobRunsBesideARunningDecode) {
+  Bench bench;
+  bench.bridge.hold_jobs();
+  ASSERT_TRUE(bench.submit(decode(1, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.submit(vad(2, *bench.buffers, 1)).has_value());
+  ASSERT_TRUE(bench.cancel(2).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(2), (Kinds{Accepted, CancelAcknowledged}));
+
+  bench.bridge.release_jobs();
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, Completed, Released}));
+  EXPECT_EQ(bench.sink->kinds_for(2), (Kinds{Accepted, CancelAcknowledged, Failed, Released}));
+}
+
+// jobs.py runs each lane on a thread of its own: a held decode holds no
+// voice-activity job, and a held voice-activity job no decode.
+TEST(FixtureJobBridge, ALaneThatIsHeldHoldsNoJobOfTheOther) {
+  Bench bench;
+  bench.bridge.hold_jobs(JobClass::SttDecode);
+  ASSERT_TRUE(bench.submit(decode(1, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.submit(vad(2, *bench.buffers, 2)).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(1), Kinds{Accepted});
+  EXPECT_EQ(bench.sink->kinds_for(2), (Kinds{Accepted, Completed, Released}));
+  const JobResult scored = bench.event_of(2, Completed).result().value();
+  EXPECT_EQ(std::get<VadResult>(scored.payload()).probabilities.size(), 2U);
+  bench.bridge.release_jobs();
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, Completed, Released}));
+
+  bench.bridge.hold_jobs(JobClass::VadFrames);
+  ASSERT_TRUE(bench.submit(vad(3, *bench.buffers, 1)).has_value());
+  ASSERT_TRUE(bench.submit(decode(4, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(3), Kinds{Accepted});
+  EXPECT_EQ(bench.sink->kinds_for(4), (Kinds{Accepted, Completed, Released}));
+  bench.bridge.release_jobs();
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(3), (Kinds{Accepted, Completed, Released}));
+}
+
+// Each lane fails its own tenth job, whatever the other lane holds; a frame
+// size the backend does not permit is refused ahead of a full lane, as
+// jobs.py checks permits_job before the lane.
+TEST(FixtureJobBridge, EachLaneFailsItsTenthJobUnaccepted) {
+  Bench bench;
+  bench.bridge.hold_jobs();
+  for (std::uint64_t job_id = 1; job_id <= 9; ++job_id) {
+    ASSERT_TRUE(bench.submit(decode(job_id, *bench.buffers)).has_value()) << job_id;
+  }
+  ASSERT_TRUE(bench.submit(vad(101, *bench.buffers, 1)).has_value());
+  ASSERT_TRUE(bench.submit(decode(10, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(9), Kinds{Accepted});
+  EXPECT_EQ(bench.sink->kinds_for(101), Kinds{Accepted});
+  EXPECT_EQ(bench.sink->kinds_for(10), (Kinds{Failed, Released}));
+  EXPECT_EQ(bench.event_of(10, Failed).error().value().context.value_or(""),
+            "job_capacity_exhausted");
+  bench.bridge.release_jobs();
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+
+  bench.bridge.hold_jobs();
+  for (std::uint64_t job_id = 102; job_id <= 110; ++job_id) {
+    ASSERT_TRUE(bench.submit(vad(job_id, *bench.buffers, 1)).has_value()) << job_id;
+  }
+  ASSERT_TRUE(bench.submit(decode(11, *bench.buffers)).has_value());
+  ASSERT_TRUE(bench.submit(vad(111, *bench.buffers, 1)).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(110), Kinds{Accepted});
+  EXPECT_EQ(bench.sink->kinds_for(11), Kinds{Accepted});
+  EXPECT_EQ(bench.sink->kinds_for(111), (Kinds{Failed, Released}));
+  EXPECT_EQ(bench.event_of(111, Failed).error().value().context.value_or(""),
+            "job_capacity_exhausted");
+
+  ASSERT_TRUE(bench.submit(vad(112, *bench.buffers, 1, 480)).has_value());
+  EXPECT_EQ(bench.event_of(112, Failed).error().value().context.value_or(""), "job_not_permitted");
+
+  bench.bridge.release_jobs();
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(110), (Kinds{Accepted, Completed, Released}));
+}
+
+// The adapter's job channel holds 16 jobs unreleased and refuses the next at
+// its submit, before both of the runner's lanes are full.
+TEST(FixtureJobBridge, SubmitRefusesTheSeventeenthUnreleasedJob) {
+  Bench bench;
+  bench.bridge.hold_jobs();
+  for (std::uint64_t job_id = 1; job_id <= 9; ++job_id) {
+    ASSERT_TRUE(bench.submit(decode(job_id, *bench.buffers)).has_value()) << job_id;
+  }
+  for (std::uint64_t job_id = 101; job_id <= 107; ++job_id) {
+    ASSERT_TRUE(bench.submit(vad(job_id, *bench.buffers, 1)).has_value()) << job_id;
+  }
+  const Result<void> seventeenth = bench.bridge.submit(vad(108, *bench.buffers, 1));
+  ASSERT_FALSE(seventeenth.has_value());
+  EXPECT_EQ(seventeenth.error().code, Error::Code::ResourceExhausted);
+  EXPECT_EQ(reason_of(seventeenth), "job_capacity_exhausted");
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(107), Kinds{Accepted});
+  EXPECT_TRUE(bench.sink->kinds_for(108).empty());
+
+  bench.bridge.release_jobs();
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  ASSERT_TRUE(bench.submit(vad(108, *bench.buffers, 1)).has_value());
+  ASSERT_TRUE(bench.bridge.settled(kPatience));
+  EXPECT_EQ(bench.sink->kinds_for(108), (Kinds{Accepted, Completed, Released}));
+}
+
+// backends/fixture.py: a frame's probability is its largest absolute sample
+// over 32768.
+TEST(FixtureJobBridge, AVoiceActivityFrameScoresItsLargestAbsoluteSample) {
+  Bench bench;
+  const JobRequest request = vad(1, *bench.buffers, 3);
+  const auto pcm = bench.buffers->data(std::get<VadFrames>(request.payload()).pcm.buffer).value();
+  const std::size_t second = 2 * kFixtureVadFrameSamples;
+  pcm[0] = std::byte{0xFF};                // 255
+  pcm[second + 3] = std::byte{0xC0};       // -16384
+  pcm[second + 9] = std::byte{0x20};       // 8192
+  pcm[2 * second + 21] = std::byte{0x80};  // -32768
+  ASSERT_TRUE(bench.submit(request).has_value());
+  const JobResult scored = bench.event_of(1, Completed).result().value();
+  EXPECT_EQ(std::get<VadResult>(scored.payload()).probabilities,
+            (std::vector<float>{255.0F / 32768.0F, 0.5F, 1.0F}));
+}
+
+// backends/fixture.py permits frames of 512 samples only; jobs.py ends another
+// job before it is taken in.
+TEST(FixtureJobBridge, AVoiceActivityJobOfAnotherFrameSizeIsFailedAsNotPermitted) {
+  Bench bench;
+  // Shorter and longer frames alike: the runner permits exactly 512.
+  for (const auto& [job_id, frame_samples] : {std::pair{1U, 480U}, std::pair{2U, 1'024U}}) {
+    ASSERT_TRUE(bench.submit(vad(job_id, *bench.buffers, 2, frame_samples)).has_value());
+    const Error refused = bench.event_of(job_id, Failed).error().value();
+    EXPECT_EQ(refused.code, Error::Code::Unsupported) << frame_samples;
+    EXPECT_EQ(refused.context.value_or(""), "job_not_permitted") << frame_samples;
+    EXPECT_EQ(bench.sink->kinds_for(job_id), (Kinds{Failed, Released})) << frame_samples;
+  }
+}
+
+// A lost backend and an unload end the voice-activity lane's running job too.
+TEST(FixtureJobBridge, ALostBackendFailsAHeldVoiceActivityJobAsReset) {
+  Bench bench;
+  bench.bridge.hold_jobs();
+  ASSERT_TRUE(bench.submit(vad(1, *bench.buffers, 1)).has_value());
+  bench.bridge.lose_backend();
+  bench.bridge.release_jobs();
+  EXPECT_EQ(bench.event_of(1, Failed).error().value().context.value_or(""), "backend_reset");
+  EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, Failed}));
+}
+
+TEST(FixtureJobBridge, AnUnloadFailsAHeldVoiceActivityJobAsUnloaded) {
+  Bench bench;
+  bench.bridge.hold_jobs();
+  ASSERT_TRUE(bench.submit(vad(1, *bench.buffers, 1)).has_value());
+  bench.bridge.unload();
+  bench.bridge.release_jobs();
+  EXPECT_EQ(bench.event_of(1, Failed).error().value().context.value_or(""), "session_unloaded");
+  EXPECT_EQ(bench.sink->kinds_for(1), (Kinds{Accepted, Failed, Released}));
+  // As the adapter's bridge, whose channel stops at the unload.
+  for (const JobClass job_class :
+       {JobClass::SttDecode, JobClass::TtsSynthesis, JobClass::VadFrames}) {
+    EXPECT_FALSE(bench.bridge.runs(job_class)) << to_string(job_class);
+  }
 }
 
 // FixtureJobBridgeOptions::submit_refuses_at_capacity: the other way the
