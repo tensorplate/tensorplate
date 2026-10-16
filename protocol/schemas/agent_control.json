@@ -73,7 +73,7 @@
         "admission_mode": {
           "type": "string",
           "enum": ["production", "qualification"],
-          "description": "Operator-only. `production` (what an absent field means) admits the member under its validated session counts. `qualification` admits a structurally valid bundle under the explicit `test_count` instead and records it as unqualified. Refused on every speech client path."
+          "description": "Operator-only. `production` (what an absent field means) admits the member under its validated session counts. `qualification` admits a structurally valid bundle under the explicit `test_count` instead and records it as unqualified; the test count is a stream session count, so the agent refuses it without `streaming`. Refused on every speech client path."
         },
         "test_count": {
           "type": "integer",
@@ -408,7 +408,7 @@
           "type": "array",
           "uniqueItems": true,
           "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
-          "description": "Control operations this agent executes beyond the singleton deploy and rollback. A client sends a request that depends on one only when the agent lists it, because an agent that predates a request field ignores it: `set_operation_add` (`deploy` with `set_operation` `add`), `member_rollback` (`rollback` naming a `deployment_id`) and `deploy_streaming` (`deploy` with `streaming`, listed by an agent whose configuration gives stream ports). Absent means none. Readers ignore names they do not know."
+          "description": "Control operations this agent executes beyond the singleton deploy and rollback. A client sends a request that depends on one only when the agent lists it, because an agent that predates a request field ignores it: `set_operation_add` (`deploy` with `set_operation` `add`), `member_rollback` (`rollback` naming a `deployment_id`), `deploy_streaming` (`deploy` with `streaming`, listed by an agent whose configuration gives stream ports) and `deploy_qualification` (`deploy` with `admission_mode` `qualification` and its `test_count`, listed with `deploy_streaming`). Absent means none. Readers ignore names they do not know."
         }
       }
     },

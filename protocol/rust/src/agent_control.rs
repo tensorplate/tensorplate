@@ -53,6 +53,10 @@ pub const FEATURE_MEMBER_ROLLBACK: &str = "member_rollback";
 /// `deploy` with `streaming`.
 pub const FEATURE_DEPLOY_STREAMING: &str = "deploy_streaming";
 
+/// `AgentStatus::control_features` entry of an agent that executes a
+/// `deploy` with `admission_mode` `qualification` and its `test_count`.
+pub const FEATURE_DEPLOY_QUALIFICATION: &str = "deploy_qualification";
+
 /// Operation discriminator.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

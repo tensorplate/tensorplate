@@ -22,7 +22,7 @@ use tensorplate_protocol::agent_state::ErrorRecord;
 use tensorplate_protocol::worker_control::{
     CandidateRef, MemberRef, WorkerControlResponse, WorkerStatusOutcome,
 };
-use tensorplate_protocol::MemberQuota;
+use tensorplate_protocol::{AdmissionMode, MemberQuota};
 
 use crate::bundle::StagedManifest;
 use crate::config::{AgentConfig, WorkerConfig};
@@ -1254,6 +1254,15 @@ impl MemberRegistry {
                 )));
             };
             config["streaming"] = serde_json::json!({"enabled": true, "port": port});
+            // Production renders no count: the worker serves its default of
+            // one, and a worker that predates the key would refuse it.
+            let qualifying = descriptor
+                .as_ref()
+                .filter(|described| described.admission_mode == AdmissionMode::Qualification);
+            if let Some(described) = qualifying {
+                let test_count = described.configuration.quota.session_count;
+                config["streaming"]["max_sessions"] = test_count.into();
+            }
             config["deployment"]["descriptor_digest"] = stream_digest(candidate).into();
         }
         fs::write(&path, serde_json::to_vec_pretty(&config)?)?;

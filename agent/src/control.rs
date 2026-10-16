@@ -16,7 +16,7 @@ use tensorplate_protocol::agent_control::{
 };
 use tensorplate_protocol::{AdmissionMode, ErrorCode};
 
-use crate::coordinator::Coordinator;
+use crate::coordinator::{Coordinator, Serving};
 use crate::error::{AgentError, AgentResult};
 use crate::recovery;
 
@@ -75,13 +75,14 @@ pub fn dispatch(
                 return Ok(refusal);
             }
             let path = PathBuf::from(&payload.bundle_path);
+            let serving = serving_of(&payload);
             match coordinator.deploy_with(
                 &payload.deployment_id,
                 &path,
                 payload.labels,
                 correlation.clone(),
                 payload.expected_bundle_digest.as_deref(),
-                payload.streaming,
+                serving,
             ) {
                 Ok(outcome) => {
                     let status = coordinator.status()?;
@@ -127,14 +128,27 @@ fn unsupported(correlation: Option<String>, what: &str) -> ControlResponse {
     )
 }
 
+/// What every generation of the deployment `payload` asks for serves. The
+/// decoder refuses a qualification request with no test count.
+fn serving_of(payload: &DeployRequest) -> Serving {
+    match (payload.admission_mode, payload.test_count) {
+        (Some(AdmissionMode::Qualification), Some(test_count)) => {
+            Serving::Qualification { test_count }
+        }
+        _ if payload.streaming => Serving::Streaming,
+        _ => Serving::Unary,
+    }
+}
+
 /// The answer to a deploy this agent cannot execute, decided before any
 /// transaction starts; `None` for the singleton `replace` it executes.
 ///
 /// `replace` naming a non-member of a set of more than one member is
 /// refused as invalid first, as it always will be. The agent executes no
-/// set mutation yet, so `add`, qualification admission, an evidence
-/// reference and any deploy into a durable resident set are then refused as
-/// unsupported.
+/// set mutation yet, so `add` is then refused as unsupported; qualification
+/// admission without `streaming` as invalid, its test count being a stream
+/// session count; and an evidence reference and any deploy into a durable
+/// resident set as unsupported.
 fn deploy_refusal(
     coordinator: &Arc<Coordinator>,
     payload: &DeployRequest,
@@ -164,8 +178,14 @@ fn deploy_refusal(
     if payload.set_operation == SetOperation::Add {
         return unsupported("`deploy` with set_operation `add`");
     }
-    if payload.admission_mode == Some(AdmissionMode::Qualification) {
-        return unsupported("qualification admission");
+    if payload.admission_mode == Some(AdmissionMode::Qualification) && !payload.streaming {
+        return Ok(Some(ControlResponse::error(
+            correlation.clone(),
+            ResponseError::new(
+                ErrorCode::ConfigInvalid,
+                "qualification admission measures stream sessions: `admission_mode` `qualification` needs `streaming`",
+            ),
+        )));
     }
     if payload.evidence_ref.is_some() {
         return unsupported("`deploy` with an evidence_ref");
@@ -478,5 +498,31 @@ mod tests {
             .expect("snapshot")
             .in_flight_transaction
             .is_none());
+    }
+
+    #[test]
+    fn a_deploy_serves_streams_in_qualification_mode_only_when_it_asks_with_its_test_count() {
+        use super::{serving_of, Serving};
+        use tensorplate_protocol::AdmissionMode::{Production, Qualification};
+        let cases = [
+            (None, None, false, Serving::Unary),
+            (None, None, true, Serving::Streaming),
+            (Some(Production), None, true, Serving::Streaming),
+            (
+                Some(Qualification),
+                Some(3),
+                true,
+                Serving::Qualification { test_count: 3 },
+            ),
+        ];
+        for (admission_mode, test_count, streaming, serves) in cases {
+            let payload = DeployRequest {
+                admission_mode,
+                test_count,
+                streaming,
+                ..DeployRequest::default()
+            };
+            assert_eq!(serving_of(&payload), serves, "{payload:?}");
+        }
     }
 }

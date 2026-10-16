@@ -2150,8 +2150,9 @@ while no job runs is learned by each session at its next submit
 (`backend_unavailable`). A stalled backend stops the worker, which ends
 every session ("A stalled speech backend" above).
 
-The agent does not set the count yet: a deployment it starts serves one
-stream session.
+The agent sets the count only for a deployment admitted in
+[qualification](agent.md#qualification) mode, to its test count; a
+production deployment it starts serves one stream session.
 
 ## Test surface
 

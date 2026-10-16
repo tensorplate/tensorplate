@@ -371,6 +371,7 @@ impl Handed {
             artifact_relative_path: Some("entry.json".into()),
             format_version: "0.2",
             probes: &self.probes,
+            test_count: None,
         };
         start_deploy(&agent.store, agent.worker.as_ref(), &deploy)
     }
@@ -388,6 +389,7 @@ fn a_bundle_of_another_format_is_referenced_without_its_staged_copy_being_read()
         artifact_relative_path: None,
         format_version: "0.1",
         probes: &handed.probes,
+        test_count: None,
     };
     let before = (host.view(), host.candidate());
 

@@ -11,12 +11,14 @@ use tensorplate_protocol::bundle_profile::BundleRuleCode;
 use tensorplate_protocol::deploy_transaction::DeployState;
 use tensorplate_protocol::ErrorCode;
 
-use crate::coordinator::{Coordinator, EventSink};
+use crate::coordinator::{Coordinator, EventSink, Serving};
 use crate::descriptor_store::restart_stamp;
 use crate::descriptor_store::tests::{agent_config, probes};
 use crate::error::BundleManifestFailure;
 use crate::recovery::apply_startup;
 use crate::worker::WorkerEvent;
+
+mod qualification;
 
 const STT: &str = "v0_2/speech_stt_streaming";
 const TTS: &str = "v0_2/speech_tts_streaming";
@@ -146,7 +148,7 @@ struct Wired {
     root: Arc<TempDir>,
     store: Arc<StateStore>,
     worker: Arc<Stepped>,
-    coordinator: Coordinator,
+    coordinator: Arc<Coordinator>,
 }
 
 fn wired() -> Wired {
@@ -232,9 +234,11 @@ fn wired_at(root: Arc<TempDir>, step: Step, configure: impl FnOnce(&mut AgentCon
         root,
         store,
         worker,
-        coordinator: coordinator
-            .with_backend_probes(probes())
-            .with_event_sink(sink),
+        coordinator: Arc::new(
+            coordinator
+                .with_backend_probes(probes())
+                .with_event_sink(sink),
+        ),
     }
 }
 
@@ -251,9 +255,14 @@ impl Wired {
     }
     fn deploy_streaming(&self, id: &str, bundle: &str) -> AgentResult<()> {
         let bundle = std::path::PathBuf::from(bundle_fixture(bundle));
-        let deployed = self
-            .coordinator
-            .deploy_with(id, &bundle, BTreeMap::new(), None, None, true);
+        let deployed = self.coordinator.deploy_with(
+            id,
+            &bundle,
+            BTreeMap::new(),
+            None,
+            None,
+            Serving::Streaming,
+        );
         deployed.map(|_| ())
     }
     /// The serving generation exits and its restart comes due.
