@@ -112,11 +112,12 @@ no verdict because the record is incomplete or could not be assembled.
 
 The steady-state case needs something that opens the declared number of
 streams against the running worker and holds them. The harness defines the
-hook and ships no driver. The worker serves one stream session at a time,
-and with the mock session its listener refuses every `Open`, so nothing can
-hold the declared count yet. The driver comes with the measurement that
-first needs it, and with the stream port, which the harness does not pass
-to a driver today. The contract:
+hook and ships no driver. The worker serves `streaming.max_sessions`
+stream sessions at a time, one by default, and with the mock session its
+listener refuses every `Open`, so nothing can hold the declared count yet.
+The driver comes with the measurement that first needs it, and with the
+stream port, which the harness does not pass to a driver today. The
+contract:
 
 - The driver is an executable given with `--stream-driver`, run once per
   run after the worker is ready, with `TP_FOOTPRINT_WORKER_URL` (the
@@ -197,13 +198,13 @@ when it reads one.
 ## What cannot be measured yet
 
 The steady-state budget needs the declared number of streams held open at
-once. The worker serves one stream session at a time, and with the mock
-session its listener refuses every `Open`. So no driver exists, and every
-record is incomplete on that budget. The size and idle budgets can be
-measured: the with-streaming worker links the gRPC closure, and it starts
-its listener before the idle samples are taken. The measurement that
-qualifies the feature is taken on the Jetson Orin Nano, from both release
-builds of the same commit, with a driver that holds real streams. Its
-summary is filed as above, with the version it was taken for. A run on any
-other machine, an amd64 workstation for one, is informational: nothing files
-it.
+once. The worker serves `streaming.max_sessions` stream sessions at a
+time, one by default, and with the mock session its listener refuses every
+`Open`. So no driver exists, and every record is incomplete on that
+budget. The size and idle budgets can be measured: the with-streaming
+worker links the gRPC closure, and it starts its listener before the idle
+samples are taken. The measurement that qualifies the feature is taken on
+the Jetson Orin Nano, from both release builds of the same commit, with a
+driver that holds real streams. Its summary is filed as above, with the
+version it was taken for. A run on any other machine, an amd64 workstation
+for one, is informational: nothing files it.
