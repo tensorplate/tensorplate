@@ -223,14 +223,28 @@ Json without_id(Json header) {
   return header;
 }
 
+JobRequest vad_request(JobChannelHarness& h, std::uint64_t job_id, std::uint64_t session_key,
+                       const Json& input) {
+  const auto bytes = input.at("payload_length").get<std::size_t>();
+  const BufferRef buffer = h.manager->allocate(bytes).value();
+  return JobRequest::create(JobIdentity{job_id, session_key, 1}, JobClass::VadFrames,
+                            VadFrames{kJobInputAudioFormat, PcmWindow{buffer, 0, bytes},
+                                      input.at("frame_samples").get<std::uint32_t>(),
+                                      input.at("frame_count").get<std::uint32_t>(),
+                                      input.at("utterance_id").get<std::uint64_t>()})
+      .value();
+}
+
 TEST(JobChannelGolden, EveryRecordedJobConversationReplaysThroughTheChannel) {
   std::set<std::string> replayed;
   for (const std::string& file : golden_files()) {
-    if (file.starts_with("negotiation") || file == "vad_frames") {
-      continue;  // the load exchange is the session's; no lane runs vad_frames
+    if (file.starts_with("negotiation")) {
+      continue;  // the load exchange is the session's
     }
     SCOPED_TRACE(file);
-    ScriptedSidecar peer;
+    ScriptedSidecar peer(
+        ScriptedSidecar::Options{.job_classes = {"stt_decode", "tts_synthesis", "vad_frames"},
+                                 .declares_any_job_class = true});
     JobChannelHarness h;
     ASSERT_TRUE(h.connect(peer.launcher()).has_value());
     ASSERT_TRUE(h.channel.set_event_sink(h.sink).has_value());
@@ -264,9 +278,6 @@ TEST(JobChannelGolden, EveryRecordedJobConversationReplaysThroughTheChannel) {
       if (kind == "job_submit") {
         const Json& input = line.at("input");
         const auto bytes = input.at("payload_length").get<std::size_t>();
-        // The session_release file submits a class no lane runs: the same
-        // identity is sent as stt_decode, as the sidecar's own replay does.
-        const bool recorded_class = input.at("type") != "vad_frames";
         if (file == "refused") {
           peer.refuse_next_submit();
           ended_by_the_runner.insert(job_id);
@@ -274,14 +285,13 @@ TEST(JobChannelGolden, EveryRecordedJobConversationReplaysThroughTheChannel) {
         const JobRequest request =
             input.at("type") == "text_segment"
                 ? JobChannelHarness::tts(job_id, session_key, std::string(bytes, 'a'))
-                : h.stt(job_id, session_key, recorded_class ? bytes : 3'200,
-                        line.at("progress_limit").get<std::uint32_t>());
+            : input.at("type") == "vad_frames"
+                ? vad_request(h, job_id, session_key, input)
+                : h.stt(job_id, session_key, bytes, line.at("progress_limit").get<std::uint32_t>());
         ASSERT_TRUE(h.submit(request).has_value());
         const auto sent = peer.sent(kind, ++submits);
         ASSERT_EQ(sent.size(), submits);
-        if (recorded_class) {
-          EXPECT_EQ(without_id(sent.back()), without_id(line));
-        }
+        EXPECT_EQ(without_id(sent.back()), without_id(line));
       } else if (kind == "job_cancel") {
         ended_by_the_runner.insert(job_id);
         ASSERT_TRUE(h.cancel(job_id).has_value());
@@ -354,23 +364,17 @@ TEST(JobChannelGolden, EveryRecordedJobConversationReplaysThroughTheChannel) {
     EXPECT_EQ(h.channel.counters(), JobChannelCounters{});
     replayed.insert(file);
   }
-  EXPECT_EQ(replayed, (std::set<std::string>{"cancel", "interleaved_progress", "refused",
-                                             "session_release", "stt_decode", "tts_synthesis"}));
+  EXPECT_EQ(replayed,
+            (std::set<std::string>{"cancel", "interleaved_progress", "refused", "session_release",
+                                   "stt_decode", "tts_synthesis", "vad_frames"}));
 }
 
 // The request the recorded `vad_frames` submit describes.
-JobRequest recorded_vad_request(JobChannelHarness& h) {
-  const Json input = golden("vad_frames").at(0).at("input");
-  const auto bytes = input.at("payload_length").get<std::size_t>();
-  const BufferRef buffer = h.manager->allocate(bytes).value();
-  return JobRequest::create(JobIdentity{1, 1, 1}, JobClass::VadFrames,
-                            VadFrames{kJobInputAudioFormat, PcmWindow{buffer, 0, bytes},
-                                      input.at("frame_samples").get<std::uint32_t>(),
-                                      input.at("frame_count").get<std::uint32_t>(), 1})
-      .value();
+JobRequest recorded_vad_request(JobChannelHarness& h, std::uint64_t job_id = 1) {
+  return vad_request(h, job_id, 1, golden("vad_frames").at(0).at("input"));
 }
 
-TEST_F(JobChannelTest, AClassNoLaneRunsIsRefusedAndNothingIsWritten) {
+TEST_F(JobChannelTest, AClassTheLoadDidNotDeclareIsRefusedAndNothingIsWritten) {
   up();
   expect_refused(h.channel.submit(recorded_vad_request(h)), Error::Code::Unsupported,
                  "job_class_unsupported");
@@ -389,17 +393,25 @@ TEST(JobChannelClasses, OnlyTheClassesTheLoadDeclaredAreTaken) {
   h.channel.admit_jobs();
   expect_refused(h.channel.submit(JobChannelHarness::tts(1, 1)), Error::Code::Unsupported,
                  "job_class_unsupported");
-  // Declared, but no lane runs it yet.
-  expect_refused(h.channel.submit(recorded_vad_request(h)), Error::Code::Unsupported,
-                 "job_class_unsupported");
+  ASSERT_TRUE(h.submit(recorded_vad_request(h, 3)).has_value());
+  ASSERT_TRUE(h.wait_kinds(3, {Accepted}));
+  peer.emit("job_completed", 3,
+            {{"result", {{"type", "vad"}, {"probabilities", {0.1, 0.9, 0.5}}}}});
+  ASSERT_TRUE(h.wait_kinds(3, {Accepted, Completed}));
+  std::optional<JobResultPayload> vad;
+  for (const JobEvent& event : h.sink->events()) {
+    if (event.identity().job_id == 3 && event.result().has_value()) {
+      vad = event.result()->payload();
+    }
+  }
+  EXPECT_EQ(vad, (JobResultPayload{VadResult{{0.1F, 0.9F, 0.5F}}}));
   EXPECT_TRUE(h.submit(h.stt(2, 1)).has_value());
   EXPECT_TRUE(h.wait_kinds(2, {Accepted}));
 }
 
-TEST(JobChannelClasses, ALoadThatDeclaresNoClassALaneRunsDoesNotStartTheChannel) {
-  // The runner refuses such a load itself; a sidecar that did not is not served.
+TEST(JobChannelClasses, ALoadThatDeclaresNoClassTheAdapterKnowsDoesNotStartTheChannel) {
   ScriptedSidecar peer(
-      ScriptedSidecar::Options{.job_classes = {"vad_frames"}, .declares_any_job_class = true});
+      ScriptedSidecar::Options{.job_classes = {"diarize_frames"}, .declares_any_job_class = true});
   JobChannelHarness h;
   const auto loaded = h.connect(peer.launcher());
   ASSERT_FALSE(loaded.has_value());
