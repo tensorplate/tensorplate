@@ -333,14 +333,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   1 by default) sets how many, and it is the ledger's `ceiling` and the
   session count `activate` answers. This worker refuses more than 64 with
   `config_invalid` until the memory a session holds is charged to the
-  deployment's budget (at most about 338 MB of host memory at 64). The
-  sessions share the speech dispatch's one job in flight and take turns,
-  one job per session. A session's jobs wait behind the other sessions',
-  and its finalize deadline counts the wait: 10 seconds for a `Finalize`,
-  and for the decodes a half-close (up to four) or a retire or a stop (up
-  to three) leaves owed; 120 seconds for text. A job that ends `backend_reset` now fails every
-  stream session of the worker with `backend_reset`, not only the job's.
-  The agent does not set the count yet. (V030-E04-F03-T02)
+  deployment's budget (at most about 350 MB of host memory at 64, plus
+  each decode's input until the backend releases the job). The sessions
+  share the speech dispatch's one job in flight and take turns, one job
+  per session. A session's jobs wait behind the other sessions', and its
+  finalize deadline counts the wait: 10 seconds for a `Finalize`, and for
+  the decodes a half-close (up to four) or a retire or a stop (up to
+  three) leaves owed; 120 seconds for text. A job that ends
+  `backend_reset` now fails every stream session of the worker with
+  `backend_reset`, not only the job's. The agent does not set the count
+  yet. (V030-E04-F03-T02)
 - The Python SDK's streaming speech client finds its stream endpoint through
   the agent. `resolve_stream_target()` reads the agent's status through the
   CLI profile, as the unary clients' discovery does, and returns the active
