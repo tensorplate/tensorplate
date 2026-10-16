@@ -775,6 +775,41 @@ TEST(SpeechJobDispatch, ABackendLostUnderAJobFailsEverySessionAsBackendReset) {
   EXPECT_EQ(speech.buffers_in_use(), 0U);
 }
 
+// The loss arrives with the job of a session already cancelled: the sessions
+// still served end with it all the same, and the queued job is never sent.
+TEST(SpeechJobDispatch, ABackendLostUnderACancelledSessionsJobFailsTheSessionsStillServed) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto cancelled = binding.open_text();
+  const auto waiting = binding.open_audio();
+  const auto idle = binding.open_audio();
+  speech.hold_jobs();
+  binding.text(cancelled, 1, "held");
+  ASSERT_TRUE(binding.settle());
+  one_utterance(binding, waiting);
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(speech.bridge->submitted().size(), 1U);
+  ASSERT_TRUE(binding.manager->apply(cancelled, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(binding.live_state(cancelled), State::CancelRequested);
+
+  speech.fixture->lose_backend();
+  for (const auto key : {waiting, idle}) {
+    SCOPED_TRACE(key);
+    ASSERT_TRUE(binding.ends_as(key, State::Failed));
+    EXPECT_EQ(binding.manager->tombstone(key)->reason, "backend_reset");
+    EXPECT_EQ(speech.bridge->releases(key), 1U);
+  }
+  ASSERT_TRUE(binding.eventually([&] { return binding.live_state(cancelled) == State::Failed; }));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.manager->held_slots(), 1U);
+  speech.fixture->unload();
+  ASSERT_TRUE(binding.ends_as(cancelled, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(cancelled)->reason, "backend_reset");
+  EXPECT_EQ(speech.bridge->releases(cancelled), 1U);
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
+}
+
 TEST(SpeechJobDispatch, ABackendLostWithNoJobOpenIsLearnedAtTheNextSubmit) {
   Binding binding(&speech_dispatch);
   SpeechUnderTest& speech = speech_of(binding);
