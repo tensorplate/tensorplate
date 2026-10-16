@@ -140,10 +140,20 @@ struct SynthesisCompletedOutput {
   std::uint64_t finalize_sequence = 0;
 };
 
-/// Will gain alternatives, a partial transcript first: a visitor over it
-/// needs a default.
-using TaskOutput = std::variant<EndpointDetectedOutput, FinalTranscriptOutput, AudioChunkOutput,
-                                SegmentCompletedOutput, SynthesisCompletedOutput>;
+/// The whole current hypothesis of an utterance whose endpoint has not been
+/// offered. An unsent one gives way to a newer revision or to its final.
+struct PartialTranscriptOutput {
+  /// Never zero: the id the utterance's endpoint and final will carry.
+  std::uint64_t utterance_id = 0;
+  /// Grows within the utterance; revisions may be skipped.
+  std::uint32_t revision = 0;
+  std::string text;
+};
+
+/// May gain alternatives: a visitor over it needs a default.
+using TaskOutput =
+    std::variant<EndpointDetectedOutput, FinalTranscriptOutput, AudioChunkOutput,
+                 SegmentCompletedOutput, SynthesisCompletedOutput, PartialTranscriptOutput>;
 
 /// Body of every task-output item a dispatch queues.
 struct TaskOutputBody final : OutputBody {
@@ -151,14 +161,15 @@ struct TaskOutputBody final : OutputBody {
   TaskOutput output;
 };
 
-/// What a Result item is charged against the metadata budget besides the
-/// bytes of its text, in budget units: per message and per transcript
-/// segment.
+/// What a Result or Partial item is charged against the metadata budget
+/// besides the bytes of its text, in budget units: per message and per
+/// transcript segment.
 inline constexpr std::uint64_t kTaskOutputMessageUnits = 48;
 inline constexpr std::uint64_t kTaskOutputSegmentUnits = 32;
 
 /// The queue item that carries `output`: Audio charged its PCM bytes for a
-/// chunk, Result for anything else.
+/// chunk, Partial keyed by its utterance for a partial transcript, Result for
+/// anything else.
 [[nodiscard]] OutputItem make_task_output_item(TaskOutput output);
 
 /// The task side of the streams of one deployment: it takes each session's
@@ -184,9 +195,12 @@ inline constexpr std::uint64_t kTaskOutputSegmentUnits = 32;
 ///   `finalize_completed`, `drain_completed`, `release_acknowledged`,
 ///   `automatic_endpoint`, `backend_reset`, `fail` and the credit releases,
 ///   and no other event.
-/// - Output. It offers TaskOutputBody items only, and none after
-///   `suppress_output`. An item answered `full` stays with the dispatch
-///   until a delivery is reported.
+/// - Output. It offers TaskOutputBody items only, none after
+///   `suppress_output`, and no partial of an utterance after its endpoint.
+///   An item answered `full` stays with the dispatch until a delivery is
+///   reported. A partial that gave way while unsent is never reported
+///   delivered, so a dispatch that waits for its output's delivery counts
+///   no partial.
 class SessionDispatch {
  public:
   SessionDispatch() = default;

@@ -20,6 +20,10 @@ Charge charge_of(const FinalTranscriptOutput& transcript) {
   return {OutputKind::Result, bytes, transcript.utterance_id};
 }
 
+Charge charge_of(const PartialTranscriptOutput& partial) {
+  return {OutputKind::Partial, kTaskOutputMessageUnits + partial.text.size(), partial.utterance_id};
+}
+
 Charge charge_of(const AudioChunkOutput& chunk) {
   return {OutputKind::Audio, chunk.pcm.size(), 0};
 }

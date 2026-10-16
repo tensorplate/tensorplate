@@ -401,6 +401,13 @@ TEST(StreamMapping, EachTaskOutputBecomesItsServerEvent) {
   EXPECT_EQ(event->synthesis_completed().segment_count(), 2U);
   EXPECT_EQ(event->synthesis_completed().total_samples(), 12'800U);
   EXPECT_EQ(event->synthesis_completed().finalize_sequence(), 14U);
+
+  event = stream::task_event(serving::PartialTranscriptOutput{3, 7, "first sec"}, format);
+  ASSERT_TRUE(event && event->has_partial_transcript());
+  EXPECT_EQ(event->partial_transcript().utterance_id(), 3U);
+  EXPECT_EQ(event->partial_transcript().revision(), 7U);
+  EXPECT_EQ(event->partial_transcript().text(), "first sec");
+  EXPECT_EQ(event->sequence(), 0U);
 }
 
 TEST(StreamMapping, AnOpenIsCheckedByDeploymentThenGenerationThenDigest) {
