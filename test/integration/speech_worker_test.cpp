@@ -1612,6 +1612,7 @@ TEST_F(SpeechWorkerScripted, AJobTheBackendRefusesFailsItsSession) {
   EXPECT_EQ(stopped.front().value("jobs_completed", -1), 0);
   EXPECT_EQ(stopped.front().value("jobs_failed", 0), 1);
   EXPECT_EQ(stopped.front().value("jobs_discarded", -1), 0);
+  EXPECT_EQ(stopped.front().value("partials_failed", -1), 0) << "a synthesis has none";
 }
 
 // A worker whose listener never started has a dispatch no manager was

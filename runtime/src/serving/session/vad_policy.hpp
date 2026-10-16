@@ -19,7 +19,7 @@ struct VadProfile {
   std::chrono::milliseconds silence_endpoint{320};
   /// Audio before the first speech frame that an utterance starts with.
   std::chrono::milliseconds leading_padding{160};
-  /// Carried for the rolling decode windows; this unit does not read them.
+  /// Read by the partial decode windows (WindowScheduler), not by this unit.
   std::chrono::milliseconds initial_accumulation{320};
   std::chrono::milliseconds decode_stride{160};
   /// Following audio kept while an endpointed utterance finishes, counted
@@ -81,6 +81,9 @@ class VadPolicy {
   [[nodiscard]] std::uint64_t next_frame_start() const noexcept { return next_frame_; }
   /// The open utterance's first sample, while in speech.
   [[nodiscard]] std::optional<std::uint64_t> utterance_start() const noexcept;
+  /// The open utterance's first speech sample, while in speech: its onset
+  /// run's first frame, or the split that started it.
+  [[nodiscard]] std::optional<std::uint64_t> speech_start() const noexcept;
   /// The open utterance's first sample, or in silence the earliest the next
   /// onset can name: no utterance takes audio before it.
   [[nodiscard]] std::uint64_t earliest_utterance_start() const noexcept;
@@ -109,6 +112,7 @@ class VadPolicy {
   /// The earliest sample the next onset may start at.
   std::uint64_t floor_ = 0;
   std::optional<std::uint64_t> utterance_start_;
+  std::uint64_t speech_start_ = 0;
   /// Consecutive frames against the current state: speech while in silence,
   /// silence while in speech. It carries across a duration split.
   std::uint32_t run_frames_ = 0;

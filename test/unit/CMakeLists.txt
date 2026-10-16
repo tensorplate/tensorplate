@@ -66,6 +66,7 @@ add_executable(tp_test_unit
   speech_dispatch_test.cpp
   speech_voice_detection_test.cpp
   vad_policy_test.cpp
+  window_scheduler_test.cpp
   control_channel_test.cpp
   drain_window_test.cpp
   stderr_log_test.cpp

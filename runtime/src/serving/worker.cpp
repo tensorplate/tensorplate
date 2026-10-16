@@ -327,6 +327,12 @@ Result<void> ServingWorker::Impl::build() {
       options.generation = *config.deployment.generation;
     }
     options.on_stall = [this](const Error& cause) { on_speech_stall(cause); };
+    options.on_partial_failed = [this](const Error& cause) {
+      log_stderr(config, "warn", "speech partial decode failed",
+                 {{"code", std::string{to_string(cause.code)}},
+                  {"reason", cause.context.value_or("")},
+                  {"message", cause.message}});
+    };
     auto dispatch =
         serving::SpeechJobDispatch::create(job_bridge, *buffer_manager, *clock, std::move(options));
     if (!dispatch) {
@@ -596,6 +602,7 @@ void ServingWorker::Impl::stop_stream_listener() noexcept {
              {"jobs_discarded", stats.jobs_discarded},
              {"releases_refused", stats.releases_refused},
              {"jobs_past_deadline", stats.jobs_past_deadline},
+             {"partials_failed", stats.partials_failed},
              {"releases_past_bound", stats.releases_past_bound},
              {"longest_release_wait_ms",
               std::chrono::duration_cast<std::chrono::milliseconds>(stats.longest_release_wait)

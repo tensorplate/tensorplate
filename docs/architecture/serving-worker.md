@@ -303,7 +303,8 @@ line says `serves_sessions: false`.
   schema does not define, a second `Open`, or an event out of sequence or
   naming another session fails the session with `invalid_event`, and nothing
   behind it is read. A `PartialTranscript` is sent only for a dispatch that
-  offers partial transcripts, and none does yet. `Ready` reports the
+  offers partial transcripts: the speech dispatch, for an audio session
+  whose utterances it finds by voice activity. `Ready` reports the
   deployment's limits and the session's initial credit.
 - **Input.** The listener checks each `Audio` and `TextSegment` before it
   offers it to the manager, against the terms the dispatch granted and
@@ -1600,9 +1601,9 @@ bridge") and their results into task output. The serving worker constructs
 it for a speech deployment
 ([The speech dispatch in the worker](#the-speech-dispatch-in-the-worker)).
 
-It is **provisional**: the least that serves one transcription and one
-synthesis, standing in for the mode handlers that will own windows and
-partial transcripts.
+It is **provisional**: the least that serves one transcription, with its
+partial transcripts, and one synthesis, standing in for the mode handlers
+that will own them.
 
 - **Audio input** (16 kHz mono 16-bit PCM, frames of 20 to 320 ms). A
   client Finalize, a half-close or the 30-second limit ends the
@@ -1658,7 +1659,34 @@ partial transcripts.
   belongs to completes only once the endpoint was queued. A backend that
   does not run `vad_frames` leaves the session as above: a Finalize, a
   half-close or the limit ends the utterance and its endpoint is offered
-  with its final.
+  with its final, and no partial transcript is offered.
+- **Partial transcripts**, with voice detection. While an utterance is
+  open its audio so far, from its first sample to the end of its scored
+  frames (30 seconds at most), is decoded as one `stt_decode` like a
+  final's: the first once 320 ms past its first speech frame was scored
+  (the leading padding does not count; after a 30-second split, from the
+  split), each later one once another 160 ms was, counted in source
+  audio, never wall time. A session has one decode on the lane at a
+  time, so the strides that pass while one runs give one decode of the
+  latest audio, never a backlog. Its text is offered as
+  `PartialTranscript` with the utterance's id and the next revision, from
+  1 in each utterance, unless it is blank or the same as the last one
+  offered; a revision is counted only when offered. Every partial is the
+  whole hypothesis, replaceable anywhere: no part of it is stable, and the
+  final still decodes the whole utterance once it ended. No partial
+  decode starts once the session drains (a half-close or the worker's
+  drain) or a Finalize waits for its frames, and one whose utterance ended
+  while it ran is dropped: no partial follows its utterance's endpoint.
+  One the backend fails (a token limit, an inference failure, memory) is
+  dropped too, the session going on, counted in `stats()`
+  (`partials_failed`, and in `jobs_failed` with every job the backend
+  failed) and reported through `on_partial_failed` at most
+  once an utterance, which the worker logs at `warn`. A refusal that would
+  meet the final too (a job class or an option the backend refuses, a
+  session it unloaded), a partial decode past its deadline, or one ended by
+  the backend's reset ends the session as any job does. A drain does
+  not wait for a partial's delivery: one that gave way unsent never is.
+  Each partial is a full Whisper pass on the one decode lane.
 - **Text input.** A segment is one `tts_synthesis` with the session's
   language and voice at normal speed. Its single audio result stays in
   the backend's buffer and is cut from there into chunks of 20 ms: a
@@ -1678,8 +1706,9 @@ partial transcripts.
   sessions against the pool's size bounds it.
 - **One lane, and one for voice activity.** One decode or synthesis is in
   flight for the whole dispatch, and sessions are served in the order
-  their work became ready. A job keeps the lane until the backend
-  reports it released, which follows its result, also when its session
+  their work became ready, partial decodes only when no other job waits.
+  A job keeps the lane until the backend reports it released, which
+  follows its result, also when its session
   was cancelled meanwhile, or failed at the job's deadline (below): that
   is where a cancel waits behind the backend. With one such job open
   nothing else of its lane is queued behind it in the backend.
@@ -1872,7 +1901,9 @@ back to back from sample zero or from where a reset put them.
   returns to silence and its next frame and next onset start at `end`.
 - `earliest_utterance_start()` is the open utterance's first sample, or
   in silence the earliest sample the next onset could name; no utterance
-  takes audio before it.
+  takes audio before it. `speech_start()` is the open utterance's first
+  speech sample: its onset run's first frame, or the split that started
+  it.
 - Offsets are absolute and never reset across utterances. An internal
   end b is `ceil(b * R / 16000)` samples at the input rate R (8,000 or
   16,000), and an internal interval [a, b) is
@@ -1880,9 +1911,10 @@ back to back from sample zero or from where a reset put them.
   both with checked arithmetic.
 
 The profile (`VadProfile`) also carries the initial decode accumulation
-(320 ms), the decode stride (160 ms) and the following audio kept after
-an endpoint (1 second) for the rolling decode windows that will read
-them. A profile is checked once, at `VadPolicy::create`
+(320 ms) and the decode stride (160 ms), which the partial decode windows
+read (`WindowScheduler`, in the same directory, pure like the policy), and
+the following audio kept after an endpoint (1 second), which nothing
+reads yet. A profile is checked once, at `VadPolicy::create`
 (`config_invalid`, `invalid_vad_profile`).
 
 ### The speech dispatch in the worker
@@ -2125,9 +2157,11 @@ cancel is the listener's change.
 `serves_sessions`. Once the listener has stopped, `speech dispatch stopped`
 carries the dispatch's counters as of the last step of its thread:
 `jobs_submitted`, `jobs_completed`, `jobs_failed`, `jobs_discarded`,
-`releases_refused`, `jobs_past_deadline`, `releases_past_bound` and
-`longest_release_wait_ms`. The job counters include `vad_frames` jobs,
-up to one for every 512 samples of a session's audio. A job the unload
+`releases_refused`, `jobs_past_deadline`, `partials_failed`,
+`releases_past_bound` and `longest_release_wait_ms`. The job counters
+include `vad_frames` jobs, up to one for every 512 samples of a session's
+audio, and partial decodes: `jobs_failed` counts the partial decodes the
+backend failed, which `partials_failed` also counts. A job the unload
 ends is in none of `jobs_completed`, `jobs_failed`, `jobs_discarded` and
 `releases_refused`, and a job the bridge refuses when it is submitted is
 in none of the counters. No metric is exported for them. A stall adds

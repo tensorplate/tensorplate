@@ -33,8 +33,10 @@ std::uint64_t end_micros(std::uint64_t input_sample) {
   return (input_sample * kMicrosPerSecond + rate - 1) / rate;
 }
 
-bool task_output(OutputKind kind) {
-  return kind == OutputKind::Audio || kind == OutputKind::Partial || kind == OutputKind::Result;
+/// Task output a drain waits to see delivered: a partial transcript that
+/// gave way unsent never is.
+bool awaits_delivery(OutputKind kind) {
+  return kind == OutputKind::Audio || kind == OutputKind::Result;
 }
 
 template <std::size_t Count>
@@ -192,7 +194,7 @@ void SyntheticSessionDispatch::finalize(std::uint64_t session_key, std::uint64_t
 }
 
 void SyntheticSessionDispatch::output_delivered(std::uint64_t session_key, OutputKind kind) {
-  post({session_key, Delivered{task_output(kind)}});
+  post({session_key, Delivered{awaits_delivery(kind)}});
 }
 
 void SyntheticSessionDispatch::post(Command command) {

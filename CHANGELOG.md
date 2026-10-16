@@ -328,6 +328,27 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The serving worker's speech dispatch offers partial transcripts of every
+  utterance it finds by voice activity, so every `faster_whisper`
+  deployment now sends `PartialTranscript` events. While an utterance is
+  open, its audio so far is decoded once 320 ms past its first speech frame
+  was scored and again after each further 160 ms of scored audio, as one
+  `stt_decode` on the dispatch's one decode lane, a full Whisper pass each;
+  the strides that pass while a session's decode runs give one decode of
+  the latest audio. A decode an endpoint waits for, or a synthesis, goes
+  before any partial. A partial's text is offered as the utterance's next
+  revision unless it is blank or unchanged; none is offered after its
+  utterance's endpoint, none starts once the session drains or a Finalize
+  waits for its frames, and the final still decodes the whole utterance. A
+  partial decode the backend fails is dropped and the session goes on: it
+  is counted in the dispatch's stats, which the worker's `speech dispatch
+  stopped` line reports as `partials_failed`, and logged at `warn` once an
+  utterance. A refusal that would meet the final too, such as a language
+  the backend does not permit, still fails the session at its first job.
+  A drain no longer waits for the delivery of a partial that gave way
+  unsent.
+  (V030-E05-F03-T01, V030-E05-F03-T04)
+
 - The speech dispatch's contract test suite also runs it detecting voice,
   holding every job but voice activity and sending each utterance's audio
   long enough to be speech. The cases whose outcome voice detection changes

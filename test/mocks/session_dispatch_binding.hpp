@@ -20,6 +20,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -322,13 +323,21 @@ class ReferenceBinding {
         ADD_FAILURE() << "an item that is not task output";
         return std::nullopt;
       }
+      check_partial_order(key, body->output);
       return std::move(body->output);
     }
   }
 
+  /// The next task output but the partial transcripts before it, unless
+  /// `Output` is one.
   template <typename Output>
   std::optional<Output> read_as(std::uint64_t key) {
     auto next = read(key);
+    if constexpr (!std::is_same_v<Output, serving::PartialTranscriptOutput>) {
+      while (next && std::holds_alternative<serving::PartialTranscriptOutput>(*next)) {
+        next = read(key);
+      }
+    }
     if (!next || !std::holds_alternative<Output>(*next)) {
       ADD_FAILURE() << "expected another kind of output";
       return std::nullopt;
@@ -487,7 +496,28 @@ class ReferenceBinding {
     std::uint64_t lifecycle_queued = 0;
     std::uint64_t lifecycle_read = 0;
     bool short_frame_sent = false;
+    /// The last endpoint and the last partial transcript read.
+    std::uint64_t endpoint_read = 0;
+    std::uint64_t partial_utterance = 0;
+    std::uint32_t partial_revision = 0;
   };
+
+  /// What the stream promises of partial transcripts: none of an utterance
+  /// whose endpoint was read, and revisions that grow within an utterance.
+  void check_partial_order(std::uint64_t key, const serving::TaskOutput& output) {
+    const std::lock_guard guard(mu);
+    Stream& stream = streams[key];
+    if (const auto* endpoint = std::get_if<serving::EndpointDetectedOutput>(&output)) {
+      stream.endpoint_read = endpoint->utterance_id;
+    } else if (const auto* partial = std::get_if<serving::PartialTranscriptOutput>(&output)) {
+      EXPECT_GT(partial->utterance_id, stream.endpoint_read) << "a partial after its endpoint";
+      if (partial->utterance_id == stream.partial_utterance) {
+        EXPECT_GT(partial->revision, stream.partial_revision) << "a revision that did not grow";
+      }
+      stream.partial_utterance = partial->utterance_id;
+      stream.partial_revision = partial->revision;
+    }
+  }
 
   void sink(const serving::ManagedSessionTransition& transition) {
     std::function<void()> hook;
