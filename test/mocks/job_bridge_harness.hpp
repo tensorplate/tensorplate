@@ -39,8 +39,10 @@ namespace tensorplate::testing {
 
 /// The backend of a ScriptedSidecar played by a thread. It takes each job the
 /// sidecar admits and ends it with the fixture bridge's result for its submit
-/// (fixture_job_bridge.hpp): the word `hello` over the decoded window, or
-/// kFixtureSpeechBytesPerTextByte bytes of silence for each byte of text.
+/// (fixture_job_bridge.hpp): the word `hello` over the decoded window,
+/// kFixtureSpeechBytesPerTextByte bytes of silence for each byte of text, or
+/// each voice-activity frame's largest absolute sample over 32768, whatever
+/// the frame size, which the fixture backend permits only at 512 samples.
 class ScriptedBackend {
  public:
   using Json = nlohmann::json;
@@ -111,8 +113,16 @@ class ScriptedBackend {
 
   void end(const ScriptedSidecar::TakenJob& job) {
     const Json& input = job.submit.at("input");
+    if (input.at("type") == "vad_frames") {
+      sidecar_.complete(job.job_id,
+                        Json{{"type", "vad"},
+                             {"probabilities",
+                              fixture_voice_activity(
+                                  job.payload, input.at("frame_samples").get<std::uint32_t>())}});
+      return;
+    }
     if (input.at("type") == "text_segment") {
-      const std::size_t bytes = kFixtureSpeechBytesPerTextByte * job.payload_bytes;
+      const std::size_t bytes = kFixtureSpeechBytesPerTextByte * job.payload.size();
       sidecar_.complete(
           job.job_id,
           Json{{"type", "audio_chunk"},
@@ -127,7 +137,7 @@ class ScriptedBackend {
                     {"token_begin", 0},
                     {"token_end", 1},
                     {"start_sample", start},
-                    {"end_sample", start + job.payload_bytes / 4}};
+                    {"end_sample", start + job.payload.size() / 4}};
     sidecar_.complete(job.job_id, Json{{"type", "transcript"},
                                        {"text", "hello"},
                                        {"tokens", {1}},

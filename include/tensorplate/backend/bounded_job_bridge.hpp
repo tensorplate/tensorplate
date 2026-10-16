@@ -155,6 +155,11 @@ class BoundedJobBridge {
   ///     hold.
   [[nodiscard]] virtual Result<void> submit(JobRequest request) = 0;
 
+  /// Whether the loaded backend runs jobs of `job_class`: false before a load and for a
+  /// class submit() refuses as "job_class_unsupported". Never waits for the backend. A
+  /// snapshot, not a promise: after a true answer an unload still makes submit() refuse.
+  [[nodiscard]] virtual bool runs(JobClass job_class) const noexcept = 0;
+
   /// Requests cancellation of a submitted job. Idempotent: repeating it, or
   /// cancelling a job whose terminal event was already delivered, succeeds
   /// and changes nothing. The job still ends with exactly one terminal event

@@ -153,9 +153,9 @@ delivery and end the job with the refusal instead of delivering it.
 
 ### Bridge guarantees
 
-- `submit`, `cancel`, `release_session` and `health` never call or wait for
-  the session lifecycle. An implementation serializes bridge work against its
-  own load, prime and unload.
+- `submit`, `runs`, `cancel`, `release_session` and `health` never call or
+  wait for the session lifecycle. An implementation serializes bridge work
+  against its own load, prime and unload.
 - Callbacks are serialized, never run on a thread that is inside a bridge
   method, and may arrive before the `submit`, `cancel` or
   `release_session` that caused them returns; register a job before
@@ -180,6 +180,7 @@ delivery and end the job with the refusal instead of delivering it.
 | Method            | Error code / context |
 | ----------------- | -------------------- |
 | `set_event_sink`  | `config_invalid` / `event_sink_null`, `event_sink_already_set` |
+| `runs`            | none: `false` before a load and for a class `submit` refuses as `job_class_unsupported` |
 | `submit`          | `not_ready` / `event_sink_missing`, `backend_not_ready`, `session_releasing`; `unavailable` / `backend_unavailable`; `unsupported` / `job_class_unsupported`, `job_not_permitted`; `config_invalid` / `duplicate_job_id`; `resource_exhausted` / `job_capacity_exhausted`; `config_invalid` / a reason of the backend's own naming, for a request it cannot carry as given |
 | `cancel`          | `not_ready` / `unknown_job` |
 | `release_session` | `config_invalid` / `session_key_zero`, `generation_zero`; `not_ready` / `event_sink_missing`; `unavailable` / `backend_unavailable` |
@@ -230,7 +231,7 @@ not as buffer handles.
 
 `test/contract/bounded_job_bridge_conformance.hpp` holds what the bridge
 header promises the caller of a bridge whose backend runs `stt_decode` and
-`tts_synthesis`, as one parameterised suite: thirty-eight cases, each under
+`tts_synthesis`, as one parameterised suite: thirty-nine cases, each under
 the header text it holds. A binding (`BridgeUnderTest`) supplies the bridge
 with its backend, the session's side of it (prime, unload, a backend that
 is lost) and a hold on started jobs; the cases force every order they need
@@ -291,10 +292,13 @@ bridge over a scripted sidecar and over the in-tree runner (below).
 backend in the test's own process, for tests of what sits above a bridge.
 No production binary contains it. It keeps the refusals and each job's
 event order through `FakeBoundedJobBridge`, which it wraps, and plays the
-backend by the in-tree sidecar runner's rules: one job runs and eight wait
-in submission order; one more ends with `failed`
-(`job_capacity_exhausted`) without `accepted`; a job is `accepted` when it
-is taken in; a cancellation is acknowledged at once and ends a waiting job
+backend by the in-tree sidecar runner's rules: `stt_decode` and
+`tts_synthesis` share one lane and `vad_frames` has another, and in each
+one job runs and eight wait in submission order; one more ends with
+`failed` (`job_capacity_exhausted`) without `accepted`, as does a
+`vad_frames` job whose frames are not 512 samples (`job_not_permitted`),
+which is checked first; a job is `accepted` when it is taken in; a
+cancellation is acknowledged at once and ends a waiting job
 then, the running one when its work returns, both as `cancelled`; a session
 release cancels the session's unfinished jobs, the running one included; a
 lost backend fails its jobs with `backend_reset` and releases them only at
@@ -302,39 +306,45 @@ the unload. Before the prime it takes a session release and acknowledges
 it, and a backend lost or a session unloaded before the prime answers
 `backend_unavailable`. Its results are those of the runner's fixture
 backend (the word `hello` ending a quarter of the payload's bytes after the
-window's start; 160 bytes of silence for each byte of text) unless the test
+window's start; 160 bytes of silence for each byte of text; of each
+voice-activity frame, its largest absolute sample over 32768, with no state
+kept from one job to the next) unless the test
 passes a result function, which receives the request and runs with the
 bridge's lock held.
 
 Two options (`FixtureJobBridgeOptions`) make it produce the other outcome
 the header allows, so that what is developed against it meets both:
 `submit_refuses_at_capacity` has `submit` itself refuse a job while nine
-are unreleased, as the adapter's job table refuses one beyond its bound,
-and `cancels_arrive_late` lets a cancelled job, started or not, run to its
-end and complete with no `cancel_acknowledged`. The T1 binary runs the
-suite against the fixture four times: as it is; refusing at capacity; with
-late cancels, stating no choice but its hold and the class it refuses, so
-that the cases pass on the header alone; and without its hold.
+are unreleased in its two lanes together, as the adapter's job table
+refuses one beyond its bound (nine across both lanes: a backend whose
+admission is shared, which the header allows; the cases that use it submit
+decodes only), and `cancels_arrive_late` lets a cancelled job, started or
+not, run to its end and complete with no `cancel_acknowledged`. The T1
+binary runs the suite against the fixture five times: as it is; refusing at
+capacity; with late cancels, stating no choice but its hold, so that the
+cases pass on the header alone; with one progress fragment for a job that
+allows progress; and without its hold.
 
 One thread runs the jobs and makes the callbacks while the backend lives;
 the unload returns once every callback owed has run, on its caller's
 thread or on that one, so `prime`, `lose_backend`, `unload` and the
 destructor are never called from a sink callback. A test can hold started
-jobs, fail the next one, set what `health` answers, ask whether everything
-submitted so far was worked through and every callback for it has
-returned, an unload's on another thread included (`settled`), and read the
-events of the fixture's own backend that a job's order refused, which are
-none unless the fixture is wrong.
+jobs, those of both lanes or of one, fail the next one, set what `health`
+answers, ask whether everything submitted so far was worked through and
+every callback for it has returned, an unload's on another thread
+included (`settled`), and read the events of the fixture's own backend
+that a job's order refused, which are none unless the fixture is wrong.
 
 It differs from the adapter with a real sidecar in six ways. A job starts
-at its submit when nothing runs, so the eight that wait are exact, where
-the runner counts a job its backend thread has not taken yet among them. A
+at its submit when nothing runs in its lane, so the eight that wait are
+exact, where the runner counts a job its lane's thread has not taken yet
+among them. A
 job's work runs in one step with the bridge's lock held: a cancellation
 finds a started job before its work, which then does not run, or after its
 end, never in between; it comes before the work for certain while a test
 holds the jobs, and for a job cancelled by the callback that submitted it.
 An unload fails every unfinished job with `session_unloaded` at once, where
-the runner fails the waiting ones itself and lets the running one end. The
+the runner fails the waiting ones itself and lets the running ones end. The
 fake it wraps refuses a submit while 64 jobs are unreleased. A prime after
 an unload or a loss does not reopen it: there is no second load of one
 session. And `release_session` on a lost or unloaded backend answers
@@ -416,9 +426,12 @@ starts it on a load that enabled `speech_jobs_v1` and stops it (next
 section); a session not built for jobs never starts it. `start` refuses a
 socket that is not open (`internal`, `socket_closed`) and a load that
 declared only job classes the adapter does not know (`unsupported`,
-`job_class_unsupported`). It takes every class the load declared,
-`vad_frames` included, and `submit` refuses any other
-(`job_class_unsupported`) before writing anything.
+`job_class_unsupported`): the session leaves out every declared name the
+adapter does not know, and an empty list is refused earlier
+(`job_classes_malformed`). It takes every class left, `vad_frames`
+included, and `submit` refuses any other (`job_class_unsupported`) before
+writing anything; `runs` answers from the same classes, from the start until
+the channel is stopped.
 
 - **Two threads own the socket.** A reader reads one frame at a time, routes
   it and calls the `JobEventSink`; while the connection lives nothing else
@@ -845,7 +858,7 @@ rely on beyond the public header, and what it must not assume:
   from a sink callback (`internal`, `lifecycle_call_in_sink_callback`; "The
   session and its job channel", above); its destructor cannot.
 
-`test/unit/bounded_job_bridge_conformance_test.cpp` runs all thirty-eight
+`test/unit/bounded_job_bridge_conformance_test.cpp` runs all thirty-nine
 conformance cases against this bridge over the scripted sidecar, with every
 choice stated: one job runs and eight wait, so nine are open at once and the
 tenth is ended by `failed`. A thread plays the sidecar's backend with the
@@ -912,8 +925,8 @@ mutex.
 `test/integration/python_pytorch_job_bridge_runner_test.cpp` runs the same
 suite over the in-tree runner and its fixture backend. Nothing can hold the
 runner's jobs, so the binding states no hold and the cases that need one are
-skipped: twenty-four run, the two that compare a decode's and a synthesis's
-result with the fixture bridge's among them. The fourteen skipped include
+skipped: twenty-one run, the two that compare a decode's and a synthesis's
+result with the fixture bridge's among them. The eighteen skipped include
 every case that keeps a job open across an unload or across a lost backend,
 so over the runner no conformance case shows either with a job open; the
 cases over the scripted sidecar do. That binding is settled once the

@@ -72,8 +72,8 @@ class BridgeUnderTest {
     /// The backend does not run `vad_frames`, the class the cases submit as
     /// one it refuses.
     bool refuses_vad_frames = false;
-    /// It runs one job at a time: a job submitted while a started one is held
-    /// has not started.
+    /// It runs one decode or synthesis at a time: one submitted while a
+    /// started one is held has not started.
     bool runs_one_job_at_a_time = false;
     /// A job that has not started ends as soon as it is cancelled, while a
     /// started one is held.
@@ -81,7 +81,7 @@ class BridgeUnderTest {
     /// A job cancelled while it is held ends `failed` with
     /// Error::Code::Cancelled, not `completed`.
     bool fails_a_held_job_that_was_cancelled = false;
-    /// Jobs it has open at once while started ones are held, running and
+    /// Decodes it has open at once while started ones are held, running and
     /// waiting together; one more is refused by submit or ended with `failed`.
     /// Zero states no bound.
     std::size_t open_jobs = 0;
@@ -274,7 +274,8 @@ class BoundedJobBridgeConformance : public ::testing::TestWithParam<BridgeCase> 
         .value();
   }
 
-  /// A job of the class BridgeUnderTest::Choices::refuses_vad_frames names.
+  /// A `vad_frames` job: of the class BridgeUnderTest::Choices::refuses_vad_frames
+  /// names, which other bindings may run.
   [[nodiscard]] JobRequest vad(std::uint64_t job_id, std::uint64_t session_key) {
     constexpr std::uint32_t kFrameSamples = 512;
     const BufferRef buffer = under->buffers().allocate(2U * kFrameSamples).value();
@@ -814,6 +815,27 @@ TEST_P(BoundedJobBridgeConformance, AClassTheBackendDoesNotRunIsRefused) {
   expect_refused(resubmit(vad(1, 5)), Error::Code::Unsupported, "job_class_unsupported");
 }
 
+// runs: "false before a load and for a class submit() refuses as
+// "job_class_unsupported"". A class it runs is taken and completes.
+TEST_P(BoundedJobBridgeConformance, ItRunsEveryClassItsSubmitTakesAndNoOther) {
+  ASSERT_NO_FATAL_FAILURE(ready());
+  for (const JobRequest& request : {decode(1, 5), synthesis(2, 5), vad(3, 5)}) {
+    const std::uint64_t job_id = request.identity().job_id;
+    if (!bridge().runs(request.job_class())) {
+      expect_refused(resubmit(request), Error::Code::Unsupported, "job_class_unsupported");
+      continue;
+    }
+    ASSERT_TRUE(submit(request).has_value()) << job_id;
+    ASSERT_TRUE(wait_kinds(job_id, {Accepted, Completed, Released})) << job_id;
+  }
+  if (bridge().runs(JobClass::TtsSynthesis)) {
+    const JobResult speech = event_of(2, Completed).result().value();
+    EXPECT_TRUE(under->buffers()
+                    .release(std::get<AudioChunkResult>(speech.payload()).pcm.buffer)
+                    .has_value());
+  }
+}
+
 // submit: "Error::Code::ConfigInvalid, "duplicate_job_id": a job with the same
 // job_id has not been released yet".
 // BridgeUnderTest::Choices::holds_started_jobs.
@@ -822,6 +844,8 @@ TEST_P(BoundedJobBridgeConformance, AJobIdIsRefusedUntilItsJobWasReleased) {
     return;
   }
   ASSERT_TRUE(submit(decode(1, 5)).has_value());
+  // runs() "never waits for the backend", which holds job 1.
+  EXPECT_TRUE(bridge().runs(JobClass::SttDecode));
   expect_refused(resubmit(decode(1, 5)), Error::Code::ConfigInvalid, "duplicate_job_id");
   expect_refused(resubmit(synthesis(1, 6)), Error::Code::ConfigInvalid, "duplicate_job_id");
   under->release_jobs();

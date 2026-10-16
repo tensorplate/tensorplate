@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -52,6 +53,15 @@ Result<JobResult> fixture_job_result(const JobRequest& request, BufferManager& b
   if (const auto* audio = std::get_if<AudioFrames>(&request.payload())) {
     return JobResult::create(fixture_transcript(*audio));
   }
+  if (const auto* frames = std::get_if<VadFrames>(&request.payload())) {
+    const auto held = buffers.data(frames->pcm.buffer);
+    if (!held.has_value()) {
+      return unexpected(held.error());
+    }
+    return JobResult::create(VadResult{
+        fixture_voice_activity(held.value().subspan(frames->pcm.byte_offset, frames->pcm.byte_size),
+                               frames->frame_samples)});
+  }
   const std::string& text = std::get<TextSegment>(request.payload()).text;
   const std::size_t bytes = kFixtureSpeechBytesPerTextByte * text.size();
   auto buffer = buffers.allocate(bytes);
@@ -69,7 +79,7 @@ FixtureJobBridge::FixtureJobBridge(BufferManager& buffers, ResultFunction result
     : buffers_(buffers),
       result_(std::move(result)),
       options_(options),
-      rules_({JobClass::SttDecode, JobClass::TtsSynthesis},
+      rules_({JobClass::SttDecode, JobClass::TtsSynthesis, JobClass::VadFrames},
              options.submit_refuses_at_capacity ? 1 + kWaitingJobs : kUnreleasedJobs),
       thread_(&FixtureJobBridge::run, this) {}
 
@@ -104,20 +114,29 @@ Result<void> FixtureJobBridge::submit(JobRequest request) {
   if (auto taken = rules_.submit(request); !taken.has_value()) {
     return taken;
   }
-  if (lane_.size() >= kWaitingJobs) {
+  const auto* frames = std::get_if<VadFrames>(&request.payload());
+  Lane& lane = lane_of(request.job_class());
+  if (frames != nullptr && frames->frame_samples != kFixtureVadFrameSamples) {
+    rules_.queue_failed(job_id, reason(Error::Code::Unsupported, "job_not_permitted"));
+    rules_.queue_released(job_id);
+  } else if (lane.waiting.size() >= kWaitingJobs) {
     rules_.queue_failed(job_id, reason(Error::Code::ResourceExhausted, "job_capacity_exhausted"));
     rules_.queue_released(job_id);
   } else {
     rules_.queue_accepted(job_id);
     open_.emplace(job_id, OpenJob{std::move(request), false});
-    if (running_ == 0) {
-      running_ = job_id;
+    if (lane.running == 0) {
+      lane.running = job_id;
     } else {
-      lane_.push_back(job_id);
+      lane.waiting.push_back(job_id);
     }
   }
   wake_locked();
   return {};
+}
+
+bool FixtureJobBridge::runs(JobClass job_class) const noexcept {
+  return !unloaded_.load() && rules_.runs(job_class);
 }
 
 Result<void> FixtureJobBridge::cancel(std::uint64_t job_id) {
@@ -181,8 +200,7 @@ void FixtureJobBridge::lose_backend() {
     unreleased_.push_back(job_id);
   }
   open_.clear();
-  lane_.clear();
-  running_ = 0;
+  empty_lanes_locked();
   wake_locked();
 }
 
@@ -190,6 +208,7 @@ void FixtureJobBridge::unload() {
   {
     const std::lock_guard<std::mutex> lock(mutex_);
     phase_ = Phase::Unloaded;
+    unloaded_.store(true);
     for (const auto& [job_id, job] : open_) {
       rules_.queue_failed(job_id, reason(Error::Code::Unavailable, "session_unloaded"));
       rules_.queue_released(job_id);
@@ -198,9 +217,8 @@ void FixtureJobBridge::unload() {
       rules_.queue_released(job_id);
     }
     open_.clear();
-    lane_.clear();
+    empty_lanes_locked();
     unreleased_.clear();
-    running_ = 0;
     unloading_ = true;
   }
   // On this thread, so that nothing is owed once the unload has returned.
@@ -216,12 +234,19 @@ void FixtureJobBridge::unload() {
 
 void FixtureJobBridge::hold_jobs() {
   const std::lock_guard<std::mutex> lock(mutex_);
-  held_ = true;
+  speech_.held = true;
+  voice_activity_.held = true;
+}
+
+void FixtureJobBridge::hold_jobs(JobClass job_class) {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  lane_of(job_class).held = true;
 }
 
 void FixtureJobBridge::release_jobs() {
   const std::lock_guard<std::mutex> lock(mutex_);
-  held_ = false;
+  speech_.held = false;
+  voice_activity_.held = false;
   wake_locked();
 }
 
@@ -247,12 +272,16 @@ std::vector<Error> FixtureJobBridge::refusals() const {
 
 // -- The backend. ----------------------------------------------------------------
 
+FixtureJobBridge::Lane& FixtureJobBridge::lane_of(JobClass job_class) noexcept {
+  return job_class == JobClass::VadFrames ? voice_activity_ : speech_;
+}
+
 void FixtureJobBridge::run() {
   std::unique_lock<std::mutex> lock(mutex_);
   for (;;) {
     // Whoever made the job due set pending_, so its events are delivered next.
-    if (running_ != 0 && !held_) {
-      end_running_locked();
+    if (Lane* const due = due_lane_locked(); due != nullptr) {
+      end_running_locked(*due);
       continue;
     }
     if (pending_) {
@@ -272,28 +301,44 @@ void FixtureJobBridge::run() {
   }
 }
 
-void FixtureJobBridge::end_running_locked() {
-  const auto job = open_.find(running_);
+FixtureJobBridge::Lane* FixtureJobBridge::due_lane_locked() noexcept {
+  for (Lane* const lane : {&speech_, &voice_activity_}) {
+    if (lane->running != 0 && !lane->held) {
+      return lane;
+    }
+  }
+  return nullptr;
+}
+
+void FixtureJobBridge::empty_lanes_locked() noexcept {
+  for (Lane* const lane : {&speech_, &voice_activity_}) {
+    lane->running = 0;
+    lane->waiting.clear();
+  }
+}
+
+void FixtureJobBridge::end_running_locked(Lane& lane) {
+  const std::uint64_t running = std::exchange(lane.running, 0);
+  const auto job = open_.find(running);
   if (job->second.cancelled) {
-    rules_.queue_failed(running_, cancelled());
+    rules_.queue_failed(running, cancelled());
   } else if (next_failure_.has_value()) {
-    rules_.queue_failed(running_, *std::exchange(next_failure_, std::nullopt));
+    rules_.queue_failed(running, *std::exchange(next_failure_, std::nullopt));
   } else if (auto result = result_(job->second.request, buffers_); result.has_value()) {
     if (options_.progress_when_allowed && job->second.request.progress_limit() > 0) {
       if (auto fragment = result_(job->second.request, buffers_); fragment.has_value()) {
-        rules_.queue_progress(running_, 1, std::move(fragment).value());
+        rules_.queue_progress(running, 1, std::move(fragment).value());
       }
     }
-    rules_.queue_completed(running_, std::move(result).value());
+    rules_.queue_completed(running, std::move(result).value());
   } else {
-    rules_.queue_failed(running_, result.error());
+    rules_.queue_failed(running, result.error());
   }
-  rules_.queue_released(running_);
+  rules_.queue_released(running);
   open_.erase(job);
-  running_ = 0;
-  if (!lane_.empty()) {
-    running_ = lane_.front();
-    lane_.pop_front();
+  if (!lane.waiting.empty()) {
+    lane.running = lane.waiting.front();
+    lane.waiting.pop_front();
   }
 }
 
@@ -304,8 +349,8 @@ void FixtureJobBridge::cancel_locked(std::map<std::uint64_t, OpenJob>::iterator 
   const std::uint64_t job_id = job->first;
   job->second.cancelled = true;
   rules_.queue_cancel_acknowledged(job_id);
-  if (job_id != running_) {
-    lane_.erase(std::find(lane_.begin(), lane_.end(), job_id));
+  if (Lane& lane = lane_of(job->second.request.job_class()); job_id != lane.running) {
+    lane.waiting.erase(std::find(lane.waiting.begin(), lane.waiting.end(), job_id));
     rules_.queue_failed(job_id, cancelled());
     rules_.queue_released(job_id);
     open_.erase(job);

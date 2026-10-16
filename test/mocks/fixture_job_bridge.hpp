@@ -9,9 +9,13 @@
 // backend (jobs.py and backends/fixture.py under
 // backends/python_pytorch/src/tensorplate_pytorch_backend/):
 //
-//   - it runs `stt_decode` and `tts_synthesis`; one job runs and
-//     kWaitingJobs wait in submission order; one more ends with `failed`
+//   - it runs `stt_decode` and `tts_synthesis` on one lane and `vad_frames`
+//     on another; in each lane one job runs and kWaitingJobs wait in
+//     submission order; one more ends with `failed`
 //     (`job_capacity_exhausted`) and is never `accepted`;
+//   - a `vad_frames` job whose frames are not kFixtureVadFrameSamples samples
+//     ends with `failed` (`job_not_permitted`) and is never `accepted`; no
+//     voice-activity state is kept from one job to the next;
 //   - a job is `accepted` when the backend takes it in, not when it starts;
 //   - a cancellation is acknowledged at once; a waiting job ends then, the
 //     running one when its work returns, each `failed` with
@@ -30,9 +34,9 @@
 //
 // It differs from the adapter with a real sidecar in six ways:
 //
-//   - a job starts at its submit when nothing runs, so the eight that wait
-//     are exact; the runner counts a job its backend thread has not taken yet
-//     among them;
+//   - a job starts at its submit when nothing runs in its lane, so the eight
+//     that wait are exact; the runner counts a job its lane's thread has not
+//     taken yet among them;
 //   - a job's work runs in one step with the bridge's lock held: a
 //     cancellation finds a started job before its work, which then does not
 //     run, or after its end, never in between. It comes before the work for
@@ -40,7 +44,7 @@
 //     callback that submitted it;
 //   - an unload fails every unfinished job with `session_unloaded` at once,
 //     where the runner fails the waiting ones itself and lets the running
-//     one end;
+//     ones end;
 //   - the wrapped fake refuses a submit while 64 jobs are unreleased;
 //   - a prime after an unload or a loss does not reopen it: there is no
 //     second load of one session;
@@ -55,16 +59,20 @@
 
 #pragma once
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <thread>
 #include <vector>
 
@@ -82,13 +90,36 @@ namespace tensorplate::testing {
 /// PCM bytes the fixture backend synthesizes for each byte of text.
 inline constexpr std::size_t kFixtureSpeechBytesPerTextByte = 160;
 
+/// Samples in each frame of a `vad_frames` job the fixture backend runs.
+inline constexpr std::uint32_t kFixtureVadFrameSamples = 512;
+
 /// The fixture backend's transcript of `audio`: one word, "hello", that ends
 /// half way through the window.
 [[nodiscard]] TranscriptResult fixture_transcript(const AudioFrames& audio);
 
+/// The fixture backend's voice activity of `pcm`, frames of `frame_samples`
+/// samples back to back in kJobInputAudioFormat: of each frame, its largest
+/// absolute sample over 32768.
+[[nodiscard]] inline std::vector<float> fixture_voice_activity(std::span<const std::byte> pcm,
+                                                               std::uint32_t frame_samples) {
+  std::vector<float> scored;
+  for (std::size_t frame = 0; 2 * (frame + 1) * frame_samples <= pcm.size(); ++frame) {
+    int peak = 0;
+    for (std::size_t sample = 0; sample < frame_samples; ++sample) {
+      const std::size_t at = 2 * (frame * frame_samples + sample);
+      const auto bits = static_cast<std::uint16_t>(std::to_integer<unsigned>(pcm[at]) |
+                                                   (std::to_integer<unsigned>(pcm[at + 1]) << 8U));
+      peak = std::max(peak, std::abs(static_cast<int>(static_cast<std::int16_t>(bits))));
+    }
+    scored.push_back(static_cast<float>(peak) / 32768.0F);
+  }
+  return scored;
+}
+
 /// The fixture backend's result for `request`: fixture_transcript() of a
 /// decode; for a synthesis, silence of kFixtureSpeechBytesPerTextByte bytes
-/// for each byte of text, in a buffer of `buffers`.
+/// for each byte of text, in a buffer of `buffers`; fixture_voice_activity()
+/// of a `vad_frames` job's window.
 [[nodiscard]] Result<JobResult> fixture_job_result(const JobRequest& request,
                                                    BufferManager& buffers);
 
@@ -96,8 +127,10 @@ inline constexpr std::size_t kFixtureSpeechBytesPerTextByte = 160;
 /// fixture produces. The defaults are the runner's.
 struct FixtureJobBridgeOptions {
   /// submit() refuses a job (`job_capacity_exhausted`) while 1 + kWaitingJobs,
-  /// the runner's count, are unreleased, as the adapter's job table refuses at
-  /// its own count of 16; none is failed for it.
+  /// the count of one of the runner's lanes, are unreleased in both lanes
+  /// together, as the adapter's job table refuses at its own count of 16; none
+  /// is failed for it. A shared count, which the header allows: the cases
+  /// that use it submit decodes only.
   bool submit_refuses_at_capacity = false;
   /// A cancellation comes too late for its job, started or not: the job runs
   /// to its end and completes, with no `cancel_acknowledged`.
@@ -111,7 +144,7 @@ struct FixtureJobBridgeOptions {
 
 class FixtureJobBridge final : public BoundedJobBridge {
  public:
-  /// Jobs that wait behind the running one.
+  /// Jobs that wait behind the running one, in each lane.
   static constexpr std::size_t kWaitingJobs = 8;
 
   /// What a job that ran returns; an error fails the job with it. Called
@@ -134,6 +167,7 @@ class FixtureJobBridge final : public BoundedJobBridge {
 
   [[nodiscard]] Result<void> set_event_sink(std::shared_ptr<JobEventSink> sink) override;
   [[nodiscard]] Result<void> submit(JobRequest request) override;
+  [[nodiscard]] bool runs(JobClass job_class) const noexcept override;
   [[nodiscard]] Result<void> cancel(std::uint64_t job_id) override;
   [[nodiscard]] Result<void> release_session(std::uint64_t session_key,
                                              std::uint64_t generation) override;
@@ -153,8 +187,10 @@ class FixtureJobBridge final : public BoundedJobBridge {
 
   // -- The test's hold on the backend. -----------------------------------------
 
-  /// From now until release_jobs(), the running job does not end.
+  /// From now until release_jobs(), the running job of each lane does not end.
   void hold_jobs();
+  /// The same for the one lane that runs `job_class`.
+  void hold_jobs(JobClass job_class);
   void release_jobs();
   /// The next job whose work returns fails with `error`.
   void fail_next_job(Error error);
@@ -176,9 +212,20 @@ class FixtureJobBridge final : public BoundedJobBridge {
     bool cancelled = false;
   };
 
+  struct Lane {
+    /// Zero when no job runs.
+    std::uint64_t running = 0;
+    std::deque<std::uint64_t> waiting;
+    bool held = false;
+  };
+
+  Lane& lane_of(JobClass job_class) noexcept;
   void run();
   // The `*_locked` members need mutex_ held.
-  void end_running_locked();
+  /// The lane whose running job may end now, if any.
+  Lane* due_lane_locked() noexcept;
+  void empty_lanes_locked() noexcept;
+  void end_running_locked(Lane& lane);
   void cancel_locked(std::map<std::uint64_t, OpenJob>::iterator job);
   void wake_locked();
 
@@ -191,19 +238,19 @@ class FixtureJobBridge final : public BoundedJobBridge {
   std::condition_variable wake_;
   std::condition_variable settled_;
   Phase phase_ = Phase::Loaded;
+  /// Read by runs() without the lock, which a result function holds.
+  std::atomic<bool> unloaded_{false};
   bool sink_set_ = false;
-  bool held_ = false;
   bool stopping_ = false;
   /// Events wait for the thread to deliver them.
   bool pending_ = false;
   bool delivering_ = false;
   /// An unload is delivering on its caller's thread.
   bool unloading_ = false;
-  /// Jobs without a terminal event: the running one and those in lane_.
+  /// Jobs without a terminal event: those of both lanes.
   std::map<std::uint64_t, OpenJob> open_;
-  std::deque<std::uint64_t> lane_;
-  /// Zero when no job runs.
-  std::uint64_t running_ = 0;
+  Lane speech_;
+  Lane voice_activity_;
   /// Jobs a lost backend failed; released by unload().
   std::vector<std::uint64_t> unreleased_;
   std::optional<Error> next_failure_;

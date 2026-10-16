@@ -819,6 +819,8 @@ TEST(JobBridgeFixture, RecordingSinkFlagsOverlappingCallbacks) {
 TEST(JobBridgeFixture, RefusalsAreTypedAndAFailedSubmitDeliversNothing) {
   auto fake =
       std::make_shared<FakeBoundedJobBridge>(std::vector<JobClass>{JobClass::TtsSynthesis}, 1);
+  EXPECT_FALSE(fake->runs(JobClass::SttDecode));
+  EXPECT_TRUE(fake->runs(JobClass::TtsSynthesis));
   const JobRequest stt = speech_request(1, JobClass::SttDecode);
   const JobRequest tts = speech_request(2, JobClass::TtsSynthesis);
   auto expect_refusal = [](const Result<void>& r, Error::Code code, const char* reason) {

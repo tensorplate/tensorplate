@@ -163,6 +163,22 @@ TEST_F(JobBridgeTest, ASessionBuiltWithABridgeLoadsWithJobsWhateverItsConfigurat
   EXPECT_TRUE(h.wait_kinds(1, {Accepted}));
 }
 
+TEST(JobBridgeClasses, ItRunsTheClassesTheLoadDeclaredFromTheLoadUntilTheUnload) {
+  ScriptedSidecar peer(ScriptedSidecar::Options{.job_classes = {"stt_decode", "vad_frames"},
+                                                .declares_any_job_class = true});
+  JobBridgeHarness h{patient(), peer.launcher()};
+  const auto runs = [&h] {
+    return std::vector<bool>{h.bridge->runs(JobClass::SttDecode),
+                             h.bridge->runs(JobClass::TtsSynthesis),
+                             h.bridge->runs(JobClass::VadFrames)};
+  };
+  EXPECT_EQ(runs(), (std::vector<bool>{false, false, false}));
+  ASSERT_TRUE(h.session->load(speech_spec()).has_value());
+  EXPECT_EQ(runs(), (std::vector<bool>{true, false, true}));
+  ASSERT_TRUE(h.session->unload().has_value());
+  EXPECT_EQ(runs(), (std::vector<bool>{false, false, false}));
+}
+
 TEST(JobBridgeRegistration, TheRegisteredBackendBuildsABridgeOnlyWithABufferManager) {
   BackendRegistry registry;
   ASSERT_TRUE(register_python_pytorch_backend(registry).has_value());

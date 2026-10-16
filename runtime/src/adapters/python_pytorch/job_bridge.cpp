@@ -31,6 +31,10 @@ Result<void> JobBridge::submit(JobRequest request) {
   return channel_->submit(request);
 }
 
+bool JobBridge::runs(JobClass job_class) const noexcept {
+  return channel_->runs(job_class);
+}
+
 Result<void> JobBridge::cancel(std::uint64_t job_id) {
   return channel_->cancel(job_id);
 }
