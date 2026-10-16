@@ -25,6 +25,7 @@
 
 #include "serving/session/dispatch.hpp"
 #include "serving/session/vad_policy.hpp"
+#include "serving/session/window_scheduler.hpp"
 
 namespace tensorplate::serving {
 
@@ -49,6 +50,10 @@ struct SpeechDispatchOptions {
   /// its bound: only the backend's reset frees that session's slot. It
   /// returns promptly and never stops or destroys the dispatch.
   std::function<void(const Error&)> on_stall;
+  /// Called on the dispatch's thread, at most once an utterance, when the
+  /// backend fails a partial decode of it; the partial is dropped and the
+  /// session goes on. It returns promptly.
+  std::function<void(const Error&)> on_partial_failed;
 };
 
 /// What the dispatch has done so far, as of the last step its thread ended.
@@ -65,6 +70,8 @@ struct SpeechDispatchStats {
   std::uint64_t releases_refused = 0;
   /// Jobs still running when their deadline passed.
   std::uint64_t jobs_past_deadline = 0;
+  /// Partial decodes the backend failed, each dropped.
+  std::uint64_t partials_failed = 0;
   /// Session releases not acknowledged when their bound passed.
   std::uint64_t releases_past_bound = 0;
   /// The longest a session release waited for the backend's acknowledgement,
@@ -101,6 +108,15 @@ struct SpeechDispatchStats {
 ///   voice-activity job that fails fails its session. An endpoint waiting
 ///   for output room does not hold its decode back; the finalization
 ///   completes once it is queued.
+/// - Partial transcripts, with voice detection: the open utterance's audio
+///   so far is an `stt_decode` whenever its WindowScheduler says one is due
+///   and the session has no job on the lane, its result offered as the
+///   utterance's next revision unless it is blank or unchanged. A decode an
+///   endpoint waits for, or a synthesis, goes before any partial. No partial
+///   starts once the session drains or a Finalize waits for its frames, and
+///   one whose utterance ended while it ran is dropped. One the backend fails
+///   is dropped too; the backend's refusal of a job of the session, a
+///   deadline missed or the backend's reset ends the session as for any job.
 /// - Text: a segment is one `tts_synthesis`, whose one audio result is cut
 ///   into chunks of kAudioChunkDuration. A chunk is cut only when the one
 ///   before it was queued, so backpressure holds one chunk and nothing grows.
@@ -108,14 +124,15 @@ struct SpeechDispatchStats {
 ///   SessionTerms::max_synthesis_audio fails the session
 ///   (`synthesis_audio_limit_exceeded`).
 /// - One decode or synthesis is in flight for the whole dispatch, sessions in
-///   the order their work became ready; a session whose job ended goes behind
-///   those waiting. Beside it, each session has at most one voice-activity
-///   job in flight and the dispatch kVadJobsInFlight, sessions in turn. A job
-///   keeps its slot until the backend releases it, also once it ended or its
-///   session is gone, so the backend never holds more of the dispatch's jobs
-///   open than kVadJobsInFlight voice-activity jobs and one other. Once the
-///   backend is lost, which releases nothing before the unload, only a
-///   running job holds one.
+///   the order their work became ready, partial decodes after the rest; a
+///   session whose job ended goes behind those waiting. Beside it, each
+///   session has at most one voice-activity job in flight and the dispatch
+///   kVadJobsInFlight, sessions in turn. A job keeps its slot until the
+///   backend releases it, also once it ended or its session is gone, so the
+///   backend never holds more of the dispatch's jobs open than
+///   kVadJobsInFlight voice-activity jobs and one other. Once the backend is
+///   lost, which releases nothing before the unload, only a running job holds
+///   one.
 /// - A job still running at its deadline fails its session if that session
 ///   is live (`deadline_missed`), whose release then cancels it. A session
 ///   release that waits past its bound, the backend holding a job it does not
@@ -262,10 +279,20 @@ class SpeechJobDispatch final : public SessionDispatch {
     EndpointReason reason = EndpointReason::ClientFinalize;
     std::uint64_t finalize_sequence = 0;
   };
+  /// The partial transcripts of the open utterance; reset as it ends.
+  struct OpenPartials {
+    /// The last one offered, and its revision.
+    std::uint32_t revision = 0;
+    std::string text;
+    /// A decode's text to offer once nothing is held.
+    std::optional<std::string> ready;
+  };
   /// Voice detection of an audio session.
   struct Detection {
-    explicit Detection(const VadPolicy& prototype) : policy(prototype) {}
+    explicit Detection(const VadPolicy& prototype)
+        : policy(prototype), windows(prototype.profile()) {}
     VadPolicy policy;
+    WindowScheduler windows;
     /// Scored and not observed yet, from the policy's next frame on.
     std::deque<float> scores;
     /// End of the frames submitted for scoring.
@@ -278,6 +305,11 @@ class SpeechJobDispatch final : public SessionDispatch {
     /// Oldest first: a finalization can complete before the dispatch sees
     /// the Finalize that joined it, and the session then takes another.
     std::deque<PendingEnd> pending;
+    /// Waiting on the partial lane.
+    bool partial_queued = false;
+    OpenPartials partials;
+    /// The last utterance a failed partial decode was reported for.
+    std::uint64_t failure_reported = 0;
   };
   struct Session {
     SessionTerms terms;
@@ -285,7 +317,8 @@ class SpeechJobDispatch final : public SessionDispatch {
     /// Produced and not yet queued, oldest first; nothing else is produced
     /// meanwhile.
     std::deque<OutputItem> held;
-    /// Task items queued and not yet reported delivered.
+    /// Task items queued and not yet reported delivered, partial transcripts
+    /// aside: one that gives way unsent is never delivered.
     std::uint64_t undelivered = 0;
     bool draining = false;
     /// The drain is a client's half-close, which ends the open utterance.
@@ -337,6 +370,8 @@ class SpeechJobDispatch final : public SessionDispatch {
     std::uint64_t session_key = 0;
     SchedulerClock::TimePoint deadline{};
     bool past_deadline = false;
+    /// The utterance a partial decode is for; zero for any other job.
+    std::uint64_t partial_of = 0;
   };
 
   SpeechJobDispatch(std::shared_ptr<BoundedJobBridge> bridge, std::shared_ptr<Core> core,
@@ -361,7 +396,12 @@ class SpeechJobDispatch final : public SessionDispatch {
   /// The live session a job ended for, its job slot freed; none when the end
   /// is counted as discarded or has ended the session.
   [[nodiscard]] Session* serving_session(SessionManager& manager, std::uint64_t key,
-                                         const JobEnded& ended, bool voice_activity);
+                                         const JobEnded& ended, bool voice_activity,
+                                         std::uint64_t partial_of);
+  /// Keeps a partial decode's text to offer, unless its utterance ended or
+  /// the text is blank or unchanged.
+  static void take_partial(Session& session, std::uint64_t utterance_id, std::string text);
+  void drop_failed_partial(Session& session, std::uint64_t utterance_id, const Error& error);
   /// Acts on the deadline and the release bounds the clock has passed.
   void check_bounds(SessionManager& manager);
   /// The next deadline or bound not acted on yet.
@@ -373,20 +413,34 @@ class SpeechJobDispatch final : public SessionDispatch {
   [[nodiscard]] SchedulerClock::Duration job_deadline(const JobRequest& request,
                                                       const Session& session) const;
   /// Submits the job of the session that has waited longest while the lane
-  /// is free, and voice-activity jobs while fewer than kVadJobsInFlight hold a
-  /// slot.
+  /// is free, a partial decode only when no other job waits, and
+  /// voice-activity jobs while fewer than kVadJobsInFlight hold a slot.
   void start_next(SessionManager& manager);
   void start_voice_activity(SessionManager& manager);
   /// The session's next job, its input buffer in `input` when it has one;
   /// none, and the session failed, when the request cannot be made.
   [[nodiscard]] std::optional<JobRequest> next_request(SessionManager& manager, std::uint64_t key,
                                                        Session& session, HeldBuffer& input);
+  /// The open utterance's partial decode, when one is still due.
+  [[nodiscard]] std::optional<JobRequest> next_partial_request(SessionManager& manager,
+                                                               std::uint64_t key, Session& session,
+                                                               HeldBuffer& input);
+  /// An `stt_decode` of `audio`, whose first sample is `first_sample`.
+  [[nodiscard]] std::optional<JobRequest> decode_request(SessionManager& manager, std::uint64_t key,
+                                                         Session& session, HeldBuffer& input,
+                                                         std::span<const std::byte> audio,
+                                                         std::uint64_t first_sample);
   /// The session's next voice-activity job, over the frames due.
   [[nodiscard]] std::optional<JobRequest> next_vad_request(SessionManager& manager,
                                                            std::uint64_t key, Session& session,
                                                            HeldBuffer& input);
   void want_job(std::uint64_t key, Session& session);
   void want_vad(std::uint64_t key, Session& session);
+  void want_partial(std::uint64_t key, Session& session);
+  /// The window of the partial decode due, if the open utterance has one.
+  [[nodiscard]] static std::optional<SampleWindow> partial_window(const Session& session);
+  /// Holds the partial transcript a decode gave. False when there is none.
+  [[nodiscard]] static bool hold_partial(Session& session);
   static void take_audio(SessionManager& manager, std::uint64_t key, Session& session,
                          std::span<const std::byte> frame);
   /// Keeps a frame of a session with voice detection, its credit held.
@@ -454,6 +508,8 @@ class SpeechJobDispatch final : public SessionDispatch {
   std::optional<InFlight> in_flight_;
   /// The lane's job until the backend releases it: the lane is taken till then.
   std::optional<std::uint64_t> unreleased_job_;
+  /// Sessions due a partial decode: served once lane_ is empty.
+  std::deque<std::uint64_t> partial_lane_;
   std::deque<std::uint64_t> vad_lane_;
   /// By job id, until each ends.
   std::map<std::uint64_t, InFlight> vad_in_flight_;

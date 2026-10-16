@@ -2,6 +2,7 @@
 #include "serving/session/speech_dispatch.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <string_view>
@@ -46,8 +47,15 @@ std::uint64_t end_micros(std::uint64_t sample, std::uint64_t rate) {
   return (sample * kMicrosPerSecond + rate - 1) / rate;
 }
 
-bool task_output(OutputKind kind) {
-  return kind == OutputKind::Audio || kind == OutputKind::Partial || kind == OutputKind::Result;
+/// Task output a drain waits to see delivered: a partial transcript that
+/// gave way unsent never is.
+bool awaits_delivery(OutputKind kind) {
+  return kind == OutputKind::Audio || kind == OutputKind::Result;
+}
+
+bool blank(const std::string& text) {
+  return std::all_of(text.begin(), text.end(),
+                     [](unsigned char c) { return std::isspace(c) != 0; });
 }
 
 Error not_served(const char* message, const char* context) {
@@ -65,6 +73,20 @@ bool input_owed(const SessionManager& manager, std::uint64_t key, std::size_t he
 Error wrong_input_kind() {
   return Error::make(Error::Code::Internal, "input of a kind the session does not take",
                      "wrong_input_kind");
+}
+
+/// The stream's reason for a backend error that answers any job of the
+/// session, not one job's work: a session it unloaded, or a job class or an
+/// option it refuses.
+std::optional<std::string> refusal_reason(const Error& error) {
+  const std::string_view reason = error.context ? std::string_view{*error.context} : "";
+  if (reason == "session_unloaded") {
+    return "backend_unavailable";
+  }
+  if (reason == "job_class_unsupported" || reason == "job_not_permitted") {
+    return "backend_unsupported_capability";
+  }
+  return std::nullopt;
 }
 
 /// The bridge's word for a job that ended because the backend was lost.
@@ -123,7 +145,7 @@ struct SpeechJobDispatch::Command {
     std::uint64_t client_sequence = 0;
   };
   struct Delivered {
-    bool task_output = false;
+    bool awaited = false;
   };
   struct SessionReleased {};
   struct JobReleased {
@@ -351,6 +373,7 @@ void SpeechJobDispatch::stop() noexcept {
     }
     sessions_.clear();
     lane_.clear();
+    partial_lane_.clear();
     vad_lane_.clear();
   });
 }
@@ -416,7 +439,7 @@ void SpeechJobDispatch::finalize(std::uint64_t session_key, std::uint64_t client
 }
 
 void SpeechJobDispatch::output_delivered(std::uint64_t session_key, OutputKind kind) {
-  core_->post({session_key, Command::Delivered{task_output(kind)}});
+  core_->post({session_key, Command::Delivered{awaits_delivery(kind)}});
 }
 
 struct SpeechJobDispatch::Step {
@@ -562,7 +585,7 @@ void SpeechJobDispatch::hand_over(SessionManager& manager, std::uint64_t key, Se
     }
   } else if (const auto* delivered = std::get_if<Command::Delivered>(&command.body)) {
     // Any delivery can make room for a held item; only task output counts.
-    session.undelivered -= delivered->task_output ? 1 : 0;
+    session.undelivered -= delivered->awaited ? 1 : 0;
   }
 }
 
@@ -633,16 +656,18 @@ void SpeechJobDispatch::acknowledge(SessionManager& manager, std::uint64_t key) 
 
 void SpeechJobDispatch::job_ended(SessionManager& manager, std::uint64_t key, JobEnded& ended) {
   const bool voice_activity = vad_in_flight_.erase(ended.job_id) != 0;
+  std::uint64_t partial_of = 0;
   if (!voice_activity) {
     if (!in_flight_ || in_flight_->job_id != ended.job_id) {
       ++stats_.jobs_discarded;
       return;
     }
+    partial_of = in_flight_->partial_of;
     // Its deadline no longer applies; its lane stays taken until it is
     // released.
     in_flight_.reset();
   }
-  Session* const served = serving_session(manager, key, ended, voice_activity);
+  Session* const served = serving_session(manager, key, ended, voice_activity, partial_of);
   if (served == nullptr) {
     return;
   }
@@ -653,8 +678,12 @@ void SpeechJobDispatch::job_ended(SessionManager& manager, std::uint64_t key, Jo
                                      vad->probabilities.end());
     return;
   }
-  if (auto* transcript = std::get_if<TranscriptResult>(&ended.outcome);
-      transcript != nullptr && !voice_activity && !session.ended_utterances.empty()) {
+  auto* transcript = std::get_if<TranscriptResult>(&ended.outcome);
+  if (transcript != nullptr && partial_of != 0) {
+    take_partial(session, partial_of, std::move(transcript->text));
+    return;
+  }
+  if (transcript != nullptr && !voice_activity && !session.ended_utterances.empty()) {
     session.ended_utterances.front().transcript = std::move(*transcript);
     return;
   }
@@ -683,7 +712,8 @@ void SpeechJobDispatch::job_ended(SessionManager& manager, std::uint64_t key, Jo
 SpeechJobDispatch::Session* SpeechJobDispatch::serving_session(SessionManager& manager,
                                                                std::uint64_t key,
                                                                const JobEnded& ended,
-                                                               bool voice_activity) {
+                                                               bool voice_activity,
+                                                               std::uint64_t partial_of) {
   const auto it = sessions_.find(key);
   const auto* error = std::get_if<Error>(&ended.outcome);
   const bool served = it != sessions_.end() && !it->second.ended;
@@ -700,10 +730,38 @@ SpeechJobDispatch::Session* SpeechJobDispatch::serving_session(SessionManager& m
   (voice_activity ? session.detection->job : session.job) = JobState::None;
   if (error != nullptr) {
     ++stats_.jobs_failed;
-    fail_for_backend(manager, key, session, *error);
+    // A refusal would meet the final too: it fails the session now.
+    if (partial_of != 0 && !refusal_reason(*error)) {
+      drop_failed_partial(session, partial_of, *error);
+    } else {
+      fail_for_backend(manager, key, session, *error);
+    }
     return nullptr;
   }
   return &session;
+}
+
+void SpeechJobDispatch::take_partial(Session& session, std::uint64_t utterance_id,
+                                     std::string text) {
+  OpenPartials& partials = session.detection->partials;
+  // An utterance that ended meanwhile has had its endpoint: no partial follows.
+  if (utterance_id != session.utterances + 1 || blank(text) || text == partials.text) {
+    return;
+  }
+  partials.ready = std::move(text);
+}
+
+// The final is still decoded, and fails typed on its own if it fails too.
+void SpeechJobDispatch::drop_failed_partial(Session& session, std::uint64_t utterance_id,
+                                            const Error& error) {
+  ++stats_.partials_failed;
+  Detection& detection = *session.detection;
+  if (detection.failure_reported != utterance_id) {
+    detection.failure_reported = utterance_id;
+    if (options_.on_partial_failed) {
+      options_.on_partial_failed(error);
+    }
+  }
 }
 
 void SpeechJobDispatch::check_bounds(SessionManager& manager) {
@@ -809,26 +867,65 @@ void SpeechJobDispatch::want_vad(std::uint64_t key, Session& session) {
   }
 }
 
+void SpeechJobDispatch::want_partial(std::uint64_t key, Session& session) {
+  Detection& detection = *session.detection;
+  if (session.job == JobState::None && !detection.partial_queued && partial_window(session)) {
+    detection.partial_queued = true;
+    partial_lane_.push_back(key);
+  }
+}
+
+std::optional<SampleWindow> SpeechJobDispatch::partial_window(const Session& session) {
+  const Detection& detection = *session.detection;
+  // An utterance whose end was asked for is decoded whole next; one the
+  // session drains without ending is not decoded at all.
+  if (session.draining || !detection.pending.empty()) {
+    return std::nullopt;
+  }
+  return detection.windows.due(detection.policy.next_frame_start());
+}
+
+bool SpeechJobDispatch::hold_partial(Session& session) {
+  OpenPartials& partials = session.detection->partials;
+  if (!partials.ready) {
+    return false;
+  }
+  partials.text = std::move(*partials.ready);
+  partials.ready.reset();
+  session.held.push_back(make_task_output_item(
+      PartialTranscriptOutput{session.utterances + 1, ++partials.revision, partials.text}));
+  return true;
+}
+
 void SpeechJobDispatch::start_next(SessionManager& manager) {
   while (!(backend_lost_ ? in_flight_.has_value() : unreleased_job_.has_value()) &&
-         !lane_.empty()) {
-    const std::uint64_t key = lane_.front();
-    lane_.pop_front();
+         !(lane_.empty() && partial_lane_.empty())) {
+    const bool partial = lane_.empty();
+    std::deque<std::uint64_t>& queue = partial ? partial_lane_ : lane_;
+    const std::uint64_t key = queue.front();
+    queue.pop_front();
     const auto it = sessions_.find(key);
     if (it == sessions_.end() || it->second.ended) {
       continue;
     }
     Session& session = it->second;
-    session.job = JobState::None;
     HeldBuffer input;
-    auto request = next_request(manager, key, session, input);
+    std::optional<JobRequest> request;
+    if (partial) {
+      session.detection->partial_queued = false;
+      request = next_partial_request(manager, key, session, input);
+    } else {
+      session.job = JobState::None;
+      request = next_request(manager, key, session, input);
+    }
     if (!request) {
       continue;
     }
     const std::uint64_t job_id = request->identity().job_id;
     // Recorded before the submit: the job's events may overtake its return.
     core_->hold_input(job_id, std::move(input));
-    in_flight_ = InFlight{job_id, key, clock_.now() + job_deadline(*request, session)};
+    in_flight_ = InFlight{job_id, key, clock_.now() + job_deadline(*request, session), false,
+                          partial ? session.utterances + 1 : 0};
     unreleased_job_ = job_id;
     session.job = JobState::Running;
     const auto submitted = bridge_->submit(std::move(request).value());
@@ -885,10 +982,10 @@ void SpeechJobDispatch::start_voice_activity(SessionManager& manager) {
 std::optional<JobRequest> SpeechJobDispatch::next_request(SessionManager& manager,
                                                           std::uint64_t key, Session& session,
                                                           HeldBuffer& input) {
-  const JobIdentity identity{next_job_id_++, key, options_.generation};
   if (session.active) {
     auto synthesis =
-        JobRequest::create(identity, JobClass::TtsSynthesis, TextSegment{session.active->text},
+        JobRequest::create(JobIdentity{next_job_id_++, key, options_.generation},
+                           JobClass::TtsSynthesis, TextSegment{session.active->text},
                            JobOptions{session.terms.language, session.terms.voice, kNormalSpeed});
     if (!synthesis) {
       fail(manager, key, session, synthesis.error());
@@ -897,7 +994,35 @@ std::optional<JobRequest> SpeechJobDispatch::next_request(SessionManager& manage
     return std::move(synthesis).value();
   }
   EndedUtterance& utterance = session.ended_utterances.front();
-  const auto buffer = core_->buffers.allocate(utterance.audio.size());
+  auto decode =
+      decode_request(manager, key, session, input, utterance.audio, utterance.first_sample);
+  // The buffer is what stays readable for the job from here on.
+  std::vector<std::byte>().swap(utterance.audio);
+  return decode;
+}
+
+std::optional<JobRequest> SpeechJobDispatch::next_partial_request(SessionManager& manager,
+                                                                  std::uint64_t key,
+                                                                  Session& session,
+                                                                  HeldBuffer& input) {
+  const auto window = partial_window(session);
+  if (!window) {
+    return std::nullopt;
+  }
+  session.detection->windows.started(window->end);
+  const std::uint64_t width = session.terms.audio_format.bytes_per_sample();
+  const auto audio = std::span{session.open_audio}.subspan(
+      (window->first - session.open_start) * width, (window->end - window->first) * width);
+  return decode_request(manager, key, session, input, audio, window->first);
+}
+
+std::optional<JobRequest> SpeechJobDispatch::decode_request(SessionManager& manager,
+                                                            std::uint64_t key, Session& session,
+                                                            HeldBuffer& input,
+                                                            std::span<const std::byte> audio,
+                                                            std::uint64_t first_sample) {
+  const JobIdentity identity{next_job_id_++, key, options_.generation};
+  const auto buffer = core_->buffers.allocate(audio.size());
   if (!buffer) {
     fail(manager, key, session, buffer.error());
     return std::nullopt;
@@ -908,15 +1033,12 @@ std::optional<JobRequest> SpeechJobDispatch::next_request(SessionManager& manage
     fail(manager, key, session, bytes.error());
     return std::nullopt;
   }
-  std::copy(utterance.audio.begin(), utterance.audio.end(), bytes->begin());
-  const std::size_t size = utterance.audio.size();
-  // The buffer is what stays readable for the job from here on.
-  std::vector<std::byte>().swap(utterance.audio);
+  std::copy(audio.begin(), audio.end(), bytes->begin());
   JobOptions options;
   options.language = session.terms.language;
   auto decode = JobRequest::create(
       identity, JobClass::SttDecode,
-      AudioFrames{kJobInputAudioFormat, PcmWindow{*buffer, 0, size}, utterance.first_sample},
+      AudioFrames{kJobInputAudioFormat, PcmWindow{*buffer, 0, audio.size()}, first_sample},
       std::move(options));
   if (!decode) {
     fail(manager, key, session, decode.error());
@@ -1030,6 +1152,8 @@ void SpeechJobDispatch::end_utterance(Session& session, std::uint64_t first, std
   session.ended_at = end;
   // Detected by the dispatch itself: the client learns of it before the final.
   if (session.detection) {
+    session.detection->windows.close();
+    session.detection->partials = {};
     session.held.push_back(
         make_task_output_item(EndpointDetectedOutput{utterance_id, end, reason}));
   }
@@ -1084,17 +1208,14 @@ void SpeechJobDispatch::reset_every_session(SessionManager& manager, const Error
 
 void SpeechJobDispatch::fail_for_backend(SessionManager& manager, std::uint64_t key,
                                          Session& session, const Error& error) {
-  const std::string_view reason = error.context ? std::string_view{*error.context} : "";
   session.ended = true;
   if (backend_was_reset(error)) {
     (void)manager.apply(key, Event::BackendReset, error);
     return;
   }
   Error cause = error;
-  if (reason == "session_unloaded") {
-    cause.context = "backend_unavailable";
-  } else if (reason == "job_class_unsupported" || reason == "job_not_permitted") {
-    cause.context = "backend_unsupported_capability";
+  if (auto reason = refusal_reason(error)) {
+    cause.context = std::move(reason);
   }
   (void)manager.apply(key, Event::Fail, std::move(cause));
 }
@@ -1131,13 +1252,14 @@ bool SpeechJobDispatch::offer_held(SessionManager& manager, std::uint64_t key, S
   if (*offered == OutputOffer::Full) {
     return false;
   }
+  const bool awaited = awaits_delivery(session.held.front().kind);
   session.held.pop_front();
   if (*offered == OutputOffer::Suppressed || *offered == OutputOffer::Closed) {
     session.ended = true;
     session.held.clear();
     return false;
   }
-  ++session.undelivered;
+  session.undelivered += awaited ? 1 : 0;
   return true;
 }
 
@@ -1187,8 +1309,11 @@ bool SpeechJobDispatch::advance_audio(SessionManager& manager, std::uint64_t key
   if (!session.ended_utterances.empty()) {
     return complete_utterance(manager, key, session);
   }
-  if (session.detection && advance_detection(manager, key, session)) {
-    return true;
+  if (session.detection) {
+    if (hold_partial(session) || advance_detection(manager, key, session)) {
+      return true;
+    }
+    want_partial(key, session);
   }
   if (!session.draining || session.owed_finalize != 0) {
     return false;
@@ -1249,10 +1374,15 @@ bool SpeechJobDispatch::observe_score(SessionManager& manager, std::uint64_t key
     fail(manager, key, session, outcome.error());
     return false;
   }
-  if (outcome->duration_split &&
-      !end_automatically(manager, key, session, start, *outcome->duration_split,
-                         EndpointReason::DurationLimit)) {
-    return false;
+  if (outcome->duration_split) {
+    if (!end_automatically(manager, key, session, start, *outcome->duration_split,
+                           EndpointReason::DurationLimit)) {
+      return false;
+    }
+    detection.windows.open(*outcome->duration_split, *outcome->duration_split);
+  }
+  if (outcome->onset) {
+    detection.windows.open(*outcome->onset, *detection.policy.speech_start());
   }
   if (outcome->silence_endpoint) {
     const std::uint64_t end = *outcome->silence_endpoint;

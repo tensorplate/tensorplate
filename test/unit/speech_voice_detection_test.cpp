@@ -5,8 +5,12 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <span>
+#include <string>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -33,6 +37,8 @@ using Binding = ReferenceBinding;
 using Event = LogicalSessionEvent;
 using State = LogicalSessionState;
 using Bytes = std::vector<std::byte>;
+/// Decode windows: the end of each, by its first sample.
+using Windows = std::map<std::uint64_t, std::uint64_t>;
 
 constexpr std::uint64_t kVadFrame = 512;
 constexpr std::uint64_t kLongest = 480'000;
@@ -92,6 +98,19 @@ std::vector<std::uint64_t> scored_ends(const SpeechUnderTest& speech, std::uint6
   return ends;
 }
 
+/// The window of each utterance's final decode: the last decode of the
+/// utterance's first sample, after its partial decodes.
+Windows final_decodes(const SpeechUnderTest& speech, std::uint64_t key) {
+  Windows finals;
+  for (const auto& request : jobs_of(speech, JobClass::SttDecode)) {
+    if (request.identity().session_key == key) {
+      const auto& audio = std::get<AudioFrames>(request.payload());
+      finals[audio.start_sample] = audio.start_sample + audio.pcm.byte_size / 2;
+    }
+  }
+  return finals;
+}
+
 std::uint32_t queue_depth(Binding& binding, std::uint64_t key) {
   const auto status = binding.manager->status(key);
   return status ? status->input_queue_depth : 0;
@@ -105,6 +124,28 @@ std::unique_ptr<DispatchUnderTest> detecting_with_short_bounds(const SchedulerCl
   return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{}, result_following_input,
                                            BufferManagerConfig{}, std::move(options),
                                            VoiceDetection::On);
+}
+
+/// The one decode submitted is a partial of the utterance ending at `end`,
+/// held: the utterance's own decode waits behind it.
+void expect_partial_held_before(const SpeechUnderTest& speech, std::uint64_t key,
+                                std::uint64_t end) {
+  const auto decodes = jobs_of(speech, JobClass::SttDecode);
+  ASSERT_EQ(decodes.size(), 1U);
+  EXPECT_EQ(decodes.front().identity().session_key, key);
+  const auto& audio = std::get<AudioFrames>(decodes.front().payload());
+  EXPECT_EQ(audio.start_sample, 0U);
+  EXPECT_LT(audio.pcm.byte_size / 2, end);
+}
+
+/// Releases the decodes expect_partial_held_before() saw held: the partial
+/// ends, its release lets the endpoint's own decode start, and that ends.
+/// False if any of it outlasts the patience.
+bool end_endpoints_decode(SpeechUnderTest& speech) {
+  speech.fixture->release_jobs(JobClass::SttDecode);
+  return speech.fixture->settled(Binding::kPatience) &&
+         speech.strategy->wait_idle(Binding::kPatience) &&
+         speech.fixture->settled(Binding::kPatience);
 }
 
 void move_clock(Binding& binding, SchedulerClock::Duration by) {
@@ -142,10 +183,7 @@ TEST(SpeechVoiceDetection, ASilenceEndpointIsOfferedBeforeItsUtterancesDecodeEnd
   EXPECT_EQ(transcript->segments.front().end_us, expected.front().end_us);
   ASSERT_TRUE(binding.settle());
   EXPECT_EQ(binding.live_state(key), State::Active);
-  const auto decodes = jobs_of(speech, JobClass::SttDecode);
-  ASSERT_EQ(decodes.size(), 1U);
-  EXPECT_EQ(std::get<AudioFrames>(decodes.front().payload()).start_sample, 0U);
-  EXPECT_EQ(std::get<AudioFrames>(decodes.front().payload()).pcm.byte_size, 2 * 42 * kVadFrame);
+  EXPECT_EQ(final_decodes(speech, key), (Windows{{0, 42 * kVadFrame}}));
 }
 
 TEST(SpeechVoiceDetection, AFinalizeEndsTheUtteranceOnceTheFramesBeforeItWereScored) {
@@ -252,9 +290,7 @@ TEST(SpeechVoiceDetection, SilenceBeforeTheOnsetIsDroppedButItsLeadingPaddingKep
   const std::uint64_t onset = 31 * kVadFrame - 2'560;
   ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 1, onset,
                                                samples_of(audio, onset, 24'000), 3));
-  const auto decodes = jobs_of(speech, JobClass::SttDecode);
-  ASSERT_EQ(decodes.size(), 1U);
-  EXPECT_EQ(std::get<AudioFrames>(decodes.front().payload()).start_sample, onset);
+  EXPECT_EQ(final_decodes(speech, key), (Windows{{onset, 24'000}}));
 }
 
 TEST(SpeechVoiceDetection, AFinalizeInSilenceYieldsAFinalWithoutSegmentsAndNoDecode) {
@@ -451,15 +487,13 @@ TEST(SpeechVoiceDetection, AFinalizeTakenWhileAnotherWaitsForItsFramesIsAnswered
   ASSERT_TRUE(binding.audio_in_long_frames(key, first));
   ASSERT_TRUE(binding.read_as<EndpointDetectedOutput>(key).has_value());
   ASSERT_TRUE(binding.settle());
+  ASSERT_NO_FATAL_FAILURE(expect_partial_held_before(speech, key, 42 * kVadFrame));
   speech.fixture->hold_jobs(JobClass::VadFrames);
   const Bytes following = voiced(3'200, 63);
   ASSERT_TRUE(binding.audio_in_long_frames(key, following));
   ASSERT_TRUE(binding.settle());
   bool decode_ended = false;
-  binding.before_next(key, Event::Finalize, [&] {
-    speech.fixture->release_jobs(JobClass::SttDecode);
-    decode_ended = speech.fixture->settled(Binding::kPatience);
-  });
+  binding.before_next(key, Event::Finalize, [&] { decode_ended = end_endpoints_decode(speech); });
   binding.finalize(key, 7);
   ASSERT_TRUE(decode_ended);
   const auto endpoints_final = binding.read_as<FinalTranscriptOutput>(key);
@@ -494,6 +528,7 @@ TEST(SpeechVoiceDetection, AFinalizeWaitingInTurnIsScoredOnlyToItsOwnEnd) {
   ASSERT_TRUE(binding.audio_in_long_frames(key, first));
   ASSERT_TRUE(binding.read_as<EndpointDetectedOutput>(key).has_value());
   ASSERT_TRUE(binding.settle());
+  ASSERT_NO_FATAL_FAILURE(expect_partial_held_before(speech, key, endpoint));
   speech.fixture->hold_jobs(JobClass::VadFrames);
   for (int session = 0; session < 8; ++session) {
     binding.audio(binding.open_audio(), voiced(1'024, 92));
@@ -502,10 +537,7 @@ TEST(SpeechVoiceDetection, AFinalizeWaitingInTurnIsScoredOnlyToItsOwnEnd) {
   ASSERT_TRUE(binding.audio_in_long_frames(key, following));
   ASSERT_TRUE(binding.settle());
   bool decode_ended = false;
-  binding.before_next(key, Event::Finalize, [&] {
-    speech.fixture->release_jobs(JobClass::SttDecode);
-    decode_ended = speech.fixture->settled(Binding::kPatience);
-  });
+  binding.before_next(key, Event::Finalize, [&] { decode_ended = end_endpoints_decode(speech); });
   binding.finalize(key, 7);
   ASSERT_TRUE(decode_ended);
   ASSERT_TRUE(binding.read_as<FinalTranscriptOutput>(key).has_value());
@@ -621,7 +653,7 @@ TEST(SpeechVoiceDetection, AnUtteranceWhollyInsideTheSilenceRunEndingItIsSilence
     EXPECT_EQ(finals.back().end_sample_offset, end);
     EXPECT_TRUE(finals.back().segments.empty());
     ASSERT_TRUE(binding.settle());
-    EXPECT_EQ(jobs_of(speech_of(binding), JobClass::SttDecode).size(), splits);
+    EXPECT_EQ(final_decodes(speech_of(binding), key).size(), splits);
   }
 }
 
@@ -1009,6 +1041,533 @@ TEST(SpeechVoiceDetection, AVoiceActivityJobsDeadlineIsReachedWithoutNotice) {
   speech.release_jobs();
   ASSERT_TRUE(binding.ends_as(key, State::Failed));
   EXPECT_EQ(binding.manager->tombstone(key)->reason, "deadline_missed");
+}
+
+// Partial transcripts: the open utterance's audio so far, decoded once the
+// accumulation and then each stride of it was scored.
+
+/// A decode: its session, and its window's first sample and end.
+using Decode = std::tuple<std::uint64_t, std::uint64_t, std::uint64_t>;
+
+std::vector<Decode> decodes_of(const SpeechUnderTest& speech) {
+  std::vector<Decode> decodes;
+  for (const auto& request : jobs_of(speech, JobClass::SttDecode)) {
+    const auto& audio = std::get<AudioFrames>(request.payload());
+    decodes.emplace_back(request.identity().session_key, audio.start_sample,
+                         audio.start_sample + audio.pcm.byte_size / 2);
+  }
+  return decodes;
+}
+
+/// What the dispatch's decode of [first, end) of a session's `audio` yields.
+std::string text_of(const SpeechUnderTest& speech, const Bytes& audio, std::uint64_t first,
+                    std::uint64_t end) {
+  return speech.transcript(first, samples_of(audio, first, end)).front().text;
+}
+
+void expect_partial(Binding& binding, std::uint64_t key, std::uint64_t utterance_id,
+                    std::uint32_t revision, const std::string& text) {
+  const auto partial = binding.read_as<PartialTranscriptOutput>(key);
+  ASSERT_TRUE(partial.has_value());
+  EXPECT_EQ(partial->utterance_id, utterance_id);
+  EXPECT_EQ(partial->revision, revision);
+  EXPECT_EQ(partial->text, text);
+}
+
+/// Answers the nth decode with `answer(n)`, from one, and voice activity as
+/// the fixture does.
+FixtureJobBridge::ResultFunction answering_decodes(
+    std::function<Result<JobResult>(std::uint64_t, const JobRequest&, BufferManager&)> answer) {
+  auto decodes = std::make_shared<std::uint64_t>(0);
+  return [decodes, answer = std::move(answer)](const JobRequest& request,
+                                               BufferManager& buffers) -> Result<JobResult> {
+    if (request.job_class() != JobClass::SttDecode) {
+      return fixture_job_result(request, buffers);
+    }
+    return answer(++*decodes, request, buffers);
+  };
+}
+
+Result<JobResult> transcript_reading(std::string text) {
+  return JobResult::create(TranscriptResult{std::move(text), {}, {}});
+}
+
+std::unique_ptr<DispatchUnderTest> detecting_with_set_texts(const SchedulerClock& clock) {
+  auto answer = [](std::uint64_t decode, const JobRequest& request, BufferManager& buffers) {
+    switch (decode) {
+      case 1:
+        return transcript_reading(" \t ");
+      case 2:
+      case 3:
+        return transcript_reading("hello");
+      case 4:
+        return transcript_reading("hello world");
+      default:
+        return result_following_input(request, buffers);
+    }
+  };
+  return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{},
+                                           answering_decodes(answer), BufferManagerConfig{},
+                                           SpeechDispatchOptions{}, VoiceDetection::On);
+}
+
+/// The backend fails the first, second and fifth decode.
+Result<JobResult> failing_some_decodes(std::uint64_t decode, const JobRequest& request,
+                                       BufferManager& buffers) {
+  if (decode == 1 || decode == 2 || decode == 5) {
+    return unexpected(Error::make(Error::Code::Internal, "inference failed", "inference_failed"));
+  }
+  return result_following_input(request, buffers);
+}
+
+struct PartialFailures {
+  std::mutex mu;
+  std::vector<Error> reported;
+};
+
+PartialFailures& partial_failures() {
+  static PartialFailures failures;
+  return failures;
+}
+
+std::unique_ptr<DispatchUnderTest> detecting_with_failing_partials(const SchedulerClock& clock) {
+  SpeechDispatchOptions options;
+  options.on_partial_failed = [](const Error& cause) {
+    const std::lock_guard guard(partial_failures().mu);
+    partial_failures().reported.push_back(cause);
+  };
+  return std::make_unique<SpeechUnderTest>(
+      clock, FixtureJobBridgeOptions{}, answering_decodes(failing_some_decodes),
+      BufferManagerConfig{}, std::move(options), VoiceDetection::On);
+}
+
+std::unique_ptr<DispatchUnderTest> detecting_with_failing_partials_unreported(
+    const SchedulerClock& clock) {
+  return std::make_unique<SpeechUnderTest>(
+      clock, FixtureJobBridgeOptions{}, answering_decodes(failing_some_decodes),
+      BufferManagerConfig{}, SpeechDispatchOptions{}, VoiceDetection::On);
+}
+
+TEST(SpeechPartialTranscripts, ComeAtTheAccumulationThenEachStrideAndRestartEachUtterance) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes audio =
+      join(join(voiced(15 * kVadFrame, 70), quiet(10 * kVadFrame, 71)), voiced(10 * kVadFrame, 72));
+  // Speech from sample 0: its first 320 ms are the first window.
+  binding.audio(key, samples_of(audio, 0, 9 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_TRUE(decodes_of(speech).empty());
+  binding.audio(key, samples_of(audio, 9 * kVadFrame, 10 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{key, 0, 10 * kVadFrame}}));
+  ASSERT_NO_FATAL_FAILURE(
+      expect_partial(binding, key, 1, 1, text_of(speech, audio, 0, 10 * kVadFrame)));
+
+  // A frame short of the 160 ms stride, then the stride: the utterance so far.
+  binding.audio(key, samples_of(audio, 10 * kVadFrame, 14 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech).size(), 1U);
+  binding.audio(key, samples_of(audio, 14 * kVadFrame, 15 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech).back(), (Decode{key, 0, 15 * kVadFrame}));
+  ASSERT_NO_FATAL_FAILURE(
+      expect_partial(binding, key, 1, 2, text_of(speech, audio, 0, 15 * kVadFrame)));
+
+  // Scored at once with its endpoint, the silence starts no partial.
+  binding.audio(key, samples_of(audio, 15 * kVadFrame, 25 * kVadFrame));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::Silence, 1, 0,
+                                               samples_of(audio, 0, 25 * kVadFrame), 0));
+  binding.audio(key, samples_of(audio, 25 * kVadFrame, 35 * kVadFrame));
+  ASSERT_NO_FATAL_FAILURE(
+      expect_partial(binding, key, 2, 1, text_of(speech, audio, 25 * kVadFrame, 35 * kVadFrame)));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{key, 0, 10 * kVadFrame},
+                                                     {key, 0, 15 * kVadFrame},
+                                                     {key, 0, 25 * kVadFrame},
+                                                     {key, 25 * kVadFrame, 35 * kVadFrame}}));
+}
+
+TEST(SpeechPartialTranscripts, TheAccumulationCountsFromTheFirstSpeechFrameNotThePadding) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes audio = join(quiet(20 * kVadFrame, 73), voiced(10 * kVadFrame, 74));
+  ASSERT_TRUE(binding.audio_in_long_frames(key, samples_of(audio, 0, 29 * kVadFrame)));
+  ASSERT_TRUE(binding.settle());
+  // 320 ms past the onset's padded start, but not past its first speech frame.
+  EXPECT_TRUE(decodes_of(speech).empty());
+  binding.audio(key, samples_of(audio, 29 * kVadFrame, 30 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  const std::uint64_t onset = 20 * kVadFrame - 2'560;
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{key, onset, 30 * kVadFrame}}));
+  ASSERT_NO_FATAL_FAILURE(
+      expect_partial(binding, key, 1, 1, text_of(speech, audio, onset, 30 * kVadFrame)));
+}
+
+// Split mid-frame at 480,000, the next utterance's speech starts there: 320 ms
+// past it falls inside frame 947, so the frame ending at 485,376 makes it due.
+TEST(SpeechPartialTranscripts, AfterASplitTheNextUtterancesCountFromTheSplit) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const std::uint64_t scored = 948 * kVadFrame;
+  const Bytes audio = voiced(scored, 97);
+  ASSERT_TRUE(binding.audio_in_long_frames(key, audio));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0,
+                                               samples_of(audio, 0, kLongest), 0));
+  ASSERT_NO_FATAL_FAILURE(
+      expect_partial(binding, key, 2, 1, text_of(speech, audio, kLongest, scored)));
+  ASSERT_TRUE(binding.settle());
+  std::vector<Decode> after_split;
+  for (const auto& decode : decodes_of(speech)) {
+    if (std::get<1>(decode) == kLongest) {
+      after_split.push_back(decode);
+    }
+  }
+  EXPECT_EQ(after_split, (std::vector<Decode>{{key, kLongest, scored}}));
+}
+
+TEST(SpeechPartialTranscripts, StridesPassedWhileOneRunsGiveOneDecodeOfTheLatestAudio) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes audio = voiced(25 * kVadFrame, 75);
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(key, samples_of(audio, 0, 10 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  ASSERT_TRUE(binding.audio_in_long_frames(key, samples_of(audio, 10 * kVadFrame, 25 * kVadFrame)));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech).size(), 1U);
+  speech.release_jobs();
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech),
+            (std::vector<Decode>{{key, 0, 10 * kVadFrame}, {key, 0, 25 * kVadFrame}}));
+  // The second took the place of the first, unsent.
+  ASSERT_NO_FATAL_FAILURE(
+      expect_partial(binding, key, 1, 2, text_of(speech, audio, 0, 25 * kVadFrame)));
+}
+
+TEST(SpeechPartialTranscripts, OneWhoseUtteranceEndedWhileItRanIsDropped) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes audio = join(voiced(10 * kVadFrame, 76), quiet(10 * kVadFrame, 77));
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(key, samples_of(audio, 0, 10 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  binding.audio(key, samples_of(audio, 10 * kVadFrame, 20 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  speech.release_jobs();
+  ASSERT_TRUE(binding.settle());
+  const auto endpoint = binding.read(key);
+  ASSERT_TRUE(endpoint.has_value());
+  EXPECT_TRUE(std::holds_alternative<EndpointDetectedOutput>(*endpoint));
+  const auto transcript = binding.read(key);
+  ASSERT_TRUE(transcript.has_value());
+  EXPECT_TRUE(std::holds_alternative<FinalTranscriptOutput>(*transcript));
+  EXPECT_FALSE(binding.output(key)->take().has_value());
+  EXPECT_EQ(decodes_of(speech),
+            (std::vector<Decode>{{key, 0, 10 * kVadFrame}, {key, 0, 20 * kVadFrame}}));
+}
+
+TEST(SpeechPartialTranscripts, ADecodeAnEndpointWaitsForGoesBeforeAnotherSessionsPartial) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto first = binding.open_audio();
+  const auto second = binding.open_audio();
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(first, voiced(10 * kVadFrame, 78));
+  ASSERT_TRUE(binding.settle());
+  binding.audio(second, voiced(10 * kVadFrame, 79));
+  binding.audio(first, quiet(10 * kVadFrame, 80));
+  ASSERT_TRUE(binding.settle());
+  speech.release_jobs();
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{first, 0, 10 * kVadFrame},
+                                                     {first, 0, 20 * kVadFrame},
+                                                     {second, 0, 10 * kVadFrame}}));
+}
+
+TEST(SpeechPartialTranscripts, ASessionWhosePartialEndedGoesBehindThoseWaiting) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto first = binding.open_audio();
+  const auto second = binding.open_audio();
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(first, voiced(10 * kVadFrame, 81));
+  ASSERT_TRUE(binding.settle());
+  // Due again while its first runs, then the other session is due.
+  binding.audio(first, voiced(5 * kVadFrame, 82));
+  ASSERT_TRUE(binding.settle());
+  binding.audio(second, voiced(10 * kVadFrame, 83));
+  ASSERT_TRUE(binding.settle());
+  speech.release_jobs();
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{first, 0, 10 * kVadFrame},
+                                                     {second, 0, 10 * kVadFrame},
+                                                     {first, 0, 15 * kVadFrame}}));
+}
+
+// More audio for a session already waiting on the lane keeps its one place.
+TEST(SpeechPartialTranscripts, ASessionDueAgainWhileWaitingKeepsOnePlace) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto first = binding.open_audio();
+  const auto second = binding.open_audio();
+  // The first session's partial ends but keeps the lane while others queue.
+  speech.fixture->hold_job_releases();
+  binding.audio(first, voiced(10 * kVadFrame, 98));
+  ASSERT_TRUE(binding.settle());
+  binding.audio(second, voiced(10 * kVadFrame, 99));
+  ASSERT_TRUE(binding.settle());
+  binding.audio(second, voiced(5 * kVadFrame, 100));
+  ASSERT_TRUE(binding.settle());
+  binding.audio(first, voiced(5 * kVadFrame, 101));
+  ASSERT_TRUE(binding.settle());
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  speech.fixture->let_job_releases_go();
+  ASSERT_TRUE(binding.settle());
+  // Due again while its decode runs: it queues once that ends, behind the first.
+  binding.audio(second, voiced(5 * kVadFrame, 102));
+  ASSERT_TRUE(binding.settle());
+  speech.release_jobs();
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{first, 0, 10 * kVadFrame},
+                                                     {second, 0, 15 * kVadFrame},
+                                                     {first, 0, 15 * kVadFrame},
+                                                     {second, 0, 20 * kVadFrame}}));
+}
+
+TEST(SpeechPartialTranscripts, NoneStartsOnceAFinalizeWaitsForItsFrames) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes audio = voiced(20 * kVadFrame, 84);
+  speech.fixture->hold_jobs(JobClass::VadFrames);
+  binding.audio(key, samples_of(audio, 0, 10 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  // Scored while the Finalize still waits for these frames.
+  binding.audio(key, samples_of(audio, 10 * kVadFrame, 20 * kVadFrame));
+  binding.finalize(key, 5);
+  ASSERT_TRUE(binding.settle());
+  speech.release_jobs();
+  ASSERT_NO_FATAL_FAILURE(
+      binding.expect_final(key, EndpointReason::ClientFinalize, 1, 0, audio, 5));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{key, 0, 20 * kVadFrame}}));
+}
+
+// A partial already waiting for the lane when the session starts draining
+// does not start: the drain does not end the utterance, so nothing reads it.
+TEST(SpeechPartialTranscripts, NoneStartsOnceTheSessionDrains) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto draining = binding.open_audio();
+  const auto other = binding.open_audio();
+  // Its first utterance's endpoint and final, unread, hold the drain open.
+  binding.audio(draining, voiced(10 * kVadFrame, 105));
+  ASSERT_TRUE(binding.settle());
+  binding.audio(draining, quiet(10 * kVadFrame, 106));
+  ASSERT_TRUE(binding.settle());
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(other, voiced(10 * kVadFrame, 107));
+  ASSERT_TRUE(binding.settle());
+  binding.audio(draining, voiced(10 * kVadFrame, 108));
+  ASSERT_TRUE(binding.settle());
+  const Error shutdown =
+      Error::make(Error::Code::Unavailable, "worker shutting down", "worker_shutdown");
+  ASSERT_TRUE(binding.manager->apply(draining, Event::Drain, shutdown).has_value());
+  ASSERT_TRUE(binding.settle());
+  speech.release_jobs();
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{draining, 0, 10 * kVadFrame},
+                                                     {draining, 0, 20 * kVadFrame},
+                                                     {other, 0, 10 * kVadFrame}}));
+  ASSERT_TRUE(binding.read_as<EndpointDetectedOutput>(draining).has_value());
+  ASSERT_TRUE(binding.read_as<FinalTranscriptOutput>(draining).has_value());
+  EXPECT_TRUE(binding.ends_as(draining, State::Closed));
+}
+
+TEST(SpeechPartialTranscripts, OnlyANonBlankChangedTextIsOfferedAndRevisesTheLast) {
+  Binding binding(&detecting_with_set_texts);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  binding.audio(key, voiced(10 * kVadFrame, 85));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech).size(), 1U);
+  EXPECT_FALSE(binding.read(key, 0ms).has_value());
+  binding.audio(key, voiced(5 * kVadFrame, 86));
+  ASSERT_NO_FATAL_FAILURE(expect_partial(binding, key, 1, 1, "hello"));
+  binding.audio(key, voiced(5 * kVadFrame, 87));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech).size(), 3U);
+  EXPECT_FALSE(binding.read(key, 0ms).has_value());
+  binding.audio(key, voiced(5 * kVadFrame, 88));
+  ASSERT_NO_FATAL_FAILURE(expect_partial(binding, key, 1, 2, "hello world"));
+}
+
+TEST(SpeechPartialTranscripts, OneTheBackendFailsIsDroppedAndReportedOnceAnUtterance) {
+  {
+    const std::lock_guard guard(partial_failures().mu);
+    partial_failures().reported.clear();
+  }
+  Binding binding(&detecting_with_failing_partials);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes audio =
+      join(join(voiced(20 * kVadFrame, 89), quiet(10 * kVadFrame, 90)), voiced(10 * kVadFrame, 91));
+  binding.audio(key, samples_of(audio, 0, 10 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  binding.audio(key, samples_of(audio, 10 * kVadFrame, 15 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.strategy->stats().partials_failed, 2U);
+  binding.audio(key, samples_of(audio, 15 * kVadFrame, 20 * kVadFrame));
+  ASSERT_NO_FATAL_FAILURE(
+      expect_partial(binding, key, 1, 1, text_of(speech, audio, 0, 20 * kVadFrame)));
+  binding.audio(key, samples_of(audio, 20 * kVadFrame, 30 * kVadFrame));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::Silence, 1, 0,
+                                               samples_of(audio, 0, 30 * kVadFrame), 0));
+  // The next utterance's first partial fails: reported again.
+  binding.audio(key, samples_of(audio, 30 * kVadFrame, 40 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  binding.finalize(key, 9);
+  ASSERT_NO_FATAL_FAILURE(
+      binding.expect_final(key, EndpointReason::ClientFinalize, 2, 30 * kVadFrame,
+                           samples_of(audio, 30 * kVadFrame, 40 * kVadFrame), 9));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Active);
+  const auto stats = speech.strategy->stats();
+  EXPECT_EQ(stats.partials_failed, 3U);
+  EXPECT_EQ(stats.jobs_failed, 3U);
+  const std::lock_guard guard(partial_failures().mu);
+  ASSERT_EQ(partial_failures().reported.size(), 2U);
+  for (const auto& cause : partial_failures().reported) {
+    EXPECT_EQ(cause.context, "inference_failed");
+  }
+}
+
+TEST(SpeechPartialTranscripts, OneTheBackendFailsIsDroppedWithNobodyToReportTo) {
+  Binding binding(&detecting_with_failing_partials_unreported);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  binding.audio(key, voiced(10 * kVadFrame, 92));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.strategy->stats().partials_failed, 1U);
+  EXPECT_EQ(binding.live_state(key), State::Active);
+}
+
+std::unique_ptr<DispatchUnderTest> detecting_with_refused_decodes(const SchedulerClock& clock) {
+  auto answer = [](std::uint64_t /*decode*/, const JobRequest& /*request*/,
+                   BufferManager& /*buffers*/) -> Result<JobResult> {
+    return unexpected(
+        Error::make(Error::Code::Unsupported, "language is not permitted", "job_not_permitted"));
+  };
+  return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{},
+                                           answering_decodes(answer), BufferManagerConfig{},
+                                           SpeechDispatchOptions{}, VoiceDetection::On);
+}
+
+// The backend would refuse the final too: the session fails at its first job.
+TEST(SpeechPartialTranscripts, OneTheBackendRefusesFailsItsSession) {
+  Binding binding(&detecting_with_refused_decodes);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  binding.audio(key, voiced(10 * kVadFrame, 103));
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "backend_unsupported_capability");
+  EXPECT_EQ(speech.strategy->stats().partials_failed, 0U);
+}
+
+TEST(SpeechPartialTranscripts, OneEndedByTheBackendsResetEndsEverySession) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const auto idle = binding.open_audio();
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(key, voiced(10 * kVadFrame, 104));
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(decodes_of(speech).size(), 1U);
+  speech.fixture->lose_backend();
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "backend_reset");
+  ASSERT_TRUE(binding.ends_as(idle, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(idle)->reason, "backend_reset");
+}
+
+TEST(SpeechPartialTranscripts, OnePastItsDeadlineFailsItsSession) {
+  Binding binding(&detecting_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(key, voiced(10 * kVadFrame, 93));
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(decodes_of(speech).size(), 1U);
+  // 320 ms of audio: 1 s and 160 ms.
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1160ms - 1ns));
+  EXPECT_EQ(binding.live_state(key), State::Active);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  EXPECT_EQ(binding.live_state(key), State::Failed);
+  speech.release_jobs();
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "deadline_missed");
+}
+
+TEST(SpeechPartialTranscripts, ACancelWaitsForOneRunningAsForAnyJob) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(key, voiced(10 * kVadFrame, 94));
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(decodes_of(speech).size(), 1U);
+  ASSERT_TRUE(binding.manager->apply(key, Event::Cancel).has_value());
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::CancelRequested);
+  speech.release_jobs();
+  EXPECT_TRUE(binding.ends_as(key, State::Closed));
+  EXPECT_FALSE(binding.output(key)->take().has_value());
+}
+
+// A drain waits for the delivery of the session's output, but a partial
+// that gave way unsent is never delivered.
+TEST(SpeechPartialTranscripts, ADrainCompletesAfterOneWasReplacedUnsent) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes audio = voiced(15 * kVadFrame, 95);
+  binding.audio(key, samples_of(audio, 0, 10 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  binding.audio(key, samples_of(audio, 10 * kVadFrame, 15 * kVadFrame));
+  ASSERT_TRUE(binding.settle());
+  ASSERT_NO_FATAL_FAILURE(
+      expect_partial(binding, key, 1, 2, text_of(speech, audio, 0, 15 * kVadFrame)));
+  ASSERT_TRUE(binding.half_close(key));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_endpoint(key, EndpointReason::HalfClose, 1, 0, audio));
+  ASSERT_TRUE(binding.settle());
+  // The final, unread, still holds the drain open.
+  EXPECT_EQ(binding.live_state(key), State::Draining);
+  binding.expect_transcript(key, 1, 0, audio, 0);
+  EXPECT_TRUE(binding.ends_as(key, State::Closed));
+}
+
+TEST(SpeechPartialTranscripts, ADrainCompletesAfterAFinalDroppedOneUnsent) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  const auto key = binding.open_audio();
+  const Bytes audio = voiced(10 * kVadFrame, 96);
+  binding.audio(key, audio);
+  ASSERT_TRUE(binding.settle());
+  ASSERT_TRUE(binding.half_close(key));
+  ASSERT_TRUE(binding.settle());
+  const auto endpoint = binding.read(key);
+  ASSERT_TRUE(endpoint.has_value());
+  EXPECT_TRUE(std::holds_alternative<EndpointDetectedOutput>(*endpoint));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(binding.live_state(key), State::Draining);
+  const auto transcript = binding.read(key);
+  ASSERT_TRUE(transcript.has_value());
+  EXPECT_TRUE(std::holds_alternative<FinalTranscriptOutput>(*transcript));
+  EXPECT_TRUE(binding.ends_as(key, State::Closed));
 }
 }  // namespace
 }  // namespace tensorplate::testing
