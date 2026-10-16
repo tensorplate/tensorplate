@@ -1103,8 +1103,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   `kokoro` runs `tts_synthesis`, one batch decode or synthesis per job: a
   Whisper transcript carries text and tokens and no word units, and a Kokoro
   job returns the segment as one `audio_chunk` and permits only the entry's
-  language and voice at speed 1000. Both mappings are provisional. No lane
-  runs `vad_frames`, and no job sends `job_progress`. (V030-E04-F03-T01)
+  language and voice at speed 1000. Both mappings are provisional. No job
+  sends `job_progress`. (V030-E04-F03-T01)
 - An internal interface, `SessionDispatch`, between a streaming transport
   binding and the work a deployment does for its sessions, with a
   deterministic implementation that needs no backend
@@ -1205,6 +1205,20 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- `BoundedJobBridge` has a new pure virtual method, `runs(JobClass)`:
+  whether the loaded backend runs a job class, `false` before a load and for
+  a class `submit` refuses with `job_class_unsupported`; it never waits for
+  the backend, and a bridge implemented outside the tree must add it. The
+  python_pytorch adapter's bridge answers from the classes the load
+  declared that the adapter knows, until the session stops its sidecar (an
+  unload, or a failed exchange with it). Nothing in the serving worker asks
+  it yet. The test fixture bridge now runs `vad_frames` as the runner's
+  fixture backend does: on a lane of its own, one job running and eight
+  waiting, for frames of 512 samples only (another size ends
+  `job_not_permitted` before it is accepted), each frame scored by its
+  largest absolute sample over 32768; a test can hold either lane alone.
+  (V030-E04-F03-T02)
+
 - `tensorplate doctor`'s `runner_profile_dependencies` finding also checks
   that `onnxruntime` imports in the `faster_whisper` profile's interpreter,
   since every load of that profile opens its voice-activity model on ONNX
@@ -1232,11 +1246,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   one 10-second deadline. (V030-E03-F01-T04, V030-E04-F01-T04)
 
 - The python_pytorch adapter's job channel takes every job class a runner's
-  load declares, `vad_frames` included, instead of only `stt_decode` and
-  `tts_synthesis`: a `vad_frames` job goes to the runner and its voice
-  probabilities come back through the job bridge. A load that declares only
-  classes the adapter does not know still fails with
-  `job_class_unsupported`.
+  load declares that the adapter knows, `vad_frames` included, instead of
+  only `stt_decode` and `tts_synthesis`: a `vad_frames` job goes to the
+  runner and its voice probabilities come back through the job bridge. A
+  load that declares only classes the adapter does not know still fails
+  with `job_class_unsupported`.
   (V030-E04-F03-T01)
 
 - A deploy or rollback that replaces a serving worker now tells that worker
