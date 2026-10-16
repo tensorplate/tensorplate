@@ -43,11 +43,23 @@ LC_ALL=C APT_BOUND_SECONDS=600 tools/ci/apt-get.sh \
 }
 install_seconds=$((SECONDS - start))
 
+declare -A allowed=([cuda-keyring]=1)
 for pin in "${TENSORRT_SDK_PACKAGES[@]}"; do
+  allowed[${pin%%=*}]=1
   actual=$(dpkg-query -W -f='${Version}' "${pin%%=*}")
   [[ $actual == "${pin#*=}" ]] || { echo "version mismatch: $pin" >&2; exit 1; }
   printf '%s\n' "$pin"
 done
+# NVIDIA's packages identify their origin through the maintainer metadata;
+# the optional Origin field is checked too. Ignore removed-package records.
+dpkg-query -W -f='${Package}|${db:Status-Status}|${Maintainer}|${Origin}\n' \
+  >"$scratch/packages" || { echo 'cannot inspect installed packages' >&2; exit 1; }
+while IFS='|' read -r package status vendor; do
+  if [[ $status == installed && ${vendor,,} == *nvidia* && ! -v allowed[$package] ]]; then
+    echo "unlisted NVIDIA package: $package" >&2
+    exit 1
+  fi
+done <"$scratch/packages"
 printf 'CUDAToolkit_ROOT=%s\n' "$CUDAToolkit_ROOT" >>"${GITHUB_ENV:-/dev/null}"
 {
   echo '### TensorRT SDK packages'

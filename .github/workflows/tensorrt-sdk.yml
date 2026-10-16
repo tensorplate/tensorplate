@@ -85,6 +85,19 @@ jobs:
           if grep -q 'not found' build-tensorrt/worker-ldd.txt; then exit 1; fi
           "$worker" --version
 
+      - name: Inspect TensorRT runtime dependencies
+        run: |
+          readelf -d /usr/lib/x86_64-linux-gnu/libnvinfer.so.* | grep NEEDED \
+            | tee build-tensorrt/tensorrt-needed.txt
+          ! grep -qiE 'cublas|cudnn' build-tensorrt/tensorrt-needed.txt
+
+      - name: Exercise the private loader with the installed SDK
+        env:
+          TP_TEST_TENSORRT_SDK: '1'
+        run: |
+          ctest --test-dir build-tensorrt --output-on-failure --no-tests=error \
+            -R '^TensorRTLoader\.'
+
       - name: Device-free T1, T2 and T3 tests
         env:
           TP_TEST_PYTHON: python

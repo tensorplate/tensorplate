@@ -5664,6 +5664,85 @@ class TensorRTKeyringTests(unittest.TestCase):
         self.check_failure("install", "NVIDIA keyring installation failed")
 
 
+class TensorRTClosureTests(unittest.TestCase):
+    """Synthetic package metadata and ELF dependencies exercise fail-closed guards."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        scripts = self.root / "tools/ci"
+        scripts.mkdir(parents=True)
+        shutil.copy2(REPO_ROOT / "tools/ci/install-tensorrt-sdk.sh", scripts)
+        digest = hashlib.sha256(b"synthetic keyring").hexdigest()
+        (scripts / "tensorrt-sdk-versions.sh").write_text(
+            "NVIDIA_APT_URL=https://example.invalid\nNVIDIA_KEYRING_VERSION=1\n"
+            f"NVIDIA_KEYRING_SHA256={digest}\nCUDAToolkit_ROOT=/synthetic\n"
+            "TENSORRT_SDK_PACKAGES=(synthetic-runtime=1)\n")
+        write_executable(scripts / "apt-get.sh", "#!/bin/sh\nexit 0\n")
+        self.bins = self.root / "bin"
+        self.bins.mkdir()
+        write_executable(self.bins / "id", "#!/bin/sh\necho 0\n")
+        write_executable(self.bins / "curl",
+                         '#!/bin/bash\nprintf "synthetic keyring" > "${!#}"\n')
+        write_executable(self.bins / "dpkg",
+                         '#!/bin/sh\nif [ "$1" = --print-architecture ]; then echo amd64; fi\n')
+        write_executable(self.bins / "dpkg-query", (
+            '#!/bin/sh\nif [ "$#" = 3 ]; then echo "${SYNTHETIC_VERSION:-1}"; '
+            'else cat "$SYNTHETIC_PACKAGES"; exit "${SYNTHETIC_QUERY_STATUS:-0}"; fi\n'))
+        self.packages = self.root / "packages"
+        self.packages.write_text(
+            "synthetic-runtime|installed|cudatools <cudatools@nvidia.com>|\n"
+            "cuda-keyring|installed|cudatools <cudatools@nvidia.com>|\n"
+            "libc6|installed|Ubuntu Developers|Ubuntu\n"
+            "removed-vendor-package|config-files|NVIDIA|\n")
+
+    def install(self, **extra):
+        return subprocess.run(
+            ["bash", "tools/ci/install-tensorrt-sdk.sh"], cwd=self.root,
+            env={**os.environ, "PATH": f"{self.bins}:{os.environ['PATH']}",
+                 "SYNTHETIC_PACKAGES": str(self.packages),
+                 "GITHUB_ENV": str(self.root / "env"),
+                 "GITHUB_STEP_SUMMARY": str(self.root / "summary"), **extra},
+            text=True, capture_output=True, timeout=10)
+
+    def test_pins_keyring_and_non_vendor_packages_are_allowed(self):
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_unlisted_vendor_package_is_rejected_by_maintainer_or_origin(self):
+        original = self.packages.read_text()
+        for vendor in ("cudatools <cudatools@nvidia.com>|", "external|NVIDIA"):
+            with self.subTest(vendor=vendor):
+                self.packages.write_text(original + f"unexpected-sdk|installed|{vendor}\n")
+                result = self.install()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unlisted NVIDIA package: unexpected-sdk", result.stderr)
+
+    def test_inventory_failure_is_rejected(self):
+        result = self.install(SYNTHETIC_QUERY_STATUS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot inspect installed packages", result.stderr)
+
+    def test_wrong_package_version_is_rejected(self):
+        result = self.install(SYNTHETIC_VERSION="2")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("version mismatch: synthetic-runtime=1", result.stderr)
+
+    def test_runtime_dependency_guard_rejects_cublas_and_cudnn(self):
+        steps = yaml.safe_load((WORKFLOWS / "tensorrt-sdk.yml").read_text())[
+            "jobs"]["tensorrt-sdk"]["steps"]
+        step = next(s for s in steps if s.get("name") == "Inspect TensorRT runtime dependencies")
+        (self.root / "build-tensorrt").mkdir()
+        write_executable(self.bins / "readelf", '#!/bin/sh\necho "NEEDED [$SYNTHETIC_NEEDED]"\n')
+        for needed, accepted in (("libm.so.6", True), ("libcublas.so.12", False),
+                                 ("libcudnn.so.9", False)):
+            with self.subTest(needed=needed):
+                result = run_step(step, self.root, PATH=f"{self.bins}:{os.environ['PATH']}",
+                                  SYNTHETIC_NEEDED=needed)
+                self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
+
+
 class CppWorkflowVcpkgTests(unittest.TestCase):
     """Where C++ workflows get vcpkg, and what the dependency cache key names."""
 

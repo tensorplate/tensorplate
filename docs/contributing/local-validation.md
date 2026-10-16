@@ -203,16 +203,25 @@ index and checks package hashes as it downloads them into a fresh temporary
 archive directory. No SDK archive cache is restored or saved; the temporary
 directory is removed on exit. It installs neither a GPU
 driver nor the full CUDA toolkit. `cuda-driver-dev` supplies link stubs, not
-a kernel driver. `nvcc` supplies the toolkit discovery metadata CMake uses;
-TensorPlate's sources still compile with the job's Clang toolchain.
+a kernel driver. On x86, CMake discovers CUDA headers and the runtime library
+directly: neither nvcc/nvvm nor TensorRT's static development archive is needed.
+The private loader target needs only headers; the adapter and worker still link
+nvinfer and cudart directly. Jetson keeps its existing SDK discovery and linkage.
 
-The x86 TensorRT packages belong to the same 10.3 API family as the
-[recorded Jetson build](../validation/sdk-e2e-validation.md#observed-evidence-yolov8n-on-jetson-orin-nano-2026-06-18).
-NVIDIA's [JetPack 6.2 stack](https://developer.nvidia.com/embedded/jetpack-sdk-62)
-pairs TensorRT 10.3 with CUDA 12.6; the x86 TensorRT packages were built for
-CUDA 12.5 and are tested here with that toolkit. The adapter uses the same
-TensorRT 10 deletion, named-tensor, shape/address and `enqueueV3` APIs on
-both architectures. Serialized engines still need to match their target GPU.
+The x86 SDK now follows the managed speech runtime's CUDA family, as recorded
+in `packaging/speech-runtime/lock/cuda.txt`. It uses a newer TensorRT 10 API
+than the [recorded Jetson build](../validation/sdk-e2e-validation.md#observed-evidence-yolov8n-on-jetson-orin-nano-2026-06-18).
+The adapter still uses TensorRT 10 deletion, named-tensor, shape/address and
+`enqueueV3` APIs. Jetson's installed SDK is unchanged. Serialized engines still
+need to match their target GPU and runtime.
+
+The job also tests the [private loader contract](../architecture/tensorrt-loader.md)
+in a separate executable with no NVIDIA link dependencies. Synthetic tests
+exercise missing libraries/exports, version mismatches and handle lifetime;
+`TP_TEST_TENSORRT_SDK=1` additionally requires loading the installed SDK and
+querying its versions, without creating a runtime or probing a device. This
+loader is not yet used by the adapter: **the SDK-built worker still requires
+NVIDIA libraries to start**. The release profile still disables TensorRT.
 
 To reproduce the job, use a disposable Ubuntu 22.04 amd64 container with
 CMake 3.25+, Clang 14, Ninja, curl, CA certificates, Python and vcpkg at the
@@ -220,8 +229,8 @@ manifest baseline. The installer modifies the container's apt sources and
 installed packages. Run `tools/ci/install-tensorrt-sdk.sh`,
 source `tools/ci/tensorrt-sdk-versions.sh`, and use the job's configure/build/test
 commands with your own build directory and `-DCUDAToolkit_ROOT="$CUDAToolkit_ROOT"`.
-It needs roughly 2.5 GB of package downloads and 6.5 GB installed SDK space,
-plus build space. Every fresh job downloads those packages again (typically
-about one to two minutes on a hosted runner). The summary records APT's
-reported download bytes/time and total download/install time, excluding
-repository and keyring setup.
+A fresh install of the current SDK closure downloaded approximately 1.4 GB
+and used 3.6 GB of installed space in a local Ubuntu container. Allow additional
+build space. Every fresh job downloads those packages again; the job summary
+records APT's actual download bytes/time and total download/install time,
+excluding repository and keyring setup. Archive caching remains disabled.
