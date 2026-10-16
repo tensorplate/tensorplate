@@ -164,6 +164,27 @@ pub struct DeployRequest {
     pub streaming: bool,
 }
 
+impl DeployRequest {
+    /// The test count, checked as the decoder checks it: present exactly in
+    /// qualification mode, and from 1 to [`MAX_MEMBER_SESSIONS`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ControlRequestError`] naming the violated rule.
+    pub fn qualification_test_count(&self) -> Result<Option<u32>, ControlRequestError> {
+        let qualification = self.admission_mode == Some(AdmissionMode::Qualification);
+        match (qualification, self.test_count) {
+            (true, None) => Err(ControlRequestError::QualificationWithoutTestCount),
+            (false, Some(_)) => Err(ControlRequestError::TestCountWithoutQualification),
+            (true, Some(0)) => Err(ControlRequestError::ZeroTestCount),
+            (true, Some(count)) if count > MAX_MEMBER_SESSIONS => {
+                Err(ControlRequestError::TestCountAboveMemberCeiling(count))
+            }
+            (_, count) => Ok(count),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RollbackRequest {
@@ -388,16 +409,7 @@ fn validate_deploy(d: &DeployRequest) -> Result<(), ControlRequestError> {
             return Err(ControlRequestError::InvalidExpectedDigest);
         }
     }
-    let qualification = d.admission_mode == Some(AdmissionMode::Qualification);
-    match (qualification, d.test_count) {
-        (true, None) => return Err(ControlRequestError::QualificationWithoutTestCount),
-        (false, Some(_)) => return Err(ControlRequestError::TestCountWithoutQualification),
-        (true, Some(0)) => return Err(ControlRequestError::ZeroTestCount),
-        (true, Some(count)) if count > MAX_MEMBER_SESSIONS => {
-            return Err(ControlRequestError::TestCountAboveMemberCeiling(count));
-        }
-        _ => {}
-    }
+    let qualification = d.qualification_test_count()?.is_some();
     if let Some(evidence) = &d.evidence_ref {
         if qualification {
             return Err(ControlRequestError::EvidenceWithQualification);

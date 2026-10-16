@@ -75,7 +75,10 @@ pub fn dispatch(
                 return Ok(refusal);
             }
             let path = PathBuf::from(&payload.bundle_path);
-            let serving = serving_of(&payload);
+            let serving = match serving_of(&payload) {
+                Ok(serving) => serving,
+                Err(error) => return Ok(ControlResponse::error(correlation, error)),
+            };
             match coordinator.deploy_with(
                 &payload.deployment_id,
                 &path,
@@ -128,16 +131,18 @@ fn unsupported(correlation: Option<String>, what: &str) -> ControlResponse {
     )
 }
 
-/// What every generation of the deployment `payload` asks for serves. The
-/// decoder refuses a qualification request with no test count.
-fn serving_of(payload: &DeployRequest) -> Serving {
-    match (payload.admission_mode, payload.test_count) {
-        (Some(AdmissionMode::Qualification), Some(test_count)) => {
-            Serving::Qualification { test_count }
-        }
-        _ if payload.streaming => Serving::Streaming,
-        _ => Serving::Unary,
-    }
+/// What every generation of the deployment `payload` asks for serves. A
+/// request built in process skips the decoder, so its test count rules are
+/// checked here too.
+fn serving_of(payload: &DeployRequest) -> Result<Serving, ResponseError> {
+    let test_count = payload
+        .qualification_test_count()
+        .map_err(|e| ResponseError::new(ErrorCode::ConfigInvalid, e.to_string()))?;
+    Ok(match test_count {
+        Some(test_count) => Serving::Qualification { test_count },
+        None if payload.streaming => Serving::Streaming,
+        None => Serving::Unary,
+    })
 }
 
 /// The answer to a deploy this agent cannot execute, decided before any
@@ -503,16 +508,44 @@ mod tests {
     #[test]
     fn a_deploy_serves_streams_in_qualification_mode_only_when_it_asks_with_its_test_count() {
         use super::{serving_of, Serving};
+        use tensorplate_protocol::agent_control::ControlRequestError::{
+            QualificationWithoutTestCount, TestCountAboveMemberCeiling,
+            TestCountWithoutQualification, ZeroTestCount,
+        };
         use tensorplate_protocol::AdmissionMode::{Production, Qualification};
+        use tensorplate_protocol::MAX_MEMBER_SESSIONS;
+        let refused = |e: tensorplate_protocol::agent_control::ControlRequestError| {
+            Err((ErrorCode::ConfigInvalid, e.to_string()))
+        };
         let cases = [
-            (None, None, false, Serving::Unary),
-            (None, None, true, Serving::Streaming),
-            (Some(Production), None, true, Serving::Streaming),
+            (None, None, false, Ok(Serving::Unary)),
+            (None, None, true, Ok(Serving::Streaming)),
+            (Some(Production), None, true, Ok(Serving::Streaming)),
             (
                 Some(Qualification),
                 Some(3),
                 true,
-                Serving::Qualification { test_count: 3 },
+                Ok(Serving::Qualification { test_count: 3 }),
+            ),
+            (
+                Some(Qualification),
+                None,
+                true,
+                refused(QualificationWithoutTestCount),
+            ),
+            (None, Some(3), true, refused(TestCountWithoutQualification)),
+            (Some(Qualification), Some(0), true, refused(ZeroTestCount)),
+            (
+                Some(Qualification),
+                Some(MAX_MEMBER_SESSIONS + 1),
+                true,
+                refused(TestCountAboveMemberCeiling(MAX_MEMBER_SESSIONS + 1)),
+            ),
+            (
+                Some(Production),
+                Some(3),
+                true,
+                refused(TestCountWithoutQualification),
             ),
         ];
         for (admission_mode, test_count, streaming, serves) in cases {
@@ -522,7 +555,40 @@ mod tests {
                 streaming,
                 ..DeployRequest::default()
             };
-            assert_eq!(serving_of(&payload), serves, "{payload:?}");
+            let served = serving_of(&payload).map_err(|e| (e.code, e.message));
+            assert_eq!(served, serves, "{payload:?}");
         }
+    }
+
+    #[test]
+    fn an_in_process_qualification_deploy_with_no_test_count_is_refused_before_any_transaction() {
+        let td = TempDir::new().expect("td");
+        let state = td.path().join("state");
+        let staging = td.path().join("staging");
+        let bundle = write_bundle(td.path(), "qualified");
+        let cfg = config(state.clone(), staging.clone());
+        let store = Arc::new(StateStore::open(&state).expect("open"));
+        let worker = Arc::new(MockWorkerControl::new());
+        let coord = Arc::new(Coordinator::new(cfg, store, worker));
+
+        let request = DeployRequest {
+            bundle_path: bundle.display().to_string(),
+            deployment_id: "qualified".into(),
+            streaming: true,
+            admission_mode: Some(tensorplate_protocol::AdmissionMode::Qualification),
+            ..DeployRequest::default()
+        };
+        let response = dispatch(&coord, ControlRequest::deploy(None, request)).expect("response");
+
+        assert_eq!(response.status, ResponseStatus::Error);
+        let error = response.error.expect("error");
+        assert_eq!(error.code, ErrorCode::ConfigInvalid);
+        let expected =
+            tensorplate_protocol::agent_control::ControlRequestError::QualificationWithoutTestCount;
+        assert_eq!(error.message, expected.to_string());
+        let snapshot = coord.state().snapshot().expect("snapshot");
+        assert!(snapshot.in_flight_transaction.is_none());
+        assert!(snapshot.last_error.is_none());
+        assert!(!staging.join("qualified").exists());
     }
 }
