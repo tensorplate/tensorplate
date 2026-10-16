@@ -1108,5 +1108,57 @@ TEST(SessionManager, CreditReturnIsShownInsideTheSerializedSection) {
   EXPECT_FALSE(finished[2].has_value());
   EXPECT_EQ(finished[3], LogicalSessionEvent::Ping);
 }
+
+std::uint64_t monotonic_ns(SchedulerClock::TimePoint at) {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(at.time_since_epoch()).count());
+}
+
+// Each held slot counts once, in its state's place; only the admitted ones
+// carry their admission time, oldest first, kept through a finalization.
+TEST(SessionManager, TheLedgerCountsEachHeldSlotOnceWithTheAdmittedOnesTimes) {
+  const auto limits = SessionLimits::create(60s, 10s, 30s, 60min, 8);
+  ASSERT_TRUE(limits);
+  testing::FakeSchedulerClock clock;
+  auto manager = SessionManager::create(
+      *limits, 5, clock, [](const auto&) {}, {}, false);
+  ASSERT_TRUE(manager);
+  EXPECT_EQ((*manager)->ledger(), (ipc::WorkerLedger{0, 0, 0, 8, {}}));
+  std::vector<std::uint64_t> keys;
+  std::vector<std::uint64_t> admitted_ns;
+  for (int index = 0; index < 6; ++index) {
+    clock.advance(1ms);
+    admitted_ns.push_back(monotonic_ns(clock.now()));
+    const auto opened = (*manager)->open(5, kBudgets);
+    ASSERT_TRUE(opened);
+    keys.push_back(opened->session_key);
+  }
+  clock.advance(1ms);
+  const auto apply = [&](std::uint64_t key, LogicalSessionEvent event,
+                         std::optional<Error> cause = std::nullopt) {
+    return (*manager)->apply(key, event, std::move(cause)).value().state;
+  };
+  EXPECT_EQ(apply(keys[1], LogicalSessionEvent::Finalize), LogicalSessionState::Finalizing);
+  EXPECT_EQ(apply(keys[2], LogicalSessionEvent::HalfClose), LogicalSessionState::Draining);
+  EXPECT_EQ(apply(keys[3], LogicalSessionEvent::Cancel), LogicalSessionState::CancelRequested);
+  EXPECT_EQ(apply(keys[4], LogicalSessionEvent::Fail,
+                  Error::make(Error::Code::Unavailable, "backend failed", "backend_failed")),
+            LogicalSessionState::Failed);
+  EXPECT_EQ(apply(keys[5], LogicalSessionEvent::Cancel), LogicalSessionState::CancelRequested);
+  EXPECT_EQ(apply(keys[5], LogicalSessionEvent::ReleaseAcknowledged), LogicalSessionState::Closed);
+  EXPECT_EQ((*manager)->ledger(),
+            (ipc::WorkerLedger{0, 2, 3, 8, {admitted_ns[0], admitted_ns[1]}}));
+
+  EXPECT_EQ(apply(keys[1], LogicalSessionEvent::FinalizeCompleted), LogicalSessionState::Active);
+  EXPECT_EQ(apply(keys[2], LogicalSessionEvent::DrainCompleted), LogicalSessionState::Draining);
+  for (const auto key : {keys[2], keys[3], keys[4]}) {
+    EXPECT_TRUE((*manager)->apply(key, LogicalSessionEvent::ReleaseAcknowledged));
+  }
+  const auto later_ns = monotonic_ns(clock.now());
+  ASSERT_TRUE((*manager)->open(5, kBudgets));
+  EXPECT_EQ((*manager)->ledger(),
+            (ipc::WorkerLedger{0, 3, 0, 8, {admitted_ns[0], admitted_ns[1], later_ns}}));
+  EXPECT_EQ((*manager)->held_slots(), 3U);
+}
 }  // namespace
 }  // namespace tensorplate::serving

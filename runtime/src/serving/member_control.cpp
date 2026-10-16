@@ -40,7 +40,8 @@ ipc::WorkerQuota quota_of(std::uint32_t sessions) {
 MemberControlTarget::MemberControlTarget(Retire on_retire) : on_retire_(std::move(on_retire)) {}
 
 ipc::WorkerLedger MemberControlTarget::ledger_status() {
-  return unimplemented_.ledger_status();
+  const std::lock_guard guard(mu_);
+  return ledger_ ? ledger_() : unimplemented_.ledger_status();
 }
 
 Result<void> MemberControlTarget::admission_fence() {
@@ -91,6 +92,11 @@ void MemberControlTarget::bind_router(RequestRouter& router) {
   const std::lock_guard guard(mu_);
   router_ = &router;
   publish_locked();
+}
+
+void MemberControlTarget::bind_ledger(Ledger ledger) {
+  const std::lock_guard guard(mu_);
+  ledger_ = std::move(ledger);
 }
 
 void MemberControlTarget::set_session_ceiling(std::uint32_t ceiling) noexcept {

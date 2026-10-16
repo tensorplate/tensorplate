@@ -992,4 +992,15 @@ std::size_t StreamListener::live_sessions() const noexcept {
   return impl_->manager ? impl_->manager->held_slots() : impl_->held_at_stop;
 }
 
+ipc::WorkerLedger StreamListener::ledger() const {
+  const std::lock_guard lock(impl_->manager_mu);
+  if (impl_->manager) {
+    return impl_->manager->ledger();
+  }
+  ipc::WorkerLedger stopped;
+  stopped.closing = static_cast<std::uint32_t>(impl_->held_at_stop);
+  stopped.ceiling = impl_->options.limits.max_sessions();
+  return stopped;
+}
+
 }  // namespace tensorplate::serving

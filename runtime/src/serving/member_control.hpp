@@ -26,7 +26,7 @@ enum class MemberAdmission : std::uint8_t { Open, Fenced, Retiring };
 
 /// A fence closes admission and an activate opens it again; a retire closes
 /// it for good and asks for the worker's stop once. Every operation is
-/// idempotent. Quota and pressure stay unsupported and the ledger empty.
+/// idempotent. Quota and pressure stay unsupported.
 class MemberControlTarget final : public ControlTarget {
  public:
   /// The longest retirement drain a retire can ask for.
@@ -36,6 +36,9 @@ class MemberControlTarget final : public ControlTarget {
   /// and what the agent asked for. It must not wait.
   using Retire =
       std::function<void(std::chrono::milliseconds window, std::chrono::milliseconds asked)>;
+  /// Reads the ledger of the stream sessions the worker serves, on the
+  /// control thread. It waits for short locked sections only.
+  using Ledger = std::function<ipc::WorkerLedger()>;
 
   explicit MemberControlTarget(Retire on_retire);
 
@@ -48,6 +51,10 @@ class MemberControlTarget final : public ControlTarget {
 
   /// Has `router` refuse new requests while admission is closed, from now on.
   void bind_router(RequestRouter& router);
+
+  /// Has ledger_status() answer with `ledger` from now on; until then the
+  /// ledger is empty.
+  void bind_ledger(Ledger ledger);
 
   /// The stream sessions the built worker serves at one time. Until it is
   /// set, an activate is answered as not ready.
@@ -64,10 +71,11 @@ class MemberControlTarget final : public ControlTarget {
  private:
   void publish_locked() noexcept;
 
-  /// Held by each operation and by bind_router().
+  /// Held by each operation and by bind_router() and bind_ledger().
   std::mutex mu_;
   std::atomic<MemberAdmission> admission_{MemberAdmission::Open};
   RequestRouter* router_ = nullptr;
+  Ledger ledger_;
   /// -1 until the worker is built.
   std::atomic<std::int64_t> ceiling_{-1};
   Retire on_retire_;

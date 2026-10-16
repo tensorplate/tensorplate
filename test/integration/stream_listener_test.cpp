@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <atomic>
@@ -19,6 +20,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -49,6 +51,7 @@ namespace {
 
 using namespace std::chrono_literals;
 using tensorplate::SystemSchedulerClock;
+using tensorplate::ipc::WorkerLedger;
 using tensorplate::serving::StreamListener;
 using tensorplate::serving::StreamListenerOptions;
 using tensorplate::testing::stream_listener::Call;
@@ -447,6 +450,102 @@ TEST(StreamListener, StopDrainsALiveSessionThenRefusesAndCloses) {
   served.listener().stop(began + 5s);
   EXPECT_LT(std::chrono::steady_clock::now() - began, 5s) << "nothing was left to wait for";
   EXPECT_EQ(served.listener().live_sessions(), 0U) << "the drained session gave its slot back";
+}
+
+/// The host's monotonic clock, which the agent orders admissions across
+/// members by.
+std::uint64_t host_monotonic_ns() {
+  timespec now{};
+  EXPECT_EQ(::clock_gettime(CLOCK_MONOTONIC, &now), 0);
+  return static_cast<std::uint64_t>(now.tv_sec) * 1'000'000'000U +
+         static_cast<std::uint64_t>(now.tv_nsec);
+}
+
+// A session counts as active with its admission time on the host's monotonic
+// clock, then as closing while its release is not acknowledged.
+TEST(StreamListener, TheLedgerHoldsASessionActiveThenClosingUntilItsRelease) {
+  Served served{true, "127.0.0.1", nullptr, std::nullopt, 2};
+  EXPECT_EQ(served.listener().ledger(), (WorkerLedger{0, 0, 0, 2, {}}));
+  const auto before = host_monotonic_ns();
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  const auto after = host_monotonic_ns();
+  const auto admitted = served.listener().ledger();
+  EXPECT_EQ(admitted.active, 1U);
+  ASSERT_EQ(admitted.admission_monotonic_ns.size(), 1U);
+  EXPECT_GE(admitted.admission_monotonic_ns.front(), before);
+  EXPECT_LE(admitted.admission_monotonic_ns.front(), after);
+
+  served.dispatch().hold_cleanup_until_failed("no_such_failure");
+  ASSERT_TRUE(client.call->WritesDone());
+  ASSERT_TRUE(served.dispatch().wait_until_cleanup_held());
+  EXPECT_EQ(served.listener().ledger(), (WorkerLedger{0, 0, 1, 2, {}}));
+}
+
+// The control thread polls while the stop releases the session manager: each
+// poll reads the live manager or the stopped report, which keeps the slot the
+// stop left held, as closing, and the ceiling.
+TEST(StreamListener, ALedgerPolledWhileTheListenerStopsReadsOneSideOfIt) {
+  Served served{true, "127.0.0.1", nullptr, std::nullopt, 2};
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  served.dispatch().hold_cleanup_until_failed("no_such_failure");
+  ASSERT_TRUE(client.call->WritesDone());
+  ASSERT_TRUE(served.dispatch().wait_until_cleanup_held());
+  const WorkerLedger closing{0, 0, 1, 2, {}};
+  std::promise<void> polled;
+  std::atomic<bool> stopped{false};
+  std::optional<WorkerLedger> other;
+  std::thread poller([&] {
+    bool first = true;
+    do {
+      const auto ledger = served.listener().ledger();
+      if (!other && ledger != closing) {
+        other = ledger;
+      }
+      if (std::exchange(first, false)) {
+        polled.set_value();
+      }
+    } while (!stopped.load());
+  });
+  polled.get_future().wait();
+  served.listener().stop(std::chrono::steady_clock::now());
+  stopped.store(true);
+  poller.join();
+  EXPECT_FALSE(other.has_value());
+  EXPECT_EQ(served.listener().live_sessions(), 1U);
+  EXPECT_EQ(served.listener().ledger(), closing);
+}
+
+// The count the stop leaves is taken once its wait ends: a session whose
+// release is acknowledged while the stop waits holds no slot after it.
+TEST(StreamListener, ASessionReleasedWhileTheStopWaitsLeavesNoSlotClosing) {
+  Served served;
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  served.dispatch().hold_cleanup_until_failed("no_such_failure");
+  ASSERT_TRUE(client.call->WritesDone());
+  ASSERT_TRUE(served.dispatch().wait_until_cleanup_held());
+  const auto full = served.refused(open_event(wire::SESSION_MODE_STT_STREAMING));
+  ASSERT_NE(full.error_message().find("FAILURE_REASON_SESSION_COUNT_LIMIT"), std::string::npos)
+      << full.error_message();
+
+  std::thread stopper([&] { served.listener().stop(std::chrono::steady_clock::now() + 30s); });
+  // Admission is closed first, so a refusal for that says the stop waits.
+  EXPECT_TRUE(eventually([&] {
+    return served.refused(open_event(wire::SESSION_MODE_STT_STREAMING))
+               .error_message()
+               .find("FAILURE_REASON_ADMISSION_CLOSED") != std::string::npos;
+  }));
+  EXPECT_EQ(served.listener().live_sessions(), 1U);
+  served.dispatch().release_held_cleanup();
+  std::optional<wire::ServerEvent> last;
+  while (auto event = client.read()) {
+    last = std::move(event);
+  }
+  stopper.join();
+  ASSERT_TRUE(last.has_value());
+  ASSERT_TRUE(last->has_session_closed()) << last->ShortDebugString();
+  EXPECT_EQ(last->session_closed().state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_EQ(served.listener().live_sessions(), 0U);
+  EXPECT_EQ(served.listener().ledger(), (WorkerLedger{0, 0, 0, 1, {}}));
 }
 
 // The worker's check of its admission refuses an Open, with the slot free

@@ -404,9 +404,21 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   on the control thread; a retire once a stop was asked closes admission
   for good and answers `ok`, but begins no window and asks for no stop.
   Each operation is idempotent; `quota_assign` and `pressure_directive`
-  stay `unsupported` and `ledger_status` reports the empty ledger. A
-  worker without a generation has no control channel and is unchanged.
-  (V030-E04-F01-T04)
+  stay `unsupported`. A worker without a generation has no control
+  channel and is unchanged. (V030-E04-F01-T04)
+
+- The serving worker's `ledger_status` answers with its stream sessions'
+  ledger instead of the empty one: `reserved` (opening, which a session
+  leaves inside the open that admits it, so 0 today), `active` (active or
+  finalizing), `closing` (draining, cancelled or failed, until the backend
+  acknowledges the release), `ceiling` (1 for a speech deployment that
+  serves streams) and, oldest first, each reserved or active session's
+  admission time on the host's monotonic clock. The worker reads it under
+  one lock, so the counts never exceed the ceiling and the times are in
+  admission order; no ledger is answered as an `error`. A worker that
+  serves no stream session reports the empty ledger, and once its stream
+  listener has stopped, the sessions still holding a place then count as
+  closing until the worker exits. (V030-E04-F01-T04)
 
 - `tensorplate doctor` reports `serving_streaming_support`: it runs the
   installed serving worker's `--version`, stopped after 5 s, and reads its

@@ -928,18 +928,24 @@ loads, so that the agent's polls are answered during a long load. It is
 the only code that reads the socket, and it never calls into an
 execution session: a backend job that does not return cannot delay an
 answer. Requests are `worker_control.json` frames, one JSON object per
-line, at most 65,536 bytes each. A request that names another
-deployment or generation is answered `member_mismatch` with this
-worker's member and goes no further. `ledger_status` and the other five
-operations are answered through `ControlTarget`, whose methods return
-at once. The worker's target (`MemberControlTarget`,
-`runtime/src/serving/member_control.hpp`) implements the admission fence,
-activate and retire below; it reports an empty ledger and refuses
-`quota_assign` and `pressure_directive` as `unsupported`, so the agent is
-never told that those took effect. An answer the wire format refuses is
-sent as an `error`. A complete frame that does not decode is
-skipped; a line longer than the frame limit ends the channel, and so
-does a response the agent does not take within one second.
+line, at most 65,536 bytes each. A request that names another deployment
+or generation is answered `member_mismatch` with this worker's member
+and goes no further. `ledger_status` and the other five operations are
+answered through `ControlTarget`, whose methods return at once;
+`ledger_status` waits only for the stream listener's and session
+manager's short locked sections. The longest is the closing of
+admission at a retire or a stop: the listener holds its lock while
+the manager starts each live session's drain and hands each change to
+the session's sink, which is short at a ceiling of one session and
+grows with the sessions held. The worker's target
+(`MemberControlTarget`, `runtime/src/serving/member_control.hpp`)
+implements the admission fence, activate and retire below, reports the
+stream sessions' ledger (**The ledger** below) and refuses
+`quota_assign` and `pressure_directive` as `unsupported`, so the agent
+is never told that those took effect. An answer the wire format refuses
+is sent as an `error`. A complete frame that does not decode is skipped;
+a line longer than the frame limit ends the channel, and so does a
+response the agent does not take within one second.
 
 **Fence, activate and retire.** Each is idempotent by the state it leaves:
 a repeat of the latest request gets the same answer, and no record of
@@ -1002,6 +1008,27 @@ bounds the HTTP drain, up to 30 s instead of the 5 s
 `shutdown.drain_deadline` default. `SessionManager::check_generation` and
 `tombstone()` still have no caller: a worker serves one generation and a
 later client message names none, and no status reads the tombstones yet.
+
+**The ledger.** `ledger_status` answers with the stream sessions'
+ledger, which `SessionManager::ledger()` takes under the manager's one
+lock. `reserved` counts sessions in `opening`; `active` those `active`
+or `finalizing`; `closing` those `draining`, `cancel_requested` or
+`failed`, each of which keeps its place until the backend acknowledges
+its release. `ceiling` is the manager's `max_sessions`, 1 for a speech
+deployment that serves streams. `admission_monotonic_ns` lists, oldest
+first, the time each reserved or active session was opened on the
+worker's scheduler clock, the host's `CLOCK_MONOTONIC`, sorted; a
+finalization does not move it. Every ledger is one the wire format
+accepts, by construction rather than by a check: each slot the manager
+holds is counted once, and a session takes one only below
+`max_sessions`, which `SessionLimits` bounds by the wire's 2,048. A
+session leaves `opening` inside the open that admits it, so `reserved`
+is 0 today. A worker that serves no stream session reports the empty
+ledger, ceiling 0, as its `activate` quota says; so does a worker that
+serves them until its listener has started, although its `activate`
+already answers 1. Once the listener has stopped, the sessions that
+still held a place then count as `closing` until the worker exits. The
+worker's status does not carry the ledger.
 
 **Contact.** The agent is in contact from the start. Three seconds
 without a decodable request is loss of contact, which the next request

@@ -13,6 +13,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -561,6 +562,34 @@ TEST(MemberControl, QuotaAndPressureStayUnsupportedAndTheLedgerEmpty) {
   }
 }
 
+TEST(MemberControl, TheLedgerIsTheBoundOneOnceItIsBound) {
+  Member member;
+  EXPECT_EQ(member.ask(Op::LedgerStatus).ledger, ipc::WorkerLedger{});
+  const ipc::WorkerLedger held{0, 1, 2, 4, {41}};
+  member.target.bind_ledger([held] { return held; });
+  const auto bound = member.ask(Op::LedgerStatus);
+  EXPECT_EQ(bound.status, Status::Ok);
+  EXPECT_EQ(bound.ledger, held);
+}
+
+// The worker binds the ledger while the agent polls, and only the target's
+// lock orders the two: no other operation takes it in between.
+TEST(MemberControl, ALedgerBoundWhileTheAgentPollsDoesNotRace) {
+  Member member{10s, false};
+  const ipc::WorkerLedger bound{0, 0, 0, 1, {}};
+  std::promise<void> gate;
+  std::thread binder([&, open = gate.get_future()] {
+    open.wait();
+    member.target.bind_ledger([bound] { return bound; });
+  });
+  gate.set_value();
+  for (int poll = 0; poll < 20; ++poll) {
+    EXPECT_EQ(member.ask(Op::LedgerStatus).status, Status::Ok);
+  }
+  binder.join();
+  EXPECT_EQ(member.ask(Op::LedgerStatus).ledger, bound);
+}
+
 // Every thread waits at one gate, so that ThreadSanitizer sees the reads of
 // the admission and the operations that change it run together.
 TEST(MemberControl, ControlCallsAndAdmissionReadsOnOtherThreadsDoNotRace) {
@@ -590,6 +619,7 @@ TEST(MemberControl, ControlCallsAndAdmissionReadsOnOtherThreadsDoNotRace) {
     wait_for_gate();
     member.target.set_session_ceiling(1);
     member.target.bind_router(member.router);
+    member.target.bind_ledger([] { return ipc::WorkerLedger{0, 0, 0, 1, {}}; });
   });
   {
     const std::lock_guard guard(gate_mu);
@@ -599,12 +629,14 @@ TEST(MemberControl, ControlCallsAndAdmissionReadsOnOtherThreadsDoNotRace) {
   for (int round = 0; round < 20; ++round) {
     EXPECT_EQ(member.ask(Op::AdmissionFence).status, Status::Ok);
     (void)member.ask(Op::Activate);
+    EXPECT_EQ(member.ask(Op::LedgerStatus).status, Status::Ok);
   }
   EXPECT_EQ(member.ask(Op::Retire).status, Status::Ok);
   done.store(true);
   for (auto& reader : readers) {
     reader.join();
   }
+  EXPECT_EQ(member.ask(Op::LedgerStatus).ledger, (ipc::WorkerLedger{0, 0, 0, 1, {}}));
   EXPECT_EQ(member.session_refusal(), "session admission is closed: retiring");
   EXPECT_TRUE(refused_because(member.infer(), "retiring")) << member.infer().second;
 }

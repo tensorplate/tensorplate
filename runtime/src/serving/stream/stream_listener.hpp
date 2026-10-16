@@ -10,6 +10,7 @@
 #include <string>
 
 #include "tensorplate/core/result.hpp"
+#include "tensorplate/ipc/worker_control.hpp"
 #include "tensorplate/scheduler/clock.hpp"
 #include "tensorplate/serving/session.hpp"
 
@@ -117,6 +118,10 @@ class StreamListener {
   /// Sessions holding a slot; after stop(), those that still held one when it
   /// released the manager.
   [[nodiscard]] std::size_t live_sessions() const noexcept;
+
+  /// The session manager's ledger. After stop() nothing is admitted: the
+  /// slots still held when it released the manager stay closing.
+  [[nodiscard]] ipc::WorkerLedger ledger() const;
 
   /// Calls not yet over on this side: a session's call outlives its slot
   /// until its last event is written or the call is cancelled.

@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
+#include "tensorplate/ipc/worker_control.hpp"
 #include "tensorplate/serving/session.hpp"
 
 namespace tensorplate::serving {
 namespace {
 using namespace std::chrono_literals;
-constexpr std::uint32_t kProtocolSessionCeiling = 2048;
+// The ledger reports max_sessions as its ceiling, which the control wire bounds.
+constexpr std::uint32_t kProtocolSessionCeiling = ipc::kWorkerControlMaxSessions;
 }  // namespace
 
 SessionLimits SessionLimits::defaults() noexcept {

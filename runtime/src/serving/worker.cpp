@@ -135,6 +135,8 @@ struct ServingWorker::Impl {
   /// Guards `stream` against a shutdown() that runs while start() sets it.
   /// Once set it stays until the worker is destroyed.
   std::mutex stream_mutex;
+  /// Declared before `control_target` and `control`, so it is destroyed after
+  /// them: the ledger reader bound to the target reads it until then.
   std::unique_ptr<serving::StreamListener> stream;
 #endif
   /// The drain of streams and of HTTP requests share it; it begins with
@@ -548,6 +550,11 @@ Result<void> ServingWorker::Impl::start_stream_listener() {
     return unexpected(listener.error());
   }
   const auto port = (*listener)->bound_port();
+  // Without a dispatch no session is admitted: the ledger stays empty, as
+  // activate's quota of none says.
+  if (speech_dispatch != nullptr) {
+    control_target.bind_ledger([served = listener->get()] { return served->ledger(); });
+  }
   {
     const std::lock_guard guard(stream_mutex);
     stream = std::move(listener).value();
