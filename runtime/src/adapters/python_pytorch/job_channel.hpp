@@ -207,7 +207,7 @@ class JobChannel {
   ///   `socket` is not open, or with
   ///   "job_channel_thread_unavailable" when a thread cannot be created;
   ///   Error::Code::Unsupported, "job_class_unsupported" when `job_classes`
-  ///   holds neither class a lane runs (`stt_decode`, `tts_synthesis`).
+  ///   is empty.
   [[nodiscard]] Result<void> start(ipc::UnixSocket& socket,
                                    const std::vector<JobClass>& job_classes);
 
@@ -298,8 +298,8 @@ class JobChannel {
   ///   without a buffer manager);
   ///   Error::Code::Unavailable, "backend_unavailable" (admission closed, the
   ///   connection ended or the channel stopped);
-  ///   Error::Code::Unsupported, "job_class_unsupported" (not `stt_decode`
-  ///   or `tts_synthesis`, or not among the load's job classes);
+  ///   Error::Code::Unsupported, "job_class_unsupported" (not among the
+  ///   load's job classes);
   ///   Error::Code::NotReady, "session_releasing";
   ///   Error::Code::ConfigInvalid, "duplicate_job_id";
   ///   Error::Code::ResourceExhausted, "job_capacity_exhausted" (kMaxOpenJobs

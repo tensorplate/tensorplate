@@ -176,12 +176,7 @@ Result<void> JobChannel::start(ipc::UnixSocket& socket, const std::vector<JobCla
   if (!socket.is_open()) {
     return refuse(Error::Code::Internal, "socket_closed");
   }
-  job_classes_.clear();
-  for (const JobClass job_class : job_classes) {
-    if (job_class == JobClass::SttDecode || job_class == JobClass::TtsSynthesis) {
-      job_classes_.push_back(job_class);
-    }
-  }
+  job_classes_ = job_classes;
   if (job_classes_.empty()) {
     return refuse(Error::Code::Unsupported, "job_class_unsupported");
   }

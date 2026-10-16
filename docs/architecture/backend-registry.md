@@ -415,8 +415,10 @@ messages on one sidecar connection. It is internal. The adapter's session
 starts it on a load that enabled `speech_jobs_v1` and stops it (next
 section); a session not built for jobs never starts it. `start` refuses a
 socket that is not open (`internal`, `socket_closed`) and a load that
-declared neither class a lane runs (`unsupported`,
-`job_class_unsupported`), as the runner refuses a runner with no such class.
+declared only job classes the adapter does not know (`unsupported`,
+`job_class_unsupported`). It takes every class the load declared,
+`vad_frames` included, and `submit` refuses any other
+(`job_class_unsupported`) before writing anything.
 
 - **Two threads own the socket.** A reader reads one frame at a time, routes
   it and calls the `JobEventSink`; while the connection lives nothing else
@@ -582,7 +584,7 @@ the channel sent; it does not bound the unary requests that wait, it
 writes a unary answer under its job lock where the runner writes it
 outside. As the runner does, it declares only the job classes a lane runs
 and refuses a load that leaves none, unless a test asks for a declaration
-no runner writes (`Options::declares_any_job_class`; four tests do). It
+no runner writes (`Options::declares_any_job_class`; five tests do). It
 holds every frame of the adapter's to the runner's
 envelope rules (`schema_version` "0.1", a `message_id`, a `kind`) and
 refuses one that breaks them as the runner does. It reports a frame of the
@@ -595,7 +597,7 @@ runner does, so that a test has a probe unanswered for as long as it needs:
 a deadline that has already passed then times a call out without a sleep,
 and a count of the callers that wait tells a test when a call on another
 thread has joined the probe. Both ends' socket buffers are set smaller than
-the largest frame, whatever the host's default. Six golden
+the largest frame, whatever the host's default. Seven golden
 files are replayed whole: the channel writes the recorded adapter frames,
 the scripted sidecar writes the recorded answers, and the sink receives what
 the codec reads from them. `test/integration/job_channel_runner_test.cpp`
