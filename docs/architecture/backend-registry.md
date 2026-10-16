@@ -86,8 +86,9 @@ to exercise. The flags are OFF by default in V01-E05-F01; each
 subsequent feature flips its own flag on once its adapter implementation
 lands.
 
-The [private TensorRT loader](tensorrt-loader.md) is tested independently of
-registration. The adapter currently retains direct SDK linkage.
+The [private TensorRT loader](tensorrt-loader.md) runs lazily during session load
+on Linux x86_64. Registration and Python serving do not require NVIDIA libraries.
+Jetson retains direct SDK linkage.
 
 ## Sessions with a job bridge
 

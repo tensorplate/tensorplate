@@ -8,6 +8,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- SDK-enabled x86 workers start without NVIDIA libraries and reject unusable TensorRT drivers before runtime construction. Jetson keeps direct SDK linkage; release builds still disable TensorRT.
+
 - The streaming slice measurement tool accepts server silence and duration
   endpoints and records every utterance, its partial cadence and revision
   gaps, and endpoint-to-final and audio-to-endpoint/final timings. Audio

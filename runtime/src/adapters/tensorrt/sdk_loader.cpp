@@ -1,15 +1,59 @@
 // SPDX-License-Identifier: Apache-2.0
-// This target is built only on Linux x86_64 with SDK headers available.
-#if TP_HAS_TENSORRT_LOADER
+// Built only with SDK headers; non-x86 platforms retain direct linkage.
+#if TP_HAS_TENSORRT_SDK
 #include "sdk_loader.hpp"
 
+#if TP_HAS_TENSORRT_LOADER
 #include <dlfcn.h>
+#endif
 
+#include <mutex>
 #include <string>
 #include <type_traits>
 
 namespace tensorplate::adapters::tensorrt {
 
+Result<nvinfer1::IRuntime*> create_runtime(const SdkFunctions& functions,
+                                           nvinfer1::ILogger& logger) {
+  int driver = 0;
+  auto status = functions.driver_version(&driver);
+  if (status != cudaSuccess || driver <= 0) {
+    return unexpected(Error::Code::LoadFailed,
+                      "cudaDriverGetVersion failed: status=" + std::to_string(status) +
+                          " version=" + std::to_string(driver));
+  }
+  int devices = 0;
+  status = functions.device_count(&devices);
+  if (status != cudaSuccess || devices <= 0) {
+    return unexpected(Error::Code::LoadFailed,
+                      "cudaGetDeviceCount failed: status=" + std::to_string(status) +
+                          " count=" + std::to_string(devices));
+  }
+  auto* runtime =
+      static_cast<nvinfer1::IRuntime*>(functions.create_runtime(&logger, NV_TENSORRT_VERSION));
+  if (runtime == nullptr) {
+    return unexpected(Error::Code::LoadFailed, "createInferRuntime returned null");
+  }
+  return runtime;
+}
+
+Result<std::shared_ptr<const SdkLibraries>> SdkLibraries::acquire() {
+  static std::mutex mutex;
+  // Retain mapped modules until OS teardown, including during LeakSanitizer checks.
+  // NOLINTNEXTLINE(cppcoreguidelines-owning-memory,cppcoreguidelines-avoid-non-const-global-variables)
+  static auto* const cached = new std::shared_ptr<const SdkLibraries>;
+  const std::lock_guard lock(mutex);
+  if (!*cached) {
+    auto result = load();
+    if (!result) {
+      return result;
+    }
+    *cached = std::move(result).value();
+  }
+  return *cached;
+}
+
+#if TP_HAS_TENSORRT_LOADER
 std::string cuda_library_name() {
   return "libcudart.so." + std::to_string(CUDART_VERSION / 1000);
 }
@@ -80,6 +124,16 @@ Result<std::shared_ptr<const SdkLibraries>> SdkLibraries::load(LibraryOps ops) {
   return std::shared_ptr<const SdkLibraries>(
       new SdkLibraries(std::move(cuda), std::move(infer), functions));
 }
+#else
+Result<std::shared_ptr<const SdkLibraries>> SdkLibraries::load() {
+  return std::shared_ptr<const SdkLibraries>(new SdkLibraries(
+      {nullptr, nullptr}, {nullptr, nullptr},
+      {::createInferRuntime_INTERNAL, ::getInferLibVersion, ::cudaRuntimeGetVersion,
+       ::cudaDriverGetVersion, ::cudaGetDeviceCount, ::cudaGetErrorString, ::cudaMalloc, ::cudaFree,
+       ::cudaStreamCreate, ::cudaStreamDestroy, ::cudaMemcpyAsync, ::cudaStreamSynchronize}));
+}
+#endif
 
 }  // namespace tensorplate::adapters::tensorrt
+
 #endif

@@ -1,0 +1,3 @@
+# NVIDIA allocations retained internally; never suppress TensorPlate allocations.
+leak:libnvinfer.so
+leak:libcudart.so

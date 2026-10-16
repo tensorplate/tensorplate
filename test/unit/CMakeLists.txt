@@ -125,7 +125,8 @@ if(TP_ENABLE_STREAMING_GRPC)
     DISCOVERY_MODE PRE_TEST)
 endif()
 
-if(TARGET tp_tensorrt_loader)
+if(TARGET tp_tensorrt_loader AND CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
   add_executable(tp_test_tensorrt_loader tensorrt_loader_test.cpp)
   target_link_libraries(tp_test_tensorrt_loader PRIVATE tp_tensorrt_loader GTest::gtest_main)
   tp_apply_warnings(tp_test_tensorrt_loader)

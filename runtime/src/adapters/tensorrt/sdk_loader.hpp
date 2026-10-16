@@ -40,9 +40,12 @@ struct LibraryOps {
 
 [[nodiscard]] std::string cuda_library_name();
 [[nodiscard]] std::string tensorrt_library_name();
+[[nodiscard]] Result<nvinfer1::IRuntime*> create_runtime(const SdkFunctions& functions,
+                                                         nvinfer1::ILogger& logger);
 
 class SdkLibraries final {
  public:
+  [[nodiscard]] static Result<std::shared_ptr<const SdkLibraries>> acquire();
   [[nodiscard]] static Result<std::shared_ptr<const SdkLibraries>> load();
   [[nodiscard]] static Result<std::shared_ptr<const SdkLibraries>> load(LibraryOps ops);
   [[nodiscard]] const SdkFunctions& functions() const noexcept { return functions_; }

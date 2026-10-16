@@ -17,12 +17,9 @@ TEST(TensorRTAdapter, FeatureFlagDisabled) {
 #else
 
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <string>
-
-#if TP_HAS_TENSORRT_SDK
-#include <cuda_runtime_api.h>
-#endif
 
 #include "tensorplate/backend/capability.hpp"
 #include "tensorplate/backend/registry.hpp"
@@ -85,12 +82,10 @@ TEST(TensorRTAdapter, LoadWithoutSdkReportsUnsupported) {
 #endif
 }
 
-TEST(TensorRTAdapter, NonEmptyInvalidEngineReportsLoadFailed) {
+TEST(TensorRTAdapter, DriverlessSdkReportsLoadFailed) {
 #if TP_HAS_TENSORRT_SDK
-  int device_count = 0;
-  if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0) {
-    GTEST_SKIP() << "TensorRT runtime needs a usable driver and device to get past "
-                    "createInferRuntime";
+  if (std::getenv("TP_TEST_TENSORRT_DRIVERLESS") == nullptr) {
+    GTEST_SKIP() << "requires SDK libraries on a driverless host";
   }
 
   const std::unique_ptr<std::FILE, decltype(&std::fclose)> engine(std::tmpfile(), &std::fclose);
@@ -107,10 +102,8 @@ TEST(TensorRTAdapter, NonEmptyInvalidEngineReportsLoadFailed) {
   const auto result = session.value()->load(spec);
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.error().code, Error::Code::LoadFailed);
-  // Both errors follow createInferRuntime; an early file-read failure is not enough.
-  EXPECT_TRUE(result.error().message == "createInferRuntime returned null" ||
-              result.error().message ==
-                  "TensorRT engine deserialization failed (architecture mismatch?)")
+  EXPECT_TRUE(result.error().message.starts_with("cudaDriverGetVersion failed:") ||
+              result.error().message.starts_with("cudaGetDeviceCount failed:"))
       << result.error().message;
   EXPECT_FALSE(session.value()->is_ready());
 #else

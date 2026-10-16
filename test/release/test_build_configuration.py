@@ -5760,7 +5760,9 @@ class CppWorkflowVcpkgTests(unittest.TestCase):
                  if "scripts/buildsystems/vcpkg.cmake" in json.dumps(job)}
         self.assertEqual(users, {"build-test", "adapter-shells", "tidy"})
         sdk_jobs = yaml.safe_load((WORKFLOWS / "tensorrt-sdk.yml").read_text())["jobs"]
-        jobs = {name: self.jobs[name] for name in users} | sdk_jobs
+        jobs = {name: self.jobs[name] for name in users} | {
+            name: job for name, job in sdk_jobs.items()
+            if "scripts/buildsystems/vcpkg.cmake" in json.dumps(job)}
         for name, job in jobs.items():
             steps = job["steps"]
             checkouts = [i for i, step in enumerate(steps)

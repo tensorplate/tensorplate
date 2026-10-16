@@ -193,6 +193,69 @@ TEST_F(TensorRTLoader, InstalledSdkLoadsWithoutCreatingRuntime) {
   }
 }
 
+// Synthetic function-table responses exercise ordering independently of the driver.
+TEST(TensorRTPreflight, GuardsEveryProbeBeforeCallingFactory) {
+  struct Case {
+    cudaError_t driver_status;
+    int driver;
+    cudaError_t device_status;
+    int devices;
+    std::string probe;
+    std::vector<int> calls;
+  };
+  static Case current;
+  static std::vector<int> calls;
+  class Logger final : public nvinfer1::ILogger {
+    void log(Severity, const char*) noexcept override {}
+  } logger;
+  SdkFunctions functions;
+  functions.driver_version = [](int* value) {
+    calls.push_back(1);
+    *value = current.driver;
+    return current.driver_status;
+  };
+  functions.device_count = [](int* value) {
+    calls.push_back(2);
+    *value = current.devices;
+    return current.device_status;
+  };
+  functions.create_runtime = [](void*, int32_t version) noexcept -> void* {
+    EXPECT_EQ(version, NV_TENSORRT_VERSION);
+    calls.push_back(3);
+    return nullptr;
+  };
+  for (const auto& item :
+       {Case{cudaErrorUnknown, 12090, cudaSuccess, 1, "cudaDriverGetVersion", {1}},
+        Case{cudaSuccess, 0, cudaSuccess, 1, "cudaDriverGetVersion", {1}},
+        Case{cudaSuccess, 12090, cudaErrorInsufficientDriver, 1, "cudaGetDeviceCount", {1, 2}},
+        Case{cudaSuccess, 12090, cudaSuccess, 0, "cudaGetDeviceCount", {1, 2}},
+        Case{cudaSuccess, 12090, cudaSuccess, 1, "createInferRuntime", {1, 2, 3}}}) {
+    current = item;
+    calls.clear();
+    SCOPED_TRACE(item.probe + " driver=" + std::to_string(item.driver) +
+                 " devices=" + std::to_string(item.devices));
+    const auto result = create_runtime(functions, logger);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, Error::Code::LoadFailed);
+    EXPECT_TRUE(result.error().message.starts_with(item.probe)) << result.error().message;
+    EXPECT_EQ(calls, item.calls);
+  }
+}
+
+TEST(TensorRTLoaderCache, RetainsSuccessfulOwnerAcrossSessions) {
+  if (std::getenv("TP_TEST_TENSORRT_SDK") == nullptr) {
+    GTEST_SKIP() << "requires the pinned runtime packages";
+  }
+  auto first = SdkLibraries::acquire();
+  ASSERT_TRUE(first.has_value()) << first.error().message;
+  const std::weak_ptr<const SdkLibraries> observer = first.value();
+  first.value().reset();
+  ASSERT_FALSE(observer.expired());
+  auto second = SdkLibraries::acquire();
+  ASSERT_TRUE(second.has_value()) << second.error().message;
+  EXPECT_EQ(second.value(), observer.lock());
+}
+
 }  // namespace
 }  // namespace tensorplate::adapters::tensorrt
 #endif
