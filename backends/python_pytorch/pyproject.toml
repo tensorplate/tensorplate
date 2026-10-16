@@ -39,6 +39,7 @@ dev = [
 speech-stt = [
     "faster-whisper",
     "ctranslate2",
+    "onnxruntime",
 ]
 
 # Development only; installed appliances use their locked runtime environment.
@@ -107,7 +108,7 @@ files = ["src", "tests"]
 # override once lerobot ships type stubs upstream. `transformers` exposes
 # Any-typed re-exports that don't add value under strict mode.
 [[tool.mypy.overrides]]
-module = ["numpy", "torch", "lerobot.*", "transformers", "faster_whisper", "ctranslate2", "kokoro", "kokoro.*"]
+module = ["numpy", "torch", "lerobot.*", "transformers", "faster_whisper", "ctranslate2", "onnxruntime", "kokoro", "kokoro.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

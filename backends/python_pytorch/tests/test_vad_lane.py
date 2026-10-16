@@ -21,6 +21,7 @@ from test_speech_jobs_golden_replay import connect as connect  # the fixture
 from test_speech_jobs_runner import (
     ACCEPTED,
     ACKNOWLEDGED,
+    ERROR_EVENT,
     FAILED,
     SESSION_RELEASED,
     assert_quiet,
@@ -310,6 +311,132 @@ def test_a_job_that_ends_unscored_beside_a_running_one_resets_the_next_admitted_
     _completes(peer, 3, 4)
     carried = "after 1" if end.endswith("another session") else None
     assert _Recording.given == [(1, None), (3, carried), (4, "after 3")]
+
+
+def _answered() -> list[Any]:
+    """Messages answered with ``error_event``: the error, and what session 1's next job gets."""
+    vad = vad_submit(2, frames=1)
+    cases: list[tuple[str, dict[str, Any], bytes | None, tuple[str, ...], str | None]] = [
+        ("unparsed", vad, b"", ("config_invalid",), None),
+        ("job-id-zero", {**vad, "job_id": 0}, None, ("config_invalid", "job_id_zero"), None),
+        ("unknown-field", {**vad, "unknown": 1}, None, ("config_invalid",), None),
+        ("schema-version", {**vad, "schema_version": "9.9"}, None, ("unsupported",), None),
+        ("no-message-id", {**vad, "message_id": ""}, None, ("config_invalid",), None),
+        (
+            "duplicate-id",
+            {**vad_submit(1), "message_id": "d1"},
+            None,
+            ("config_invalid", "duplicate_job_id"),
+            None,
+        ),
+        # These leave the state: no session reads, another session, or not a VAD submit.
+        (
+            "no-session",
+            {**vad, "session_key": 0},
+            None,
+            ("config_invalid", "session_key_zero"),
+            "after 1",
+        ),
+        ("other-generation", {**vad, "generation": 2}, b"", ("config_invalid",), "after 1"),
+        ("unparsed-decode", submit(2), b"", ("config_invalid",), "after 1"),
+        (
+            "duplicate-decode-id",
+            {**submit(1), "message_id": "d1"},
+            None,
+            ("config_invalid", "duplicate_job_id"),
+            "after 1",
+        ),
+        (
+            "cancel-naming-the-class",
+            message(protocol.KIND_JOB_CANCEL, 1, job_class="vad_frames"),
+            None,
+            ("config_invalid",),
+            "after 1",
+        ),
+    ]
+    return [pytest.param(*case[1:], id=case[0]) for case in cases]
+
+
+@pytest.mark.parametrize(("header", "payload", "error", "carried"), _answered())
+def test_a_vad_frames_submit_answered_with_error_event_resets_its_sessions_next_job(
+    connect: Callable[..., Peer],
+    monkeypatch: pytest.MonkeyPatch,
+    header: dict[str, Any],
+    payload: bytes | None,
+    error: tuple[str, ...],
+    carried: str | None,
+) -> None:
+    peer, gate = _recording(connect, monkeypatch)
+    # A submit without a message id is answered under a generated one.
+    answer = digest(exchange(peer, header, payload))
+    assert (answer[0], *answer[2:]) == (ERROR_EVENT, *error)
+    gate.set()
+    assert read(peer, 2) == ended(1)
+    _completes(peer, 3, 4)
+    assert _Recording.given == [(1, None), (3, carried), (4, "after 3")]
+
+
+def test_a_vad_frames_submit_the_reader_answers_busy_resets_its_sessions_next_job(
+    connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer, gate = _recording(connect, monkeypatch)
+    backend = peer.runner.state.backend
+    assert isinstance(backend, FixtureBackend)
+    main = threading.Event()
+    backend.job_gate = main
+    peer.gates.append(main)
+    assert read_after(peer, submit(50)) == (ACCEPTED, 50)
+    tensor = {
+        "name": "x",
+        "tensor": {"dtype": "uint8", "shape": [1]},
+        "payload_offset": 0,
+        "payload_length": 1,
+    }
+    infers = [message(protocol.KIND_INFER, tensors=[tensor]) for _ in range(jobs.UNARY_QUEUE_DEPTH)]
+    for infer in infers:
+        peer.send(infer, b"\0")
+    # The backend thread would answer this one, but its lane is full.
+    answer = digest(exchange(peer, {**vad_submit(2, frames=1), "schema_version": "9.9"}))
+    assert (answer[0], *answer[2:]) == (ERROR_EVENT, "resource_exhausted")
+    main.set()
+    assert read(peer, 2) == ended(50)
+    answered = [("infer_response", infer["message_id"]) for infer in infers]
+    assert [frame[:2] for frame in read(peer, len(infers))] == answered
+    gate.set()
+    assert read(peer, 2) == ended(1)
+    _completes(peer, 3, 4)
+    assert _Recording.given == [(1, None), (3, None), (4, "after 3")]
+
+
+def test_vad_submits_that_run_nothing_keep_no_state_for_a_session_without_jobs(
+    connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer, gate = _recording(connect, monkeypatch)
+    answer = digest(exchange(peer, {**vad_submit(3, session_key=3), "schema_version": "9.9"}))
+    assert (answer[0], *answer[2:]) == (ERROR_EVENT, "unsupported")
+    answer = digest(exchange(peer, {**vad_submit(4), "generation": 2}, b""))
+    assert (answer[0], *answer[2:]) == (ERROR_EVENT, "config_invalid")
+    # Session 5 has a decode job only.
+    assert read_after(peer, submit(50, session_key=5)) == (ACCEPTED, 50)
+    for session_key in (2, 5):
+        refused = vad_submit(session_key, session_key=session_key, frames=1)
+        refused["input"].update(frame_samples=768, payload_length=768 * 2)
+        peer.send(refused)
+        assert read(peer, 2) == ended(session_key, FAILED, "unsupported", "job_not_permitted")
+    gate.set()
+    assert sorted(read(peer, 4)) == sorted([*ended(1), *ended(50)])
+    assert_quiet(peer)
+    assert list(peer.runner._table._vad_sessions) == [(1, 1)]
+
+
+def test_a_sessions_only_vad_job_that_fails_keeps_no_state_for_the_session(
+    connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer, gate = _recording(connect, monkeypatch, failing={1})
+    gate.set()
+    assert read(peer, 2) == ended(1, FAILED, "inference_failed")
+    assert_quiet(peer)
+    assert peer.runner._table._vad_sessions == {}
 
 
 def test_a_cancelled_last_waiting_job_leaves_the_jobs_ahead_of_it_their_state(
