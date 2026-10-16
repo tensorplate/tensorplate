@@ -115,12 +115,22 @@ TEST(JobSessionNegotiation, ALoadWithJobsWritesAndReadsTheRecordedNegotiation) {
   EXPECT_EQ(written.at(0), recorded.at(0));
   EXPECT_EQ(without_id(written.at(1)), without_id(recorded.at(2)));
 
-  // Of the two classes the load declared, the channel takes the one a lane runs.
+  // The channel takes the classes the load declared, and tts_synthesis is not one.
   ASSERT_TRUE(h.session->prime().has_value());
   expect_refused(h.channel->submit(JobSessionHarness::tts(1, 1)), Error::Code::Unsupported,
                  "job_class_unsupported");
   ASSERT_TRUE(h.submit(h.stt(2, 1)).has_value());
   EXPECT_TRUE(h.wait_kinds(2, {Accepted}));
+  const Json vad = golden("vad_frames").at(0).at("input");
+  const auto bytes = vad.at("payload_length").get<std::size_t>();
+  const BufferRef pcm = h.manager->allocate(bytes).value();
+  ASSERT_TRUE(h.submit(JobRequest::create(JobIdentity{3, 1, 1}, JobClass::VadFrames,
+                                          VadFrames{kJobInputAudioFormat, PcmWindow{pcm, 0, bytes},
+                                                    vad.at("frame_samples").get<std::uint32_t>(),
+                                                    vad.at("frame_count").get<std::uint32_t>(), 1})
+                           .value())
+                  .has_value());
+  EXPECT_TRUE(h.wait_kinds(3, {Accepted}));
 }
 
 TEST(JobSessionNegotiation, TheRecordedRefusalFailsTheLoadWithTheSidecarsError) {
@@ -237,10 +247,9 @@ TEST(JobSessionNegotiation, ALoadAnswerWithoutReadableJobClassesFailsTheLoad) {
   EXPECT_TRUE(peer.reaped());
 }
 
-TEST(JobSessionNegotiation, ALoadThatDeclaresNoClassALaneRunsFailsAndTheSidecarIsReaped) {
-  // The runner refuses such a load itself; a sidecar that did not is not served.
+TEST(JobSessionNegotiation, ALoadThatDeclaresNoClassTheAdapterKnowsFailsAndTheSidecarIsReaped) {
   ScriptedSidecar peer(
-      ScriptedSidecar::Options{.job_classes = {"vad_frames"}, .declares_any_job_class = true});
+      ScriptedSidecar::Options{.job_classes = {"diarize_frames"}, .declares_any_job_class = true});
   JobSessionHarness h(with_jobs(), peer.launcher());
   expect_refused(h.session->load(recorded_spec()), Error::Code::Unsupported,
                  "job_class_unsupported");
