@@ -87,9 +87,9 @@ whatever the keys.
 Speech jobs do not pass through `InferScheduler`. The provisional
 `SpeechJobDispatch` ([serving-worker.md](serving-worker.md), "The speech
 dispatch") submits each one to the backend session's job bridge itself
-and keeps one in flight, so this scheduler's queue, deadlines and
-in-flight accounting never see a speech job, and no deadline covers the
-one in flight.
+and keeps one decode or synthesis in flight, with up to eight voice-activity
+jobs beside it, so this scheduler's queue, deadlines and in-flight
+accounting never see a speech job, and none of its deadlines covers one.
 
 ## Monotonic deadline domain
 

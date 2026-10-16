@@ -23,6 +23,7 @@
 #include "tensorplate/scheduler/clock.hpp"
 
 #include "serving/session/dispatch.hpp"
+#include "serving/session/vad_policy.hpp"
 
 namespace tensorplate::serving {
 
@@ -34,7 +35,8 @@ struct SpeechDispatchOptions {
   bool text_input = true;
   /// A job still running this long after its submit fails its session
   /// (`deadline_missed`): the base, plus the second figure for each second of
-  /// the job's audio, a decode's input or a synthesis's granted maximum.
+  /// the job's audio: a decode's or a voice-activity job's input, or a
+  /// synthesis's granted maximum.
   /// Provisional, sized by arithmetic on one short clip's latency.
   SchedulerClock::Duration job_deadline_base = std::chrono::seconds{10};
   SchedulerClock::Duration job_deadline_per_audio_second = std::chrono::milliseconds{500};
@@ -79,20 +81,36 @@ struct SpeechDispatchStats {
 /// - Audio (16 kHz mono 16-bit PCM, frames of 20 to 320 ms): a client
 ///   Finalize, a half-close or the 30 s limit ends the utterance, whose audio
 ///   is one `stt_decode`. Its result is the final's one segment, over the
-///   whole utterance; no audio, or no text, yields a final without segments.
-///   Three utterances may have ended without their final; a fourth, ended by
-///   the limit or by a Finalize, fails the session
-///   (`utterance_backlog_exceeded`).
+///   whole utterance; no audio, or no text, yields a final without segments,
+///   its EndpointDetected just before it. Three utterances may have ended
+///   without their final; a fourth, ended by the limit or by a Finalize,
+///   fails the session (`utterance_backlog_exceeded`).
+/// - Voice detection, when the backend runs `vad_frames` (asked once, at
+///   create()): each audio session's frames of 512 samples are scored by
+///   `vad_frames` jobs and a VadPolicy ends its utterances. An utterance runs
+///   from its onset to a silence endpoint, the 30 s limit, a Finalize or a
+///   half-close, and its EndpointDetected is offered as it ends, ahead of the
+///   decode; audio no onset can reach is dropped. A frame's input credit
+///   returns once all of it was scored, so unscored audio stays within the
+///   credit. Nothing past an utterance's end is scored until its final:
+///   what follows waits, its credit held. A Finalize or half-close ends the
+///   utterance once the whole frames before it were scored, in silence with
+///   a final without segments and no decode, as for an utterance that
+///   starts at a split and lies wholly inside the silence run ending it. A
+///   voice-activity job that fails fails its session. An endpoint waiting
+///   for output room does not hold its decode back; the finalization
+///   completes once it is queued.
 /// - Text: a segment is one `tts_synthesis`, whose one audio result is cut
 ///   into chunks of kAudioChunkDuration. A chunk is cut only when the one
 ///   before it was queued, so backpressure holds one chunk and nothing grows.
 ///   A segment whose audio takes the segments since the last Finalize over
 ///   SessionTerms::max_synthesis_audio fails the session
 ///   (`synthesis_audio_limit_exceeded`).
-/// - One job is in flight for the whole dispatch, sessions in the order their
-///   work became ready; a session whose job ended goes behind those waiting.
-///   A job keeps the lane until the backend ends it, also once its session is
-///   gone.
+/// - One decode or synthesis is in flight for the whole dispatch, sessions in
+///   the order their work became ready; a session whose job ended goes behind
+///   those waiting. Beside it, each session has at most one voice-activity
+///   job in flight and the dispatch kVadJobsInFlight, sessions in turn. A job
+///   keeps its slot until the backend ends it, also once its session is gone.
 /// - A job still running at its deadline fails its session if that session
 ///   is live (`deadline_missed`), whose release then cancels it. A session
 ///   release that waits past its bound, the backend holding a job it does not
@@ -123,6 +141,10 @@ struct SpeechDispatchStats {
 /// backend session was unloaded.
 class SpeechJobDispatch final : public SessionDispatch {
  public:
+  /// The sidecar's voice-activity lane lets eight jobs wait behind the one it
+  /// runs: this many in flight are never refused for its capacity.
+  static constexpr std::size_t kVadJobsInFlight = 8;
+
   /// Registers the dispatch as `bridge`'s event sink. `buffers` and `clock`,
   /// the manager's, outlive the dispatch and the bridge.
   /// @return ConfigInvalid with context "job_bridge_null" or
@@ -195,6 +217,7 @@ class SpeechJobDispatch final : public SessionDispatch {
 
   /// An utterance that ended, its final still to be produced.
   struct EndedUtterance {
+    std::uint64_t utterance_id = 0;
     std::uint64_t first_sample = 0;
     std::uint64_t end_sample = 0;
     /// Until its job is submitted.
@@ -202,6 +225,10 @@ class SpeechJobDispatch final : public SessionDispatch {
     EndpointReason reason = EndpointReason::ClientFinalize;
     std::uint64_t finalize_sequence = 0;
     std::optional<TranscriptResult> transcript;
+    /// An utterance without audio runs no job: a request could not carry it.
+    [[nodiscard]] bool needs_decode() const noexcept {
+      return end_sample > first_sample && !transcript.has_value();
+    }
   };
   struct WaitingSegment {
     std::uint64_t segment_id = 0;
@@ -219,6 +246,34 @@ class SpeechJobDispatch final : public SessionDispatch {
     bool completion_queued = false;
   };
   enum class JobState : std::uint8_t { None, Queued, Running };
+  /// A frame handed over whose input credit is held until it was scored.
+  struct HeldFrame {
+    std::uint64_t end_sample = 0;
+    std::uint64_t bytes = 0;
+  };
+  /// A Finalize or a half-close, waiting for the frames before it.
+  struct PendingEnd {
+    std::uint64_t end_sample = 0;
+    EndpointReason reason = EndpointReason::ClientFinalize;
+    std::uint64_t finalize_sequence = 0;
+  };
+  /// Voice detection of an audio session.
+  struct Detection {
+    explicit Detection(const VadPolicy& prototype) : policy(prototype) {}
+    VadPolicy policy;
+    /// Scored and not observed yet, from the policy's next frame on.
+    std::deque<float> scores;
+    /// End of the frames submitted for scoring.
+    std::uint64_t submitted_end = 0;
+    /// The utterance key of the next voice-activity job: a new one starts
+    /// the backend's state afresh.
+    std::uint64_t utterance_id = 1;
+    JobState job = JobState::None;
+    std::deque<HeldFrame> held_credit;
+    /// Oldest first: a finalization can complete before the dispatch sees
+    /// the Finalize that joined it, and the session then takes another.
+    std::deque<PendingEnd> pending;
+  };
   struct Session {
     SessionTerms terms;
     std::shared_ptr<BoundedOutputQueue> output;
@@ -247,10 +302,15 @@ class SpeechJobDispatch final : public SessionDispatch {
     bool past_bound = false;
     JobState job = JobState::None;
 
-    /// Audio input. The open utterance is [utterance_start, samples_accepted).
+    /// Audio input. `open_audio` is [open_start, samples_accepted): the open
+    /// utterance, or with voice detection the audio an utterance may take.
     std::uint64_t samples_accepted = 0;
-    std::uint64_t utterance_start = 0;
+    std::uint64_t open_start = 0;
+    /// Where the last utterance ended.
+    std::uint64_t ended_at = 0;
     std::vector<std::byte> open_audio;
+    std::optional<Detection> detection;
+    /// Utterances ended so far: the last one's id.
     std::uint64_t utterances = 0;
     std::deque<EndedUtterance> ended_utterances;
     /// The manager counts a finalization this dispatch has yet to complete.
@@ -275,7 +335,8 @@ class SpeechJobDispatch final : public SessionDispatch {
   };
 
   SpeechJobDispatch(std::shared_ptr<BoundedJobBridge> bridge, std::shared_ptr<Core> core,
-                    const SchedulerClock& clock, SpeechDispatchOptions options);
+                    const SchedulerClock& clock, SpeechDispatchOptions options,
+                    std::optional<VadPolicy> detection);
 
   void run();
   /// Waits until a step is due. False once the dispatch is stopping.
@@ -292,26 +353,38 @@ class SpeechJobDispatch final : public SessionDispatch {
   void release(SessionManager& manager, std::uint64_t key, Session& session);
   void acknowledge(SessionManager& manager, std::uint64_t key);
   void job_ended(SessionManager& manager, std::uint64_t key, JobEnded& ended);
+  /// The live session a job ended for, its job slot freed; none when the end
+  /// is counted as discarded or has ended the session.
+  [[nodiscard]] Session* serving_session(SessionManager& manager, std::uint64_t key,
+                                         const JobEnded& ended, bool voice_activity);
   /// Acts on the deadline and the release bounds the clock has passed.
   void check_bounds(SessionManager& manager);
   /// The next deadline or bound not acted on yet.
   [[nodiscard]] std::optional<SchedulerClock::TimePoint> next_bound() const;
-  /// The later of the request and the deadline of the session's job in
+  /// The later of the request and the deadlines of the session's jobs in
   /// flight, plus the bound.
   [[nodiscard]] SchedulerClock::TimePoint release_due(std::uint64_t key,
                                                       const Session& session) const;
   [[nodiscard]] SchedulerClock::Duration job_deadline(const JobRequest& request,
                                                       const Session& session) const;
-  /// Submits the job of the session that has waited longest, while the lane
-  /// is free.
+  /// Submits the job of the session that has waited longest while the lane
+  /// is free, and voice-activity jobs while fewer than kVadJobsInFlight run.
   void start_next(SessionManager& manager);
+  void start_voice_activity(SessionManager& manager);
   /// The session's next job, its input buffer in `input` when it has one;
   /// none, and the session failed, when the request cannot be made.
   [[nodiscard]] std::optional<JobRequest> next_request(SessionManager& manager, std::uint64_t key,
                                                        Session& session, HeldBuffer& input);
+  /// The session's next voice-activity job, over the frames due.
+  [[nodiscard]] std::optional<JobRequest> next_vad_request(SessionManager& manager,
+                                                           std::uint64_t key, Session& session,
+                                                           HeldBuffer& input);
   void want_job(std::uint64_t key, Session& session);
+  void want_vad(std::uint64_t key, Session& session);
   static void take_audio(SessionManager& manager, std::uint64_t key, Session& session,
                          std::span<const std::byte> frame);
+  /// Keeps a frame of a session with voice detection, its credit held.
+  static void keep_audio(Session& session, std::span<const std::byte> frame);
   void pump(SessionManager& manager, std::uint64_t key, Session& session);
   /// Offers the oldest held item. False while the queue has no room or once
   /// it stopped taking task output.
@@ -319,6 +392,18 @@ class SpeechJobDispatch final : public SessionDispatch {
   /// One step of the session's work. False when nothing can be done until
   /// another command arrives.
   [[nodiscard]] bool advance_audio(SessionManager& manager, std::uint64_t key, Session& session);
+  /// Observes the next score, ends the utterance a Finalize or a half-close
+  /// waits to end, or asks for scoring.
+  [[nodiscard]] bool advance_detection(SessionManager& manager, std::uint64_t key,
+                                       Session& session);
+  [[nodiscard]] static bool observe_score(SessionManager& manager, std::uint64_t key,
+                                          Session& session);
+  [[nodiscard]] static bool end_as_asked(SessionManager& manager, std::uint64_t key,
+                                         Session& session);
+  /// Drops the audio no utterance can take, and returns the credit of the
+  /// frames before `scored`.
+  static void let_go(SessionManager& manager, std::uint64_t key, Session& session,
+                     std::uint64_t scored);
   [[nodiscard]] bool advance_text(SessionManager& manager, std::uint64_t key, Session& session);
   /// `segment` is the session's active one.
   [[nodiscard]] bool advance_segment(SessionManager& manager, std::uint64_t key, Session& session,
@@ -333,8 +418,14 @@ class SpeechJobDispatch final : public SessionDispatch {
   /// it already holds every ended utterance it may.
   [[nodiscard]] static bool may_end_utterance(SessionManager& manager, std::uint64_t key,
                                               Session& session);
-  static void end_utterance(Session& session, EndpointReason reason,
-                            std::uint64_t finalize_sequence);
+  /// Ends [first, end) of the open audio, numbering it.
+  static void end_utterance(Session& session, std::uint64_t first, std::uint64_t end,
+                            EndpointReason reason, std::uint64_t finalize_sequence);
+  /// Applies `automatic_endpoint`, then ends [first, end). False, and the
+  /// session ended, when it may not.
+  [[nodiscard]] static bool end_automatically(SessionManager& manager, std::uint64_t key,
+                                              Session& session, std::uint64_t first,
+                                              std::uint64_t end, EndpointReason reason);
   static void fail(SessionManager& manager, std::uint64_t key, Session& session, Error cause);
   /// Fails the session with what the stream names the bridge's `error`.
   static void fail_for_backend(SessionManager& manager, std::uint64_t key, Session& session,
@@ -346,12 +437,17 @@ class SpeechJobDispatch final : public SessionDispatch {
   const std::shared_ptr<Core> core_;
   const SchedulerClock& clock_;
   const SpeechDispatchOptions options_;
+  /// Copied for each audio session when the backend runs `vad_frames`.
+  const std::optional<VadPolicy> detection_;
   std::once_flag joined_;
   /// The rest is touched by the thread only, and by stop() once it has
   /// joined.
   std::map<std::uint64_t, Session> sessions_;
   std::deque<std::uint64_t> lane_;
   std::optional<InFlight> in_flight_;
+  std::deque<std::uint64_t> vad_lane_;
+  /// By job id.
+  std::map<std::uint64_t, InFlight> vad_in_flight_;
   std::uint64_t next_job_id_ = 1;
   bool stalled_ = false;
   /// What the thread waits for between its steps.

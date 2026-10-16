@@ -49,7 +49,8 @@ _BINARIES = {
     "worker": "TENSORPLATE_STREAMING_WORKER_BIN",
 }
 PCM = speech.AudioFormat("pcm_s16le", 16000)
-FRAME = bytes(3200)  # 100 ms
+# 100 ms at three quarters of full scale: speech to a backend that detects voice.
+FRAME = b"\x00\x60" * 1600
 # The fixture backend transcribes any audio as this.
 FIXTURE_TEXT = "hello"
 # An agent with this many stream port pairs can start a generation while the last one stops.

@@ -201,6 +201,17 @@ TEST(VadPolicy, EarliestUtteranceStartIsWhereTheNextOnsetCouldStart) {
   EXPECT_EQ(policy.earliest_utterance_start(), 33 * kFrame + 100);
 }
 
+TEST(VadPolicy, TheSilenceRunThatEndsAnUtteranceIsWholeFrames) {
+  auto policy = make_policy();
+  EXPECT_EQ(policy.silence_run_samples(), 10 * kFrame);
+  VadProfile shorter;
+  shorter.silence_endpoint = 300ms;
+  EXPECT_EQ(make_policy(shorter).silence_run_samples(), 10 * kFrame);
+  EXPECT_EQ(feed(policy, kSpeech, 2), Outcomes{onset(0)});
+  EXPECT_EQ(feed(policy, kSilence, 10),
+            Outcomes{endpoint(2 * kFrame + policy.silence_run_samples())});
+}
+
 TEST(VadPolicy, ResetEndsTheUtteranceWhereTheDispatchEndedIt) {
   auto policy = make_policy();
   EXPECT_EQ(feed(policy, kSpeech, 2), Outcomes{onset(0)});

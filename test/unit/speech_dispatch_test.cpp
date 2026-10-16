@@ -319,6 +319,38 @@ TEST(SpeechJobDispatch, ASessionThatEndedWhileItWaitedForTheLaneIsNotServed) {
   EXPECT_EQ(speech.strategy->stats().sessions, 2U);
 }
 
+TEST(SpeechJobDispatch, WithoutVoiceDetectionADecodeWaitsForTheOutputBeforeIt) {
+  Binding binding(&speech_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const auto queue = binding.output(key);
+  // A lifecycle message the peer has not read leaves the first answer no room.
+  OutputItem unread{
+      OutputKind::Control,
+      SessionBudgets::kOutputMetadataBytes - SessionBudgets::kOutputControlReserveBytes, 0,
+      std::make_unique<OutputBody>()};
+  ASSERT_EQ(queue->offer(unread, binding.clock.now()).value(), OutputOffer::Queued);
+  const Bytes first = patterned_bytes(kFrameBytes, 1);
+  binding.audio(key, first);
+  binding.finalize(key, 1);
+  ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Active; }));
+  const Bytes second = patterned_bytes(kFrameBytes, 2);
+  binding.audio(key, second);
+  binding.finalize(key, 2);
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
+
+  const auto lifecycle = queue->take();
+  ASSERT_TRUE(lifecycle.has_value());
+  ASSERT_TRUE(queue->delivered(lifecycle->sequence, binding.clock.now()));
+  binding.dispatch().output_delivered(key, OutputKind::Control);
+  ASSERT_NO_FATAL_FAILURE(
+      binding.expect_final(key, EndpointReason::ClientFinalize, 1, 0, first, 1));
+  ASSERT_NO_FATAL_FAILURE(
+      binding.expect_final(key, EndpointReason::ClientFinalize, 2, first.size() / 2, second, 2));
+  EXPECT_EQ(speech.bridge->submitted().size(), 2U);
+}
+
 /// Another submitter fills the backend, so the session's one job finds no
 /// room: refused by submit() itself or ended by `failed`, as the backend
 /// chooses.

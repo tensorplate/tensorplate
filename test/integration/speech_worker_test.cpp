@@ -2066,6 +2066,11 @@ void hold_a_job(HeldJob& held, ControlSocketPair* control = nullptr) {
     std::this_thread::sleep_for(20ms);
   }
   ASSERT_TRUE(std::filesystem::exists(dir / "job")) << held.log();
+  // The fixture backend scores voice activity, so the utterance's endpoint is
+  // offered when it ends, ahead of its held decode.
+  const auto endpoint = client.next();
+  ASSERT_TRUE(endpoint.has_value() && endpoint->has_endpoint_detected()) << held.log();
+  EXPECT_EQ(endpoint->endpoint_detected().reason(), wire::ENDPOINT_REASON_CLIENT_FINALIZE);
 }
 
 // A session cancelled under the held job holds its place until its release
@@ -2120,8 +2125,6 @@ TEST_F(SpeechWorkerRunner, ARetiredWorkerProcessClosesItsSessionAndExitsWithSucc
       << held.log();
   std::ofstream{held.scratch.dir / "release"};
 
-  const auto endpoint = client.next();
-  ASSERT_TRUE(endpoint.has_value() && endpoint->has_endpoint_detected()) << held.log();
   const auto transcript = client.next();
   ASSERT_TRUE(transcript.has_value() && transcript->has_final_transcript()) << held.log();
   const auto closed = closed_of(client.next());
@@ -2139,7 +2142,8 @@ TEST_F(SpeechWorkerRunner, ARetiredWorkerProcessClosesItsSessionAndExitsWithSucc
   EXPECT_TRUE(logged(log, "drain window shortened").empty()) << log;
   const auto stopped = logged(log, "speech dispatch stopped");
   ASSERT_EQ(stopped.size(), 1U) << log;
-  EXPECT_EQ(stopped.front().value("jobs_completed", 0), 1);
+  // The utterance's one voice-activity job and its decode.
+  EXPECT_EQ(stopped.front().value("jobs_completed", 0), 2);
   EXPECT_EQ(stopped.front().value("releases_refused", -1), 0);
   EXPECT_EQ(stopped.front().value("releases_past_bound", -1), 0);
 }

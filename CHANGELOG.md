@@ -328,6 +328,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The serving worker's speech dispatch ends utterances by voice detection
+  when the backend runs `vad_frames`, as every `faster_whisper` deployment
+  does. It cuts each audio session's audio into frames of 512 samples and
+  has them scored by `vad_frames` jobs beside the decode, one at a time for
+  a session and at most eight at once, and the voice detection policy ends
+  an utterance at a silence endpoint (320 ms of silence), at the 30-second
+  limit, or at a client Finalize or half-close; the utterance starts 160 ms
+  before its speech, and audio no utterance can take is dropped.
+  EndpointDetected is sent when the utterance ends, before its decode. A
+  frame's input credit returns once all of it was scored, and the audio
+  that follows an utterance's end waits, its credit held, until that
+  utterance's final. A Finalize or half-close is answered once the frames
+  before it were scored; in silence its final has no segments and nothing
+  is decoded, as for an utterance that starts at a 30-second split and lies
+  wholly inside the silence run ending it. Each Finalize is answered by a
+  final of its own, in order. A `vad_frames` job that fails fails its
+  session. A backend that does not run `vad_frames` is served as before.
+  (V030-E04-F03-T02)
+
 - Hosted amd64 CI builds and links the worker against pinned TensorRT and
   CUDA development packages and runs device-free tests in an optional,
   path-filtered workflow, with fresh SDK downloads and timing. (XE-01)
@@ -387,12 +406,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   (V030-E04-F03-T01).
 
 - A voice detection policy for audio stream sessions in the serving
-  worker, not wired yet: per-frame speech probabilities (512 samples at
-  16 kHz) become utterance onsets with 160 ms of leading audio after two
-  speech frames, endpoints after ten silence frames (320 ms), and splits
-  at the 30-second utterance limit. Offsets never reset across
-  utterances, and internal offsets convert to input samples and
-  microseconds with checked arithmetic. (V030-E05-F03-T01,
+  worker, which its speech dispatch runs: per-frame speech probabilities
+  (512 samples at 16 kHz) become utterance onsets with 160 ms of leading
+  audio after two speech frames, endpoints after ten silence frames
+  (320 ms), and splits at the 30-second utterance limit. Offsets never
+  reset across utterances, and internal offsets convert to input samples
+  and microseconds with checked arithmetic. (V030-E05-F03-T01,
   V030-E05-F03-T04)
 
 - The serving worker serves several stream sessions at a time:
@@ -400,10 +419,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   1 by default) sets how many, and it is the ledger's `ceiling` and the
   session count `activate` answers. This worker refuses more than 64 with
   `config_invalid` until the memory a session holds is charged to the
-  deployment's budget (at most about 351 MB of host memory at 64, plus
-  each decode's input until the backend releases the job). The sessions
-  share the speech dispatch's one job in flight and take turns, one job
-  per session. A session's jobs wait behind the other sessions', and its
+  deployment's budget (at most about 353 MB of host memory at 64, plus
+  each job's input until the backend releases the job). The sessions
+  share the speech dispatch's one decode or synthesis in flight and take
+  turns, one job per session. A session's jobs wait behind the other
+  sessions', and its
   finalize deadline counts the wait: 10 seconds for a `Finalize`, and for
   the decodes a half-close (up to four) or a retire or a stop (up to
   three) leaves owed; 120 seconds for text. A job that ends
@@ -532,7 +552,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   ended by a Finalize, a half-close or the 30-second limit is one decode
   whose text becomes the final transcript; a text segment is one synthesis
   whose audio is cut into 20 ms chunks under the output queue's
-  backpressure. One job is in flight at a time. A session fails with
+  backpressure. One decode or synthesis is in flight at a time. A session
+  fails with
   `resource_exhausted`, which a stream reports as `internal`, when a
   fourth utterance ends, by the limit or by a
   Finalize, before the first of three has its final, or when its
@@ -1227,9 +1248,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   the backend, and a bridge implemented outside the tree must add it. The
   python_pytorch adapter's bridge answers from the classes the load
   declared that the adapter knows, until the session stops its sidecar (an
-  unload, or a failed exchange with it). Nothing in the serving worker asks
-  it yet. The test fixture bridge now runs `vad_frames` as the runner's
-  fixture backend does: on a lane of its own, one job running and eight
+  unload, or a failed exchange with it). The serving worker's speech
+  dispatch asks it whether `vad_frames` runs. The test fixture bridge now
+  runs `vad_frames` as the runner's fixture backend does: on a lane of its
+  own, one job running and eight
   waiting, for frames of 512 samples only (another size ends
   `job_not_permitted` before it is accepted), each frame scored by its
   largest absolute sample over 32768; a test can hold either lane alone.

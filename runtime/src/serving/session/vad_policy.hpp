@@ -84,6 +84,11 @@ class VadPolicy {
   /// The open utterance's first sample, or in silence the earliest the next
   /// onset can name: no utterance takes audio before it.
   [[nodiscard]] std::uint64_t earliest_utterance_start() const noexcept;
+  /// The length in samples of the silence run that ends an utterance in
+  /// speech; the run ends at the silence endpoint.
+  [[nodiscard]] std::uint64_t silence_run_samples() const noexcept {
+    return std::uint64_t{silence_frames_} * profile_.frame_samples;
+  }
 
  private:
   VadPolicy(VadProfile profile, std::uint32_t min_speech_frames, std::uint32_t silence_frames,
