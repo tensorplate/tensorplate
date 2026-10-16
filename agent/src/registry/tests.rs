@@ -8,10 +8,18 @@ use std::sync::mpsc;
 use std::time::Instant;
 use tempfile::TempDir;
 
+use tensorplate_protocol::worker_control::{WorkerControlResponse, WorkerOp};
+use tensorplate_protocol::ValidatePayload;
+
 use crate::supervision::FakeClock;
 use crate::worker::MemberEvent;
 
+#[path = "../../tests/support/member_target.rs"]
+mod member_target;
+use member_target::{Admission, MemberTarget};
+
 mod activation;
+mod control;
 mod descriptors;
 mod handoff;
 mod ports;
@@ -46,6 +54,25 @@ struct Handle {
     hold_failure: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
     /// The same for `terminate`.
     hold_terminate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    /// How the worker answers the agent's runtime operations.
+    target: Mutex<MemberTarget>,
+    /// What carries an operation to the worker and back.
+    reply: Mutex<Reply>,
+    /// Each runtime operation sent, with its transaction id.
+    ops: Mutex<Vec<(WorkerOp, String)>>,
+    /// An operation says it was sent, then waits to be let be answered.
+    hold_call: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+}
+
+/// What becomes of a runtime operation sent to a fake process.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Reply {
+    /// The worker answers it.
+    Answered,
+    /// Nothing answers within the budget; the worker never applied it.
+    Unanswered,
+    /// The channel failed while it was sent.
+    Broken,
 }
 
 impl Handle {
@@ -54,6 +81,76 @@ impl Handle {
     }
     fn set_contact(&self, contact: ControlContact) {
         *self.contact.lock().unwrap() = contact;
+    }
+    fn ops(&self) -> Vec<(WorkerOp, String)> {
+        self.ops.lock().unwrap().clone()
+    }
+    fn admission(&self) -> Admission {
+        self.target.lock().unwrap().admission
+    }
+    fn reply(&self, reply: Reply) {
+        *self.reply.lock().unwrap() = reply;
+    }
+    /// Holds the next runtime operation sent; returns what tells that it
+    /// was sent and what lets it be answered.
+    fn hold_call(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (started, has_started) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        *self.hold_call.lock().unwrap() = Some((started, released));
+        (has_started, release)
+    }
+}
+
+/// The control channel of a fake process.
+struct FakeCaller(Arc<Handle>);
+
+impl RuntimeCall for FakeCaller {
+    fn call(
+        &self,
+        command: RuntimeCommand,
+        _budget: Duration,
+    ) -> Result<WorkerControlResponse, ControlChannelError> {
+        let handle = &self.0;
+        let request = command
+            .request(handle.spec.member.clone(), "ctl-1".into())
+            .validate_payload()
+            .map_err(|_| ControlChannelError::InvalidRequest)?;
+        let sent = (request.op, request.transaction_id.clone());
+        handle.ops.lock().unwrap().push(sent);
+        let held = handle.hold_call.lock().unwrap().take();
+        if let Some((started, release)) = held {
+            let _ = started.send(());
+            let _ = release.recv_timeout(GRACE);
+        }
+        let reply = *handle.reply.lock().unwrap();
+        match reply {
+            Reply::Answered => Ok(handle.target.lock().unwrap().answer(&request)),
+            Reply::Unanswered => Err(ControlChannelError::Deadline),
+            Reply::Broken => Err(ControlChannelError::Closed),
+        }
+    }
+}
+
+/// A control channel a built worker answers at once.
+struct Answering(MemberRef, Mutex<MemberTarget>);
+
+impl Answering {
+    fn boxed(member: MemberRef) -> Box<dyn RuntimeCall> {
+        Box::new(Self(member, Mutex::new(MemberTarget::built(0))))
+    }
+}
+
+impl RuntimeCall for Answering {
+    fn call(
+        &self,
+        command: RuntimeCommand,
+        _budget: Duration,
+    ) -> Result<WorkerControlResponse, ControlChannelError> {
+        let request = command
+            .request(self.0.clone(), "ctl-1".into())
+            .validate_payload()
+            .map_err(|_| ControlChannelError::InvalidRequest)?;
+        Ok(self.1.lock().unwrap().answer(&request))
     }
 }
 
@@ -86,6 +183,9 @@ impl MemberProcess for FakeProcess {
     }
     fn control(&self) -> ControlContact {
         *self.0.contact.lock().unwrap()
+    }
+    fn control_caller(&self) -> Box<dyn RuntimeCall> {
+        Box::new(FakeCaller(self.0.clone()))
     }
     fn terminate(&mut self) {
         self.0.calls.lock().unwrap().push("terminate");
@@ -142,6 +242,7 @@ impl ProcessLauncher for FakeLauncher {
             let _ = release.recv();
         }
         let config = serde_json::from_slice(&std::fs::read(&spec.config_path).unwrap()).unwrap();
+        let ceiling = MemberTarget::ceiling_of(&config);
         let handle = Arc::new(Handle {
             spec: spec.clone(),
             config,
@@ -152,6 +253,10 @@ impl ProcessLauncher for FakeLauncher {
             contact: Mutex::new(ControlContact::Reporting),
             hold_failure: Mutex::new(None),
             hold_terminate: Mutex::new(None),
+            target: Mutex::new(MemberTarget::built(ceiling)),
+            reply: Mutex::new(Reply::Answered),
+            ops: Mutex::default(),
+            hold_call: Mutex::new(None),
         });
         self.launched.lock().unwrap().push(handle.clone());
         Ok(Box::new(FakeProcess(handle)))
@@ -189,6 +294,15 @@ struct Fixture {
     next_generation: Arc<AtomicU64>,
     clock: Arc<FakeClock>,
     registry: MemberRegistry,
+}
+
+/// Waits for every activate a restart has sent on a thread of its own to
+/// be answered.
+fn activations_answered(f: &Fixture) {
+    let threads = std::mem::take(&mut *f.registry.activations.lock().unwrap());
+    for thread in threads {
+        thread.join().unwrap();
+    }
 }
 
 /// Waits, with a bound, until another thread's stop of `registry` has begun.

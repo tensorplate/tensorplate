@@ -27,8 +27,10 @@ treat the field as a value carried on the request, not global state.
 [`worker_control.json`](../../protocol/schemas/worker_control.json)
 defines the messages of the runtime control channel between the agent and
 a serving worker. The agent's member registry opens one for every worker
-it starts and polls it with `ledger_status`; the agent sends no other
-operation yet. On it, every request carries a `correlation_id` and the
+it starts, polls it with `ledger_status`, and sends `admission_fence` and
+`activate` around a deploy's or rollback's commit; it sends no `retire`,
+`quota_assign` or `pressure_directive` yet. On it, every request carries a
+`correlation_id` and the
 response that answers it echoes the same value. `transaction_id` there
 names the committing deploy transaction for `admission_fence`, `activate`
 and `retire`, and is the literal `runtime` for `quota_assign`,
@@ -36,7 +38,13 @@ and `retire`, and is the literal `runtime` for `quota_assign`,
 Each request gets its own `correlation_id`. The schema lets the agent
 repeat only the latest request it sent on a channel, with the id it was
 first sent with, and asks the worker to answer a repeat with the outcome
-it gave. The agent repeats no request yet. The worker keeps no record of
+it gave. The agent never repeats a request under its first id: a fence or
+an activate not answered before the channel's next ledger poll is sent
+again after that poll, as a new request with a new `correlation_id` and
+the same `transaction_id`, until 3 seconds have passed since the first
+attempt. The activate a failed transaction owes a worker that did not
+answer it `ok` is sent again later, in calls of its own, with that
+transaction's `transaction_id`. The worker keeps no record of
 the latest request: a repeat of an applied `admission_fence`, `activate`
 or `retire` gets the same answer because each depends only on the
 member's admission state, and the operations whose repeat would act

@@ -427,7 +427,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["deployment_id", "generation", "bundle_digest", "state", "admission_mode", "quota"],
-      "description": "One resident-set member at its committed generation. `process`, `readiness`, `draining` and `contact` say how the worker process of that generation stands now; all four are absent when the agent's worker control does not report its processes. Fields whose source does not exist yet are absent: `stream_api_version` until the stream endpoint lands, `effective_quota` until the agent reports what the member's worker has in force, and `staged_bytes` until staging is keyed by generation.",
+      "description": "One resident-set member at its committed generation. `process`, `readiness`, `draining` and `contact` say how the worker process of that generation stands now; all four are absent when the agent's worker control does not report its processes. `effective_quota` is the quota the member's worker answered its last `activate` with, while its process runs, and absent once an `activate` is answered `error`. Fields whose source does not exist yet are absent: `stream_api_version` until the stream endpoint lands, and `staged_bytes` until staging is keyed by generation.",
       "properties": {
         "deployment_id": {"$ref": "#/definitions/DeploymentId"},
         "generation": {"$ref": "#/definitions/StateCounter"},
@@ -459,7 +459,7 @@
         "stream_api_version": {"type": "string", "minLength": 1},
         "effective_quota": {
           "$ref": "#/definitions/MemberQuota",
-          "description": "The quota the member's worker reports in force; it may be lower than `quota`."
+          "description": "The quota the member's worker answered its last `activate` with, absent once one is answered `error`; it may be lower than `quota`."
         },
         "staged_bytes": {"$ref": "#/definitions/QuotaBytes"},
         "contact": {

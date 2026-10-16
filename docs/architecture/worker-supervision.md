@@ -315,14 +315,24 @@ must validate against protocol 0.1 and match operation, transaction, correlation
 and member generation. Malformed frames, wrong members, EOF and partial writes
 close the transport; contact detection continues after closure.
 
-There are at most 16 queued commands and one active exchange. Queue time counts
-toward a command's one-second budget. A due ledger poll takes precedence: queued
-commands without a remaining execution window receive backpressure or expiry.
-An issued command's deadline is also bounded by the next poll. An expired read
-preserves partial framing; a later reply to that older correlation is drained
-without refreshing contact. Expired operations are never automatically retried,
-so a poll cannot cause a previously applied mutation to be applied again. A
-caller must treat an issued operation's timeout as an unknown outcome.
+There are at most 16 queued commands and one active exchange. A due ledger poll
+takes precedence: queued commands without a remaining execution window receive
+backpressure or expiry. An issued command's deadline is also bounded by the next
+poll. An expired read preserves partial framing; a later reply to that older
+correlation is drained without refreshing contact.
+
+`ControlChannel::submit` sends a command once, with a one-second budget that
+includes queue time; it never sends it again, and its caller must treat a
+timeout as an unknown outcome. `ControlChannel::caller()` returns a
+`ControlCaller`, which other threads use to send a command with a budget of
+their own (`RuntimeCall::call`; the member registry gives a fence or an
+activate 3 seconds). An attempt not answered when its gap before the next poll
+ends is sent again after that poll, as a new request with a new correlation
+ID: the schema lets a repeat keep its ID only while no other request was sent
+since, and the poll was. A command still queued when its budget passes is never
+sent. Sending a fence or an activate again is safe because the worker's answer
+to each depends only on its admission state. The call returns the first paired
+response whatever its status, and a transport failure at once.
 
 `ContactMonitor` emits typed `OutOfContact` after three missed polls and
 `MemberFailed` at ten seconds without a valid paired ledger response. A worker

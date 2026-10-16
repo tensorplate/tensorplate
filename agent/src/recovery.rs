@@ -333,7 +333,9 @@ fn restore_active(coordinator: &Coordinator) -> AgentResult<()> {
             return Err(err);
         }
     };
-    let tx = format!("recovery-restore-{}", active.deployment_id);
+    // Sent to the worker with its activate, so within the control channel's
+    // id policy, which a deployment id need not be.
+    let tx = crate::coordinator::new_transaction_id();
     let prepare_timeout =
         std::time::Duration::from_millis(coordinator.config().worker.prepare_timeout_ms);
     let warm_timeout =

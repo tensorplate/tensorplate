@@ -574,6 +574,88 @@ fn roles(f: &Fixture) -> Vec<(MemberRef, MemberRole)> {
     live.into_iter().map(|m| (m.member, m.role)).collect()
 }
 
+/// `serving` was activated when it started, then fenced by a transaction
+/// that failed and activated again with that transaction's id.
+fn assert_reopened(serving: &Handle) {
+    let ops = serving.ops();
+    let sent: Vec<WorkerOp> = ops.iter().map(|(op, _)| *op).collect();
+    let fence_then_activate = [WorkerOp::AdmissionFence, WorkerOp::Activate];
+    assert_eq!(sent[1..], fence_then_activate, "{ops:?}");
+    assert_eq!(sent[0], WorkerOp::Activate, "{ops:?}");
+    assert_eq!(ops[1].1, ops[2].1, "{ops:?}");
+    assert_eq!(serving.admission(), Admission::Open);
+}
+
+#[test]
+fn a_deploy_whose_serving_member_does_not_answer_its_fence_fails_before_the_commit() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    let before = w.store.snapshot().unwrap();
+    let serving = w.f.launcher.handle(1);
+    serving.reply(Reply::Unanswered);
+    let heard = serving.clone();
+    let answer_again = move || heard.reply(Reply::Answered);
+    *w.worker.on_failure.lock().unwrap() = Some(Box::new(answer_again));
+
+    let refused = w.deploy("tts", TTS).unwrap_err();
+
+    assert!(
+        matches!(refused, AgentError::WorkerTimeout(3_000)),
+        "{refused:?}"
+    );
+    let outgoing = (MemberRef::new("stt", 1), MemberRole::Serving);
+    let given_up = (MemberRef::new("tts", 2), MemberRole::Abandoned);
+    assert_eq!(roles(&w.f), [outgoing, given_up]);
+    assert!(serving.calls().is_empty());
+    assert_reopened(&serving);
+    let found = w.store.snapshot().unwrap();
+    assert_eq!(found.active, before.active);
+    assert!(found.in_flight_transaction.is_none());
+    let recorded = found.last_error.expect("the failure is recorded");
+    assert_eq!(recorded.code, ErrorCode::Timeout);
+    let entry = found.quarantined.last().expect("a quarantine entry");
+    assert_eq!(entry.phase, DeployState::Warmed);
+}
+
+#[test]
+fn a_rollback_fences_the_member_it_replaces_and_activates_the_one_it_starts() {
+    let w = wired();
+    w.deploy("stt", STT).unwrap();
+    w.deploy("tts", TTS).unwrap();
+
+    w.coordinator.rollback(None).unwrap();
+
+    let outgoing = w.f.launcher.handle(2).ops();
+    let [_, (WorkerOp::AdmissionFence, fenced)] = &outgoing[..] else {
+        panic!("{outgoing:?}");
+    };
+    let incoming = w.f.launcher.handle(3).ops();
+    assert_eq!(incoming, [(WorkerOp::Activate, fenced.clone())]);
+    let live = w.f.registry.live_members().unwrap();
+    assert_eq!(live[0].member, MemberRef::new("stt", 3));
+    assert_eq!(live[0].effective_quota, Some(MemberTarget::quota(0)));
+}
+
+#[test]
+fn a_restore_activates_its_member_with_a_transaction_id_the_control_channel_accepts() {
+    let w = wired();
+    // A deployment id may hold a `.`, which a control-channel id may not.
+    w.f.health(ACTIVE_PORT, "stt.v1");
+    w.deploy("stt.v1", STT).unwrap();
+
+    let next = w.started_again();
+    next.f.health(ACTIVE_PORT, "stt.v1");
+    apply_startup(&next.coordinator).unwrap();
+
+    let restored = next.f.launcher.handle(2).ops();
+    let [(WorkerOp::Activate, transaction_id)] = &restored[..] else {
+        panic!("{restored:?}");
+    };
+    assert!(transaction_id.starts_with("tx-"), "{transaction_id}");
+    let live = next.f.registry.live_members().unwrap();
+    assert_eq!(live[0].effective_quota, Some(MemberTarget::quota(0)));
+}
+
 #[test]
 fn a_deploy_whose_commit_write_is_refused_fails_and_the_serving_member_stays() {
     let w = wired();
@@ -588,6 +670,7 @@ fn a_deploy_whose_commit_write_is_refused_fails_and_the_serving_member_stays() {
     let given_up = (MemberRef::new("tts", 2), MemberRole::Abandoned);
     assert_eq!(roles(&w.f), [serving, given_up]);
     assert!(w.f.launcher.handle(1).calls().is_empty());
+    assert_reopened(&w.f.launcher.handle(1));
     let found = w.store.snapshot().unwrap();
     assert_eq!(found.active, before.active);
     assert!(found.in_flight_transaction.is_none());
@@ -673,6 +756,7 @@ fn a_rollback_whose_commit_write_is_refused_fails_and_the_serving_member_stays()
     let given_up = (MemberRef::new("stt", 3), MemberRole::Abandoned);
     assert_eq!(roles(&w.f), [serving, given_up]);
     assert!(w.f.launcher.handle(2).calls().is_empty());
+    assert_reopened(&w.f.launcher.handle(2));
     let found = w.store.snapshot().unwrap();
     assert_eq!(found.active, before.active);
     assert!(found.in_flight_transaction.is_none());

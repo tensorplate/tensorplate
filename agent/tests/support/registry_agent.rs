@@ -20,8 +20,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use tensorplate_agent::config::{AgentConfig, PortRange, WorkerControlMode};
+use tensorplate_agent::control_channel::{RuntimeCall, RuntimeCommand};
 use tensorplate_agent::coordinator::{Coordinator, DeployOutcome};
-use tensorplate_agent::error::{AgentError, AgentResult};
+use tensorplate_agent::error::{AgentError, AgentResult, ControlChannelError};
 use tensorplate_agent::registry::{
     configured_ports, durable_generations, ControlContact, HealthProbe, LaunchSpec, MemberPorts,
     MemberProcess, MemberRegistry, ProcessLauncher, RegistrySettings,
@@ -31,9 +32,14 @@ use tensorplate_agent::worker::{
     LiveMember, MemberEvent, ServingMember, WorkerControl, WorkerReadiness,
 };
 use tensorplate_protocol::agent_state::{decode_agent_state, ErrorRecord};
-use tensorplate_protocol::worker_control::CandidateRef;
+use tensorplate_protocol::worker_control::{CandidateRef, WorkerControlResponse, WorkerOp};
+use tensorplate_protocol::ValidatePayload;
 
 use super::common::{vision_bundle, Harness};
+
+#[path = "member_target.rs"]
+mod member_target;
+use member_target::MemberTarget;
 
 /// The two ports the agent's workers are given, in the order they are leased.
 pub const PORTS: [u16; 2] = [41_280, 41_281];
@@ -84,6 +90,9 @@ pub struct Worker {
     loading: AtomicBool,
     contact: Mutex<ControlContact>,
     hold_stop: Mutex<Option<Hold>>,
+    target: Mutex<MemberTarget>,
+    /// Each runtime operation sent, with its transaction id.
+    ops: Mutex<Vec<(WorkerOp, String)>>,
 }
 
 impl Worker {
@@ -103,6 +112,9 @@ impl Worker {
     pub fn set_contact(&self, contact: ControlContact) {
         *self.contact.lock().unwrap() = contact;
     }
+    pub fn ops(&self) -> Vec<(WorkerOp, String)> {
+        self.ops.lock().unwrap().clone()
+    }
     /// Hold this worker's answer to a stop request; returns what tells
     /// that the request arrived and what lets the worker exit.
     pub fn hold_stop(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
@@ -111,6 +123,33 @@ impl Worker {
 }
 
 struct Process(Arc<Worker>);
+
+/// A worker's control channel: closed once the worker exited, answered
+/// `not_ready` to an activate while it loads.
+struct Channel(Arc<Worker>);
+
+impl RuntimeCall for Channel {
+    fn call(
+        &self,
+        command: RuntimeCommand,
+        _budget: Duration,
+    ) -> Result<WorkerControlResponse, ControlChannelError> {
+        let worker = &self.0;
+        let request = command
+            .request(worker.spec.member.clone(), "ctl-1".into())
+            .validate_payload()
+            .map_err(|_| ControlChannelError::InvalidRequest)?;
+        let sent = (request.op, request.transaction_id.clone());
+        worker.ops.lock().unwrap().push(sent);
+        if !worker.running() {
+            return Err(ControlChannelError::Closed);
+        }
+        let mut target = worker.target.lock().unwrap();
+        let loading = worker.loading.load(Ordering::SeqCst);
+        target.ceiling = (!loading).then(|| MemberTarget::ceiling_of(&worker.config));
+        Ok(target.answer(&request))
+    }
+}
 
 impl MemberProcess for Process {
     fn exited(&mut self) -> AgentResult<bool> {
@@ -124,6 +163,9 @@ impl MemberProcess for Process {
     }
     fn control(&self) -> ControlContact {
         *self.0.contact.lock().unwrap()
+    }
+    fn control_caller(&self) -> Box<dyn RuntimeCall> {
+        Box::new(Channel(self.0.clone()))
     }
     fn terminate(&mut self) {
         held(&self.0.hold_stop);
@@ -193,6 +235,8 @@ impl ProcessLauncher for Workers {
             loading: AtomicBool::new(self.start_loading.load(Ordering::SeqCst)),
             contact: Mutex::new(ControlContact::Reporting),
             hold_stop: Mutex::new(None),
+            target: Mutex::new(MemberTarget::built(MemberTarget::ceiling_of(&config))),
+            ops: Mutex::default(),
         });
         self.started.lock().unwrap().push(worker.clone());
         Ok(Box::new(Process(worker)))

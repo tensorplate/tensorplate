@@ -112,7 +112,9 @@ pub enum RuntimeCommand {
 }
 
 impl RuntimeCommand {
-    fn request(self, member: MemberRef, id: String) -> WorkerControlRequest {
+    /// The request this command makes for `member` under `id`.
+    #[must_use]
+    pub fn request(self, member: MemberRef, id: String) -> WorkerControlRequest {
         match self {
             Self::AdmissionFence { transaction_id } => {
                 WorkerControlRequest::admission_fence(transaction_id, id, member)
@@ -152,10 +154,92 @@ struct Queued {
     reply: mpsc::SyncSender<Result<WorkerControlResponse>>,
 }
 
-/// Owns no process: the registry handles kill/reap/restart after `MemberFailed`.
-pub struct ControlChannel {
+/// A runtime operation sent to one member, answered or not within a budget.
+pub trait RuntimeCall: Send {
+    /// Send `command` until a response pairs with it, the channel fails or
+    /// `budget` passes, and return that response whatever its status. Each
+    /// attempt is bounded by one poll gap, at most a second, and attempts
+    /// repeat within `budget`.
+    ///
+    /// # Errors
+    ///
+    /// [`ControlChannelError::Deadline`] when `budget` passed with no
+    /// response, and the channel's own error when it failed or stopped.
+    fn call(&self, command: RuntimeCommand, budget: Duration) -> Result<WorkerControlResponse>;
+}
+
+/// Sends runtime operations to one member from any thread. The channel's
+/// thread exchanges each in the gap before its next ledger poll.
+#[derive(Clone)]
+pub struct ControlCaller {
     member: MemberRef,
     requests: mpsc::SyncSender<Queued>,
+}
+
+impl ControlCaller {
+    fn enqueue(
+        &self,
+        command: RuntimeCommand,
+        expires: Instant,
+    ) -> Result<mpsc::Receiver<Result<WorkerControlResponse>>> {
+        command
+            .clone()
+            .request(self.member.clone(), "probe".into())
+            .validate_payload()
+            .map_err(|_| ControlChannelError::InvalidRequest)?;
+        let (reply, result) = mpsc::sync_channel(1);
+        self.requests
+            .try_send(Queued {
+                command,
+                expires,
+                reply,
+            })
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => ControlChannelError::QueueFull,
+                mpsc::TrySendError::Disconnected(_) => ControlChannelError::Stopped,
+            })?;
+        Ok(result)
+    }
+}
+
+impl RuntimeCall for ControlCaller {
+    /// An attempt waits no longer than the gap before the channel's next
+    /// ledger poll. One not answered within it is sent again after the poll
+    /// that ended it, so as a new request with a new correlation id: the
+    /// schema lets a repeat keep its id only while no other request was sent
+    /// since. A queued attempt is never sent once `budget` has passed.
+    fn call(&self, command: RuntimeCommand, budget: Duration) -> Result<WorkerControlResponse> {
+        let start = Instant::now();
+        let end = start.checked_add(budget).unwrap_or(start);
+        loop {
+            let reply = match self.enqueue(command.clone(), end) {
+                Err(ControlChannelError::QueueFull) => Err(ControlChannelError::QueueFull),
+                Err(error) => return Err(error),
+                Ok(reply) => reply
+                    .recv_timeout(end.saturating_duration_since(Instant::now()))
+                    .unwrap_or_else(|error| {
+                        Err(match error {
+                            mpsc::RecvTimeoutError::Timeout => ControlChannelError::Deadline,
+                            mpsc::RecvTimeoutError::Disconnected => ControlChannelError::Stopped,
+                        })
+                    }),
+            };
+            match reply {
+                Err(ControlChannelError::Deadline | ControlChannelError::QueueFull) => {
+                    if Instant::now() >= end {
+                        return Err(ControlChannelError::Deadline);
+                    }
+                    pause(end);
+                }
+                answered => return answered,
+            }
+        }
+    }
+}
+
+/// Owns no process: the registry handles kill/reap/restart after `MemberFailed`.
+pub struct ControlChannel {
+    caller: ControlCaller,
     snapshot: Arc<Mutex<ChannelSnapshot>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -190,8 +274,7 @@ impl ControlChannel {
             .spawn(move || run(stream, &peer, &receiver, &shared, &stopping))
             .map_err(|e| ControlChannelError::Io(e.kind()))?;
         Ok(Self {
-            member,
-            requests,
+            caller: ControlCaller { member, requests },
             snapshot,
             stop,
             thread: Some(thread),
@@ -199,28 +282,19 @@ impl ControlChannel {
     }
 
     /// One second includes queue time. Dropping the receiver does not cancel an issued operation.
-    /// A deadline means its outcome is unknown; the client never automatically reapplies it.
+    /// A deadline means its outcome is unknown; `submit` never sends it again. [`ControlCaller`]
+    /// does, as a new request.
     pub fn submit(
         &self,
         command: RuntimeCommand,
     ) -> Result<mpsc::Receiver<Result<WorkerControlResponse>>> {
-        command
-            .clone()
-            .request(self.member.clone(), "probe".into())
-            .validate_payload()
-            .map_err(|_| ControlChannelError::InvalidRequest)?;
-        let (reply, result) = mpsc::sync_channel(1);
-        self.requests
-            .try_send(Queued {
-                command,
-                expires: Instant::now() + POLL_PERIOD,
-                reply,
-            })
-            .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => ControlChannelError::QueueFull,
-                mpsc::TrySendError::Disconnected(_) => ControlChannelError::Stopped,
-            })?;
-        Ok(result)
+        self.caller.enqueue(command, Instant::now() + POLL_PERIOD)
+    }
+
+    /// What sends this member runtime operations while the channel runs.
+    #[must_use]
+    pub fn caller(&self) -> ControlCaller {
+        self.caller.clone()
     }
 
     pub fn snapshot(&self) -> ChannelSnapshot {
@@ -319,7 +393,7 @@ impl Transport {
                 return Err(ControlChannelError::MemberMismatch);
             }
             if response.correlation_id != request.correlation_id {
-                // Expired operations are never retried, even after a subsequent ledger poll.
+                // A late reply to an earlier attempt; one sent again has a new id.
                 let old = response
                     .correlation_id
                     .as_deref()
@@ -376,6 +450,8 @@ fn pause(deadline: Instant) {
     thread::sleep(IO_QUANTUM.min(deadline.saturating_duration_since(Instant::now())));
 }
 
+/// Polls the member once a [`POLL_PERIOD`] and exchanges each queued runtime
+/// operation in the gap before the next poll, bounded by that poll.
 fn run(
     stream: UnixStream,
     member: &MemberRef,

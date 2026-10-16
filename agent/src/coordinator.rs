@@ -1129,6 +1129,9 @@ fn report_process(member: &mut MemberStatus, live: &[LiveMember]) {
         Readiness::NotReady
     });
     member.draining = Some(held.is_some_and(|held| held.role == MemberRole::Draining));
+    member.effective_quota = held
+        .filter(|held| held.running)
+        .and_then(|held| held.effective_quota);
     member.contact = held
         .filter(|held| held.running)
         .and_then(|held| held.in_contact)
@@ -1208,6 +1211,7 @@ mod tests {
     };
     use tensorplate_protocol::agent_state::decode_agent_state;
     use tensorplate_protocol::worker_control::MemberRef;
+    use tensorplate_protocol::{DomainQuotaBytes, MemberQuota};
 
     fn held(id: &str, generation: u64, role: MemberRole) -> LiveMember {
         LiveMember {
@@ -1218,6 +1222,7 @@ mod tests {
             in_contact: Some(true),
             http_port: 18_080,
             stream_port: None,
+            effective_quota: None,
         }
     }
 
@@ -1258,6 +1263,25 @@ mod tests {
             (member.process, member.readiness),
             (Some(ProcessState::Running), Some(Readiness::NotReady))
         );
+    }
+
+    #[test]
+    fn a_member_reports_the_quota_its_running_worker_answered_and_none_once_it_stopped() {
+        let quota = MemberQuota {
+            session_count: 4,
+            domain_bytes: DomainQuotaBytes {
+                guest_ram: Some(0),
+                ..DomainQuotaBytes::default()
+            },
+        };
+        let mut activated = held("vision-v2", 2, MemberRole::Serving);
+        activated.effective_quota = Some(quota);
+        for (running, expected) in [(true, Some(quota)), (false, None)] {
+            let mut member = committed();
+            activated.running = running;
+            report_process(&mut member, &[activated.clone()]);
+            assert_eq!(member.effective_quota, expected, "running: {running}");
+        }
     }
 
     #[test]

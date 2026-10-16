@@ -14,18 +14,23 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use tensorplate_protocol::agent_control::is_valid_deployment_id;
 use tensorplate_protocol::agent_state::ErrorRecord;
-use tensorplate_protocol::worker_control::{CandidateRef, MemberRef};
+use tensorplate_protocol::worker_control::{
+    CandidateRef, MemberRef, WorkerControlResponse, WorkerStatusOutcome,
+};
+use tensorplate_protocol::MemberQuota;
 
 use crate::bundle::StagedManifest;
 use crate::config::{AgentConfig, WorkerConfig};
-use crate::control_channel::{ChannelSnapshot, ContactState, ControlChannel};
+use crate::control_channel::{
+    ChannelSnapshot, ContactState, ControlChannel, RuntimeCall, RuntimeCommand,
+};
 use crate::descriptor_store::{self, DescriptorStore};
-use crate::error::{AgentError, AgentResult};
+use crate::error::{AgentError, AgentResult, ControlChannelError};
 use crate::state::StateStore;
 use crate::supervision::{MonotonicClock, SystemMonotonicClock};
 use crate::worker::{
@@ -67,6 +72,9 @@ pub const RESTART_DELAYS: [Duration; 3] = [
 /// How long a restart counts against its member.
 pub const RESTART_WINDOW: Duration = Duration::from_secs(300);
 
+/// How long a member is given to answer an admission fence or an activate.
+pub const CONTROL_BUDGET: Duration = Duration::from_secs(3);
+
 /// What a member's control channel has shown so far.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlContact {
@@ -100,6 +108,10 @@ pub trait MemberProcess: Send {
     fn startup_failure(&mut self) -> AgentError;
 
     fn control(&self) -> ControlContact;
+
+    /// What sends the process's control channel a runtime operation, from
+    /// outside the registry's lock.
+    fn control_caller(&self) -> Box<dyn RuntimeCall>;
 
     /// Ask the process to drain and exit.
     fn terminate(&mut self);
@@ -275,6 +287,195 @@ struct Member {
     ports: Arc<PortLease>,
     /// Set while a thread holds the member outside the registry's map.
     outside: Option<Outside>,
+    control: Arc<ControlState>,
+}
+
+/// What the agent's fence and activates left in force on one member,
+/// shared with a thread that sends it one.
+#[derive(Default)]
+struct ControlState {
+    /// The fence in force. Held while an operation is sent, so operations
+    /// reach the member in the order they were decided.
+    fenced_by: Mutex<Option<Fence>>,
+    /// What the member's worker answered its last `activate` with, until
+    /// one is answered `error`.
+    quota: Mutex<Option<MemberQuota>>,
+}
+
+impl ControlState {
+    /// Whether the activate a failed transaction owes the member is due at
+    /// `now`; if so it is next due at `next`. An operation being sent is
+    /// not waited for.
+    fn reopen_due(&self, now: Instant, next: Instant) -> bool {
+        let mut fenced_by = match self.fenced_by.try_lock() {
+            Ok(fenced_by) => fenced_by,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return false,
+        };
+        match fenced_by.as_mut().map(|fence| &mut fence.reopen_at) {
+            Some(Some(at)) if now >= *at => {
+                *at = next;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+struct Fence {
+    transaction_id: String,
+    /// Set once the transaction failed and its activate was answered
+    /// neither `ok` nor `unsupported`: when the supervision step sends that
+    /// activate again.
+    reopen_at: Option<Instant>,
+}
+
+/// One member's control, taken out of the registry's lock to send it an
+/// operation.
+struct Reach {
+    name: String,
+    caller: Box<dyn RuntimeCall>,
+    control: Arc<ControlState>,
+}
+
+impl Reach {
+    /// `role` names the member in what is logged: `serving`, `candidate`
+    /// or `restarted`.
+    fn of(member: &Member, role: &str) -> Self {
+        Self {
+            name: format!(
+                "{role} worker `{}` generation {}",
+                member.deployment_id, member.generation
+            ),
+            caller: member.process.control_caller(),
+            control: member.control.clone(),
+        }
+    }
+
+    /// Recorded before it is sent: a transaction that fails re-activates a
+    /// member whose answer was lost.
+    fn fence(&self, transaction_id: &str) -> Result<WorkerControlResponse, ControlChannelError> {
+        let mut fenced_by = lock(&self.control.fenced_by);
+        *fenced_by = Some(Fence {
+            transaction_id: transaction_id.to_owned(),
+            reopen_at: None,
+        });
+        let command = RuntimeCommand::AdmissionFence {
+            transaction_id: transaction_id.to_owned(),
+        };
+        self.caller.call(command, CONTROL_BUDGET)
+    }
+
+    fn activate(&self, transaction_id: &str, unless_fenced: bool) {
+        let fenced_by = lock(&self.control.fenced_by);
+        // The transaction that fenced it re-activates it or retires it.
+        if unless_fenced && fenced_by.is_some() {
+            return;
+        }
+        if let Err(failed) = self.send_activate(transaction_id) {
+            eprintln!("{}: activate {}", self.name, failed.why);
+        }
+    }
+
+    /// Re-activate the member a transaction fenced and did not commit. One
+    /// not answered `ok` stays fenced, owed the activate from `now` on,
+    /// unless its worker answered `unsupported`.
+    fn reopen(&self, now: Instant) {
+        let mut fenced_by = lock(&self.control.fenced_by);
+        let Some(fence) = fenced_by.as_mut() else {
+            return;
+        };
+        let transaction_id = fence.transaction_id.clone();
+        let Err(failed) = self.send_activate(&transaction_id) else {
+            if fence.reopen_at.is_some() {
+                eprintln!(
+                    "{}: activate after failed transaction `{transaction_id}` answered ok",
+                    self.name
+                );
+            }
+            *fenced_by = None;
+            return;
+        };
+        if failed.unsupported {
+            *fenced_by = None;
+            eprintln!(
+                "{}: activate after failed transaction `{transaction_id}` {}",
+                self.name, failed.why
+            );
+        } else if fence.reopen_at.replace(now).is_none() {
+            eprintln!(
+                "{}: activate after failed transaction `{transaction_id}` {}; sent again until it is answered ok",
+                self.name, failed.why
+            );
+        }
+    }
+
+    /// Send again the activate a failed transaction owes the member, unless
+    /// another transaction fenced the member since.
+    fn retry_reopen(&self) {
+        let mut fenced_by = lock(&self.control.fenced_by);
+        let owed = fenced_by.as_ref().filter(|fence| fence.reopen_at.is_some());
+        let Some(transaction_id) = owed.map(|fence| fence.transaction_id.clone()) else {
+            return;
+        };
+        let why = match self.send_activate(&transaction_id) {
+            Ok(()) => "answered ok".to_owned(),
+            Err(failed) if failed.unsupported => failed.why,
+            Err(_) => return,
+        };
+        *fenced_by = None;
+        eprintln!(
+            "{}: activate after failed transaction `{transaction_id}` {why}",
+            self.name
+        );
+    }
+
+    /// The answer other than `ok` is the caller's to log: an activate
+    /// follows a commit or a failure that it cannot undo.
+    fn send_activate(&self, transaction_id: &str) -> Result<(), NotActivated> {
+        let command = RuntimeCommand::Activate {
+            transaction_id: transaction_id.to_owned(),
+        };
+        match self.caller.call(command, CONTROL_BUDGET) {
+            Ok(answer) if answer.status == WorkerStatusOutcome::Ok => {
+                *lock(&self.control.quota) = answer.quota;
+                Ok(())
+            }
+            Ok(answer) => {
+                // A quota the worker no longer admits by is worse than none.
+                if answer.status == WorkerStatusOutcome::Error {
+                    *lock(&self.control.quota) = None;
+                }
+                Err(NotActivated {
+                    why: format!("refused: {}", refusal(&answer)),
+                    unsupported: answer.status == WorkerStatusOutcome::Unsupported,
+                })
+            }
+            Err(err) => Err(NotActivated {
+                why: format!("not answered: {err}"),
+                unsupported: false,
+            }),
+        }
+    }
+}
+
+/// An `activate` that was not answered `ok`.
+struct NotActivated {
+    why: String,
+    /// A worker without the control target: it never closed its admission,
+    /// so a failed transaction has nothing to reopen.
+    unsupported: bool,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn refusal(answer: &WorkerControlResponse) -> String {
+    match &answer.error {
+        Some(error) => format!("{}: {}", error.code, error.message),
+        None => format!("{:?}", answer.status),
+    }
 }
 
 /// Counts a member process, or a launch, that a thread holds outside the
@@ -457,6 +658,9 @@ pub struct MemberRegistry {
     /// Runs once, just before a restart reads the staged manifest.
     #[cfg(test)]
     before_staged_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// The threads the supervision step sent an activate from.
+    #[cfg(test)]
+    activations: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl MemberRegistry {
@@ -479,6 +683,8 @@ impl MemberRegistry {
             inner: Mutex::new(Members::default()),
             #[cfg(test)]
             before_staged_read: Mutex::new(None),
+            #[cfg(test)]
+            activations: Mutex::default(),
         }
     }
 
@@ -614,6 +820,7 @@ impl Members {
             )),
             http_port: member.ports.ports.http,
             stream_port: member.ports.ports.stream,
+            effective_quota: *lock(&member.control.quota),
         })
     }
 
@@ -800,6 +1007,7 @@ impl MemberRegistry {
                     process,
                     recipe,
                     outside: Some(outside),
+                    control: Arc::default(),
                 },
             )),
             Err(error) => Err(FailedLaunch {
@@ -885,24 +1093,16 @@ impl MemberRegistry {
     /// Stop `members`: ask each to drain, then kill whatever is still
     /// running when the one stop deadline they share passes.
     fn retire(&self, mut members: Vec<Stopping>) {
-        for stopping in &mut members {
+        let deadline = self.ask_to_stop(&mut members);
+        reap(members, deadline);
+    }
+
+    /// Ask each of `members` to drain; returns the stop deadline they share.
+    fn ask_to_stop(&self, members: &mut [Stopping]) -> Instant {
+        for stopping in members.iter_mut() {
             stopping.member().process.terminate();
         }
-        let deadline = Instant::now() + self.settings.stop_deadline;
-        // Each is dropped once reaped, which is when its ports and its
-        // place among the draining members are given up.
-        for mut stopping in members {
-            let member = stopping.member();
-            while !matches!(member.process.exited(), Ok(true)) {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    member.process.kill();
-                    break;
-                }
-                std::thread::sleep(DRAIN_POLL.min(remaining));
-            }
-            let _ = fs::remove_file(&member.config_path);
-        }
+        Instant::now() + self.settings.stop_deadline
     }
 
     /// The prepared candidate's port and control contact. A candidate that
@@ -956,6 +1156,56 @@ impl MemberRegistry {
             "serving worker `{}` generation {generation} lost its control channel before it served",
             member.deployment_id
         )))
+    }
+
+    /// Close the serving member's admission before the commit: it must
+    /// answer `ok` within [`CONTROL_BUDGET`]. A member that exited or whose
+    /// control channel failed admits nothing and is not fenced.
+    fn fence_serving(&self, transaction_id: &str) -> AgentResult<()> {
+        let Some(reach) = self.admitting_serving()? else {
+            return Ok(());
+        };
+        let refused = match reach.fence(transaction_id) {
+            Ok(answer) if answer.status == WorkerStatusOutcome::Ok => return Ok(()),
+            Ok(answer) => AgentError::WorkerControl(format!(
+                "{} refused the admission fence: {}",
+                reach.name,
+                refusal(&answer)
+            )),
+            Err(ControlChannelError::Deadline) => AgentError::WorkerTimeout(
+                u64::try_from(CONTROL_BUDGET.as_millis()).unwrap_or(u64::MAX),
+            ),
+            Err(err) => {
+                AgentError::WorkerControl(format!("{}: admission fence: {err}", reach.name))
+            }
+        };
+        // One that exited or lost its channel meanwhile admits nothing either.
+        if self.admitting_serving()?.is_some() {
+            return Err(refused);
+        }
+        Ok(())
+    }
+
+    /// The serving member, unless it exited or its control channel failed.
+    /// One that cannot be inspected may still admit. Refused once the
+    /// registry stops, so no commit follows a fence a stop cut short.
+    fn admitting_serving(&self) -> AgentResult<Option<Reach>> {
+        let mut members = self.members()?;
+        if members.stopping {
+            return Err(AgentError::Stopping);
+        }
+        let Some(generation) = members.serving else {
+            return Ok(None);
+        };
+        let Some(member) = members.by_generation.get_mut(&generation) else {
+            return Ok(None);
+        };
+        if matches!(member.process.exited(), Ok(true))
+            || member.process.control() == ControlContact::Failed
+        {
+            return Ok(None);
+        }
+        Ok(Some(Reach::of(member, "serving")))
     }
 
     /// Keep the judgement that `generation` is ready, for as long as the
@@ -1039,22 +1289,72 @@ impl MemberRegistry {
                         self.probe.ready_model(port, self.settings.status_poll_interval),
                         Ok(Some(model)) if model == deployment_id
                     );
-                let Ok(mut members) = self.members() else {
-                    return;
-                };
-                if ready
-                    && members.serving == Some(generation)
-                    && matches!(members.restart, Restart::Loading { .. })
-                {
-                    members.restart = Restart::Idle;
-                    if let Some(member) = members.by_generation.get_mut(&generation) {
-                        member.ready = true;
+                let activated = {
+                    let Ok(mut members) = self.members() else {
+                        return;
+                    };
+                    if !ready
+                        || members.serving != Some(generation)
+                        || !matches!(members.restart, Restart::Loading { .. })
+                    {
+                        return;
                     }
+                    members.restart = Restart::Idle;
                     events.push(MemberEvent::Serving {
                         member: MemberRef::new(deployment_id, generation),
                     });
+                    members.by_generation.get_mut(&generation).map(|member| {
+                        member.ready = true;
+                        Reach::of(member, "restarted")
+                    })
+                };
+                if let Some(reach) = activated {
+                    self.activate_restarted(reach);
                 }
             }
+        }
+    }
+
+    fn activate_restarted(&self, reach: Reach) {
+        let transaction_id = format!("tx-{}", uuid::Uuid::new_v4());
+        self.activate_on_thread(reach, move |reach| reach.activate(&transaction_id, true));
+    }
+
+    /// Send the serving member again the activate a failed transaction
+    /// owes it, at most once a poll interval.
+    fn retry_reopen(&self, now: Instant) {
+        let reach = {
+            let Ok(members) = self.members() else {
+                return;
+            };
+            let serving = members.serving;
+            let serving = serving.and_then(|generation| members.by_generation.get(&generation));
+            let Some(member) = serving else {
+                return;
+            };
+            let next = later(now, self.settings.status_poll_interval);
+            if !member.control.reopen_due(now, next) {
+                return;
+            }
+            Reach::of(member, "serving")
+        };
+        self.activate_on_thread(reach, Reach::retry_reopen);
+    }
+
+    /// An activate from the supervision step, on a thread of its own: the
+    /// step does not wait for the answer.
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    fn activate_on_thread(&self, reach: Reach, send: impl FnOnce(&Reach) + Send + 'static) {
+        let name = reach.name.clone();
+        let spawned = std::thread::Builder::new()
+            .name("member-activate".into())
+            .spawn(move || send(&reach));
+        match spawned {
+            #[cfg(test)]
+            Ok(thread) => lock(&self.activations).push(thread),
+            #[cfg(not(test))]
+            Ok(_) => {}
+            Err(err) => eprintln!("{name}: activate not sent: {err}"),
         }
     }
 
@@ -1259,6 +1559,24 @@ impl MemberRegistry {
     }
 }
 
+/// Wait for `members` to exit, killing whatever still runs at `deadline`.
+/// Each is dropped once reaped, which is when its ports and its place among
+/// the draining members are given up.
+fn reap(members: Vec<Stopping>, deadline: Instant) {
+    for mut stopping in members {
+        let member = stopping.member();
+        while !matches!(member.process.exited(), Ok(true)) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                member.process.kill();
+                break;
+            }
+            std::thread::sleep(DRAIN_POLL.min(remaining));
+        }
+        let _ = fs::remove_file(&member.config_path);
+    }
+}
+
 fn later(now: Instant, wait: Duration) -> Instant {
     now.checked_add(wait).unwrap_or(now)
 }
@@ -1413,7 +1731,7 @@ impl WorkerControl for MemberRegistry {
         }
     }
 
-    fn fence(&self, _transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
+    fn fence(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
         {
             let mut members = self.members()?;
             if members.stopping {
@@ -1441,11 +1759,12 @@ impl WorkerControl for MemberRegistry {
         }
         // A candidate that exited or lost its control channel since it was
         // warmed replaces nothing.
-        self.candidate_progress(candidate).map(|_| ())
+        self.candidate_progress(candidate)?;
+        self.fence_serving(transaction_id)
     }
 
-    fn activate(&self, _transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
-        let retired = {
+    fn activate(&self, transaction_id: &str, candidate: &CandidateRef) -> AgentResult<()> {
+        let (retired, activated) = {
             let mut members = self.members()?;
             if members.stopping {
                 return Err(AgentError::Stopping);
@@ -1462,9 +1781,18 @@ impl WorkerControl for MemberRegistry {
             members.admit(generation, prepared);
             members.serving = Some(generation);
             members.forget_restart();
-            old.map(|member| members.stopping(member))
+            let activated = members.by_generation.get(&generation);
+            let activated = activated.map(|member| Reach::of(member, "candidate"));
+            (old.map(|member| members.stopping(member)), activated)
         };
-        self.retire(retired.into_iter().collect());
+        let mut retired: Vec<Stopping> = retired.into_iter().collect();
+        // Asked before the activate is sent: a stop of the agent, which waits
+        // for this member only as long as for any other, never waits on it.
+        let deadline = self.ask_to_stop(&mut retired);
+        if let Some(reach) = activated {
+            reach.activate(transaction_id, false);
+        }
+        reap(retired, deadline);
         Ok(())
     }
 
@@ -1519,10 +1847,20 @@ impl WorkerControl for MemberRegistry {
     }
 
     fn abandon(&self, candidate: &CandidateRef) {
-        if let Ok(mut members) = self.members() {
+        let serving = {
+            let Ok(mut members) = self.members() else {
+                return;
+            };
             if members.names(members.candidate, &candidate.deployment_id) {
                 members.candidate_abandoned = true;
             }
+            let serving = members.serving;
+            serving
+                .and_then(|generation| members.by_generation.get(&generation))
+                .map(|member| Reach::of(member, "serving"))
+        };
+        if let Some(reach) = serving {
+            reach.reopen(self.clock.now());
         }
     }
 
@@ -1610,6 +1948,7 @@ impl WorkerControl for MemberRegistry {
                     in_contact: None,
                     http_port: draining.ports.http,
                     stream_port: draining.ports.stream,
+                    effective_quota: None,
                 }),
         );
         Some(live)
@@ -1619,6 +1958,7 @@ impl WorkerControl for MemberRegistry {
         let mut events = Vec::new();
         let now = self.clock.now();
         self.watch_serving(now, &mut events);
+        self.retry_reopen(now);
         self.start_owed_restart(now, &mut events);
         events
     }
@@ -1838,6 +2178,10 @@ impl MemberProcess for SystemProcess {
 
     fn control(&self) -> ControlContact {
         contact_of(&self.channel.snapshot())
+    }
+
+    fn control_caller(&self) -> Box<dyn RuntimeCall> {
+        Box::new(self.channel.caller())
     }
 
     fn terminate(&mut self) {
