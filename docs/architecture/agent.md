@@ -1326,7 +1326,19 @@ deploy abandoned is not named. `active.stream_endpoint` and
 when that generation was started with [streaming](#streaming); in the
 window above where the outgoing worker's generation is attached, a
 redeploy of a format 0.1 bundle under its own id, the outgoing worker's
-endpoint and digest are too, if it streams.
+endpoint and digest are too, if it streams. `active.admission_mode` is the
+mode the active record's descriptor records, read from the descriptor
+document at each status, with `active.test_count`, the descriptor's
+session count, in [qualification](#qualification) mode; both are absent
+when the record names no descriptor or the document does not read back as
+named, and on `previous_active` and `candidate`. A slot projected from a
+resident set takes both from the member. A qualification session count
+outside 1 to 2048, which no deploy records, reports neither. Of the
+descriptor's two digests only `descriptor_digest`, the one `active`
+carries beside them while its generation streams, covers the mode, which
+sits outside `configuration`: the qualification and production
+descriptors of one bundle differ in `configuration_digest` only through
+the quota's session count (N against 0).
 
 A singleton record that names a descriptor carries its generation: a
 deploy, a rollback, a restore and the

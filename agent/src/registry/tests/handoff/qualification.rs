@@ -4,7 +4,9 @@
 //! is started with, what records it, and the refusals before staging.
 
 use super::*;
-use tensorplate_protocol::agent_control::{ControlRequest, DeployRequest, ResponseStatus};
+use tensorplate_protocol::agent_control::{
+    ControlRequest, DeployRequest, ResponseStatus, StatusRequest,
+};
 use tensorplate_protocol::{AdmissionMode, DeploymentDescriptor, DomainQuotaBytes};
 
 /// A copy of the STT fixture bundle under `root` declaring `sessions`.
@@ -72,6 +74,11 @@ impl Wired {
     fn staged(&self, id: &str) -> bool {
         self.root.path().join("staging").join(id).exists()
     }
+    /// The admission mode and test count status reports on `active`.
+    fn reported_admission(&self) -> (Option<AdmissionMode>, Option<u32>) {
+        let (reported, _) = active_of(self);
+        (reported.admission_mode, reported.test_count)
+    }
 }
 
 #[test]
@@ -95,6 +102,27 @@ fn a_qualification_deploy_starts_its_worker_with_the_test_count_and_records_it_u
     let described = w.active_descriptor();
     assert_eq!(described.admission_mode, AdmissionMode::Qualification);
     assert_eq!(described.configuration.quota, unmeasured(3));
+
+    let status = ControlRequest::status(None, StatusRequest::default());
+    let answered = crate::control::dispatch(&w.coordinator, status).unwrap();
+    let active = answered.agent_status.unwrap().active.unwrap();
+    assert_eq!(active.admission_mode, Some(AdmissionMode::Qualification));
+    assert_eq!(active.test_count, Some(3));
+}
+
+#[test]
+fn status_reports_no_admission_for_a_descriptor_that_does_not_read_back() {
+    let w = wired_with(Step::BeforePrepare, streams);
+    w.qualify("stt", &declaring(&w.root, 4), 3).unwrap();
+    let qualified = (Some(AdmissionMode::Qualification), Some(3));
+    assert_eq!(w.reported_admission(), qualified);
+
+    let path = w.store.state_dir().join("descriptor-stt-1.json");
+    let text = fs::read_to_string(&path).unwrap();
+    let altered = text.replace("\"qualification\"", "\"production\"");
+    assert_ne!(altered, text);
+    fs::write(&path, altered).unwrap();
+    assert_eq!(w.reported_admission(), (None, None));
 }
 
 #[test]
@@ -123,7 +151,14 @@ fn a_rollback_and_the_next_start_start_a_qualification_deployment_with_its_test_
     let qualified = w.active_descriptor();
     w.deploy("tts", TTS).unwrap();
 
+    assert_eq!(
+        w.reported_admission(),
+        (Some(AdmissionMode::Production), None)
+    );
+
     w.coordinator.rollback(None).unwrap();
+    let admitted = (Some(AdmissionMode::Qualification), Some(3));
+    assert_eq!(w.reported_admission(), admitted);
     let back = w.active_descriptor();
     assert_eq!(back.generation, 3);
     assert_eq!(back.admission_mode, AdmissionMode::Qualification);
@@ -140,6 +175,7 @@ fn a_rollback_and_the_next_start_start_a_qualification_deployment_with_its_test_
         qualified.configuration_digest
     );
     assert_eq!(next.rendered(4)["max_sessions"], 3);
+    assert_eq!(next.reported_admission(), admitted);
 }
 
 #[test]
@@ -152,6 +188,10 @@ fn a_production_deploy_of_a_bundle_qualified_before_renders_no_count_and_records
 
     w.stream("stt", &bundle).unwrap();
     let production = w.active_descriptor();
+    assert_eq!(
+        w.reported_admission(),
+        (Some(AdmissionMode::Production), None)
+    );
     assert_eq!(production.generation, 2);
     assert_eq!(production.admission_mode, AdmissionMode::Production);
     assert_eq!(production.configuration.quota, MemberQuota::default());

@@ -362,6 +362,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   deployment descriptor schema accepts a qualification test count that no
   memory domain backs yet. (V030-E05-F02-T01)
 
+- Agent status reports the mode the active deployment was admitted under:
+  `active.admission_mode` (`production` or `qualification`), as its
+  deployment descriptor or its resident-set member records it, and
+  `active.test_count` with the operator's test count in qualification mode.
+  Both are absent for a format 0.1 bundle, which has no descriptor, and when
+  the descriptor does not read back. `tensorplate status` shows them as an
+  `admission=` line under `active:` (`qualification (unqualified)` with
+  `test_count=`) and as `admission_mode` and `test_count` in each JSON
+  deployment block. (V030-E05-F02-T01)
+
 - The Python sidecar runs `vad_frames` jobs on a lane of their own: a second
   thread that runs one voice-activity job at a time, with 8 waiting jobs
   apart from the decode lane's 8, so voice-activity frames never wait behind
