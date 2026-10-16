@@ -376,6 +376,38 @@ def test_a_vad_frames_submit_answered_with_error_event_resets_its_sessions_next_
     assert _Recording.given == [(1, None), (3, carried), (4, "after 3")]
 
 
+def test_a_vad_frames_submit_the_reader_answers_busy_resets_its_sessions_next_job(
+    connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer, gate = _recording(connect, monkeypatch)
+    backend = peer.runner.state.backend
+    assert isinstance(backend, FixtureBackend)
+    main = threading.Event()
+    backend.job_gate = main
+    peer.gates.append(main)
+    assert read_after(peer, submit(50)) == (ACCEPTED, 50)
+    tensor = {
+        "name": "x",
+        "tensor": {"dtype": "uint8", "shape": [1]},
+        "payload_offset": 0,
+        "payload_length": 1,
+    }
+    infers = [message(protocol.KIND_INFER, tensors=[tensor]) for _ in range(jobs.UNARY_QUEUE_DEPTH)]
+    for infer in infers:
+        peer.send(infer, b"\0")
+    # The backend thread would answer this one, but its lane is full.
+    answer = digest(exchange(peer, {**vad_submit(2, frames=1), "schema_version": "9.9"}))
+    assert (answer[0], *answer[2:]) == (ERROR_EVENT, "resource_exhausted")
+    main.set()
+    assert read(peer, 2) == ended(50)
+    answered = [("infer_response", infer["message_id"]) for infer in infers]
+    assert [frame[:2] for frame in read(peer, len(infers))] == answered
+    gate.set()
+    assert read(peer, 2) == ended(1)
+    _completes(peer, 3, 4)
+    assert _Recording.given == [(1, None), (3, None), (4, "after 3")]
+
+
 def test_a_cancelled_last_waiting_job_leaves_the_jobs_ahead_of_it_their_state(
     connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
