@@ -296,12 +296,12 @@ holds the member earlier, from before it takes that generation
 than the one it replaces; [agent.md](agent.md#member-registry) gives the
 order that makes it so.
 
-On SIGTERM or SIGINT the agent asks every worker, serving and candidate, to
-drain, kills what is still running at the one 10-second stop deadline they
-share, stops its listener and exits 0. No worker is started once the stop
-has begun, and a deploy in flight is left in flight for the next start's
-recovery; its caller is answered status `error` with the code
-`unavailable`. A second signal during the stop does nothing.
+On SIGTERM or SIGINT the agent asks every worker, serving, candidate and
+retiring, to drain, kills what is still running at the one 10-second stop
+deadline they share, stops its listener and exits 0. No worker is started
+once the stop has begun, and a deploy in flight is left in flight for the
+next start's recovery; its caller is answered status `error` with the
+code `unavailable`. A second signal during the stop does nothing.
 
 ## Runtime control client
 

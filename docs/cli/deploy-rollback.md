@@ -43,9 +43,18 @@ deploy without the flag for a deployment driven over `/infer`, as
 
 What else a streaming deployment means for an operator:
 
-- A deploy or rollback that replaces it, and an agent stop, stop its worker
-  as they stop any: SIGTERM and a 5-second drain, after which every open
-  stream session is closed with `worker_shutdown`.
+- A deploy or rollback that replaces it retires its worker once the
+  commit is written: the worker takes no new stream session, gives the
+  open ones up to 30 seconds to finish, closes any still open with
+  `deployment_retired` and exits. The deploy returns without waiting for
+  that drain. The old worker keeps its ports until it exits, so a deploy
+  that needs them waits for it (up to `worker.prepare_timeout_ms`). One
+  still running 40 seconds after it acknowledged the retire, or that did
+  not acknowledge it within 3 seconds, is sent SIGTERM, and killed if it
+  still runs 10 seconds later. An agent stop still stops every worker with
+  SIGTERM and a 5-second drain, after which every open stream session is
+  closed with `worker_shutdown` (`deployment_retired` in a worker already
+  retiring).
 - Setting the range moves every worker's HTTP port into it, so
   `serving_url` leaves 18080 and 18081.
 - The installed serving worker must be built with streaming support
