@@ -1191,6 +1191,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- `tensorplate doctor`'s `runner_profile_dependencies` finding also checks
+  that `onnxruntime` imports in the `faster_whisper` profile's interpreter,
+  since every load of that profile opens its voice-activity model on ONNX
+  Runtime: a host where it does not import now fails the finding instead of
+  passing doctor and failing every load. The speech runtime's build
+  self-test imports it too and checks that the faster-whisper wheel carries
+  the model (V030-E05-F03-T01).
 - A deploy or rollback that replaces a serving worker now tells the
   replaced worker to retire (`retire` on its control channel, with a
   30-second drain) once the commit is durable, before the new worker is
