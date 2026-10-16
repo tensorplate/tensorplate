@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -134,8 +135,8 @@ class HeldAcknowledgements final : public JobEventSink {
 
 /// Passes every call to the fixture bridge behind it and counts what the
 /// dispatch asked. It can answer one session release as the adapter does when
-/// its release record is full, and a job class as a backend that does not run
-/// it. It can hold back the backend's acknowledgements of session releases,
+/// its release record is full, and job classes as a backend that does not run
+/// them. It can hold back the backend's acknowledgements of session releases,
 /// and hold the caller of the next release_session() until the test lets it
 /// go.
 ///
@@ -166,7 +167,11 @@ class CountingJobBridge final : public BoundedJobBridge {
     {
       const std::lock_guard guard(mu_);
       submitted_.push_back(request);
-      if (refused_class_ == request.job_class()) {
+      if (std::exchange(refuse_next_submit_, false)) {
+        return unexpected(Error::make(Error::Code::ResourceExhausted, "job_capacity_exhausted",
+                                      "job_capacity_exhausted"));
+      }
+      if (refused_classes_.contains(request.job_class())) {
         return unexpected(Error::make(Error::Code::Unsupported, "job_class_unsupported",
                                       "job_class_unsupported"));
       }
@@ -178,7 +183,7 @@ class CountingJobBridge final : public BoundedJobBridge {
   [[nodiscard]] bool runs(JobClass job_class) const noexcept override {
     {
       const std::lock_guard guard(mu_);
-      if (refused_class_ == job_class) {
+      if (refused_classes_.contains(job_class)) {
         return false;
       }
     }
@@ -245,9 +250,15 @@ class CountingJobBridge final : public BoundedJobBridge {
     const std::lock_guard guard(mu_);
     refuse_next_release_ = true;
   }
+  /// The next submit is refused as the adapter's channel refuses one past
+  /// its open jobs.
+  void refuse_next_submit() {
+    const std::lock_guard guard(mu_);
+    refuse_next_submit_ = true;
+  }
   void refuse_class(JobClass job_class) {
     const std::lock_guard guard(mu_);
-    refused_class_ = job_class;
+    refused_classes_.insert(job_class);
   }
   /// How often release_session() was called for `session_key`.
   [[nodiscard]] std::uint64_t releases(std::uint64_t session_key) const {
@@ -289,10 +300,15 @@ class CountingJobBridge final : public BoundedJobBridge {
   std::vector<JobRequest> submitted_;
   std::vector<std::uint64_t> cancelled_;
   bool refuse_next_release_ = false;
-  std::optional<JobClass> refused_class_;
+  bool refuse_next_submit_ = false;
+  std::set<JobClass> refused_classes_;
   std::atomic<std::uint64_t> health_calls_{0};
   std::atomic<bool> callbacks_first_{false};
 };
+
+/// Whether the dispatch is shown the fixture backend's `vad_frames`. Without
+/// it the dispatch ends utterances only as a client or the limit asks.
+enum class VoiceDetection : std::uint8_t { Off, On };
 
 class SpeechUnderTest final : public DispatchUnderTest {
  public:
@@ -302,10 +318,11 @@ class SpeechUnderTest final : public DispatchUnderTest {
   explicit SpeechUnderTest(const SchedulerClock& clock, FixtureJobBridgeOptions options = {},
                            FixtureJobBridge::ResultFunction result = result_following_input,
                            BufferManagerConfig pool = {},
-                           serving::SpeechDispatchOptions dispatch = {})
+                           serving::SpeechDispatchOptions dispatch = {},
+                           VoiceDetection voice = VoiceDetection::Off)
       : buffers(BufferManager::create(std::move(pool)).value()),
         fixture(std::make_shared<FixtureJobBridge>(*buffers, std::move(result), options)),
-        bridge(std::make_shared<CountingJobBridge>(fixture)),
+        bridge(counting(fixture, voice)),
         strategy(serving::SpeechJobDispatch::create(bridge, *buffers, clock,
                                                     recording_stalls(std::move(dispatch)))
                      .value()) {
@@ -401,6 +418,14 @@ class SpeechUnderTest final : public DispatchUnderTest {
   std::unique_ptr<serving::SpeechJobDispatch> strategy;
 
  private:
+  static std::shared_ptr<CountingJobBridge> counting(std::shared_ptr<FixtureJobBridge> fixture,
+                                                     VoiceDetection voice) {
+    auto counting = std::make_shared<CountingJobBridge>(std::move(fixture));
+    if (voice == VoiceDetection::Off) {
+      counting->refuse_class(JobClass::VadFrames);
+    }
+    return counting;
+  }
   serving::SpeechDispatchOptions recording_stalls(serving::SpeechDispatchOptions dispatch) {
     dispatch.generation = kGeneration;
     dispatch.on_stall = [this](const Error& cause) {
@@ -439,6 +464,13 @@ class SpeechUnderTest final : public DispatchUnderTest {
   auto speech = std::make_unique<SpeechUnderTest>(clock);
   speech->bridge->deliver_callbacks_first();
   return speech;
+}
+/// The fixture backend runs `vad_frames`, and the dispatch detects voice.
+[[nodiscard]] inline std::unique_ptr<DispatchUnderTest> speech_dispatch_detecting_voice(
+    const SchedulerClock& clock) {
+  return std::make_unique<SpeechUnderTest>(clock, FixtureJobBridgeOptions{}, result_following_input,
+                                           BufferManagerConfig{}, serving::SpeechDispatchOptions{},
+                                           VoiceDetection::On);
 }
 /// The fixture backend's own results: `hello`, and silence for speech.
 [[nodiscard]] inline std::unique_ptr<DispatchUnderTest> speech_dispatch_with_fixture_results(

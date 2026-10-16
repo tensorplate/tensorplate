@@ -195,6 +195,7 @@ class FixtureJobBridge final : public BoundedJobBridge {
   /// The same for the one lane that runs `job_class`.
   void hold_jobs(JobClass job_class);
   void release_jobs();
+  void release_jobs(JobClass job_class);
   /// The next job whose work returns fails with `error`.
   void fail_next_job(Error error);
   /// What health() answers while the backend runs jobs.

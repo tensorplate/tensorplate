@@ -250,6 +250,12 @@ void FixtureJobBridge::release_jobs() {
   wake_locked();
 }
 
+void FixtureJobBridge::release_jobs(JobClass job_class) {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  lane_of(job_class).held = false;
+  wake_locked();
+}
+
 void FixtureJobBridge::fail_next_job(Error error) {
   const std::lock_guard<std::mutex> lock(mutex_);
   next_failure_ = std::move(error);
