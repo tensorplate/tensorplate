@@ -933,7 +933,11 @@ or generation is answered `member_mismatch` with this worker's member
 and goes no further. `ledger_status` and the other five operations are
 answered through `ControlTarget`, whose methods return at once;
 `ledger_status` waits only for the stream listener's and session
-manager's short locked sections. The worker's target
+manager's short locked sections. The longest is the closing of
+admission at a retire or a stop: the listener holds its lock while
+the manager starts each live session's drain and hands each change to
+the session's sink, which is short at a ceiling of one session and
+grows with the sessions held. The worker's target
 (`MemberControlTarget`, `runtime/src/serving/member_control.hpp`)
 implements the admission fence, activate and retire below, reports the
 stream sessions' ledger (**The ledger** below) and refuses
