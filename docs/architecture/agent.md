@@ -1061,9 +1061,10 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   does not answer `ok` within 3 seconds is sent SIGTERM at once and killed
   10 seconds later, as any member that is stopped; one whose answer is
   still not recorded 13 seconds after the retire was queued (the thread
-  that waits for it did not run) is sent SIGTERM then. A displaced or
-  abandoned candidate and a member taken out of service are never sent
-  `retire`.
+  that waits for it did not run) is sent SIGTERM then. A `prepare` that
+  finds every port held asks the retiring member retired first to stop
+  (see Ports below). A displaced or abandoned candidate and a member
+  taken out of service are never sent `retire`.
 - **Promotion.** A candidate that exited after it was warmed is refused
   by the fence, before the commit write: the deploy fails with the
   worker's failure and the serving member stays. One whose control
@@ -1198,14 +1199,19 @@ its start until its process has been reaped; a member that is draining
 after a promotion or a yield still holds them, and so does the restart owed
 to a member that stopped, whose successor starts on the same ports. A new
 candidate is given the first ports nothing holds. When none is free its
-`prepare` waits, up to `worker.prepare_timeout_ms`, for a draining worker to
-be reaped, and then fails with `resource_exhausted`. A failed or unloaded
-member gives its ports back. The agent does not check that a port it
-leases is free on the host: when another process listens on one, the worker
-given it does not start, so every deploy onto it fails with the worker's
-startup error, `unavailable` naming the address, and a restart, which keeps
-its ports, fails until its three restarts are used up and the member is
-failed.
+`prepare` asks the retiring member retired first, the lowest generation, to
+stop: SIGTERM, which cuts the worker's drain to at most its 5-second
+shutdown drain, and a kill at the 10-second stop deadline. It asks none while
+another member is already on its way out (asked to stop, exited or being
+reaped), and only one at a time, so a drain is cut short only when no port
+is free. It waits, up to `worker.prepare_timeout_ms`, for ports to be given
+back, and then fails with `resource_exhausted` before anything is started.
+A failed or unloaded member gives its ports back. The agent does not check
+that a port it leases is free on the host: when another process listens on
+one, the worker given it does not start, so every deploy onto it fails with
+the worker's startup error, `unavailable` naming the address, and a
+restart, which keeps its ports, fails until its three restarts are used up
+and the member is failed.
 
 The pool is `worker.serving_port_range` when the configuration has one:
 pairs taken in order from `first`, an HTTP port and the port after it, kept

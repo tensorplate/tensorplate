@@ -577,6 +577,10 @@ mod leaving {
             }
         }
 
+        pub(super) fn len(&self) -> usize {
+            self.0.lock().unwrap_or_else(PoisonError::into_inner).len()
+        }
+
         pub(super) fn newest(&self) -> Option<u64> {
             let set = self.0.lock().unwrap_or_else(PoisonError::into_inner);
             set.keys().next_back().copied()
@@ -611,6 +615,12 @@ impl Retiring {
     fn stop(&mut self, kill_at: Instant) {
         self.stopping.member().process.terminate();
         self.phase = Retirement::Terminated { kill_at };
+    }
+
+    /// Asked to stop, or exited.
+    fn leaving(&mut self) -> bool {
+        matches!(self.phase, Retirement::Terminated { .. })
+            || matches!(self.stopping.member().process.exited(), Ok(true))
     }
 }
 
@@ -722,6 +732,10 @@ pub struct MemberRegistry {
     /// Runs once, on the next of those threads, before it sends or waits.
     #[cfg(test)]
     before_thread_sends: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Runs once, before a `prepare` next reads the retiring members for
+    /// ports.
+    #[cfg(test)]
+    before_retiring_read: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl MemberRegistry {
@@ -750,6 +764,8 @@ impl MemberRegistry {
             retirements: Mutex::default(),
             #[cfg(test)]
             before_thread_sends: Mutex::new(None),
+            #[cfg(test)]
+            before_retiring_read: Mutex::new(None),
         }
     }
 
@@ -991,16 +1007,29 @@ impl MemberRegistry {
 
     /// Ports for a new candidate: the first nothing holds. A worker that is
     /// still draining holds its ports, so this waits, until `timeout`, for
-    /// one to be reaped.
+    /// one to be reaped, and meanwhile cuts a retiring member's drain short.
     fn lease_ports(
         &self,
         candidate: &CandidateRef,
         timeout: Duration,
     ) -> AgentResult<Arc<PortLease>> {
         let deadline = later(Instant::now(), timeout);
+        let mut waiting = false;
         loop {
             if let Some(lease) = self.ports.lease() {
                 return Ok(lease);
+            }
+            if let Some(lease) = self.stop_oldest_retiring(candidate) {
+                return Ok(lease);
+            }
+            if !waiting {
+                waiting = true;
+                eprintln!(
+                    "`{}` waits up to {} ms for ports: each of the {} the configuration gives is held",
+                    candidate.deployment_id,
+                    timeout.as_millis(),
+                    self.ports.ports.len()
+                );
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -1012,6 +1041,39 @@ impl MemberRegistry {
             }
             std::thread::sleep(DRAIN_POLL.min(remaining));
         }
+    }
+
+    /// Ports nothing holds; or else, unless a member is already on its way
+    /// out, ask the retiring member retired first to stop: `candidate`
+    /// needs the ports it holds. Generations only grow, so the lowest was
+    /// retired first.
+    fn stop_oldest_retiring(&self, candidate: &CandidateRef) -> Option<Arc<PortLease>> {
+        #[cfg(test)]
+        if let Some(before) = lock(&self.before_retiring_read).take() {
+            before();
+        }
+        let kill_at = later(self.clock.now(), self.settings.stop_deadline);
+        let mut members = self.members().ok()?;
+        // Each retiring member is listed as draining too; one listed and
+        // not retiring is being stopped or reaped.
+        if members.draining.len() > members.retiring.len()
+            || members.retiring.values_mut().any(Retiring::leaving)
+        {
+            return None;
+        }
+        // Tried after the list was read: a reaped member gave its ports
+        // back before it left the list.
+        if let Some(lease) = self.ports.lease() {
+            return Some(lease);
+        }
+        let (generation, oldest) = members.retiring.iter_mut().next()?;
+        eprintln!(
+            "retiring worker `{}` generation {generation} asked to stop before its drain ends: `{}` needs its ports",
+            oldest.stopping.member().deployment_id,
+            candidate.deployment_id
+        );
+        oldest.stop(kill_at);
+        None
     }
 
     /// Start the next generation of `recipe` on `ports`. Refused once the

@@ -349,3 +349,191 @@ fn an_unloaded_restart_is_not_sent_its_activate_after_its_retire() {
         successor.ops()
     );
 }
+
+/// Both ports held, by the serving member and one still draining: the
+/// deploy has them once the draining member is gone, within the stop
+/// deadline, not its drain.
+#[test]
+fn a_deploy_finding_every_port_held_asks_the_draining_member_to_stop() {
+    let f = fixture();
+    let old = fenced_for_tts(&f);
+    old.keeps_draining.store(true, Ordering::SeqCst);
+    old.obeys_terminate.store(false, Ordering::SeqCst);
+    activate_tts(&f);
+    retires_answered(&f);
+    let (is_stopping, release) = hold_stop(&old);
+
+    std::thread::scope(|scope| {
+        let release = release;
+        let preparing = scope.spawn(|| f.prepare("third"));
+        is_stopping.recv_timeout(GRACE).unwrap();
+        release.send(()).unwrap();
+        step(&f, DRAIN - TICK);
+        assert_eq!(old.calls(), ["terminate"]);
+        step(&f, TICK);
+        preparing.join().unwrap().unwrap();
+    });
+
+    assert_eq!(old.calls(), ["terminate", "kill"]);
+    assert_eq!(port_of(&f.launcher.handle(3)), ACTIVE_PORT);
+    assert!(draining(&f, 1).is_none());
+}
+
+/// `stt` retired by the promotion of `tts`, then `tts` by an unload.
+#[test]
+fn a_deploy_asks_only_the_member_retired_first_to_stop_and_only_once() {
+    let f = fixture();
+    let first = fenced_for_tts(&f);
+    first.keeps_draining.store(true, Ordering::SeqCst);
+    first.obeys_terminate.store(false, Ordering::SeqCst);
+    activate_tts(&f);
+    let second = f.launcher.handle(2);
+    second.keeps_draining.store(true, Ordering::SeqCst);
+    f.registry.unload("tts");
+    retires_answered(&f);
+
+    let refused = f.prepare_briefly("third").unwrap_err();
+
+    assert!(matches!(refused, AgentError::NoFreePort(_)), "{refused}");
+    assert_eq!(first.calls(), ["terminate"]);
+    // This one finds it asked to stop from its first look on.
+    f.prepare_briefly("third").unwrap_err();
+    assert_eq!(first.calls(), ["terminate"]);
+    assert!(second.calls().is_empty());
+    step(&f, DRAIN);
+    f.prepare("third").unwrap();
+    assert_eq!(port_of(&f.launcher.handle(3)), ACTIVE_PORT);
+    assert!(draining(&f, 2).is_some());
+    assert!(second.calls().is_empty());
+}
+
+#[test]
+fn a_deploy_waits_for_a_retiring_member_that_exited_to_be_reaped() {
+    let f = fixture();
+    let first = fenced_for_tts(&f);
+    first.keeps_draining.store(true, Ordering::SeqCst);
+    activate_tts(&f);
+    let second = f.launcher.handle(2);
+    second.keeps_draining.store(true, Ordering::SeqCst);
+    f.registry.unload("tts");
+    retires_answered(&f);
+    first.exited.store(true, Ordering::SeqCst);
+
+    let refused = f.prepare_briefly("third").unwrap_err();
+
+    assert!(matches!(refused, AgentError::NoFreePort(_)), "{refused}");
+    assert!(first.calls().is_empty());
+    assert!(second.calls().is_empty());
+    step(&f, Duration::ZERO);
+    f.prepare("third").unwrap();
+    assert_eq!(port_of(&f.launcher.handle(3)), ACTIVE_PORT);
+}
+
+#[test]
+fn a_deploy_waits_for_a_member_being_stopped_before_it_cuts_a_drain_short() {
+    let f = fixture();
+    let retiring = f.serve("stt");
+    retiring.keeps_draining.store(true, Ordering::SeqCst);
+    f.prepare("tts").unwrap();
+    let candidate = f.launcher.handle(2);
+    f.registry.unload("stt");
+    retires_answered(&f);
+    let (is_stopping, release) = hold_stop(&candidate);
+
+    std::thread::scope(|scope| {
+        let release = release;
+        let unloading = scope.spawn(|| f.registry.unload("tts"));
+        is_stopping.recv_timeout(GRACE).unwrap();
+
+        let refused = f.prepare_briefly("third").unwrap_err();
+
+        assert!(matches!(refused, AgentError::NoFreePort(_)), "{refused}");
+        assert!(retiring.calls().is_empty());
+        release.send(()).unwrap();
+        unloading.join().unwrap();
+    });
+    f.prepare("third").unwrap();
+    assert_eq!(port_of(&f.launcher.handle(3)), CANDIDATE_PORT);
+    assert!(retiring.calls().is_empty());
+}
+
+#[test]
+fn a_deploy_that_finds_a_free_port_leaves_a_draining_member_its_drain() {
+    let f = fixture();
+    let serving = f.serve("stt");
+    serving.keeps_draining.store(true, Ordering::SeqCst);
+    f.registry.unload("stt");
+    retires_answered(&f);
+
+    f.prepare("tts").unwrap();
+
+    assert_eq!(port_of(&f.launcher.handle(2)), CANDIDATE_PORT);
+    assert!(serving.calls().is_empty());
+    assert!(draining(&f, 1).is_some());
+}
+
+/// Its retire's answer arrives after it was asked to stop for its ports.
+#[test]
+fn a_member_asked_to_stop_for_its_ports_keeps_that_stop_once_its_retire_is_answered() {
+    let f = fixture();
+    let old = fenced_for_tts(&f);
+    old.keeps_draining.store(true, Ordering::SeqCst);
+    old.obeys_terminate.store(false, Ordering::SeqCst);
+    let (asked, answer) = old.hold_call_of(RETIRE);
+    activate_tts(&f);
+    asked.recv_timeout(GRACE).unwrap();
+
+    let refused = f.prepare_briefly("third").unwrap_err();
+    assert!(matches!(refused, AgentError::NoFreePort(_)), "{refused}");
+    assert_eq!(old.calls(), ["terminate"]);
+    f.prepare_briefly("third").unwrap_err();
+    assert_eq!(old.calls(), ["terminate"]);
+    answer.send(()).unwrap();
+    retires_answered(&f);
+
+    step(&f, DRAIN - TICK);
+    assert_eq!(old.calls(), ["terminate"]);
+    step(&f, TICK);
+    assert_eq!(old.calls(), ["terminate", "kill"]);
+    f.prepare("third").unwrap();
+}
+
+/// Holds the next `prepare` before it reads the retiring members for
+/// ports; returns what tells that it is held and what lets it read.
+fn hold_retiring_read(f: &Fixture) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let (held, is_held) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    *f.registry.before_retiring_read.lock().unwrap() = Some(Box::new(move || {
+        let _ = held.send(());
+        let _ = released.recv_timeout(GRACE);
+    }));
+    (is_held, release)
+}
+
+/// The member retired first had exited; it is reaped between the deploy's
+/// first look at the ports and its look at the retiring members.
+#[test]
+fn a_deploy_takes_the_ports_a_member_reaped_meanwhile_gave_back() {
+    let f = fixture();
+    let first = fenced_for_tts(&f);
+    first.keeps_draining.store(true, Ordering::SeqCst);
+    activate_tts(&f);
+    let second = f.launcher.handle(2);
+    second.keeps_draining.store(true, Ordering::SeqCst);
+    f.registry.unload("tts");
+    retires_answered(&f);
+    first.exited.store(true, Ordering::SeqCst);
+    let (is_reading, may_read) = hold_retiring_read(&f);
+
+    std::thread::scope(|scope| {
+        let may_read = may_read;
+        let preparing = scope.spawn(|| f.prepare("third"));
+        is_reading.recv_timeout(GRACE).unwrap();
+        step(&f, Duration::ZERO);
+        may_read.send(()).unwrap();
+        preparing.join().unwrap().unwrap();
+    });
+
+    assert!(second.calls().is_empty());
+    assert_eq!(port_of(&f.launcher.handle(3)), ACTIVE_PORT);
+}

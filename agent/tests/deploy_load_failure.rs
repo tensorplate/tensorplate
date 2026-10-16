@@ -754,6 +754,44 @@ fn a_replacing_deploy_returns_while_the_replaced_worker_drains_and_it_is_reaped_
     assert!(!configs.join("drain-a.terminated").exists());
 }
 
+/// Both ports are held, by the serving worker and the replaced one, which
+/// still drains open sessions; the rollback has the replaced worker's
+/// ports once it answered SIGTERM, not once its drain ended.
+#[test]
+fn a_rollback_while_the_replaced_worker_drains_asks_it_to_stop_and_takes_its_ports() {
+    let first = HealthPort::listen();
+    let second = HealthPort::listen();
+    let h = ProcessHarness::new(first.port, second.port);
+    let configs = h.td.path().join("worker-configs");
+    first.serve("drain-a");
+    assert_eq!(h.deploy("drain-a").status, ResponseStatus::Ok);
+    std::fs::write(configs.join("drain-a.draining"), "").expect("open sessions");
+    second.serve("good-b");
+    let replacing = h.deploy("good-b");
+    let tx = replacing.transaction_id.expect("transaction id");
+    ops_once_retired(&configs.join("drain-a-1.control.jsonl"), &tx);
+
+    let rolled_back = std::thread::scope(|scope| {
+        let rolling_back = scope.spawn(|| h.rollback());
+        let context = || format!("draining: {:?}", h.draining());
+        wait_for(Duration::from_secs(15), context, || {
+            h.coord.supervise();
+            rolling_back.is_finished()
+        });
+        rolling_back.join().expect("rollback")
+    });
+
+    assert_eq!(
+        rolled_back.status,
+        ResponseStatus::Ok,
+        "{:?}",
+        rolled_back.error
+    );
+    assert!(configs.join("drain-a.terminated").is_file());
+    assert!(!configs.join("drain-a-1.retired").exists());
+    assert!(configs.join("serving-drain-a-3.json").is_file());
+}
+
 #[test]
 fn a_replaced_worker_that_never_answers_its_retire_is_asked_to_stop() {
     let first = HealthPort::listen();
