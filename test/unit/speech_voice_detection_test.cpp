@@ -1479,6 +1479,23 @@ TEST(SpeechPartialTranscripts, OneTheBackendRefusesFailsItsSession) {
   EXPECT_EQ(speech.strategy->stats().partials_failed, 0U);
 }
 
+// The final would meet the unload too: the session fails at the partial.
+TEST(SpeechPartialTranscripts, OneEndedByTheBackendsUnloadFailsItsSession) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(key, voiced(10 * kVadFrame, 109));
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(decodes_of(speech).size(), 1U);
+  speech.fixture->unload();
+  ASSERT_TRUE(binding.ends_as(key, State::Failed));
+  EXPECT_EQ(binding.manager->tombstone(key)->reason, "backend_unavailable");
+  const auto stats = speech.strategy->stats();
+  EXPECT_EQ(stats.partials_failed, 0U);
+  EXPECT_EQ(stats.jobs_failed, 1U);
+}
+
 TEST(SpeechPartialTranscripts, OneEndedByTheBackendsResetEndsEverySession) {
   Binding binding(&speech_dispatch_detecting_voice);
   SpeechUnderTest& speech = speech_of(binding);
