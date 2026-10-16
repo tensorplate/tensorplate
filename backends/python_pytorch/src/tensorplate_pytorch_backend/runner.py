@@ -21,9 +21,9 @@ Threads
     beside them; a load or unload waits for the one running. At most 8 jobs in
     each lane and 8 unary requests wait; one more is refused with
     ``resource_exhausted``. The threads share the GIL: a VAD job runs during
-    a decode only while the backend's native call releases it, as ONNX
-    Runtime's and CTranslate2's do; a backend that holds it stalls the VAD
-    lane for the length of its call.
+    a decode while the backend's native call releases it, as ONNX Runtime's
+    and CTranslate2's do; a native call that keeps it stalls the VAD lane for
+    the length of that call, and Python code on the two threads interleaves.
     :func:`watch_parent`'s thread ends the process once the serving worker
     that started it is gone.
 

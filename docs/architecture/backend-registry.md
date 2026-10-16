@@ -961,9 +961,9 @@ and one that any entry file of those profiles can set.
   and never behind the FIFO; a load or unload is not started while one runs.
   The reader's one backend call is `permits_job`, which reads only what the
   load established. The threads share Python's GIL: a VAD job overlaps a
-  decode only while the backend's native call has released it, as ONNX
-  Runtime's and CTranslate2's calls do. A backend that holds the GIL through
-  a call stalls the VAD lane until that call returns.
+  decode while the backend's native call has released it, as ONNX Runtime's
+  and CTranslate2's calls do. A native call that keeps the GIL stalls the
+  VAD lane until it returns; Python code on the two threads interleaves.
 - **Bounds.** In each lane one job runs and at most 8 wait; a submit beyond
   that fails with `resource_exhausted` and `job_capacity_exhausted`, and
   neither lane's jobs count against the other. At most 8 unary requests
@@ -973,7 +973,9 @@ and one that any entry file of those profiles can set.
   `utterance_id`, and gives it to the session's next job of that utterance;
   a job of another utterance gets none, so the voice-activity model starts
   from reset. A job that ends without `job_completed`, `session_released`
-  and a load or unload drop it. The backend keeps no per-session state.
+  and a load or unload drop it, and a job of the session running at that
+  moment stores nothing when it completes. The backend keeps no per-session
+  state.
 - **Admission.** `job_accepted` is sent when the job is admitted, not when it
   starts. A message the sidecar cannot read, or a submit that reuses the id
   of an unreleased job or carries a zero in its identity, is answered with an

@@ -258,6 +258,33 @@ def test_the_table_keeps_each_sessions_state_for_its_utterance_and_drops_it_on_a
     ]
 
 
+@pytest.mark.parametrize("end", ["cancelled", "refused", "refused in another session"])
+def test_a_job_that_does_not_complete_beside_a_running_one_leaves_that_one_no_state(
+    connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch, end: str
+) -> None:
+    monkeypatch.setattr(_Recording, "given", [])
+    peer = connect({"fixture": _Recording})
+    backend = peer.enable_jobs()
+    gate = peer.hold(backend)
+    hold_vad(peer, backend, 1, session_key=1)
+    if end == "cancelled":
+        assert read_after(peer, vad_submit(2)) == (ACCEPTED, 2)
+        peer.send(message(protocol.KIND_JOB_CANCEL, 2))
+        assert read(peer, 3) == [(ACKNOWLEDGED, 2), *ended(2, FAILED, "cancelled")]
+    else:
+        session = 2 if end.endswith("another session") else 1
+        refused = vad_submit(2, session_key=session, frames=1)
+        refused["input"].update(frame_samples=768, payload_length=768 * 2)
+        peer.send(refused)
+        assert read(peer, 2) == ended(2, FAILED, "unsupported", "job_not_permitted")
+    gate.set()
+    assert read(peer, 2) == ended(1)
+    peer.send(vad_submit(3))
+    assert read(peer, 3) == [(ACCEPTED, 3), *ended(3)]
+    carried = "after 1" if end.endswith("another session") else None
+    assert _Recording.given == [(1, None), (3, carried)]
+
+
 def test_an_unload_fails_waiting_vad_jobs_and_is_answered_after_the_running_one(
     connect: Callable[..., Peer],
 ) -> None:

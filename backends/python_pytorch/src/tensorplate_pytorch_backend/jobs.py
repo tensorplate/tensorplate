@@ -45,6 +45,8 @@ class Job:
     cancelled: bool = False
     #: Whether it waits in and runs on the VAD lane.
     vad: bool = False
+    #: Whether its completion may store the state it returns.
+    keeps_state: bool = True
 
     @property
     def session(self) -> tuple[int, int]:
@@ -244,7 +246,7 @@ class JobTable:
                 except Exception as exc:
                     failure = _edge(exc)
                 else:
-                    if job.vad and request is not None:
+                    if job.vad and job.keeps_state and request is not None:
                         self._vad_states[job.session] = (request.utterance_id, state)
                     self._release(job)
             if failure is not None:
@@ -336,6 +338,9 @@ class JobTable:
         """Send ``job_failed`` for ``job`` and release it."""
         if job.vad:  # the adapter starts a new utterance after it
             self._vad_states.pop(job.session, None)
+            running = self._vad_running
+            if running is not None and running is not job and running.session == job.session:
+                running.keeps_state = False
         fixed = sanitize.MESSAGES[code]
         try:
             error = job_objects.error_object(code, message or fixed, context)
