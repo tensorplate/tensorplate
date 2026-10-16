@@ -60,6 +60,9 @@ Result<VadPolicy> VadPolicy::create(VadProfile profile) {
   if (profile.frame_samples == 0 || profile.frame_samples > kMaxFrameSamples) {
     return unexpected(invalid_profile());
   }
+  if (profile.commit_agreement < 2) {
+    return unexpected(invalid_profile());
+  }
   // Compared in milliseconds, before any conversion can wrap. A max_utterance
   // of zero or less leaves every duration below out of range.
   if (profile.max_utterance > kMaxUtterance) {
