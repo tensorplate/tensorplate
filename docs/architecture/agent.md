@@ -372,7 +372,7 @@ records (`active` to `previous_active` and the candidate to `active` for a
 deploy, the swap for a rollback) and sets the phase, so a start that finds
 `promoted` with the records moved reads a committed transaction. The commit
 is written after the candidate is fenced and before it is activated, so the
-member it replaces is asked to stop only once the commit is durable (see
+member it replaces is told to retire only once the commit is durable (see
 [Serving-worker handoff](#serving-worker-handoff-v01-e08-f05)). `active`,
 `failed` and `rolled_back` remain values of the phase and are no longer
 written to a transaction in flight: the write that ends a transaction
@@ -487,10 +487,11 @@ seconds, or the fence fails the transaction: `timeout` when it does not
 answer, and `inference_failed`, naming the worker's answer, when it refuses
 or its channel fails during the fence. A serving worker that exited or
 whose control channel failed admits nothing and is not told. `activate`,
-once the commit is durable, gives the candidate the serving slot, asks
-the member it replaces to stop, sends the candidate `activate`, and then
-reaps the replaced member; it is the only call that mutates the worker's
-active deployment.
+once the commit is durable, gives the candidate the serving slot, tells
+the member it replaces to retire, sends the candidate `activate`, and
+returns without waiting for the retired member's drain, which the
+supervision step watches (see the registry's **Retire**); it is the only
+call that mutates the worker's active deployment.
 It is refused once the agent is stopping, or when the worker control no
 longer holds the candidate; either refusal leaves the committed
 transaction for the next start to settle forward. A candidate that exited
@@ -502,13 +503,14 @@ worker control's restarts (see
 [Restart recovery](#restart-recovery-v01-e08-f07)); it is false by default,
 so a worker control that restarts nothing ends the start.
 `unload` is best-effort (failure is logged but never undoes a successful
-promotion). `abandon` tells the worker control that the transaction
-which prepared a candidate returned without promoting it; the coordinator
-calls it on every such return, a failed state write included, and it does
-nothing by default. The registry then sends `activate` to a serving
-worker that transaction fenced, so it admits work again. `hold` asks the
-worker control to start no generation by itself until `release`; a
-transaction that hands over a generation takes
+promotion); the registry retires a serving member it unloads, as one a
+promotion replaces, and stops a candidate. `abandon` tells the worker
+control that the transaction which prepared a candidate returned without
+promoting it; the coordinator calls it on every such return, a failed
+state write included, and it does nothing by default. The registry then
+sends `activate` to a serving worker that transaction fenced, so it admits
+work again. `hold` asks the worker control to start no generation by
+itself until `release`; a transaction that hands over a generation takes
 the hold before it takes that generation and releases it when `prepare` has
 returned (see [the member registry](#member-registry)). Every
 implementation supplies both, so one that forwards `prepare` cannot leave
@@ -625,7 +627,7 @@ its candidate was prepared leaves that candidate's process running until
 the next deploy or rollback prepares a candidate, or the agent stops; the
 abandoned candidate's tree can be removed before then, and nothing reads it
 again. So can the tree of a member a commit retired while its process is
-still draining: it has been told to stop and is not started again.
+still draining: it has been told to retire and is not started again.
 
 A `staging_dir` belongs to one state directory, because the agent removes
 every tree its own state files do not name. Two agents with separate state
@@ -1004,11 +1006,11 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   or a restore's, hands over its generation instead: the launch is that
   generation and takes none from the counter. A handed generation must be
   above every generation the registry holds, its members', those of workers
-  it has asked to stop and not yet reaped, and the one a restart is owed
-  for. One taken under a hold always is; a reference that is not, which
-  only a generation handed twice can be, is refused with `internal`,
-  recoverable: another attempt takes a new generation. A restart always
-  takes a new one, whatever its recipe names.
+  it has asked to stop or told to retire and not yet reaped, and the one a
+  restart is owed for. One taken under a hold always is; a reference that
+  is not, which only a generation handed twice can be, is refused with
+  `internal`, recoverable: another attempt takes a new generation. A
+  restart always takes a new one, whatever its recipe names.
 - **Start.** The registry renders the serving config with
   `deployment.generation` and `deployment.endpoint` set to the deployment id,
   hands the worker its control socket on fd 0 in the same launch, and starts
@@ -1027,17 +1029,42 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   that answers no ledger poll for 10 seconds has a failed control channel
   and is killed and refused, whatever the warm timeout, and so is one whose
   process can no longer be inspected (its wait fails).
-- **Stop.** A member being replaced, displaced or unloaded is sent SIGTERM
-  and is killed if it has not exited 10 seconds later; members stopped
-  together share that deadline. Its serving config tells it to drain its
-  sessions for 5 seconds (`shutdown.drain_deadline_ms`), so its own drain
-  ends before the registry would kill it. The signal goes to the worker's
-  process id only: a worker that has to be killed leaves its sidecar to
-  exit when it sees the worker's socket close or, while a backend call
-  holds it, once it sees its parent change: within about two seconds of
-  the kill, unless the call holds the interpreter lock (status 4; see
+- **Stop.** A candidate being displaced or unloaded, a member whose retire
+  is not acknowledged, and every member when the agent stops, is sent
+  SIGTERM and is killed if it has not exited 10 seconds later; members
+  stopped together share that deadline. Its serving config tells it to
+  drain its sessions for 5 seconds (`shutdown.drain_deadline_ms`), so its
+  own drain ends before the registry would kill it. The signal goes to the
+  worker's process id only: a worker that has to be killed leaves its
+  sidecar to exit when it sees the worker's socket close or, while a
+  backend call holds it, once it sees its parent change: within about
+  two seconds of the kill, unless the call holds the interpreter lock
+  (status 4; see
   [the speech dispatch](serving-worker.md#the-speech-dispatch-in-the-worker)).
   Every member is stopped this way when the agent itself is told to stop.
+- **Retire.** A serving member a promotion replaces, or one an unload
+  stops, leaves the serving slot under the registry's lock and is held as
+  retiring: listed as draining and holding its ports until it is reaped.
+  Its `retire`, with a 30-second drain (`drain_timeout_ms` 30000) and the
+  committing transaction's id (an unload's carries an id of its own), is
+  queued on its control channel after the commit and before the
+  candidate is sent `activate`; the answer is waited for on a thread of
+  its own, so the candidate's `activate` does not wait for it. The
+  retire takes the member's fence record, so an `activate` a failed
+  transaction still owed it, or a restart's, is not sent after the
+  retire. A worker that
+  answers `ok` closes its admission for good, drains its sessions and
+  exits by itself. The supervision step reaps a retiring member once its
+  process has exited; one still running 40 seconds after it acknowledged
+  (the drain, then 10 seconds to stop its sidecar and exit) is sent
+  SIGTERM, and one still running 10 seconds after that is killed. One that
+  does not answer `ok` within 3 seconds is sent SIGTERM at once and killed
+  10 seconds later, as any member that is stopped; one whose answer is
+  still not recorded 13 seconds after the retire was queued (the thread
+  that waits for it did not run) is sent SIGTERM then. A `prepare` that
+  finds every port held asks the retiring member retired first to stop
+  (see Ports below). A displaced or abandoned candidate and a member
+  taken out of service are never sent `retire`.
 - **Promotion.** A candidate that exited after it was warmed is refused
   by the fence, before the commit write: the deploy fails with the
   worker's failure and the serving member stays. One whose control
@@ -1046,9 +1073,9 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   does not answer its fence `ok` fails the deploy the same way and is
   activated again. Once
   the commit is written the candidate takes the serving slot even if it
-  exited since, and the supervision step restarts it; the member it
-  replaces is sent its stop only after the commit, before the candidate
-  is sent `activate`, so the agent's own stop never waits on that answer.
+  exited since, and the supervision step restarts it; the retire of the
+  member it replaces is queued only after the commit, before the
+  candidate is sent `activate`.
 - **Supervision.** The agent's loop runs the coordinator's turn
   (`Coordinator::supervise`) every 100 ms and logs what it did: the
   registry's supervision step (`WorkerControl::supervise`), then, once a
@@ -1078,18 +1105,18 @@ for framing, deadlines, ownership and loss-of-contact behavior.
   `activate`, with a transaction id of its own, once the supervision step
   judges it ready; it is sent from a thread of its own, so the step does
   not wait for the answer, and not at all while a transaction has fenced
-  that generation. An `activate` waits at most 3 seconds for its answer;
-  one after a commit or a restart not answered `ok` is logged and fails
-  nothing. The quota an `ok` carries is the member's `effective_quota` in
-  status; an `activate` answered `error` clears it, and one not answered,
-  or refused otherwise, leaves it. Operations to
-  one worker are sent one at a time, and a restart's activate is not sent
-  while a transaction's fence is in force; a fence that finds an activate
-  being sent to its worker waits for it, at most 3 seconds, before its own
-  3 seconds begin. Each
-  is exchanged in the gap before the channel's next ledger poll, so none
-  delays a poll; one not answered when its gap ends is sent again after
-  the poll, as a new request with its own `correlation_id`.
+  that generation or once it was told to retire. An `activate` waits at
+  most 3 seconds for its answer; one after a commit or a restart not
+  answered `ok` is logged and fails nothing. The quota an `ok` carries is
+  the member's `effective_quota` in status; an `activate` answered
+  `error` clears it, and one not answered, or refused otherwise, leaves
+  it. Operations to one worker are sent one at a time, and a restart's
+  activate is not sent while a transaction's fence is in force; a fence
+  that finds an activate being sent to its worker waits for it, at most
+  3 seconds, before its own 3 seconds begin. Each is exchanged in the gap
+  before the channel's next ledger poll, so none delays a poll; one not
+  answered when its gap ends is sent again after the poll, as a new
+  request with its own `correlation_id`.
 - **Restart.** The successor is a new generation: a new generation number
   and serving config, on the same port, from the member's staged root. It
   starts 1, 2 and 4 seconds after the stop for the first, second and third
@@ -1172,14 +1199,19 @@ its start until its process has been reaped; a member that is draining
 after a promotion or a yield still holds them, and so does the restart owed
 to a member that stopped, whose successor starts on the same ports. A new
 candidate is given the first ports nothing holds. When none is free its
-`prepare` waits, up to `worker.prepare_timeout_ms`, for a draining worker to
-be reaped, and then fails with `resource_exhausted`. A failed or unloaded
-member gives its ports back. The agent does not check that a port it
-leases is free on the host: when another process listens on one, the worker
-given it does not start, so every deploy onto it fails with the worker's
-startup error, `unavailable` naming the address, and a restart, which keeps
-its ports, fails until its three restarts are used up and the member is
-failed.
+`prepare` asks the retiring member retired first, the lowest generation, to
+stop: SIGTERM, which cuts the worker's drain to at most its 5-second
+shutdown drain, and a kill at the 10-second stop deadline. It asks none while
+another member is already on its way out (asked to stop, exited or being
+reaped), and only one at a time, so a drain is cut short only when no port
+is free. It waits, up to `worker.prepare_timeout_ms`, for ports to be given
+back, and then fails with `resource_exhausted` before anything is started.
+A failed or unloaded member gives its ports back. The agent does not check
+that a port it leases is free on the host: when another process listens on
+one, the worker given it does not start, so every deploy onto it fails with
+the worker's startup error, `unavailable` naming the address, and a
+restart, which keeps its ports, fails until its three restarts are used up
+and the member is failed.
 
 The pool is `worker.serving_port_range` when the configuration has one:
 pairs taken in order from `first`, an HTTP port and the port after it, kept
@@ -1210,11 +1242,11 @@ resident set.
 The registry answers for every worker process it holds: the serving member,
 the candidate a deploy has prepared (listed as abandoned once that deploy
 ended without promoting it, and running until the next deploy displaces
-it), and each generation it has asked to stop and not yet reaped. A
-generation that left the registry's map to be stopped is recorded as
-draining under the same lock that took it out, and the record is removed
-once its process has been reaped. A worker the
-registry is still starting is not listed until its launch has returned, and
+it), and each generation it has asked to stop or told to retire and not
+yet reaped. A generation that left the registry's map to be stopped is
+recorded as draining under the same lock that took it out, and the record
+is removed once its process has been reaped. A worker the registry is
+still starting is not listed until its launch has returned, and
 one it kills, for lost contact or for not becoming ready after a restart,
 is not listed while it is killed. For each one listed the registry reports
 its deployment id and generation, whether its process has been seen to
@@ -1235,8 +1267,8 @@ contact, the ports it holds, and the quota its worker answered its last
   three polls in a row went unanswered. Lost contact alone does not take a
   member out of service; ten seconds without an answer does.
 - **Draining** generations are reported as running until they are reaped,
-  with the readiness they had; their control channel is held by the thread
-  that stops them and is not read.
+  with the readiness they had; their control channel is not read for
+  status.
 
 Agent status uses this in two places. Beside a singleton record,
 `active.generation` is the generation serving at `active.serving_url`, read
@@ -1290,13 +1322,15 @@ that runs.
 generation is the one the record names, whichever serves. A committed
 generation that was promoted over reads `process: running` and
 `draining: true`, with the readiness it had and no `contact`, until it is
-reaped, which takes up to the stop deadline (ten seconds); from then on it
-reads `stopped`. Its successor serves from the promotion on and is not in
-status until a record names it. A generation that drains and is not a
-committed member, as the one a singleton deploy replaced, is not listed: it
-is visible on the host as a worker process that still runs, and through the
-ports it still holds, since a deploy that needs them waits for it to be
-reaped.
+reaped; from then on it reads `stopped`. A retired worker is reaped once it
+exits after its drain, at most 50 seconds after it acknowledged the retire
+(the 30-second drain, 10 seconds of cleanup and the stop deadline), or
+within the stop deadline when it did not acknowledge it. Its successor
+serves from the promotion on and is not in status until a record names
+it. A generation that drains and is not a committed member, as the one a
+singleton deploy replaced, is not listed: it is visible on the host as a
+worker process that still runs, and through the ports it still holds,
+since a deploy that needs them waits for it to be reaped.
 
 Not done yet: `tensorplate status` severity and `tensorplate doctor` do not
 judge `process` or `readiness`. They judge `contact`, which the agent now
@@ -1327,9 +1361,10 @@ agent logs that it is listening. Before that a signal ends the agent at
 once. The handler only stores a flag, so a second signal during the stop
 does nothing: it neither hurries the stop nor ends the agent. The agent's loop
 then stops the registry, which sets its stopping flag before it stops the
-first member: every worker, serving and candidate, is sent SIGTERM, all
-share the one 10-second stop deadline, and what is left is killed and
-reaped. From the flag on no launch begins. Requests are answered on threads
+first member: every worker, serving, candidate and retiring, is sent
+SIGTERM, all share the one 10-second stop deadline, and what is left is
+killed and reaped. A worker's SIGTERM ends a retire drain it is in early.
+From the flag on no launch begins. Requests are answered on threads
 that are not joined, so the registry also waits for a worker one of them
 was starting or stopping when the flag was set: that thread stops it,
 within a stop deadline counted from when it began to. That wait ends 12

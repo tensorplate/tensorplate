@@ -27,13 +27,15 @@ treat the field as a value carried on the request, not global state.
 [`worker_control.json`](../../protocol/schemas/worker_control.json)
 defines the messages of the runtime control channel between the agent and
 a serving worker. The agent's member registry opens one for every worker
-it starts, polls it with `ledger_status`, and sends `admission_fence` and
-`activate` around a deploy's or rollback's commit; it sends no `retire`,
-`quota_assign` or `pressure_directive` yet. On it, every request carries a
-`correlation_id` and the
-response that answers it echoes the same value. `transaction_id` there
-names the committing deploy transaction for `admission_fence`, `activate`
-and `retire`, and is the literal `runtime` for `quota_assign`,
+it starts, polls it with `ledger_status`, sends `admission_fence` and
+`activate` around a deploy's or rollback's commit, and `retire` to the
+worker the commit replaces or an unload stops; it sends no `quota_assign`
+or `pressure_directive` yet. On it, every request carries a
+`correlation_id` and the response that answers it echoes the same value.
+`transaction_id` there names the committing deploy transaction for
+`admission_fence`, `activate` and `retire` (a restarted worker's
+`activate` and an unload's `retire`, which commit nothing, carry a `tx-`
+id of their own), and is the literal `runtime` for `quota_assign`,
 `ledger_status` and `pressure_directive`, which belong to no transaction.
 Each request gets its own `correlation_id`. The schema lets the agent
 repeat only the latest request it sent on a channel, with the id it was

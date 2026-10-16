@@ -229,25 +229,16 @@ fn a_handed_generation_at_or_below_one_that_is_draining_is_refused() {
     let d = described();
     let second = restamped(&d, 2);
     d.serve(&second);
-    let (is_stopping, release) = hold_stop(&d.launcher.handle(2));
+    let serving = d.launcher.handle(2);
+    serving.keeps_draining.store(true, Ordering::SeqCst);
 
-    std::thread::scope(|scope| {
-        // Dropped if this closure panics, which lets what is held end.
-        let release = release;
-        let unloading = scope.spawn(|| d.registry.unload("stt"));
-        is_stopping
-            .recv_timeout(GRACE)
-            .expect("the member is asked to stop");
+    d.registry.unload("stt");
 
-        // Generation 2 has left the table and has not been reaped.
-        for handed in [&d.recipe, &second] {
-            refused_as_held(&d, handed, 2);
-        }
-        assert_eq!(d.launcher.count(), 1);
-
-        release.send(()).unwrap();
-        unloading.join().unwrap();
-    });
+    // Generation 2 has left the table and has not been reaped.
+    for handed in [&d.recipe, &second] {
+        refused_as_held(&d, handed, 2);
+    }
+    assert_eq!(d.launcher.count(), 1);
 }
 
 #[test]
@@ -264,7 +255,9 @@ fn with_two_generations_draining_a_handed_one_must_be_above_the_newer() {
     let [second, third, fourth] = [2, 3, 4].map(|generation| restamped(&d, generation));
     d.serve(&second);
     d.registry.prepare("tx", &third, WARM).unwrap();
-    let (is_stopping, release) = hold_stop(&d.launcher.handle(2));
+    let serving = d.launcher.handle(2);
+    serving.keeps_draining.store(true, Ordering::SeqCst);
+    let (is_stopping, release) = hold_stop(&d.launcher.handle(3));
 
     std::thread::scope(|scope| {
         // Dropped if this closure panics, which lets what is held end.
@@ -272,7 +265,7 @@ fn with_two_generations_draining_a_handed_one_must_be_above_the_newer() {
         let unloading = scope.spawn(|| d.registry.unload("stt"));
         is_stopping
             .recv_timeout(GRACE)
-            .expect("the serving member is asked to stop");
+            .expect("the candidate is asked to stop");
 
         // Generations 2 and 3 left the table together; neither is reaped.
         for handed in [&d.recipe, &second, &third] {

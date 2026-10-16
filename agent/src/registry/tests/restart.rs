@@ -780,22 +780,20 @@ fn no_launch_begins_once_shutdown_has_begun() {
 #[test]
 fn shutdown_waits_for_a_member_another_thread_is_stopping() {
     let f = fixture();
-    let old = f.serve("stt");
-    old.obeys_terminate.store(false, Ordering::SeqCst);
+    let serving = f.serve("stt");
     f.prepare("tts").unwrap();
-    let port = u16::try_from(port_of(&f.launcher.handle(2))).unwrap();
-    f.health(port, "tts");
-    assert!(f.warm("tts").unwrap().ready);
+    let unloaded = f.launcher.handle(2);
+    unloaded.obeys_terminate.store(false, Ordering::SeqCst);
 
     std::thread::scope(|scope| {
-        let promotion = scope.spawn(|| f.registry.promote("tx", &candidate("tts")));
-        wait_for_terminate(&old);
+        let unloading = scope.spawn(|| f.registry.unload("tts"));
+        wait_for_terminate(&unloaded);
         f.registry.shutdown();
-        assert_eq!(old.calls(), ["terminate", "kill"]);
-        promotion.join().unwrap().unwrap();
+        assert_eq!(unloaded.calls(), ["terminate", "kill"]);
+        unloading.join().unwrap();
     });
 
-    assert_eq!(f.launcher.handle(2).calls(), ["terminate"]);
+    assert_eq!(serving.calls(), ["terminate"]);
 }
 
 /// A staged root of its own, holding a copy of `bundle`.

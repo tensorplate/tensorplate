@@ -419,6 +419,30 @@ fn a_call_unanswered_when_its_gap_ends_is_sent_again_after_the_poll_as_a_new_req
 }
 
 #[test]
+fn a_queued_call_is_sent_before_its_answer_is_waited_for() {
+    let (stream, peer) = worker::spawn(vec![
+        worker::ledger(Duration::ZERO),
+        fence_answer(Duration::ZERO),
+        worker::ledger(Duration::ZERO),
+    ]);
+    let channel = ControlChannel::start(stream, member()).unwrap();
+    wait_until(Duration::from_secs(1), || {
+        channel.snapshot().ledger.is_some()
+    });
+
+    let answer = Box::new(channel.caller()).queue(fence(), Duration::from_secs(3));
+    wait_for_the_second_poll(&channel);
+    drop(channel);
+    let requests = peer.join().unwrap();
+
+    assert_eq!(
+        ops(&requests),
+        ["ledger_status", "admission_fence", "ledger_status"]
+    );
+    assert_eq!(answer().unwrap().status, WorkerStatusOutcome::Ok);
+}
+
+#[test]
 fn a_call_queued_behind_a_poll_that_outlasts_its_budget_is_never_sent() {
     let (stream, peer) = worker::spawn(vec![
         worker::ledger(Duration::from_millis(800)),

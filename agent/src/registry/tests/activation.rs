@@ -34,6 +34,12 @@ fn failure() -> ErrorRecord {
     AgentError::WorkerNotReady.to_record()
 }
 
+/// Whether `handle` was sent a retire by `tx` last, and not asked to stop.
+fn retired_by(handle: &Handle, tx: &str) -> bool {
+    let retire = (WorkerOp::Retire, tx.to_owned());
+    handle.ops().last() == Some(&retire) && handle.calls().is_empty()
+}
+
 #[test]
 fn a_fenced_candidate_moves_nothing_until_it_is_activated() {
     let f = fixture();
@@ -52,8 +58,13 @@ fn a_fenced_candidate_moves_nothing_until_it_is_activated() {
 
     f.registry.activate("tx", &candidate("tts")).unwrap();
 
-    assert_eq!(serving.calls(), ["terminate"]);
+    assert!(retired_by(&serving, "tx"), "{:?}", serving.ops());
     assert_eq!(active(&f).as_deref(), Some("tts"));
+    let moved = [
+        (MemberRef::new("tts", 2), MemberRole::Serving),
+        (MemberRef::new("stt", 1), MemberRole::Draining),
+    ];
+    assert_eq!(roles(&f), moved);
 }
 
 #[test]
@@ -66,7 +77,7 @@ fn a_candidate_that_exits_after_its_fence_takes_the_slot_and_is_restarted() {
 
     f.registry.activate("tx", &candidate("tts")).unwrap();
 
-    assert_eq!(serving.calls(), ["terminate"]);
+    assert!(retired_by(&serving, "tx"), "{:?}", serving.ops());
     let stopped = step(&f, Duration::ZERO);
     let owed = stopped.iter().any(|event| {
         matches!(event, MemberEvent::RestartDue { deployment_id, .. } if deployment_id == "tts")

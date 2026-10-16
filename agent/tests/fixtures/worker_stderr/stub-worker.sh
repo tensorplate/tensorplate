@@ -8,7 +8,7 @@
 # started and fails like `fail-<name>` after that; `exit-<n>` exits <n>
 # silently; `mute-<name>` stays alive and never answers its control socket;
 # any other id stays alive answering it (control-responder.py) without
-# listening.
+# listening, and `deaf-<name>` does so but never answers a retire.
 id=$(sed -n 's/.*"model_id": "\([^"]*\)".*/\1/p' "$2")
 fixtures=$(dirname "$0")
 case "$id" in

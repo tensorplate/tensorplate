@@ -166,7 +166,15 @@ pub trait RuntimeCall: Send {
     /// [`ControlChannelError::Deadline`] when `budget` passed with no
     /// response, and the channel's own error when it failed or stopped.
     fn call(&self, command: RuntimeCommand, budget: Duration) -> Result<WorkerControlResponse>;
+
+    /// Queue `command` before returning, as the first attempt of
+    /// [`RuntimeCall::call`]; what is returned waits for its answer as
+    /// `call` does, on any thread.
+    fn queue(self: Box<Self>, command: RuntimeCommand, budget: Duration) -> Answer;
 }
+
+/// Waits for the answer to an operation [`RuntimeCall::queue`] queued.
+pub type Answer = Box<dyn FnOnce() -> Result<WorkerControlResponse> + Send>;
 
 /// Sends runtime operations to one member from any thread. The channel's
 /// thread exchanges each in the gap before its next ledger poll.
@@ -200,19 +208,21 @@ impl ControlCaller {
             })?;
         Ok(result)
     }
-}
 
-impl RuntimeCall for ControlCaller {
-    /// An attempt waits no longer than the gap before the channel's next
+    /// Wait for the answer to `queued`, the first attempt at `command`. An
+    /// attempt waits no longer than the gap before the channel's next
     /// ledger poll. One not answered within it is sent again after the poll
     /// that ended it, so as a new request with a new correlation id: the
     /// schema lets a repeat keep its id only while no other request was sent
-    /// since. A queued attempt is never sent once `budget` has passed.
-    fn call(&self, command: RuntimeCommand, budget: Duration) -> Result<WorkerControlResponse> {
-        let start = Instant::now();
-        let end = start.checked_add(budget).unwrap_or(start);
+    /// since. A queued attempt is never sent once `end` has passed.
+    fn answer(
+        &self,
+        command: &RuntimeCommand,
+        end: Instant,
+        mut queued: Result<mpsc::Receiver<Result<WorkerControlResponse>>>,
+    ) -> Result<WorkerControlResponse> {
         loop {
-            let reply = match self.enqueue(command.clone(), end) {
+            let reply = match queued {
                 Err(ControlChannelError::QueueFull) => Err(ControlChannelError::QueueFull),
                 Err(error) => return Err(error),
                 Ok(reply) => reply
@@ -233,8 +243,28 @@ impl RuntimeCall for ControlCaller {
                 }
                 answered => return answered,
             }
+            queued = self.enqueue(command.clone(), end);
         }
     }
+}
+
+impl RuntimeCall for ControlCaller {
+    fn call(&self, command: RuntimeCommand, budget: Duration) -> Result<WorkerControlResponse> {
+        let end = end_of(budget);
+        let queued = self.enqueue(command.clone(), end);
+        self.answer(&command, end, queued)
+    }
+
+    fn queue(self: Box<Self>, command: RuntimeCommand, budget: Duration) -> Answer {
+        let end = end_of(budget);
+        let queued = self.enqueue(command.clone(), end);
+        Box::new(move || self.answer(&command, end, queued))
+    }
+}
+
+fn end_of(budget: Duration) -> Instant {
+    let start = Instant::now();
+    start.checked_add(budget).unwrap_or(start)
 }
 
 /// Owns no process: the registry handles kill/reap/restart after `MemberFailed`.

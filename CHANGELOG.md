@@ -1152,6 +1152,25 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- A deploy or rollback that replaces a serving worker now tells the
+  replaced worker to retire (`retire` on its control channel, with a
+  30-second drain) once the commit is durable, before the new worker is
+  sent `activate`, and returns without waiting for its answer or its
+  drain; an unload of a serving worker retires it the same way. A worker
+  that acknowledges the retire closes its admission for good, drains its
+  sessions and exits by itself. Until the agent's supervision reaps it, it
+  is listed as draining and keeps its ports; a deploy or rollback that
+  finds every port held sends the worker retired first SIGTERM, which
+  ends its drain within 5 seconds, and goes on once it has exited, so a
+  drain is cut short only when no port is free. One still
+  running 40 seconds after it acknowledged (the drain and 10 seconds of
+  cleanup) is sent SIGTERM and killed 10 seconds later; one that does not
+  answer `ok` within 3 seconds is sent SIGTERM at once and killed 10
+  seconds later, as before. An `activate` still owed to the worker after a
+  failed deploy is not sent after its retire. When the agent stops,
+  retiring workers are stopped with every other worker: SIGTERM and the
+  one 10-second deadline. (V030-E03-F01-T04, V030-E04-F01-T04)
+
 - The python_pytorch adapter's job channel takes every job class a runner's
   load declares, `vad_frames` included, instead of only `stt_decode` and
   `tts_synthesis`: a `vad_frames` job goes to the runner and its voice

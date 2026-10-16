@@ -626,9 +626,10 @@ fn a_rollback_fences_the_member_it_replaces_and_activates_the_one_it_starts() {
     w.coordinator.rollback(None).unwrap();
 
     let outgoing = w.f.launcher.handle(2).ops();
-    let [_, (WorkerOp::AdmissionFence, fenced)] = &outgoing[..] else {
+    let [_, (WorkerOp::AdmissionFence, fenced), (WorkerOp::Retire, retired)] = &outgoing[..] else {
         panic!("{outgoing:?}");
     };
+    assert_eq!(retired, fenced);
     let incoming = w.f.launcher.handle(3).ops();
     assert_eq!(incoming, [(WorkerOp::Activate, fenced.clone())]);
     let live = w.f.registry.live_members().unwrap();
@@ -766,7 +767,7 @@ fn a_rollback_whose_commit_write_is_refused_fails_and_the_serving_member_stays()
 }
 
 #[test]
-fn the_serving_member_is_asked_to_stop_only_once_the_commit_is_durable() {
+fn the_serving_member_is_sent_its_retire_only_once_the_commit_is_durable() {
     for rollback in [false, true] {
         let w = wired();
         w.deploy("stt", STT).unwrap();
@@ -774,10 +775,10 @@ fn the_serving_member_is_asked_to_stop_only_once_the_commit_is_durable() {
             w.deploy("tts", TTS).unwrap();
         }
         let outgoing = w.f.launcher.handle(if rollback { 2 } else { 1 });
-        let (asked, release) = hold_stop(&outgoing);
+        let (asked, release) = outgoing.hold_call_of(WorkerOp::Retire);
 
         let committed = std::thread::scope(|scope| {
-            // Dropped if this closure panics, which lets the stop end.
+            // Dropped if this closure panics, which lets the retire end.
             let release = release;
             let transaction = scope.spawn(|| {
                 if rollback {

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use common::Harness;
 use tensorplate_agent::control::dispatch;
-use tensorplate_agent::control_channel::{RuntimeCall, RuntimeCommand};
+use tensorplate_agent::control_channel::{Answer, RuntimeCall, RuntimeCommand};
 use tensorplate_agent::coordinator::Coordinator;
 use tensorplate_agent::error::{AgentError, AgentResult, ControlChannelError};
 use tensorplate_agent::recovery;
@@ -27,14 +27,16 @@ use tensorplate_agent::registry::{
 };
 use tensorplate_agent::state::StateStore;
 use tensorplate_agent::supervision::FakeClock;
-use tensorplate_agent::worker::{MemberEvent, WorkerControl};
+use tensorplate_agent::worker::{MemberEvent, MemberRole, WorkerControl};
 use tensorplate_protocol::agent_control::{
     AgentRunState, ControlRequest, ControlResponse, DeployRequest, RecoveryAction, ResponseStatus,
     RollbackRequest,
 };
 use tensorplate_protocol::agent_state::TransactionKind;
 use tensorplate_protocol::deploy_transaction::DeployState;
-use tensorplate_protocol::worker_control::{MemberRef, WorkerControlResponse};
+use tensorplate_protocol::worker_control::{
+    MemberRef, WorkerControlResponse, WorkerOp, WorkerStatusOutcome,
+};
 use tensorplate_protocol::ErrorCode;
 use tensorplate_protocol::ValidatePayload;
 
@@ -47,7 +49,8 @@ struct Process {
     channel: Channel,
 }
 
-/// A process's control channel, closed once the process exited.
+/// A process's control channel, closed once the process exited. With no
+/// sessions to drain, a process that acknowledged its retire exits.
 #[derive(Clone)]
 struct Channel {
     member: MemberRef,
@@ -68,7 +71,15 @@ impl RuntimeCall for Channel {
             .request(self.member.clone(), "ctl-1".into())
             .validate_payload()
             .map_err(|_| ControlChannelError::InvalidRequest)?;
-        Ok(self.target.lock().unwrap().answer(&request))
+        let answer = self.target.lock().unwrap().answer(&request);
+        if request.op == WorkerOp::Retire && answer.status == WorkerStatusOutcome::Ok {
+            self.exited.store(true, Ordering::SeqCst);
+        }
+        Ok(answer)
+    }
+
+    fn queue(self: Box<Self>, command: RuntimeCommand, budget: Duration) -> Answer {
+        Box::new(move || self.call(command, budget))
     }
 }
 
@@ -225,6 +236,24 @@ fn hold_next_launch(agent: &Agent) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
     (has_started, release)
 }
 
+/// Supervision steps, as the agent's loop runs them, until no member is
+/// draining: a retired worker that exited is reaped by one.
+fn reap_retired(agent: &Agent) {
+    let deadline = Instant::now() + HELD;
+    loop {
+        agent.registry.supervise();
+        let live = agent.registry.live_members().expect("the registry reports");
+        if live
+            .iter()
+            .all(|member| member.role != MemberRole::Draining)
+        {
+            return;
+        }
+        assert!(Instant::now() < deadline, "never reaped: {live:?}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn shutdown_begun(agent: &Agent) {
     let deadline = Instant::now() + HELD;
     while !agent.registry.stopping() {
@@ -317,6 +346,7 @@ fn a_rollback_held_in_prepare_when_the_agent_stops_stays_in_flight() {
     let agent = start_agent(&h);
     deploy_as(&agent, "stt", &common::vision_bundle(h.td.path(), "stt")).expect("deploy");
     deploy_as(&agent, "tts", &common::vision_bundle(h.td.path(), "tts")).expect("deploy");
+    reap_retired(&agent);
 
     let answer = stop_during(&agent, || agent.coord.rollback(None));
 
@@ -504,6 +534,7 @@ fn a_caller_is_answered_error_with_the_code_unavailable_while_the_agent_stops() 
     let agent = start_agent(&h);
     deploy_as(&agent, "stt", &common::vision_bundle(h.td.path(), "stt")).expect("deploy");
     deploy_as(&agent, "tts", &common::vision_bundle(h.td.path(), "tts")).expect("deploy");
+    reap_retired(&agent);
     let bundle = common::vision_bundle(h.td.path(), "third");
 
     let interrupted = stop_during(&agent, || {
@@ -606,6 +637,7 @@ fn a_rollback_that_returns_through_a_failed_state_write_releases_the_member_it_p
     let agent = start_agent(&h);
     deploy_as(&agent, "stt", &common::vision_bundle(h.td.path(), "stt")).expect("deploy");
     deploy_as(&agent, "tts", &common::vision_bundle(h.td.path(), "tts")).expect("deploy");
+    reap_retired(&agent);
     // The worker serving `tts` is the one that exits.
     agent.launcher.launched.lock().unwrap().remove(0);
 

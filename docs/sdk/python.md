@@ -576,14 +576,15 @@ a read: the connection, the request's write and each wait for more of the
 answer.
 
 Each generation is a worker of its own. A deploy or a rollback normally
-starts the new generation on another stream port and stops the old worker; a
-restart starts a new generation on the same port. So the target a client
-read goes stale, and a client made by `from_agent()` follows it:
+starts the new generation on another stream port and retires the old
+worker; a restart starts a new generation on the same port. So the target a
+client read goes stale, and a client made by `from_agent()` follows it:
 
 - **A session already open stays where it is.** It runs until its worker
   ends it, which a worker going away does with `ServiceUnavailableError`
-  and `reason` `worker_shutdown`, or `deployment_retired` once the agent
-  retires workers. It is never moved to another generation.
+  and `reason` `deployment_retired` when a deploy or rollback retired it,
+  after up to 30 seconds of drain, or `worker_shutdown` when it was
+  stopped. It is never moved to another generation.
 - **After such an end, the next open reads the status first**, as it does
   after an open whose read of the status failed.
 - **An open whose first call ends before any server event reads the status

@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 use tempfile::TempDir;
 
-use tensorplate_protocol::worker_control::{WorkerControlResponse, WorkerOp};
+use tensorplate_protocol::worker_control::{WorkerControlRequest, WorkerControlResponse, WorkerOp};
 use tensorplate_protocol::ValidatePayload;
 
 use crate::supervision::FakeClock;
@@ -24,6 +24,7 @@ mod descriptors;
 mod handoff;
 mod ports;
 mod restart;
+mod retire;
 mod view;
 
 const ACTIVE_PORT: u16 = 41_080;
@@ -49,6 +50,9 @@ struct Handle {
     /// Reading whether the process exited fails.
     uninspectable: AtomicBool,
     obeys_terminate: AtomicBool,
+    /// An acknowledged retire leaves it running, as sessions still draining
+    /// would; otherwise it exits once it has answered.
+    keeps_draining: AtomicBool,
     contact: Mutex<ControlContact>,
     /// `startup_failure` says it has begun, then waits to be let finish.
     hold_failure: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
@@ -58,10 +62,12 @@ struct Handle {
     target: Mutex<MemberTarget>,
     /// What carries an operation to the worker and back.
     reply: Mutex<Reply>,
-    /// Each runtime operation sent, with its transaction id.
-    ops: Mutex<Vec<(WorkerOp, String)>>,
+    /// Each runtime request sent, as the worker reads it.
+    requests: Mutex<Vec<WorkerControlRequest>>,
     /// An operation says it was sent, then waits to be let be answered.
     hold_call: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    /// When set, only an operation of this kind is held.
+    held_op: Mutex<Option<WorkerOp>>,
 }
 
 /// What becomes of a runtime operation sent to a fake process.
@@ -82,8 +88,14 @@ impl Handle {
     fn set_contact(&self, contact: ControlContact) {
         *self.contact.lock().unwrap() = contact;
     }
+    /// Each runtime operation sent, with its transaction id.
     fn ops(&self) -> Vec<(WorkerOp, String)> {
-        self.ops.lock().unwrap().clone()
+        let requests = self.requests.lock().unwrap();
+        let sent = requests.iter().map(|r| (r.op, r.transaction_id.clone()));
+        sent.collect()
+    }
+    fn requests(&self) -> Vec<WorkerControlRequest> {
+        self.requests.lock().unwrap().clone()
     }
     fn admission(&self) -> Admission {
         self.target.lock().unwrap().admission
@@ -94,15 +106,69 @@ impl Handle {
     /// Holds the next runtime operation sent; returns what tells that it
     /// was sent and what lets it be answered.
     fn hold_call(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        self.hold(None)
+    }
+    /// Holds the next `op` sent, as [`Handle::hold_call`] does.
+    fn hold_call_of(&self, op: WorkerOp) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        self.hold(Some(op))
+    }
+    fn hold(&self, op: Option<WorkerOp>) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
         let (started, has_started) = mpsc::channel();
         let (release, released) = mpsc::channel();
+        *self.held_op.lock().unwrap() = op;
         *self.hold_call.lock().unwrap() = Some((started, released));
         (has_started, release)
     }
 }
 
-/// The control channel of a fake process.
+/// The control channel of a fake process: closed once the process exited.
 struct FakeCaller(Arc<Handle>);
+
+impl FakeCaller {
+    /// The request the worker reads, recorded as it is queued.
+    fn queued(&self, command: RuntimeCommand) -> Result<WorkerControlRequest, ControlChannelError> {
+        let handle = &self.0;
+        let request = command
+            .request(handle.spec.member.clone(), "ctl-1".into())
+            .validate_payload()
+            .map_err(|_| ControlChannelError::InvalidRequest)?;
+        handle.requests.lock().unwrap().push(request.clone());
+        Ok(request)
+    }
+
+    fn answer(
+        &self,
+        request: &WorkerControlRequest,
+    ) -> Result<WorkerControlResponse, ControlChannelError> {
+        let handle = &self.0;
+        if handle.exited.load(Ordering::SeqCst) {
+            return Err(ControlChannelError::Closed);
+        }
+        let held = match *handle.held_op.lock().unwrap() {
+            Some(op) if op != request.op => None,
+            _ => handle.hold_call.lock().unwrap().take(),
+        };
+        if let Some((started, release)) = held {
+            let _ = started.send(());
+            let _ = release.recv_timeout(GRACE);
+        }
+        let reply = *handle.reply.lock().unwrap();
+        match reply {
+            Reply::Answered => {
+                let answer = handle.target.lock().unwrap().answer(request);
+                if request.op == WorkerOp::Retire
+                    && answer.status == WorkerStatusOutcome::Ok
+                    && !handle.keeps_draining.load(Ordering::SeqCst)
+                {
+                    handle.exited.store(true, Ordering::SeqCst);
+                }
+                Ok(answer)
+            }
+            Reply::Unanswered => Err(ControlChannelError::Deadline),
+            Reply::Broken => Err(ControlChannelError::Closed),
+        }
+    }
+}
 
 impl RuntimeCall for FakeCaller {
     fn call(
@@ -110,24 +176,12 @@ impl RuntimeCall for FakeCaller {
         command: RuntimeCommand,
         _budget: Duration,
     ) -> Result<WorkerControlResponse, ControlChannelError> {
-        let handle = &self.0;
-        let request = command
-            .request(handle.spec.member.clone(), "ctl-1".into())
-            .validate_payload()
-            .map_err(|_| ControlChannelError::InvalidRequest)?;
-        let sent = (request.op, request.transaction_id.clone());
-        handle.ops.lock().unwrap().push(sent);
-        let held = handle.hold_call.lock().unwrap().take();
-        if let Some((started, release)) = held {
-            let _ = started.send(());
-            let _ = release.recv_timeout(GRACE);
-        }
-        let reply = *handle.reply.lock().unwrap();
-        match reply {
-            Reply::Answered => Ok(handle.target.lock().unwrap().answer(&request)),
-            Reply::Unanswered => Err(ControlChannelError::Deadline),
-            Reply::Broken => Err(ControlChannelError::Closed),
-        }
+        self.answer(&self.queued(command)?)
+    }
+
+    fn queue(self: Box<Self>, command: RuntimeCommand, _budget: Duration) -> Answer {
+        let queued = self.queued(command);
+        Box::new(move || self.answer(&queued?))
     }
 }
 
@@ -151,6 +205,10 @@ impl RuntimeCall for Answering {
             .validate_payload()
             .map_err(|_| ControlChannelError::InvalidRequest)?;
         Ok(self.1.lock().unwrap().answer(&request))
+    }
+
+    fn queue(self: Box<Self>, command: RuntimeCommand, budget: Duration) -> Answer {
+        Box::new(move || self.call(command, budget))
     }
 }
 
@@ -250,13 +308,15 @@ impl ProcessLauncher for FakeLauncher {
             exited: AtomicBool::new(false),
             uninspectable: AtomicBool::new(false),
             obeys_terminate: AtomicBool::new(!self.stubborn.load(Ordering::SeqCst)),
+            keeps_draining: AtomicBool::new(false),
             contact: Mutex::new(ControlContact::Reporting),
             hold_failure: Mutex::new(None),
             hold_terminate: Mutex::new(None),
             target: Mutex::new(MemberTarget::built(ceiling)),
             reply: Mutex::new(Reply::Answered),
-            ops: Mutex::default(),
+            requests: Mutex::default(),
             hold_call: Mutex::new(None),
+            held_op: Mutex::new(None),
         });
         self.launched.lock().unwrap().push(handle.clone());
         Ok(Box::new(FakeProcess(handle)))
@@ -300,6 +360,14 @@ struct Fixture {
 /// be answered.
 fn activations_answered(f: &Fixture) {
     let threads = std::mem::take(&mut *f.registry.activations.lock().unwrap());
+    for thread in threads {
+        thread.join().unwrap();
+    }
+}
+
+/// Waits for the answer to every retire sent so far to be recorded.
+fn retires_answered(f: &Fixture) {
+    let threads = std::mem::take(&mut *f.registry.retirements.lock().unwrap());
     for thread in threads {
         thread.join().unwrap();
     }
@@ -448,6 +516,7 @@ impl Fixture {
         self.health(port, id);
         assert!(self.warm(id).unwrap().ready);
         self.registry.promote("tx", &candidate(id)).unwrap();
+        retires_answered(self);
         handle
     }
     fn configs(&self) -> usize {
@@ -592,14 +661,15 @@ fn warming_another_deployment_than_the_prepared_one_is_refused() {
 }
 
 #[test]
-fn promotion_retires_the_old_generation_by_asking_it_to_stop() {
+fn promotion_sends_the_old_generation_a_retire_and_the_next_step_reaps_it() {
     let f = fixture();
     let old = f.serve("stt");
     assert_eq!(old.config["bind"]["port"], ACTIVE_PORT);
     let new = f.serve("tts");
     assert_eq!(new.config["bind"]["port"], CANDIDATE_PORT);
 
-    assert_eq!(old.calls(), ["terminate"]);
+    assert_eq!(old.ops().last(), Some(&(WorkerOp::Retire, "tx".to_owned())));
+    assert!(old.calls().is_empty());
     assert!(new.calls().is_empty());
     assert_eq!(
         f.registry.active_deployment_id().unwrap().as_deref(),
@@ -609,6 +679,8 @@ fn promotion_retires_the_old_generation_by_asking_it_to_stop() {
         serving_url(&f).as_deref(),
         Some(format!("http://127.0.0.1:{CANDIDATE_PORT}/infer").as_str())
     );
+    assert_eq!(f.configs(), 2);
+    f.registry.supervise();
     assert_eq!(f.configs(), 1);
 
     let third = f.serve("stt");
@@ -619,13 +691,14 @@ fn promotion_retires_the_old_generation_by_asking_it_to_stop() {
 #[test]
 fn a_member_that_ignores_the_stop_request_is_killed_only_after_the_drain() {
     let f = fixture();
-    let old = f.serve("stt");
-    old.obeys_terminate.store(false, Ordering::SeqCst);
+    f.prepare("stt").unwrap();
+    let displaced = f.launcher.handle(1);
+    displaced.obeys_terminate.store(false, Ordering::SeqCst);
 
     let started = Instant::now();
-    f.serve("tts");
+    f.prepare("stt").unwrap();
     assert!(started.elapsed() >= DRAIN, "{:?}", started.elapsed());
-    assert_eq!(old.calls(), ["terminate", "kill"]);
+    assert_eq!(displaced.calls(), ["terminate", "kill"]);
 }
 
 #[test]
@@ -676,22 +749,36 @@ fn unload_stops_the_members_of_that_deployment_only() {
 
     f.registry.unload("tts");
     assert_eq!(f.launcher.handle(2).calls(), ["terminate"]);
-    assert!(serving.calls().is_empty());
+    assert_eq!(serving.ops(), [(WorkerOp::Activate, "tx".to_owned())]);
 
     f.registry.unload("stt");
-    assert_eq!(serving.calls(), ["terminate"]);
+    let (op, _) = serving.ops().pop().unwrap();
+    assert_eq!(op, WorkerOp::Retire);
+    assert!(serving.calls().is_empty());
     assert_eq!(f.registry.active_deployment_id().unwrap(), None);
 }
 
 #[test]
 fn dropping_the_registry_stops_every_member_it_still_runs() {
-    let f = fixture();
-    let serving = f.serve("stt");
-    f.prepare("tts").unwrap();
-    let candidate = f.launcher.handle(2);
+    // A third port: the candidate launches while a retiring member holds
+    // its own.
+    let f = fixture_with(
+        |mut settings| {
+            let http = CANDIDATE_PORT + 1;
+            settings.ports.push(MemberPorts { http, stream: None });
+            settings
+        },
+        |registry| registry,
+    );
+    let retiring = f.serve("stt");
+    retiring.keeps_draining.store(true, Ordering::SeqCst);
+    let serving = f.serve("tts");
+    f.prepare("stt").unwrap();
+    let candidate = f.launcher.handle(3);
     candidate.obeys_terminate.store(false, Ordering::SeqCst);
 
     drop(f.registry);
+    assert_eq!(retiring.calls(), ["terminate"]);
     assert_eq!(serving.calls(), ["terminate"]);
     assert_eq!(candidate.calls(), ["terminate", "kill"]);
 }
@@ -981,7 +1068,9 @@ fn a_candidate_whose_control_channel_is_pending_or_unanswered_at_the_fence_is_fe
         assert!(candidate_handle.calls().is_empty(), "{contact:?}");
         assert!(serving.calls().is_empty(), "{contact:?}");
         f.registry.activate("tx", &candidate("tts")).unwrap();
-        assert_eq!(serving.calls(), ["terminate"], "{contact:?}");
+        let retired = (WorkerOp::Retire, "tx".to_owned());
+        assert_eq!(serving.ops().last(), Some(&retired), "{contact:?}");
+        assert!(serving.calls().is_empty(), "{contact:?}");
         let active = f.registry.active_deployment_id().unwrap();
         assert_eq!(active.as_deref(), Some("tts"), "{contact:?}");
     }
