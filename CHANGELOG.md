@@ -8,6 +8,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The streaming slice measurement tool accepts server silence and duration
+  endpoints and records every utterance, its partial cadence and revision
+  gaps, and endpoint-to-final and audio-to-endpoint/final timings. Audio
+  timing follows endpoint input offsets, including splits within a frame.
+  Existing session and TTS measurements keep their meanings; measurement
+  records advance to 0.2 while 0.1 records remain readable. (V030-E06-F01-T04)
+
 - The Python SDK's relay tests no longer fail now and then under parallel
   load. gRPC defers closing a reset connection while a write is in progress
   on it, so an open's second call could go out on that connection and be

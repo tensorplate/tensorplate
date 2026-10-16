@@ -33,6 +33,7 @@ from candidate_record import RecordError, validate_record  # noqa: E402
 
 TOOL_NAME = "slice-measure"
 RECORD_KIND = "slice_measurement"
+SCHEMA_VERSION = "0.2"
 MODES = ("stt", "tts")
 
 # The registered values of the `stage` metric label, in pipeline order.
@@ -200,8 +201,95 @@ def new_session(mode: str, index: int, call_start_ns: int) -> dict[str, Any]:
         "server": server,
         "server_stages": server_stages(),
     }
+    if mode == "stt":
+        session["utterances"] = []
+        client["audio_frames"] = []
     session["measurements"] = derive_measurements(mode, session)
     return session
+
+
+def new_utterance(utterance_id: int, start: int) -> dict[str, Any]:
+    return {
+        "utterance_id": utterance_id,
+        "start_sample_offset": start,
+        "endpoint": None,
+        "final": None,
+        "partials": [],
+        "boundaries": dict.fromkeys(
+            (
+                "first_audio_sent",
+                "last_audio_sent",
+                "first_partial",
+                "endpoint",
+                "final_transcript",
+            )
+        ),
+        "measurements": {},
+        "cadence": {},
+    }
+
+
+def utterance_audio(session: dict[str, Any], utterance: dict[str, Any]) -> list[dict[str, Any]]:
+    """Frames overlapping the utterance's half-open input interval, even at a split frame."""
+    endpoint = utterance["endpoint"]
+    end = endpoint["end_sample_offset"] if endpoint else session["client"]["samples_sent"]
+    start = utterance["start_sample_offset"]
+    return [
+        frame
+        for frame in session["client"]["audio_frames"]
+        if start < end and frame["end_sample_offset"] > start and frame["start_sample_offset"] < end
+    ]
+
+
+def derive_utterance_boundaries(
+    session: dict[str, Any], utterance: dict[str, Any]
+) -> dict[str, Any]:
+    frames = utterance_audio(session, utterance)
+    return {
+        **utterance["boundaries"],
+        "first_audio_sent": frames[0]["sent_ns"] if frames else None,
+        "last_audio_sent": frames[-1]["sent_ns"] if frames and utterance["endpoint"] else None,
+        "first_partial": utterance["partials"][0]["at_ns"] if utterance["partials"] else None,
+    }
+
+
+def derive_utterance_measurements(utterance: dict[str, Any]) -> dict[str, Any]:
+    boundaries = utterance["boundaries"]
+    result = {}
+    for name, start, end, event in (
+        ("endpoint_to_final", "endpoint", "final_transcript", "final_transcript"),
+        ("last_audio_to_endpoint", "last_audio_sent", "endpoint", "endpoint_detected"),
+        (
+            "last_audio_to_final",
+            "last_audio_sent",
+            "final_transcript",
+            "final_transcript",
+        ),
+        (
+            "first_audio_to_first_partial",
+            "first_audio_sent",
+            "first_partial",
+            "partial_transcript",
+        ),
+    ):
+        a, b = boundaries[start], boundaries[end]
+        result[name] = {
+            "from": start,
+            "to": end,
+            "ended_by": event,
+            "ns": None if a is None or b is None else b - a,
+        }
+    return result
+
+
+def derive_cadence(utterance: dict[str, Any]) -> dict[str, Any]:
+    partials = utterance["partials"]
+    revisions = [0, *(p["revision"] for p in partials)]
+    return {
+        "partial_count": len(partials),
+        "revision_gaps": [max(0, b - a - 1) for a, b in itertools.pairwise(revisions)],
+        "intervals_ns": [b["at_ns"] - a["at_ns"] for a, b in itertools.pairwise(partials)],
+    }
 
 
 def derive_measurements(mode: str, session: dict[str, Any]) -> dict[str, Any]:
@@ -217,6 +305,42 @@ def derive_measurements(mode: str, session: dict[str, Any]) -> dict[str, Any]:
             else:
                 final = session["server"]["final"]
                 valid = final is not None and final["text_bytes"] > 0
+        if name == "call_start_to_first_transcript" and "utterances" in session:
+            candidates = []
+            for index, utterance in enumerate(session["utterances"]):
+                prefix = f"utterances/{index}"
+                for position, partial in enumerate(utterance["partials"]):
+                    if partial["text_bytes"]:
+                        candidates.append(
+                            (
+                                partial["at_ns"],
+                                "first_partial",
+                                f"{prefix}/partials/{position}/at_ns",
+                                "partial_transcript",
+                            )
+                        )
+                final = utterance["final"]
+                if final and final["text_bytes"]:
+                    candidates.append(
+                        (
+                            utterance["boundaries"]["final_transcript"],
+                            "final_transcript",
+                            f"{prefix}/boundaries/final_transcript",
+                            "final_transcript",
+                        )
+                    )
+            if candidates:
+                at, key, path, event = min(candidates)
+                # Keep the original boundary name when it already names this event.
+                end = key if boundaries[key] == at else path
+                derived[name] = {
+                    "from": start,
+                    "to": end,
+                    "ended_by": event,
+                    "ns": at - boundaries[start],
+                }
+                continue
+            valid = False
         ns = None
         if valid and boundaries[start] is not None and boundaries[end] is not None:
             ns = boundaries[end] - boundaries[start]
@@ -288,7 +412,32 @@ def session_findings(mode: str, section: dict[str, Any], session: dict[str, Any]
             client["finalize_sequence"],
         )
         expect("total input_audio_samples", totals["input_audio_samples"], samples)
-        if totals["utterances_completed"] < 1:
+        if "utterances" in session:
+            utterances = session["utterances"]
+            expect(
+                "total utterances_completed",
+                totals["utterances_completed"],
+                len(utterances),
+            )
+            for utterance in utterances:
+                endpoint, final = utterance["endpoint"], utterance["final"]
+                if endpoint is None or final is None:
+                    found.append("utterance has no endpoint or final")
+                    continue
+                expect(
+                    "utterance final end_sample_offset",
+                    final["end_sample_offset"],
+                    endpoint["end_sample_offset"],
+                )
+                sequence = (
+                    client["finalize_sequence"] if endpoint["reason"] == "client_finalize" else 0
+                )
+                expect(
+                    "utterance final finalize_sequence",
+                    final["finalize_sequence"],
+                    sequence,
+                )
+        elif totals["utterances_completed"] < 1:
             found.append("total utterances_completed is 0")
     else:
         produced = server["audio_samples"]
@@ -368,6 +517,10 @@ def finalize(record: dict[str, Any]) -> dict[str, Any]:
         if section is None:
             continue
         for session in section["sessions"]:
+            for utterance in session.get("utterances", []):
+                utterance["boundaries"] = derive_utterance_boundaries(session, utterance)
+                utterance["measurements"] = derive_utterance_measurements(utterance)
+                utterance["cadence"] = derive_cadence(utterance)
             session["measurements"] = derive_measurements(mode, session)
         section["summary"] = derive_summary(mode, section)
     record["gpu"]["summary"] = derive_gpu_summary(record["gpu"]["samples"])
@@ -427,6 +580,10 @@ def _check_boundaries(mode: str, label: str, session: dict[str, Any], not_before
         if closed < max(read, default=boundaries["call_start"]):
             raise RecordError(f"{label}: session_closed precedes an event read before it")
         latest = max(latest, closed)
+    for utterance in session.get("utterances", []):
+        times = [at for at in utterance["boundaries"].values() if at is not None]
+        times.extend(p["at_ns"] for p in utterance["partials"])
+        latest = max(latest, max(times, default=latest))
     return latest
 
 
@@ -482,6 +639,11 @@ def _check_counts(mode: str, label: str, session: dict[str, Any]) -> None:
     """Hold the session's counts to the events its other fields record."""
     server, boundaries = session["server"], session["boundaries"]
     single = sum(server[name] is not None for name in (*ANSWERS[mode], "closed"))
+    if mode == "stt" and "utterances" in session:
+        single = int(server["closed"] is not None) + sum(
+            int(u["endpoint"] is not None) + int(u["final"] is not None)
+            for u in session["utterances"]
+        )
     many = server["partials"] if mode == "stt" else server["chunks"]
     counted = server["accepted_events"] + server["ignored_events"] + many + single
     if server["events_received"] < counted + (boundaries["ready"] is not None):
@@ -518,6 +680,129 @@ def _check_input(
         raise RecordError(f"{label}: last_audio_scheduled is not the last frame's place in time")
     if client["max_pacing_lag_ns"] < lag:
         raise RecordError(f"{label}: max_pacing_lag_ns is below the last frame's lag")
+
+
+def _check_utterances(label: str, section: dict[str, Any], session: dict[str, Any]) -> None:
+    client, server, bounds = session["client"], session["server"], session["boundaries"]
+    frames = client["audio_frames"]
+    per_frame = section["input"]["format"]["sample_rate_hz"] * section["input"]["frame_ms"] // 1000
+    offset, previous = 0, bounds["ready"]
+    for index, frame in enumerate(frames):
+        end = min(offset + per_frame, section["input"]["samples"])
+        due = bounds["first_audio_sent"] + index * section["input"]["frame_ms"] * 1_000_000
+        if (
+            frame["start_sample_offset"] != offset
+            or frame["end_sample_offset"] != end
+            or end <= offset
+            or frame["scheduled_ns"] != due
+            or frame["sent_ns"] < max(due, previous)
+        ):
+            raise RecordError(f"{label}: audio frame offsets or timestamps disagree with input")
+        offset, previous = end, frame["sent_ns"]
+    if (
+        len(frames) != client["frames_sent"]
+        or offset != client["samples_sent"]
+        or offset * 2 != client["bytes_sent"]
+    ):
+        raise RecordError(f"{label}: audio frames disagree with client counts")
+    if frames:
+        if frames[0]["sent_ns"] != bounds["first_audio_sent"]:
+            raise RecordError(f"{label}: first audio frame timestamp disagrees")
+        if (
+            bounds["last_audio_sent"] is not None
+            and frames[-1]["sent_ns"] != bounds["last_audio_sent"]
+        ):
+            raise RecordError(f"{label}: last audio frame timestamp disagrees")
+        lag = max(f["sent_ns"] - f["scheduled_ns"] for f in frames)
+        if lag != client["max_pacing_lag_ns"]:
+            raise RecordError(f"{label}: audio frames disagree with max_pacing_lag_ns")
+    ids, start, previous_endpoint, partial_count = set(), 0, None, 0
+    finalize_utterance = None
+    first_partial = None
+    for utterance in session["utterances"]:
+        uid = utterance["utterance_id"]
+        if uid in ids or utterance["start_sample_offset"] != start:
+            raise RecordError(f"{label}: utterance identity or start offset disagrees")
+        if ids and previous_endpoint is None:
+            raise RecordError(f"{label}: utterance starts without the preceding endpoint")
+        ids.add(uid)
+        ub, endpoint, final = (
+            utterance["boundaries"],
+            utterance["endpoint"],
+            utterance["final"],
+        )
+        _require_derived(
+            f"{label}: utterance boundaries",
+            ub,
+            derive_utterance_boundaries(session, utterance),
+        )
+        for key, answer in (("endpoint", endpoint), ("final_transcript", final)):
+            at = ub[key]
+            if (at is None) != (answer is None):
+                raise RecordError(f"{label}: utterance {key} and timestamp disagree")
+            if at is not None and (
+                bounds["ready"] is None
+                or at < bounds["ready"]
+                or (bounds["session_closed"] is not None and at > bounds["session_closed"])
+            ):
+                raise RecordError(f"{label}: utterance event outside the session")
+        if endpoint is not None:
+            end = endpoint["end_sample_offset"]
+            available = max(
+                (f["end_sample_offset"] for f in frames if f["sent_ns"] <= ub["endpoint"]),
+                default=0,
+            )
+            if end < start or end > available:
+                raise RecordError(f"{label}: utterance endpoint offset outside sent audio")
+            if previous_endpoint is not None and ub["endpoint"] < previous_endpoint:
+                raise RecordError(f"{label}: utterance endpoints are out of order")
+            if endpoint["reason"] == "client_finalize":
+                if (
+                    finalize_utterance is not None
+                    or bounds["finalize_sent"] is None
+                    or ub["endpoint"] < bounds["finalize_sent"]
+                ):
+                    raise RecordError(f"{label}: utterance endpoint does not follow Finalize")
+                finalize_utterance = utterance
+            elif endpoint["reason"] not in ("silence", "duration_limit", "half_close"):
+                raise RecordError(f"{label}: unknown utterance endpoint reason")
+            start = end
+        if final is not None and (endpoint is None or ub["final_transcript"] < ub["endpoint"]):
+            raise RecordError(f"{label}: utterance final without its endpoint")
+        revision, at = -1, ub["first_audio_sent"]
+        for partial in utterance["partials"]:
+            if (
+                at is None
+                or partial["at_ns"] < at
+                or partial["revision"] <= revision
+                or (previous_endpoint is not None and partial["at_ns"] < previous_endpoint)
+                or (
+                    bounds["session_closed"] is not None
+                    and partial["at_ns"] > bounds["session_closed"]
+                )
+                or (ub["endpoint"] is not None and partial["at_ns"] > ub["endpoint"])
+            ):
+                raise RecordError(f"{label}: partial outside its utterance or revision order")
+            if partial["text_bytes"] and first_partial is None:
+                first_partial = partial["at_ns"]
+            revision, at = partial["revision"], partial["at_ns"]
+            partial_count += 1
+        _require_derived(
+            f"{label}: utterance measurements",
+            utterance["measurements"],
+            derive_utterance_measurements(utterance),
+        )
+        _require_derived(
+            f"{label}: partial cadence", utterance["cadence"], derive_cadence(utterance)
+        )
+        previous_endpoint = ub["endpoint"]
+    if partial_count != server["partials"] or first_partial != bounds["first_partial"]:
+        raise RecordError(f"{label}: utterance partials disagree with session")
+    for key, boundary in (("endpoint", "endpoint"), ("final", "final_transcript")):
+        expected = finalize_utterance[key] if finalize_utterance else None
+        at = finalize_utterance["boundaries"][boundary] if finalize_utterance else None
+        if server[key] != expected or bounds[boundary] != at:
+            raise RecordError(f"{label}: session {key} disagrees with Finalize utterance")
 
 
 def _check_gpu(gpu: dict[str, Any], loopback: bool) -> None:
@@ -595,6 +880,17 @@ def check_record(record: Any) -> tuple[str, str]:
                 _check_outcome(mode, label, session, vocab)
                 _check_counts(mode, label, session)
                 _check_input(mode, label, section, session, frame)
+                if mode == "stt":
+                    has_utterances = "utterances" in session
+                    has_frames = "audio_frames" in session["client"]
+                    if has_utterances != has_frames or (
+                        record["schema_version"] == "0.2" and not has_frames
+                    ):
+                        raise RecordError(
+                            f"{label}: per-utterance records need utterances and audio_frames"
+                        )
+                    if has_utterances:
+                        _check_utterances(label, section, session)
                 _require_derived(
                     f"{label}: measurements",
                     session["measurements"],

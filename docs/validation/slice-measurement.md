@@ -37,19 +37,34 @@ event that ended it:
 | Measurement | From | To |
 | --- | --- | --- |
 | `session_initialization` | `call_start` | `ready` |
-| `call_start_to_first_transcript` | `call_start` | the first partial transcript that holds more than whitespace, or the final transcript when none arrived |
+| `call_start_to_first_transcript` | `call_start` | the earliest nonblank partial or final transcript |
 | `last_audio_to_final_transcript` | `last_audio_scheduled` | `final_transcript` |
 | `call_start_to_first_audio` | `call_start` | `first_audio_chunk` |
 | `segment_to_first_audio` | `text_segment_scheduled` | `first_audio_chunk` |
 | `segment_to_completion` | `text_segment_scheduled` | `segment_completed` |
 
-- A speech-to-text session sends one utterance and ends it with a client
-  `Finalize`; it waits for no silence. An endpoint that arrives before the
-  `Finalize` was sent ends the session as `unexpected_event`, because the
-  input is then not one utterance.
-- A final transcript of nothing but whitespace is not a sample of
-  `call_start_to_first_transcript`; the session counts as a miss for it. A
-  partial transcript of nothing but whitespace is not a first transcript.
+- A speech-to-text session sends one clip and then a client `Finalize`.
+  On a voice-detecting deployment, pauses can yield several utterances in
+  that same session: `EndpointDetected(SILENCE)` and
+  `EndpointDetected(DURATION_LIMIT)` are valid before Finalize. Each
+  utterance keeps its own endpoint, partials and final. A partial after
+  its utterance's endpoint, a duplicate endpoint or final, or a final
+  without its own endpoint stops the session as `unexpected_event`.
+  The client cannot tell whether a deployment detects voice, so it does not
+  reject a clip for exceeding `max_utterance_ms` before sending audio. On a
+  deployment without voice detection that enforces this limit, an over-long
+  clip now ends as the server's failure, recorded as `session_failed`.
+- The session's existing `endpoint`, `final_transcript`, `server.endpoint`
+  and `server.final` fields still describe the utterance ended by the
+  client's Finalize. `last_audio_to_final_transcript` keeps its scheduled
+  last-frame origin. `call_start_to_first_transcript` ends at the earliest
+  nonblank partial or final across all utterances, including a server-ended
+  utterance; its `to` field names that observation's path when it is outside
+  the existing session boundaries. An empty Finalize response after an
+  earlier transcript does not erase that first-transcript sample.
+- A session with no nonblank partial or final counts as a miss for
+  `call_start_to_first_transcript`. Empty and whitespace-only transcripts
+  supply no sample for that measurement.
 - The time to an answer is counted from when its input was due, not from
   when it went: `last_audio_scheduled` is the last frame's place in real
   time counted from the first frame, and `text_segment_scheduled` is the
@@ -83,6 +98,68 @@ reports.
 Each mode's summary gives, for every measurement, the count, the misses,
 the minimum, the maximum and the 50th, 95th and 99th percentiles by nearest
 rank on the sessions' raw values, all of which stay in the record.
+
+## Per-utterance observations
+
+New records use `schema_version: "0.2"`; the checker also accepts existing
+`0.1` records. This is the measurement record's version, independent of the
+stream protocol. Every STT session adds `utterances` and
+`client.audio_frames`; TTS measurements and the existing session summaries
+keep their fields and definitions. Sessions still run one at a time.
+
+Each utterance records its protocol `utterance_id`, `start_sample_offset`,
+`endpoint` (reason and exclusive `end_sample_offset`), `final` (Finalize
+sequence, end offset, segment count, text size and digest), and `partials`.
+Each partial records `at_ns`, `revision`, stripped `text_bytes` and the
+SHA-256 digest of the text as received. No transcript text is saved.
+
+The utterance's input interval starts at zero for the first utterance and
+at the previous endpoint's end offset thereafter. This is the wire input
+interval, including silence; it does not claim to identify speech onset or
+the server's trimmed decode window. `client.audio_frames` records each
+frame's start and exclusive end sample offsets, `scheduled_ns` and
+`sent_ns`. Offsets use the negotiated input sample rate, not wall time.
+The first and last frames overlapping the utterance's half-open interval
+supply its audio boundaries. An endpoint inside a frame assigns that frame
+to both adjacent utterances. An empty interval (for example Finalize in
+silence immediately after an endpoint) has no audio boundaries.
+
+Each utterance has `boundaries`, `measurements` and `cadence`. Boundaries
+are caller monotonic nanoseconds from run start; received events are
+stamped when read, even if handled later. Every measurement carries
+`from`, `to`, `ended_by` and `ns`:
+
+| Measurement | From | To |
+| --- | --- | --- |
+| `endpoint_to_final` | this utterance's `endpoint` receipt | its `final_transcript` receipt |
+| `last_audio_to_endpoint` | `last_audio_sent`: send time of the last frame overlapping this utterance's input interval | its `endpoint` receipt |
+| `last_audio_to_final` | the same `last_audio_sent` | its `final_transcript` receipt |
+| `first_audio_to_first_partial` | `first_audio_sent`: send time of the first overlapping frame | its `first_partial` receipt |
+
+These per-utterance audio measurements use actual send times, unlike the
+existing session measurement's scheduled origin. Frame schedule and send
+times remain available to inspect credit delays. A delayed endpoint is
+matched by its input offset, never by choosing the last frame sent before
+its arrival. A missing boundary produces `ns: null`. An empty utterance
+can still measure endpoint-to-final; a peer that emits only a final has no
+first-partial sample. These missing optional observations do not add
+misses to the existing session summaries or change the run's result.
+
+`cadence.partial_count` counts every received partial, including empty or
+whitespace hypotheses. Per-utterance `first_partial` also includes those
+hypotheses; the session's first-transcript measurement still requires
+nonblank text. `cadence.intervals_ns[i]` is the receipt time of
+`partials[i + 1]` minus that of `partials[i]`. `cadence.revision_gaps[i]`
+is the number of skipped revisions before `partials[i]`. The first gap
+is `max(0, revision - 1)`, so an initial revision of either zero or one
+has no gap; subsequent gaps are the revision difference minus one. For
+revisions 1, 3, 4, the gaps are `[0, 1, 0]`: the server replaced one unsent
+partial. Revision zero is valid, and revisions must increase within an
+utterance. Counts, gaps, intervals and measurements are
+recomputed by the checker, along with frame offsets and timestamps,
+endpoint/final identity and the session's utterance totals. Observations
+from failed or interrupted sessions remain diagnostic data, not successful
+latency samples.
 
 ## What the record holds
 
@@ -190,8 +267,9 @@ python3 -m venv /var/tmp/slice-measure
 Give either mode or both. The endpoint, generation and descriptor digest
 are those of the served deployment; the tool does not discover them. For a
 worker that reports no generation and no descriptor digest, give the target
-as `<deployment>` alone. The audio is one utterance as mono 16-bit PCM in a
-WAV file, and the text file holds one segment of 1 to 4,096 bytes,
+as `<deployment>` alone. The audio is a clip of mono 16-bit PCM in a
+WAV file; it may contain pauses and exceed one utterance's duration limit
+when the server endpoints it. The text file holds one segment of 1 to 4,096 bytes,
 surrounding whitespace dropped.
 
 ```bash

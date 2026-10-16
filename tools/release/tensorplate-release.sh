@@ -520,8 +520,8 @@ expected = sys.argv[1]
 # Documents with their own version track: the file's root `schema_version`
 # lists the versions its readers accept, and every other `schema_version`
 # constraint in the file must name one of them. The versions themselves are
-# pinned by that document's Rust mirror and its tests, not here.
-state_tracks = {"protocol/schemas/agent_state.json"}
+# pinned by that document's reader and its tests, not here.
+state_tracks = {"protocol/schemas/agent_state.json", "config/schemas/slice_measurement_record.json"}
 bad = []
 for path in sorted(list(pathlib.Path("config/schemas").glob("*.json")) + list(pathlib.Path("protocol/schemas").glob("*.json"))):
     data = json.loads(path.read_text())

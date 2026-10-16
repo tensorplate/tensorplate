@@ -547,40 +547,101 @@ class Call:
 
     # --- speech-to-text ---------------------------------------------------
 
+    def _utterance(self, utterance_id: int) -> dict[str, Any]:
+        utterances = self.session["utterances"]
+        for utterance in utterances:
+            if utterance["utterance_id"] == utterance_id:
+                return utterance
+        if not utterance_id or (utterances and utterances[-1]["endpoint"] is None):
+            raise _Stop("unexpected_event")
+        start = utterances[-1]["endpoint"]["end_sample_offset"] if utterances else 0
+        utterance = record_mod.new_utterance(utterance_id, start)
+        utterances.append(utterance)
+        return utterance
+
     def _on_partial_transcript(self, at: int, partial: Any) -> None:
         boundaries, server = self.session["boundaries"], self.session["server"]
-        if not self._follows(at, "first_audio_sent") or server["endpoint"] is not None:
+        if not self._follows(at, "first_audio_sent"):
             raise _Stop("unexpected_event")
+        utterance = self._utterance(partial.utterance_id)
+        frames = record_mod.utterance_audio(self.session, utterance)
+        revision = utterance["partials"][-1]["revision"] if utterance["partials"] else -1
+        if (
+            utterance["endpoint"] is not None
+            or partial.revision <= revision
+            or not frames
+            or at < frames[0]["sent_ns"]
+        ):
+            raise _Stop("unexpected_event")
+        utterance["partials"].append(
+            {
+                "at_ns": at,
+                "revision": partial.revision,
+                "text_bytes": len(partial.text.strip().encode()),
+                "text_sha256": sha256_digest(partial.text.encode()),
+            }
+        )
         server["partials"] += 1
         if partial.text.strip() and boundaries["first_partial"] is None:
             boundaries["first_partial"] = at
 
     def _on_endpoint_detected(self, at: int, endpoint: Any) -> None:
         boundaries, server = self.session["boundaries"], self.session["server"]
-        if server["final"] is not None:
-            return
-        if not self._follows(at, "finalize_sent") or server["endpoint"] is not None:
+        reason = enum_name(self._pb.EndpointReason, endpoint.reason)
+        if reason == "client_finalize":
+            if not self._follows(at, "finalize_sent") or server["endpoint"] is not None:
+                raise _Stop("unexpected_event")
+        elif reason == "half_close":
+            if not self.half_closed:
+                raise _Stop("unexpected_event")
+        elif reason not in ("silence", "duration_limit"):
             raise _Stop("unexpected_event")
-        boundaries["endpoint"] = at
-        server["endpoint"] = {
-            "reason": enum_name(self._pb.EndpointReason, endpoint.reason),
+        available = max(
+            (
+                f["end_sample_offset"]
+                for f in self.session["client"]["audio_frames"]
+                if f["sent_ns"] <= at
+            ),
+            default=0,
+        )
+        utterance = self._utterance(endpoint.utterance_id)
+        if (
+            utterance["endpoint"] is not None
+            or not utterance["start_sample_offset"] <= endpoint.end_sample_offset <= available
+        ):
+            raise _Stop("unexpected_event")
+        utterance["boundaries"]["endpoint"] = at
+        utterance["endpoint"] = {
+            "reason": reason,
             "end_sample_offset": endpoint.end_sample_offset,
         }
+        if reason == "client_finalize":
+            boundaries["endpoint"] = at
+            server["endpoint"] = utterance["endpoint"]
 
     def _on_final_transcript(self, at: int, final: Any) -> None:
-        server = self.session["server"]
-        if server["final"] is not None:
-            return
-        if server["endpoint"] is None:
+        utterance = next(
+            (u for u in self.session["utterances"] if u["utterance_id"] == final.utterance_id),
+            None,
+        )
+        if (
+            utterance is None
+            or utterance["endpoint"] is None
+            or utterance["final"] is not None
+            or at < utterance["boundaries"]["endpoint"]
+        ):
             raise _Stop("unexpected_event")
         text = "".join(segment.text for segment in final.segments)
-        self.session["boundaries"]["final_transcript"] = at
-        server["final"] = {
+        utterance["boundaries"]["final_transcript"] = at
+        utterance["final"] = {
             **numbers(final, "finalize_sequence", "end_sample_offset"),
             "segments": len(final.segments),
             "text_bytes": len(text.strip().encode()),
             "text_sha256": sha256_digest(text.encode()),
         }
+        if utterance["endpoint"]["reason"] == "client_finalize":
+            self.session["boundaries"]["final_transcript"] = at
+            self.session["server"]["final"] = utterance["final"]
 
     # --- text-to-speech ---------------------------------------------------
 
@@ -675,7 +736,7 @@ def _stt(call: Call, pb: Any, target: Target, plan: dict[str, Any]) -> None:
         raise _Stop("ready_mismatch")
     frame_ms = plan["frame_ms"]
     fits = limits.min_frame_ms <= frame_ms <= limits.max_frame_ms
-    if not fits or plan["samples"] * 1000 > limits.max_utterance_ms * plan["rate"]:
+    if not fits:
         raise _Stop("input_outside_limits")
     client, boundaries = call.session["client"], call.session["boundaries"]
     first = due = at = 0
@@ -685,11 +746,21 @@ def _stt(call: Call, pb: Any, target: Target, plan: dict[str, Any]) -> None:
         if position:
             call.pace(due)
         body = pb.Audio(
-            data=frame, sample_count=len(frame) // 2, sample_offset=client["samples_sent"]
+            data=frame,
+            sample_count=len(frame) // 2,
+            sample_offset=client["samples_sent"],
         )
         at = call.send_input(len(frame), 0, audio=body)
         if not position:
             first = due = boundaries["first_audio_sent"] = at
+        client["audio_frames"].append(
+            {
+                "start_sample_offset": body.sample_offset,
+                "end_sample_offset": body.sample_offset + body.sample_count,
+                "scheduled_ns": due,
+                "sent_ns": at,
+            }
+        )
         client["max_pacing_lag_ns"] = max(client["max_pacing_lag_ns"] or 0, at - due)
         client["frames_sent"] += 1
         client["bytes_sent"] += len(frame)
@@ -839,7 +910,7 @@ def measure(
     )  # fmt: skip
     stated = worker_version is not None or worker_build is not None
     record: dict[str, Any] = {
-        "schema_version": "0.1",
+        "schema_version": record_mod.SCHEMA_VERSION,
         "record_kind": record_mod.RECORD_KIND,
         "provenance": provenance,
         "tool": {
@@ -886,7 +957,14 @@ def measure(
         for mode, section in requested.items():
             if section is not None:
                 run_section(
-                    run, bindings, mode, *section, iterations, event_timeout_ms, record, save
+                    run,
+                    bindings,
+                    mode,
+                    *section,
+                    iterations,
+                    event_timeout_ms,
+                    record,
+                    save,
                 )
         record["run"]["ended_by"] = "completed"
     except KeyboardInterrupt:
