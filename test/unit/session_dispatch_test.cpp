@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -154,6 +155,27 @@ bool detects_voice(Binding& binding) {
   return binding.under_test->voice_detection().has_value();
 }
 
+/// Records what `key`'s output queue holds when its next finalization is
+/// reported.
+void record_at_completion(Binding& binding, std::uint64_t key, std::atomic<std::uint64_t>& queued) {
+  binding.before_next(key, Event::FinalizeCompleted, [&binding, key, &queued] {
+    queued = binding.output(key)->metadata_usage().used();
+  });
+}
+
+/// What an utterance's undelivered endpoint, and its final when
+/// `with_final`, hold of the output queue's metadata budget.
+std::uint64_t utterance_charge(Binding& binding, std::uint64_t first_sample,
+                               std::span<const std::byte> audio, bool with_final) {
+  std::uint64_t bytes = make_task_output_item(EndpointDetectedOutput{}).bytes;
+  if (with_final) {
+    FinalTranscriptOutput transcript;
+    transcript.segments = binding.under_test->transcript(first_sample, audio);
+    bytes += make_task_output_item(std::move(transcript)).bytes;
+  }
+  return bytes;
+}
+
 /// Text whose speech is more than the session's PCM budget holds at once.
 std::string overflowing_text(Binding& binding, std::uint64_t key) {
   const auto terms = binding.terms(key);
@@ -214,6 +236,18 @@ void finalize_takes_over(const DispatchCase& dispatch, Takeover order, int round
   const AudioSizes sizes = sizes_of(binding, key);
   const std::size_t longest = sizes.longest_utterance;
   const Bytes audio = patterned_bytes(longest + sizes.shortest_frame, 5);
+  const auto first = std::span{audio}.first(longest);
+  const auto second = std::span{audio}.subspan(longest);
+  // Detecting voice, the first utterance completes while the Finalize's
+  // frames still wait to be scored: the finalization is reported once the
+  // Finalize's endpoint was queued, before its final. Released as the
+  // Finalize is applied, the job may be seen to end before the Finalize.
+  const bool pinned = detects_voice(binding) &&
+                      (order == Takeover::BeforeTheJobEnds || order == Takeover::AfterTheJobEnds);
+  std::atomic<std::uint64_t> queued_at_completion{0};
+  if (pinned) {
+    record_at_completion(binding, key, queued_at_completion);
+  }
   binding.under_test->hold_jobs();
   ASSERT_TRUE(binding.audio_in_long_frames(key, audio));
   ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Finalizing; }));
@@ -239,18 +273,27 @@ void finalize_takes_over(const DispatchCase& dispatch, Takeover order, int round
     binding.finalize(key, 7);
     releaser.join();
   }
-  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0,
-                                               std::span{audio}.first(longest), 0));
+  const std::uint64_t second_endpoint =
+      pinned ? utterance_charge(binding, longest / sizes.sample, second, false) : 0;
+  if (pinned && order == Takeover::BeforeTheJobEnds) {
+    ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Active; }));
+    EXPECT_EQ(queued_at_completion, utterance_charge(binding, 0, first, true) + second_endpoint);
+  }
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0, first, 0));
   if (order == Takeover::AfterTheJobEnds) {
     // The completion is not reported while the Finalize the dispatch has
     // recorded is still to be handed over.
     ASSERT_TRUE(binding.settle());
     ASSERT_EQ(binding.live_state(key), State::Finalizing);
     binding.dispatch().finalize(key, 7);
+    if (pinned) {
+      // The first utterance's endpoint and final were read.
+      ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Active; }));
+      EXPECT_EQ(queued_at_completion, second_endpoint);
+    }
   }
   ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2,
-                                               longest / sizes.sample,
-                                               std::span{audio}.subspan(longest), 7));
+                                               longest / sizes.sample, second, 7));
   ASSERT_TRUE(binding.settle());
   ASSERT_EQ(binding.live_state(key), State::Active);
 }
@@ -769,13 +812,30 @@ TEST_P(SessionDispatchContract, AFinalizeRightAfterTheLongestUtteranceIsComplete
   const AudioSizes sizes = sizes_of(binding, key);
   const std::size_t longest = sizes.longest_utterance;
   const Bytes audio = patterned_bytes(scored_length(sizes, longest), 8);
+  const auto first = std::span{audio}.first(longest);
+  const auto rest = std::span{audio}.subspan(longest);
+  const bool voice = detects_voice(binding);
+  std::atomic<std::uint64_t> queued_at_completion{0};
+  if (voice) {
+    // Held, the first utterance completes after the Finalize was handed
+    // over and while its frames still wait to be scored: the finalization
+    // is reported once the Finalize's endpoint was queued, before its final.
+    record_at_completion(binding, key, queued_at_completion);
+    binding.under_test->hold_jobs();
+  }
   ASSERT_TRUE(binding.audio_in_long_frames(key, audio));
   binding.finalize(key, 7);
-  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0,
-                                               std::span{audio}.first(longest), 0));
+  if (voice) {
+    ASSERT_TRUE(binding.settle());
+    binding.under_test->release_jobs();
+    ASSERT_TRUE(binding.eventually([&] { return binding.live_state(key) == State::Active; }));
+    EXPECT_EQ(queued_at_completion,
+              utterance_charge(binding, 0, first, true) +
+                  utterance_charge(binding, longest / sizes.sample, rest, false));
+  }
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::DurationLimit, 1, 0, first, 0));
   ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2,
-                                               longest / sizes.sample,
-                                               std::span{audio}.subspan(longest), 7));
+                                               longest / sizes.sample, rest, 7));
   ASSERT_TRUE(binding.settle());
   EXPECT_EQ(binding.live_state(key), State::Active);
   EXPECT_FALSE(binding.output(key)->take().has_value());
