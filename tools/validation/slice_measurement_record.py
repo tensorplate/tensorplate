@@ -406,7 +406,9 @@ def derive_aggregate(record: dict[str, Any]) -> dict[str, Any]:
             measurements[mode] = None
             continue
         samples: dict[str, list[int | None]] = {name: [] for name in MEASUREMENTS[mode]}
+        samples["input_lag"] = []
         if mode == "stt":
+            samples["max_pacing_lag"] = []
             samples.update(
                 {name: [] for name in derive_utterance_measurements(new_utterance(1, 0))}
             )
@@ -421,6 +423,10 @@ def derive_aggregate(record: dict[str, Any]) -> dict[str, Any]:
                 failures[cause] = failures.get(cause, 0) + 1
             for name, entry in derive_measurements(mode, session).items():
                 samples[name].append(entry["ns"] if cause is None else None)
+            # Scheduling pressure is diagnostic even when the session failed.
+            samples["input_lag"].append(session["client"]["input_lag_ns"])
+            if mode == "stt":
+                samples["max_pacing_lag"].append(session["client"]["max_pacing_lag_ns"])
             for utterance in session.get("utterances", []):
                 for name, entry in derive_utterance_measurements(utterance).items():
                     samples[name].append(entry["ns"] if cause is None else None)
@@ -550,10 +556,31 @@ def _describe(session: dict[str, Any]) -> str:
 _RUN_ENDS = {None: "did not end", "interrupt": "interrupted", "error": "ended by an error ({})"}
 
 
+def refused_at_open(session: dict[str, Any]) -> bool:
+    """Recognized refusal statuses before any server event, excluding transport failures."""
+    return (
+        session["outcome"] == "call_failed"
+        and session["client"]["events_sent"] > 0
+        and session["server"]["events_received"] == 0
+        and session["grpc_status"]
+        in (
+            "RESOURCE_EXHAUSTED",
+            "FAILED_PRECONDITION",
+            "INVALID_ARGUMENT",
+            "NOT_FOUND",
+            "PERMISSION_DENIED",
+            "UNAUTHENTICATED",
+            "UNIMPLEMENTED",
+            "OUT_OF_RANGE",
+        )
+    )
+
+
 def derive_result(record: dict[str, Any]) -> dict[str, Any]:
     """The run's status and why, from how it ended and from the sessions."""
     failed: list[str] = []
     incomplete: list[str] = []
+    refusals: list[str] = []
     ended = record["run"]["ended_by"]
     if ended != "completed":
         failed.append(f"run: {_RUN_ENDS[ended].format(record['run']['error'])}")
@@ -567,7 +594,12 @@ def derive_result(record: dict[str, Any]) -> dict[str, Any]:
         for session in section["sessions"]:
             label = f"{mode} session {session['index']}"
             if session["outcome"] != "completed":
-                failed.append(f"{label}: {_describe(session)}")
+                reasons = (
+                    refusals
+                    if record["schema_version"] == "0.3" and refused_at_open(session)
+                    else failed
+                )
+                reasons.append(f"{label}: {_describe(session)}")
                 continue
             failed.extend(
                 f"{label}: {finding}" for finding in session_findings(mode, section, session)
@@ -575,8 +607,16 @@ def derive_result(record: dict[str, Any]) -> dict[str, Any]:
             for name, entry in derive_measurements(mode, session).items():
                 if entry["ns"] is None:
                     incomplete.append(f"{label}: no sample for {name}")
-    status = "failed" if failed else "incomplete" if incomplete else "complete"
-    return {"status": status, "reasons": failed + incomplete}
+    status = (
+        "failed"
+        if failed
+        else "completed_with_refusals"
+        if refusals
+        else "incomplete"
+        if incomplete
+        else "complete"
+    )
+    return {"status": status, "reasons": failed + refusals + incomplete}
 
 
 def finalize(record: dict[str, Any]) -> dict[str, Any]:
@@ -922,7 +962,11 @@ def _check_claims(record: dict[str, Any]) -> None:
             raise RecordError("settings.expect_test_count must be 1 to 2048")
         if (run["finished_ns"] is None) != (run["ended_by"] is None):
             raise RecordError("run: finished_ns does not agree with ended_by")
-    elif "aggregate" in record or "sessions" in record["settings"] or "finished_ns" in run:
+    elif (
+        "aggregate" in record
+        or any(key in record["settings"] for key in ("sessions", "stagger_ms", "expect_test_count"))
+        or "finished_ns" in run
+    ):
         raise RecordError("concurrent settings and aggregates require schema version 0.3")
 
 
@@ -1044,7 +1088,7 @@ def check_record(record: Any) -> tuple[str, str]:
 
 
 def exit_status(status: str) -> int:
-    if status == "complete":
+    if status in ("complete", "completed_with_refusals"):
         return EXIT_COMPLETE
     if status == "failed":
         return EXIT_FAILED
@@ -1067,7 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{TOOL_NAME}: invalid: {args.record}: {exc}", file=sys.stderr)
         return EXIT_NO_VERDICT
     status, detail = check_record(record)
-    stream = sys.stdout if status == "complete" else sys.stderr
+    stream = sys.stdout if exit_status(status) == 0 else sys.stderr
     if status != "invalid" and record.get("provenance") == "synthetic":
         print(f"{TOOL_NAME}: provenance synthetic: these numbers measure nothing", file=stream)
     print(f"{TOOL_NAME}: {status}: {detail}", file=stream)

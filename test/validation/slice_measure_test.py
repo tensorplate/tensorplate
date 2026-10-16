@@ -1132,7 +1132,7 @@ class Harness:
         self.text = {"text": TEXT, "language": "en", "voice": VOICE}
 
     def serve(self, servicer: SliceServer) -> tuple[grpc.Server, str]:
-        server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=16))
         self.bindings.rpc.add_SessionServiceServicer_to_server(servicer, server)
         port = server.add_insecure_port("127.0.0.1:0")
         server.start()
@@ -1914,7 +1914,7 @@ def check_utterances(harness: Harness) -> None:
     for fault, reason in (("server_endpoints", "silence"), ("duration_split", "duration_limit")):
         record, session, server = harness.run("stt", fault)
         assert session["outcome"] == "completed" and not server.violations, session
-        assert record["schema_version"] == "0.3"
+        assert record["schema_version"] == "0.2"
         utterances = session["utterances"]
         assert [u["utterance_id"] for u in utterances] == [1, 2, 3]
         assert [u["endpoint"]["reason"] for u in utterances] == [reason, reason, "client_finalize"]
@@ -2130,6 +2130,20 @@ def check_record_versions() -> None:
         session["client"].pop("audio_frames")
     jsonschema.validate(legacy, record_mod.load_schema())
     assert record_mod.check_record(legacy)[0] == "complete"
+    for original in (legacy, built):
+        for path, value in (
+            ("aggregate", {}),
+            ("settings.sessions", 2),
+            ("settings.stagger_ms", 0),
+            ("settings.expect_test_count", 2),
+            ("run.finished_ns", 0),
+            ("stt.sessions.0.connection", {"started_ns": 0, "connect_ns": 0, "ended_ns": 0}),
+            ("result.status", "completed_with_refusals"),
+        ):
+            bad = copy.deepcopy(original)
+            put(path, value)(bad)
+            assert not jsonschema.Draft7Validator(record_mod.load_schema()).is_valid(bad), path
+            assert record_mod.check_record(bad)[0] == "invalid", path
 
 
 def check_run_endings(harness: Harness) -> None:
@@ -2441,7 +2455,7 @@ def check_command(harness: Harness) -> None:
     ]  # fmt: skip
     command = [
         sys.executable, str(CLIENT_TOOL), "run", "--out", str(out),
-        "--iterations", "2", "--gpu-interval-ms", "20", *stt,
+        "--iterations", "2", "--sessions", "1", "--gpu-interval-ms", "20", *stt,
         "--tts-endpoint", servers[1][1], "--tts-target", spec, "--tts-language", "en",
         "--text-file", str(text),
         "--voice", VOICE,
@@ -2454,6 +2468,16 @@ def check_command(harness: Harness) -> None:
         assert done.returncode == 0 and "complete: every session completed" in done.stdout, done
         record = json.loads(out.read_text(encoding="utf-8"))
         assert record["result"] == {"status": "complete", "reasons": []}
+        assert record["schema_version"] == "0.2" and "aggregate" not in record
+        if legacy_checker := os.environ.get("TP_SLICE_MEASURE_LEGACY_CHECKER"):
+            checked = subprocess.run(
+                [sys.executable, legacy_checker, "check", str(out)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            assert checked.returncode == 0, checked
         # Both targets are loopback, so the GPU is sampled; no commit, so nothing is `recorded`.
         assert record["gpu"]["status"] == "sampled" and record["provenance"] == "synthetic"
         assert {k: v for k, v in record["run"].items() if k != "finished_ns"} == {
@@ -2473,8 +2497,11 @@ def check_command(harness: Harness) -> None:
             (["--sessions", "0"], "--sessions"),
             (["--sessions", "65"], "--sessions"),
             (["--stagger-ms", "-1"], "--stagger-ms"),
-            (["--expect-test-count", "0"], "--expect-test-count"),
-            (["--expect-test-count", "2049"], "--expect-test-count"),
+            (["--stagger-ms", "0"], "require --sessions greater than 1"),
+            (["--stagger-ms", "5"], "require --sessions greater than 1"),
+            (["--expect-test-count", "1"], "require --sessions greater than 1"),
+            (["--sessions", "2", "--expect-test-count", "0"], "--expect-test-count"),
+            (["--sessions", "2", "--expect-test-count", "2049"], "--expect-test-count"),
             (["--iterations", "0"], "at least 1"),
             (["--source-commit", "abc"], "not a full commit id"),
             (["--stt-target", "d:7"], "is not DEPLOYMENT or DEPLOYMENT:GENERATION:DIGEST"),
@@ -2569,7 +2596,7 @@ class ConcurrentServer:
         self.lock = threading.Lock()
         self.opened = threading.Condition(self.lock)
         self.gate = threading.Event()
-        self.saved = threading.Event()
+        self.release_peers = threading.Event()
         self.peers: list[str] = []
         self.children: list[SliceServer] = []
 
@@ -2588,12 +2615,14 @@ class ConcurrentServer:
             self.opened.notify_all()
             if len(self.children) % self.count == 0:
                 self.gate.set()
-        if self.fault != "checkpoint_stagger" and not self.gate.wait(10):
+        if not self.gate.wait(10):
             context.abort(grpc.StatusCode.INTERNAL, "batch never reached the gate")
-        if slot == 0 and self.fault in ("refuse_open", "deadline"):
+        if self.fault == "checkpoint_batch" and slot % self.count:
+            assert self.release_peers.wait(10), "coordinator did not collect the first session"
+        if self.fault == "all_refused" or (slot == 0 and self.fault in ("refuse_open", "deadline")):
             status = (
                 grpc.StatusCode.RESOURCE_EXHAUSTED
-                if self.fault == "refuse_open"
+                if self.fault in ("refuse_open", "all_refused")
                 else grpc.StatusCode.DEADLINE_EXCEEDED
             )
             context.abort(status, "synthetic failure")
@@ -2634,10 +2663,6 @@ class StaggerClock(client_mod.Run):
             assert self.server.opened.wait_for(
                 lambda: len(self.server.children) > len(self.waits), 10
             )
-        if self.server.fault == "checkpoint_stagger":
-            assert self.server.saved.wait(10), (
-                "completed session was not checkpointed during stagger"
-            )
         self.waits.append(until)
         self.at = until
 
@@ -2647,17 +2672,19 @@ class StaggerClock(client_mod.Run):
 
 
 def concurrent_record(harness: Harness, mode: str, count: int, fault: str = "", **settings):
+    observe_checkpoint = settings.pop("observe_checkpoint", lambda _: None)
     servicer = ConcurrentServer(harness.bindings, count, fault)
     server, endpoint = harness.serve(servicer)
-    run = StaggerClock(servicer) if settings.get("stagger_ms") else client_mod.Run()
+    run = settings.pop("run", None) or (
+        StaggerClock(servicer) if settings.get("stagger_ms") else client_mod.Run()
+    )
     target = client_mod.Target(endpoint, *TARGET)
     saved: list[dict] = []
     plan = harness.audio if mode == "stt" else harness.text
 
     def checkpoint(item):
+        observe_checkpoint(item)
         saved.append(copy.deepcopy(item))
-        if item[mode] and item[mode]["sessions"]:
-            servicer.saved.set()
 
     with mock.patch.object(client_mod, "GpuSampler", wraps=client_mod.GpuSampler) as sampler:
         try:
@@ -2690,16 +2717,26 @@ def check_concurrent_sessions(harness: Harness) -> None:
         implicit = scripted(harness, mode)[0]
         explicit = scripted(harness, mode, settings={"sessions": 1})[0]
         assert implicit[mode] == explicit[mode]
-        assert implicit["aggregate"] == explicit["aggregate"]
+        assert "aggregate" not in implicit and "aggregate" not in explicit
         assert implicit["settings"] == explicit["settings"]
-        legacy = copy.deepcopy(explicit)
-        legacy["schema_version"] = "0.2"
-        legacy.pop("aggregate")
-        legacy["run"].pop("finished_ns")
-        for key in ("sessions", "stagger_ms", "expect_test_count"):
-            legacy["settings"].pop(key)
-        jsonschema.validate(legacy, record_mod.load_schema())
-        assert record_mod.check_record(legacy)[0] == explicit["result"]["status"]
+        assert explicit["schema_version"] == "0.2"
+        assert set(explicit["settings"]) == {"iterations", "event_timeout_ms", "max_input_lag_ms"}
+        assert set(explicit["run"]) == {"ended_by", "error"}
+        assert all("connection" not in entry for entry in explicit[mode]["sessions"])
+        if legacy_checker := os.environ.get("TP_SLICE_MEASURE_LEGACY_CHECKER"):
+            path = harness.work / "single-session.json"
+            path.write_text(record_mod.dump(explicit))
+            checked = subprocess.run(
+                [sys.executable, legacy_checker, "check", str(path)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            assert checked.returncode == record_mod.exit_status(explicit["result"]["status"]), (
+                checked
+            )
+            assert "invalid" not in checked.stderr, checked
 
         record, server, _, saved = concurrent_record(
             harness, mode, 4, "refuse_open", expect_test_count=8
@@ -2709,11 +2746,27 @@ def check_concurrent_sessions(harness: Harness) -> None:
         assert aggregate["sessions_recorded"] == aggregate["sessions_opened"] == 4
         assert (aggregate["sessions_clean"], aggregate["sessions_failed"]) == (3, 1)
         assert aggregate["failed_by_cause"] == [{"cause": "grpc:RESOURCE_EXHAUSTED", "count": 1}]
-        assert record["result"]["status"] == "failed"
+        assert record["result"]["status"] == "completed_with_refusals"
+        assert record_mod.exit_status(record["result"]["status"]) == 0
         samples = record[mode]["summary"]["session_initialization"]
         assert (samples["count"], samples["misses"]) == (3, 1)
         assert [s["index"] for s in record[mode]["sessions"]] == list(range(4))
-        assert len(saved) == 5
+        assert len(saved) == 3
+        assert saved[1][mode]["sessions"] == []
+        assert len(saved[2][mode]["sessions"]) == 4
+        mixed = copy.deepcopy(record)
+        admitted = next(s for s in mixed[mode]["sessions"] if s["outcome"] == "completed")
+        admitted["server"]["closed"]["totals"][
+            "input_audio_samples" if mode == "stt" else "segments_completed"
+        ] += 1
+        record_mod.finalize(mixed)
+        assert record_mod.check_record(mixed)[0] == "failed"
+        assert record_mod.exit_status(mixed["result"]["status"]) == 1
+        assert mixed["aggregate"]["sessions_clean"] == 2
+        assert mixed["aggregate"]["failed_by_cause"] == [
+            {"cause": "grpc:RESOURCE_EXHAUSTED", "count": 1},
+            {"cause": "invalid_response", "count": 1},
+        ]
         for child in server.children:
             if child.seen["opens"]:
                 assert child.seen["opens"][0].resolved.deployment_id == TARGET[0]
@@ -2746,6 +2799,18 @@ def check_concurrent_sessions(harness: Harness) -> None:
         record, _, _, _ = concurrent_record(harness, "tts", 4, fault)
         assert record["aggregate"]["sessions_clean"] == 3
         assert record["aggregate"]["failed_by_cause"] == [{"cause": cause, "count": 1}]
+        assert record_mod.exit_status(record["result"]["status"]) == 1
+
+    record, _, _, _ = concurrent_record(harness, "stt", 8, "partial")
+    assert record["aggregate"]["sessions_clean"] == 8
+    record, _, _, _ = concurrent_record(harness, "tts", 4, "all_refused")
+    assert record["aggregate"]["sessions_clean"] == 0
+    assert record["result"]["status"] == "completed_with_refusals"
+    real_run = client_mod.Run()
+    with mock.patch.object(real_run.cancelled, "wait", wraps=real_run.cancelled.wait) as waits:
+        record, _, _, _ = concurrent_record(harness, "tts", 3, stagger_ms=25, run=real_run)
+    assert any(call.args[0] > 0 for call in waits.call_args_list)
+    assert record["aggregate"]["sessions_clean"] == 3
 
     record, _, run, _ = concurrent_record(harness, "tts", 3, stagger_ms=25)
     assert run.waits == [25 * MS, 50 * MS]
@@ -2756,11 +2821,6 @@ def check_concurrent_sessions(harness: Harness) -> None:
     ]
     assert record["aggregate"]["sessions_clean"] == 3
     assert record["aggregate"]["wall_time_ns"] == 50 * MS
-    checkpointed, _, _, snapshots = concurrent_record(
-        harness, "tts", 3, "checkpoint_stagger", stagger_ms=25
-    )
-    assert checkpointed["aggregate"]["sessions_clean"] == 3
-    assert len(snapshots[1]["tts"]["sessions"]) == 1
     for path, value, needle in (
         ("tts.sessions.1.index", 0, "unique, ordered and in range"),
         ("tts.sessions.2.index", 3, "unique, ordered and in range"),
@@ -2786,25 +2846,144 @@ def check_concurrent_sessions(harness: Harness) -> None:
     assert "previous batch ended" in record_mod.check_record(bad)[1]
 
 
+def check_batch_checkpoints(harness: Harness) -> None:
+    servicer = ConcurrentServer(harness.bindings, 8, "checkpoint_batch")
+    server, endpoint = harness.serve(servicer)
+    pending: list = []
+    counts: list[int] = []
+    overlaps: list[bool] = []
+    real_completed, real_finalize = client_mod.as_completed, record_mod.finalize
+
+    def completing(tasks):
+        pending[:] = tasks
+        for future in real_completed(tasks):
+            yield future
+            # The other seven RPCs stay gated until the coordinator collects the first.
+            servicer.release_peers.set()
+
+    def finalizing(record):
+        overlaps.append(any(not task.done() for task in pending))
+        if overlaps[-1]:
+            servicer.release_peers.set()
+        assert not overlaps[-1], "record calculations overlap a measured session"
+        return real_finalize(record)
+
+    def checkpoint(record):
+        assert all(task.done() for task in pending), "JSON encoding overlaps a measured session"
+        counts.append(len(record["tts"]["sessions"]) if record["tts"] else 0)
+        client_mod.write_record(harness.work / "batch-checkpoint.json", record)
+
+    try:
+        with (
+            mock.patch.object(client_mod, "as_completed", side_effect=completing),
+            mock.patch.object(record_mod, "finalize", side_effect=finalizing),
+        ):
+            record = client_mod.measure(
+                harness.bindings,
+                stt=None,
+                tts=(client_mod.Target(endpoint, *TARGET), harness.text),
+                sessions=8,
+                gpu_sampling="off",
+                checkpoint=checkpoint,
+            )
+    finally:
+        servicer.release_peers.set()
+        server.stop(0).wait()
+    assert not any(overlaps)
+    assert counts == [0, 0, 8]
+    assert record["aggregate"]["sessions_clean"] == 8
+    assert record_mod.check_record(record)[0] == "incomplete"
+
+
+def check_checkpoint_stalls(harness: Harness, bound_ms: float) -> None:
+    """Opt-in scheduling probe: eight stampers during eight 30-second fake STT sessions."""
+    active, stop = threading.Event(), threading.Event()
+    ready = threading.Barrier(9)
+    gaps, counts, sizes = [0] * 8, [0] * 8, []
+    lock = threading.Lock()
+    completed = 0
+    original_session, original_audio = client_mod.run_session, harness.audio
+
+    def stamp(slot):
+        ready.wait(timeout=10)
+        before, was_active = time.monotonic_ns(), False
+        while not stop.wait(0.001):
+            now, measuring = time.monotonic_ns(), active.is_set()
+            if measuring and was_active:
+                gaps[slot] = max(gaps[slot], now - before)
+                counts[slot] += 1
+            before, was_active = now, measuring
+
+    def measured(*args, **kwargs):
+        nonlocal completed
+        active.set()
+        try:
+            return original_session(*args, **kwargs)
+        finally:
+            with lock:
+                completed += 1
+                if completed == 8:
+                    active.clear()
+
+    def checkpoint(record):
+        assert not active.is_set(), "JSON encoding overlaps the active batch"
+        sizes.append(len(record_mod.dump(record)))
+
+    threads = [threading.Thread(target=stamp, args=(slot,)) for slot in range(8)]
+    for thread in threads:
+        thread.start()
+    try:
+        ready.wait(timeout=10)
+        pcm = bytes(30 * RATE * 2)
+        harness.audio = {
+            **original_audio,
+            "frames": [bytes(640)] * 1500,
+            "samples": 30 * RATE,
+            "bytes": len(pcm),
+            "sha256": client_mod.sha256_digest(pcm),
+        }
+        with mock.patch.object(client_mod, "run_session", side_effect=measured):
+            record, _, _, _ = concurrent_record(
+                harness, "stt", 8, "partial", observe_checkpoint=checkpoint
+            )
+    finally:
+        harness.audio = original_audio
+        stop.set()
+        for thread in threads:
+            thread.join(timeout=10)
+            assert not thread.is_alive()
+    assert record["aggregate"]["sessions_clean"] == 8
+    assert all(count > 1 for count in counts)
+    maximum = max(gaps) / MS
+    print(
+        f"checkpoint probe: {max(sizes)} JSON bytes; max active stamp gap {maximum:.3f} ms; bound {bound_ms:g} ms"
+    )
+    assert maximum <= bound_ms, (maximum, bound_ms)
+
+
 def check_concurrent_endings(harness: Harness) -> None:
     for error in (KeyboardInterrupt, ValueError):
         servicer = ConcurrentServer(harness.bindings, 3, "interrupt_peers")
         server, endpoint = harness.serve(servicer)
         target = client_mod.Target(endpoint, *TARGET)
 
-        def checkpoint(record):
-            if record["tts"] and record["tts"]["sessions"]:
-                raise error()
+        real_completed = client_mod.as_completed
+
+        def interrupted(completions):
+            yield next(real_completed(completions))
+            raise error()
 
         try:
-            with contextlib.redirect_stderr(io.StringIO()):
+            with (
+                contextlib.redirect_stderr(io.StringIO()),
+                mock.patch.object(client_mod, "as_completed", side_effect=interrupted),
+            ):
                 record = client_mod.measure(
                     harness.bindings,
                     stt=None,
                     tts=(target, harness.text),
                     sessions=3,
                     gpu_sampling="off",
-                    checkpoint=checkpoint,
                 )
         finally:
             server.stop(0).wait()
@@ -2832,8 +3011,8 @@ def check_concurrent_endings(harness: Harness) -> None:
     assert record["aggregate"]["failed_by_cause"] == [{"cause": "channel_timeout", "count": 4}]
 
 
-def check_concurrent_command(harness: Harness) -> None:
-    servicer = ConcurrentServer(harness.bindings, 4, "refuse_open")
+def check_concurrent_command(harness: Harness, fault: str = "refuse_open") -> None:
+    servicer = ConcurrentServer(harness.bindings, 4, fault)
     server, endpoint = harness.serve(servicer)
     source = harness.work / "concurrent-text.txt"
     source.write_text(TEXT)
@@ -2871,10 +3050,13 @@ def check_concurrent_command(harness: Harness) -> None:
         )
     finally:
         server.stop(0).wait()
-    assert done.returncode == 1 and "3 sessions ended cleanly; 1 failed" in done.stdout, done
+    expected = "completed_with_refusals" if fault == "refuse_open" else "failed"
+    assert done.returncode == record_mod.exit_status(expected), done
+    assert "3 sessions ended cleanly; 1 failed" in done.stdout, done
+    assert expected in done.stdout + done.stderr
     record = json.loads(out.read_text())
     assert record["settings"]["sessions"] == 4 and record["settings"]["expect_test_count"] == 3
-    assert record_mod.check_record(record)[0] == "failed"
+    assert record_mod.check_record(record)[0] == expected
     assert len(set(servicer.peers)) == 4
 
 
@@ -2885,6 +3067,12 @@ def check_aggregates() -> None:
     record["schema_version"] = "0.3"
     record["settings"].update(sessions=1, stagger_ms=0, expect_test_count=None)
     record["run"]["finished_ns"] = 13000 * MS
+    for session, lag in zip(record["stt"]["sessions"], (1, 3, 7), strict=True):
+        extra = (lag - 1) * MS
+        session["client"]["audio_frames"][-1]["sent_ns"] += extra
+        for key in ("last_audio_sent", "finalize_sent"):
+            session["boundaries"][key] += extra
+        session["client"].update(input_lag_ns=lag * MS, max_pacing_lag_ns=lag * MS)
     # Pool intervals with unequal partial counts; averaging percentiles gives a different answer.
     for session, intervals in zip(record["stt"]["sessions"], ((1, 2), (7,), (9, 11)), strict=True):
         utterance = session["utterances"][0]
@@ -2911,6 +3099,9 @@ def check_aggregates() -> None:
         ("stt", "endpoint_to_final", 3, 1, 1, 1),
         ("stt", "partial_interval", 5, 7, 11, 11),
         ("tts", "segment_to_first_audio", 3, 80, 90, 90),
+        ("stt", "input_lag", 3, 3, 7, 7),
+        ("stt", "max_pacing_lag", 3, 3, 7, 7),
+        ("tts", "input_lag", 3, 0.5, 0.5, 0.5),
     ):
         value = aggregate["measurements"][mode][name]
         assert (value["count"], value["p50_ns"], value["p95_ns"], value["max_ns"]) == (
@@ -2924,6 +3115,8 @@ def check_aggregates() -> None:
         ("aggregate.sessions_opened", 0),
         ("aggregate.failed_by_cause", [{"cause": "grpc:UNAVAILABLE", "count": 1}]),
         ("aggregate.measurements.stt.partial_interval.p95_ns", 10 * MS),
+        ("aggregate.measurements.stt.max_pacing_lag.p95_ns", 0),
+        ("aggregate.measurements.tts.input_lag.count", 0),
         ("aggregate.wall_time_ns", 1),
         ("run.finished_ns", 1),
     ):
@@ -2965,6 +3158,9 @@ def check_aggregates() -> None:
     assert (endpoint["count"], endpoint["misses"]) == (2, 1)
     value = record["aggregate"]["measurements"]["stt"]["partial_interval"]
     assert (value["count"], value["misses"], value["p50_ns"]) == (4, 1, 2 * MS)
+    for key in ("input_lag", "max_pacing_lag"):
+        value = record["aggregate"]["measurements"]["stt"][key]
+        assert (value["count"], value["misses"], value["p50_ns"]) == (3, 0, 3 * MS)
 
 
 def main() -> int:
@@ -2990,8 +3186,12 @@ def main() -> int:
         check_utterances(harness)
         check_run_endings(harness)
         check_concurrent_sessions(harness)
+        check_batch_checkpoints(harness)
+        if bound := os.environ.get("TP_SLICE_MEASURE_STALL_BOUND_MS"):
+            check_checkpoint_stalls(harness, float(bound))
         check_concurrent_endings(harness)
         check_concurrent_command(harness)
+        check_concurrent_command(harness, "deadline")
         check_sessions(harness)
         check_faults(harness)
         check_arrival_order(harness)

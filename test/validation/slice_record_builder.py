@@ -251,3 +251,26 @@ def stop_session(record: dict[str, Any], mode: str, index: int) -> dict[str, Any
     """The client ended one session itself, on an event its state does not allow."""
     record[mode]["sessions"][index].update(outcome="stopped", stop_reason="unexpected_event")
     return record_mod.finalize(record)
+
+
+def build_refusal_record(source_commit: str) -> dict[str, Any]:
+    """A concurrent run with one refused Open and five clean sessions."""
+    record = build_record(source_commit)
+    record["schema_version"] = "0.3"
+    record["settings"].update(iterations=1, sessions=3, stagger_ms=0, expect_test_count=2)
+    record["run"]["finished_ns"] = 13_000 * MS
+    for mode in ("stt", "tts"):
+        section = record[mode]
+        for session in section["sessions"]:
+            session["connection"] = {
+                "started_ns": session["boundaries"]["call_start"] - section["target"]["connect_ns"],
+                "connect_ns": section["target"]["connect_ns"],
+                "ended_ns": session["boundaries"]["session_closed"],
+            }
+    previous = record["tts"]["sessions"][0]
+    refusal = record_mod.new_session("tts", 0, previous["boundaries"]["call_start"])
+    refusal.update(outcome="call_failed", grpc_status="RESOURCE_EXHAUSTED")
+    refusal["client"]["events_sent"] = 1
+    refusal["connection"] = previous["connection"]
+    record["tts"]["sessions"][0] = refusal
+    return record_mod.finalize(record)

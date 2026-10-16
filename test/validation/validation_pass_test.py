@@ -1040,6 +1040,11 @@ def check_streaming_line() -> None:
         assert statuses(findings)[f"settings.{key}"] == "note"
     assert index_mod.verdict(findings) == index_mod.EXIT_UNCHANGED
 
+    refusals = index_mod.streaming_line(stream_mod.build_refusal_record(commit), envelope())
+    assert refusals["result"] == "completed_with_refusals"
+    assert refusals["metrics"]["tts.segment_to_first_audio.count"] == 2
+    assert refusals["checks"]["tts.sessions"] == "1 call_failed, 2 completed"
+
     with tempfile.TemporaryDirectory() as raw_tmp:
         tmp = Path(raw_tmp)
         record_file = tmp / "record.json"

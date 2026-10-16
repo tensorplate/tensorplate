@@ -964,6 +964,7 @@ def run_concurrent_section(
     pending = set()
     try:
         for iteration in range(iterations):
+            save()
             previous: queue.Queue[int] | None = None
             for offset in range(count):
                 started: queue.Queue[int] = queue.Queue()
@@ -974,7 +975,8 @@ def run_concurrent_section(
                 if session is not None:
                     publish(session)
                 pending.remove(future)
-                save()
+            # Record encoding holds the GIL: never checkpoint while a sibling is measured.
+            save()
     finally:
         if pending:
             run.cancelled.set()
@@ -993,7 +995,7 @@ def measure(
     tts: tuple[Target, dict[str, Any]] | None,
     iterations: int = 1,
     sessions: int = 1,
-    stagger_ms: int = 0,
+    stagger_ms: int | None = None,
     expect_test_count: int | None = None,
     event_timeout_ms: int = 30_000,
     provenance: str = "synthetic",
@@ -1008,14 +1010,17 @@ def measure(
 ) -> dict[str, Any]:
     """Run the requested sections and return the finished record.
 
-    `checkpoint` is given the record as it stands before the first session
-    and after each one. An error or an interrupt ends the run and is
+    `checkpoint` is given the record before and after each concurrent batch,
+    or after each sequential session. An error or an interrupt ends the run and is
     recorded; it is not raised.
     """
-    if not 1 <= sessions <= 64 or stagger_ms < 0:
+    if not 1 <= sessions <= 64 or (stagger_ms is not None and stagger_ms < 0):
         raise MeasureError("--sessions is 1 to 64; --stagger-ms is nonnegative")
+    if sessions == 1 and (stagger_ms is not None or expect_test_count is not None):
+        raise MeasureError("--stagger-ms and --expect-test-count require --sessions greater than 1")
     if expect_test_count is not None and not 1 <= expect_test_count <= 2048:
         raise MeasureError("--expect-test-count is 1 to 2048")
+    stagger_ms = stagger_ms or 0
     run = run or Run()
     requested = {"stt": stt, "tts": tts}
     serving = all(section[0].is_loopback() for section in requested.values() if section)
@@ -1026,7 +1031,7 @@ def measure(
     )  # fmt: skip
     stated = worker_version is not None or worker_build is not None
     record: dict[str, Any] = {
-        "schema_version": record_mod.SCHEMA_VERSION,
+        "schema_version": record_mod.SCHEMA_VERSION if sessions > 1 else "0.2",
         "record_kind": record_mod.RECORD_KIND,
         "provenance": provenance,
         "tool": {
@@ -1053,18 +1058,20 @@ def measure(
         "percentile_method": "nearest_rank",
         "settings": {
             "iterations": iterations,
-            "sessions": sessions,
-            "stagger_ms": stagger_ms,
-            "expect_test_count": expect_test_count,
             "event_timeout_ms": event_timeout_ms,
             "max_input_lag_ms": record_mod.MAX_INPUT_LAG_MS,
         },
         "stt": None,
         "tts": None,
         "gpu": sampler.section("the run did not end", [], serving),
-        "run": {"ended_by": None, "error": None, "finished_ns": None},
+        "run": {"ended_by": None, "error": None},
         "result": {},
     }
+    if sessions > 1:
+        record["settings"].update(
+            sessions=sessions, stagger_ms=stagger_ms, expect_test_count=expect_test_count
+        )
+        record["run"]["finished_ns"] = None
 
     def save() -> None:
         record_mod.finalize(record)
@@ -1106,7 +1113,8 @@ def measure(
         traceback.print_exc()
         record["run"].update(ended_by="error", error=type(error).__name__)
     record["gpu"] = sampler.finish(serving)
-    record["run"]["finished_ns"] = run.now()
+    if sessions > 1:
+        record["run"]["finished_ns"] = run.now()
     return record_mod.finalize(record)
 
 
@@ -1138,7 +1146,7 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         help="concurrent sessions per batch (1 to 64)",
     )
-    run.add_argument("--stagger-ms", type=int, default=0, help="delay between session launches")
+    run.add_argument("--stagger-ms", type=int, help="delay between concurrent launches (default 0)")
     run.add_argument(
         "--expect-test-count",
         type=int,
@@ -1174,8 +1182,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if min(args.iterations, args.event_timeout_ms, args.gpu_interval_ms) < 1:
             raise MeasureError("iterations, timeouts and intervals are at least 1")
-        if not 1 <= args.sessions <= 64 or args.stagger_ms < 0:
+        if not 1 <= args.sessions <= 64 or (args.stagger_ms is not None and args.stagger_ms < 0):
             raise MeasureError("--sessions is 1 to 64; --stagger-ms is nonnegative")
+        if args.sessions == 1 and (
+            args.stagger_ms is not None or args.expect_test_count is not None
+        ):
+            raise MeasureError(
+                "--stagger-ms and --expect-test-count require --sessions greater than 1"
+            )
         if args.expect_test_count is not None and not 1 <= args.expect_test_count <= 2048:
             raise MeasureError("--expect-test-count is 1 to 2048")
         if not 20 <= args.frame_ms <= 320:
@@ -1245,7 +1259,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     print(
         f"{name}: {status}: {detail}",
-        file=sys.stdout if status == "complete" else sys.stderr,
+        file=sys.stdout if record_mod.exit_status(status) == 0 else sys.stderr,
     )
     return record_mod.exit_status(status)
 

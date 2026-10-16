@@ -106,8 +106,8 @@ rank on the sessions' raw values, all of which stay in the record.
 
 ## Per-utterance observations
 
-New records use `schema_version: "0.3"`; the checker also accepts existing
-`0.1` and `0.2` records. This is the measurement record's version, independent
+Single-session runs write `schema_version: "0.2"`; concurrent runs write
+`"0.3"`. The checker also accepts existing `0.1` records. This is the measurement record's version, independent
 of the stream protocol; the schema's `$id` keeps its v0.1 identifier.
 Every STT session adds `utterances` and
 `client.audio_frames`; TTS measurements and the existing session summaries
@@ -215,11 +215,14 @@ The result is `failed` when the run did not end by itself, a session did
 not complete or a completed session's answers contradict what was sent (a
 `Finalize` answered under another sequence, totals that do not add up);
 `incomplete` when a mode was not run or a measurement has a miss;
-`complete` otherwise.
+`complete` otherwise. Concurrent refusal probes have the
+`completed_with_refusals` exception described below.
 
-The record is written before the first session and again after each completed
-attempt (successful or failed), each time as a whole file that replaces
-the one before. A run that an
+The record is written before and after each concurrent batch, or after each
+sequential session, as a whole file that replaces the one before. Neither
+deriving summaries nor encoding JSON runs while any session in a concurrent
+batch is active: these operations hold the Python GIL and would delay peer
+threads receiving events or pacing audio. A run that an
 error or an interrupt ends writes it once more, with `run.ended_by` set to
 `error` (and the error's type name) or `interrupt`; a run that was killed
 leaves the last one, whose `ended_by` is null; SIGTERM is such a kill, the
@@ -241,8 +244,9 @@ One GPU sampler covers the whole run.
 
 Each mode's existing `sessions` array retains every finished attempt, sorted
 by `index = iteration * N + slot`, even when completions arrive out of order.
-A checkpoint can therefore have gaps in its indices; running attempts appear
-when they end. A refusal, deadline or protocol violation affects only that
+A checkpoint retains whole completed batches. A process killed during a
+batch leaves the pre-batch record; the final record after a handled interrupt
+can contain only the attempts that started, with gaps in their indices. A refusal, deadline or protocol violation affects only that
 session. A connection that never becomes ready has a timeout entry with
 `connection.connect_ns: null` and no events sent; its `call_start` holds the
 attempt start, and all call latencies are null. An interrupt or unexpected
@@ -267,6 +271,11 @@ The additive root `aggregate` contains:
   `min_ns` and `max_ns`. Failed sessions retain diagnostic timestamps but
   contribute misses, not latency samples. Missing utterance boundaries also
   contribute misses; no interval is invented for fewer than two partials.
+  `input_lag` pools `client.input_lag_ns` for both modes; STT additionally
+  pools each session's `client.max_pacing_lag_ns` as `max_pacing_lag`. These
+  scheduling diagnostics retain observed values from failed sessions too,
+  with null observations counted as misses. They expose client scheduling
+  pressure separately from server latency.
 
 Percentiles use **nearest rank**: sort the raw non-null samples and select
 the sample of rank `ceil(p * count / 100)`, counting from 1. They are pooled
@@ -278,13 +287,13 @@ The validation index retains nondefault concurrency, stagger and qualification
 counts as settings; comparisons report differences as notes under the
 existing comparison policy.
 
-`--sessions 1` preserves the sequential observation path, session fields and
-summary meanings. A reader that ignores additive fields can keep reading
-the existing per-mode `sessions` and `summary`. A strict 0.2 schema reader
-needs the new schema, or a 0.2 projection of a single-session configuration:
-remove root `aggregate`, `run.finished_ns`, and `settings.sessions`,
-`settings.stagger_ms`, `settings.expect_test_count`, then set `schema_version`
-to `"0.2"`. Existing 0.1 and 0.2 records remain valid without changes.
+`--sessions 1` preserves the sequential observation path and writes the
+0.2 format directly: no aggregate, connection observations, concurrent
+settings, or `run.finished_ns`. The existing 0.2 checker reads that output
+without a projection or schema update. Existing 0.1 and 0.2 records remain
+valid, and both schema validation and the checker reject concurrent-only
+fields on those versions. `--stagger-ms` (even zero) and `--expect-test-count`
+require `--sessions` greater than one, since 0.2 cannot record those settings.
 
 Before a qualification run, the operator deploys with
 `tensorplate deploy --qualification --test-count N` and uses
@@ -293,8 +302,50 @@ Pass `--sessions N --expect-test-count N` to the measurement tool.
 `--expect-test-count` is optional, accepts 1 to 2048, and records only the
 operator-supplied value beside `settings.sessions`; it queries no agent and
 verifies no deployment configuration. It may differ from the session count
-when probing refusals. The supported count and latency remain unqualified
+when probing refusals. A completed concurrent run whose only failures are
+recognized refusals at Open, with every admitted session closing cleanly,
+reports `completed_with_refusals` and exits 0. This includes a run with every
+Open refused; it supplies no admitted-session latency samples. Refusals
+remain in `sessions_failed` and `failed_by_cause`; the successful exit does
+not erase them. The classification requires a sent Open, no server event,
+and one of `RESOURCE_EXHAUSTED`, `FAILED_PRECONDITION`, `INVALID_ARGUMENT`,
+`NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `UNIMPLEMENTED`, or
+`OUT_OF_RANGE`. Deadlines, connection failures, invalid responses, protocol
+violations and failures after admission still produce `failed` and exit 1.
+The 0.2 single-session result policy is unchanged. The supported count and latency remain unqualified
 until the operator's hardware measurements establish them.
+
+### Checking checkpoint interference and compatibility
+
+The fake-server suite gates seven sessions until the coordinator collects
+the first completion, and asserts that no record derivation or JSON encoding
+happens during that interval. It also exercises eight concurrent sessions
+and the real stagger wait. An optional scheduling probe sends eight 30-second
+clips to the in-process fake while eight extra threads stamp monotonic time
+at 1 ms intervals. It prints the encoded record size and maximum stamp gap
+while sessions are active, and asserts that the gap is at most 25 ms. Record
+encoding must never overlap this active interval. This elapsed-time check is
+opt-in because the bound also detects unrelated host scheduling stalls; run
+it on an otherwise idle machine and investigate a failure, rather than
+interpreting it as worker capacity.
+
+```sh
+ulimit -v 4194304
+export MALLOC_ARENA_MAX=2 TP_SLICE_MEASURE_REQUIRE_PINS=1
+TP_SLICE_MEASURE_STALL_BOUND_MS=25 timeout 600 python test/validation/slice_measure_test.py
+```
+
+To exercise the actual 0.2 reader from develop's merged implementation, unpack
+that public commit's tools and schemas and point the suite at its checker:
+
+```sh
+legacy_dir=$(mktemp -d)
+git archive b39ea34aaf0c6f4312d40df4d50de95aaf5af16d tools/validation config/schemas protocol/schemas | tar -x -C "$legacy_dir"
+TP_SLICE_MEASURE_LEGACY_CHECKER="$legacy_dir/tools/validation/slice_measurement_record.py" timeout 600 python test/validation/slice_measure_test.py
+```
+
+Both checks use only the in-process fake and synthetic input. They do not
+measure a real worker or establish latency or capacity on hardware.
 
 ## GPU readings
 

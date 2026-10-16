@@ -4,7 +4,6 @@
   "title": "Streaming slice measurement record",
   "description": "Machine-readable result of one run of tools/validation/slice_measure.py: paced speech-to-text sessions and text-to-speech segments over the stream session envelope, each with a timestamp at every boundary the caller can see, on the caller's monotonic clock. It carries counts, sizes, digests and times, the language and voice the sessions named, and facts of the measuring machine that name no machine: no audio, text, transcript, address, host name, path or caller identifier. Every duration, distribution and the result are derived from the timestamps and counts, and the checker recomputes them and refuses a record whose derived fields disagree. It evaluates no latency gate and is never Production lifecycle evidence.",
   "type": "object",
-  "additionalProperties": false,
   "required": [
     "schema_version",
     "record_kind",
@@ -100,12 +99,8 @@
     },
     "settings": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["iterations", "event_timeout_ms", "max_input_lag_ms"],
       "properties": {
-        "sessions": { "type": "integer", "minimum": 1, "maximum": 64 },
-        "stagger_ms": { "$ref": "#/definitions/Count" },
-        "expect_test_count": { "type": ["integer", "null"], "minimum": 1, "maximum": 2048, "description": "Operator-stated deployment qualification count; never queried or verified by this tool." },
         "iterations": { "type": "integer", "minimum": 1, "description": "Sequential batches per mode; each batch requests settings.sessions sessions (one in older records)." },
         "event_timeout_ms": { "type": "integer", "minimum": 1, "description": "Longest the client waits for the next server event it needs, counted again from each one. A Pong or a SessionStatus is not one." },
         "max_input_lag_ms": {
@@ -123,15 +118,12 @@
       "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/TtsSection" }],
       "description": "Null when no text-to-speech target was given."
     },
-    "aggregate": { "$ref": "#/definitions/Aggregate" },
     "gpu": { "$ref": "#/definitions/Gpu" },
     "run": {
       "type": "object",
-      "additionalProperties": false,
       "required": ["ended_by", "error"],
-      "description": "How the run ended. The record is written before the first session and after each one, so a run that was killed leaves one whose `ended_by` is null.",
+      "description": "How the run ended. The record is written before and after a concurrent batch, or after each sequential session, so a run that was killed leaves one whose `ended_by` is null.",
       "properties": {
-        "finished_ns": { "$ref": "#/definitions/OptionalNs" },
         "ended_by": { "type": ["string", "null"], "enum": [null, "completed", "interrupt", "error"] },
         "error": {
           "type": ["string", "null"],
@@ -147,8 +139,8 @@
       "properties": {
         "status": {
           "type": "string",
-          "enum": ["complete", "incomplete", "failed"],
-          "description": "`failed` when the run did not end by itself, a session did not complete or an answer contradicts what was sent; otherwise `incomplete` when a mode was not run or a measurement has no sample; `complete` otherwise. Never a statement about a latency gate."
+          "enum": ["complete", "incomplete", "failed", "completed_with_refusals"],
+          "description": "`completed_with_refusals` (0.3 only) when only recognized Open refusals failed and admitted sessions closed cleanly; `failed` when the run did not end by itself, a session did not complete or an answer contradicts what was sent; otherwise `incomplete` when a mode was not run or a measurement has no sample; `complete` otherwise. Never a statement about a latency gate."
         },
         "reasons": { "type": "array", "items": { "type": "string", "minLength": 1 } }
       }
@@ -156,11 +148,138 @@
   },
   "oneOf": [
     {
-      "properties": {"schema_version": {"const": "0.1"}}
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "record_kind": {},
+        "provenance": {},
+        "tool": {},
+        "worker": {},
+        "client_platform": {},
+        "recorded_at_utc": {},
+        "clock": {},
+        "percentile_method": {},
+        "settings": {
+          "additionalProperties": false,
+          "properties": {"iterations": {}, "event_timeout_ms": {}, "max_input_lag_ms": {}}
+        },
+        "stt": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "properties": {
+                "sessions": {
+                  "type": "array",
+                  "items": {"type": "object", "properties": {"connection": {"enum": []}}}
+                }
+              }
+            }
+          ]
+        },
+        "tts": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "properties": {
+                "sessions": {
+                  "type": "array",
+                  "items": {"type": "object", "properties": {"connection": {"enum": []}}}
+                }
+              }
+            }
+          ]
+        },
+        "gpu": {},
+        "run": {"additionalProperties": false, "properties": {"ended_by": {}, "error": {}}},
+        "result": {"properties": {"status": {"enum": ["complete", "incomplete", "failed"]}}}
+      },
+      "additionalProperties": false
     },
     {
       "properties": {
         "schema_version": {"const": "0.2"},
+        "record_kind": {},
+        "provenance": {},
+        "tool": {},
+        "worker": {},
+        "client_platform": {},
+        "recorded_at_utc": {},
+        "clock": {},
+        "percentile_method": {},
+        "settings": {
+          "additionalProperties": false,
+          "properties": {"iterations": {}, "event_timeout_ms": {}, "max_input_lag_ms": {}}
+        },
+        "stt": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "properties": {
+                "sessions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["utterances"],
+                    "properties": {
+                      "client": {"type": "object", "required": ["audio_frames"]},
+                      "connection": {"enum": []}
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "tts": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "properties": {
+                "sessions": {
+                  "type": "array",
+                  "items": {"type": "object", "properties": {"connection": {"enum": []}}}
+                }
+              }
+            }
+          ]
+        },
+        "gpu": {},
+        "run": {"additionalProperties": false, "properties": {"ended_by": {}, "error": {}}},
+        "result": {"properties": {"status": {"enum": ["complete", "incomplete", "failed"]}}}
+      },
+      "additionalProperties": false
+    },
+    {
+      "properties": {
+        "schema_version": {"const": "0.3"},
+        "record_kind": {},
+        "provenance": {},
+        "tool": {},
+        "worker": {},
+        "client_platform": {},
+        "recorded_at_utc": {},
+        "clock": {},
+        "percentile_method": {},
+        "settings": {
+          "additionalProperties": false,
+          "properties": {
+            "iterations": {},
+            "event_timeout_ms": {},
+            "max_input_lag_ms": {},
+            "sessions": {"type": "integer", "minimum": 1, "maximum": 64},
+            "stagger_ms": {"$ref": "#/definitions/Count"},
+            "expect_test_count": {
+              "type": ["integer", "null"],
+              "minimum": 1,
+              "maximum": 2048,
+              "description": "Operator-stated deployment qualification count; never queried or verified by this tool."
+            }
+          },
+          "required": ["sessions", "stagger_ms", "expect_test_count"]
+        },
         "stt": {
           "oneOf": [
             {"type": "null"},
@@ -178,43 +297,21 @@
               }
             }
           ]
-        }
-      }
-    },
-    {
-      "properties": {
-        "schema_version": {"const": "0.3"},
-        "stt": {
-          "oneOf": [
-            {"type": "null"},
-            {
-              "type": "object",
-              "properties": {
-                "sessions": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "required": ["utterances"],
-                    "properties": {
-                      "client": {
-                        "type": "object",
-                        "required": ["audio_frames"]
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          ]
         },
-        "settings": {
-          "required": ["sessions", "stagger_ms", "expect_test_count"]
-        },
+        "tts": {},
+        "gpu": {},
         "run": {
+          "additionalProperties": false,
+          "properties": {"ended_by": {}, "error": {}, "finished_ns": {"$ref": "#/definitions/OptionalNs"}},
           "required": ["finished_ns"]
-        }
+        },
+        "result": {
+          "properties": {"status": {"enum": ["complete", "incomplete", "failed", "completed_with_refusals"]}}
+        },
+        "aggregate": {"$ref": "#/definitions/Aggregate"}
       },
-      "required": ["aggregate"]
+      "required": ["aggregate"],
+      "additionalProperties": false
     }
   ],
   "definitions": {
@@ -261,8 +358,9 @@
                 {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["session_initialization", "call_start_to_first_transcript", "last_audio_to_final_transcript", "endpoint_to_final", "last_audio_to_endpoint", "last_audio_to_final", "first_audio_to_first_partial", "partial_interval"],
+                  "required": ["session_initialization", "call_start_to_first_transcript", "last_audio_to_final_transcript", "endpoint_to_final", "last_audio_to_endpoint", "last_audio_to_final", "first_audio_to_first_partial", "partial_interval", "input_lag", "max_pacing_lag"],
                   "properties": {
+                    "input_lag": {"$ref": "#/definitions/Distribution"},
                     "session_initialization": {"$ref": "#/definitions/Distribution"},
                     "call_start_to_first_transcript": {"$ref": "#/definitions/Distribution"},
                     "last_audio_to_final_transcript": {"$ref": "#/definitions/Distribution"},
@@ -270,7 +368,8 @@
                     "last_audio_to_endpoint": {"$ref": "#/definitions/Distribution"},
                     "last_audio_to_final": {"$ref": "#/definitions/Distribution"},
                     "first_audio_to_first_partial": {"$ref": "#/definitions/Distribution"},
-                    "partial_interval": {"$ref": "#/definitions/Distribution"}
+                    "partial_interval": {"$ref": "#/definitions/Distribution"},
+                    "max_pacing_lag": {"$ref": "#/definitions/Distribution"}
                   }
                 }
               ]
@@ -281,8 +380,9 @@
                 {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["session_initialization", "call_start_to_first_audio", "segment_to_first_audio", "segment_to_completion"],
+                  "required": ["session_initialization", "call_start_to_first_audio", "segment_to_first_audio", "segment_to_completion", "input_lag"],
                   "properties": {
+                    "input_lag": {"$ref": "#/definitions/Distribution"},
                     "session_initialization": {"$ref": "#/definitions/Distribution"},
                     "call_start_to_first_audio": {"$ref": "#/definitions/Distribution"},
                     "segment_to_first_audio": {"$ref": "#/definitions/Distribution"},
