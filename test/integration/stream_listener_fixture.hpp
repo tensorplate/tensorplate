@@ -289,6 +289,18 @@ class SteeredDispatch final : public serving::SessionDispatch {
     std::unique_lock lock(mu_);
     return cv_.wait_for(lock, std::chrono::seconds{5}, [&] { return held_cleanup_.has_value(); });
   }
+  /// Hands the kept cleanup request to the dispatch behind now.
+  void release_held_cleanup() {
+    std::optional<serving::ManagedSessionTransition> released;
+    {
+      const std::lock_guard guard(mu_);
+      released = std::exchange(held_cleanup_, std::nullopt);
+      cleanup_hold_ = false;
+    }
+    if (released) {
+      inner_.on_transition(*released);
+    }
+  }
 
   /// The gates and the yield of the dispatch behind.
   [[nodiscard]] SyntheticSessionDispatch& synthetic() noexcept { return inner_; }

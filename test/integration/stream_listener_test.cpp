@@ -515,6 +515,39 @@ TEST(StreamListener, ALedgerPolledWhileTheListenerStopsReadsOneSideOfIt) {
   EXPECT_EQ(served.listener().ledger(), closing);
 }
 
+// The count the stop leaves is taken once its wait ends: a session whose
+// release is acknowledged while the stop waits holds no slot after it.
+TEST(StreamListener, ASessionReleasedWhileTheStopWaitsLeavesNoSlotClosing) {
+  Served served;
+  auto client = served.ready(wire::SESSION_MODE_STT_STREAMING);
+  served.dispatch().hold_cleanup_until_failed("no_such_failure");
+  ASSERT_TRUE(client.call->WritesDone());
+  ASSERT_TRUE(served.dispatch().wait_until_cleanup_held());
+  const auto full = served.refused(open_event(wire::SESSION_MODE_STT_STREAMING));
+  ASSERT_NE(full.error_message().find("FAILURE_REASON_SESSION_COUNT_LIMIT"), std::string::npos)
+      << full.error_message();
+
+  std::thread stopper([&] { served.listener().stop(std::chrono::steady_clock::now() + 30s); });
+  // Admission is closed first, so a refusal for that says the stop waits.
+  EXPECT_TRUE(eventually([&] {
+    return served.refused(open_event(wire::SESSION_MODE_STT_STREAMING))
+               .error_message()
+               .find("FAILURE_REASON_ADMISSION_CLOSED") != std::string::npos;
+  }));
+  EXPECT_EQ(served.listener().live_sessions(), 1U);
+  served.dispatch().release_held_cleanup();
+  std::optional<wire::ServerEvent> last;
+  while (auto event = client.read()) {
+    last = std::move(event);
+  }
+  stopper.join();
+  ASSERT_TRUE(last.has_value());
+  ASSERT_TRUE(last->has_session_closed()) << last->ShortDebugString();
+  EXPECT_EQ(last->session_closed().state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_EQ(served.listener().live_sessions(), 0U);
+  EXPECT_EQ(served.listener().ledger(), (WorkerLedger{0, 0, 0, 1, {}}));
+}
+
 // The worker's check of its admission refuses an Open, with the slot free
 // and with the session that holds the other one live, until it lets Opens in.
 TEST(StreamListener, AnAdmissionCheckRefusalRefusesOpensAndKeepsTheLiveSession) {
