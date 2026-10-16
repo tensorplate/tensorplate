@@ -6,6 +6,7 @@ from tensorplate_pytorch_backend.backends.base import (
     JobBackend,
     NamedTensor,
     RuntimeCapability,
+    VadBackend,
 )
 from tensorplate_pytorch_backend.backends.cuda_fixture import CudaFixtureBackend
 from tensorplate_pytorch_backend.backends.faster_whisper import FasterWhisperBackend
@@ -26,4 +27,5 @@ __all__ = [
     "NamedTensor",
     "RuntimeCapability",
     "SmolVLABackend",
+    "VadBackend",
 ]

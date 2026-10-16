@@ -121,16 +121,23 @@ def test_an_empty_capability_list_is_refused(connect: Callable[..., Peer]) -> No
     assert peer.runner.state.backend is None
 
 
-class _DeclaresVad(FixtureBackend):
+class _DeclaresVadWithoutRunningIt(FixtureBackend):
+    run_vad = None  # type: ignore[assignment]  # so it is no VadBackend
+
     def job_classes(self) -> tuple[str, ...]:
-        return (protocol.JOB_CLASS_VAD_FRAMES, *reversed(super().job_classes()))
+        return tuple(reversed(super().job_classes()))
 
 
-def test_a_declared_class_without_a_lane_is_neither_advertised_nor_run(
+def test_a_declared_class_the_backend_cannot_run_is_neither_advertised_nor_run(
     connect: Callable[..., Peer],
 ) -> None:
-    peer = connect({"fixture": _DeclaresVad})
-    assert exchange(peer, golden("negotiation")[1])["job_classes"] == list(jobs.LANE_JOB_CLASSES)
+    assert protocol.JOB_CLASS_VAD_FRAMES in _DeclaresVadWithoutRunningIt().job_classes()
+    peer = connect({"fixture": _DeclaresVadWithoutRunningIt})
+    response = exchange(peer, golden("negotiation")[1])
+    assert response["job_classes"] == [
+        protocol.JOB_CLASS_STT_DECODE,
+        protocol.JOB_CLASS_TTS_SYNTHESIS,
+    ]
     vad = golden("vad_frames")[0]
     peer.send(vad)
     assert read(peer, 2) == ended(vad["job_id"], FAILED, "unsupported", "job_class_unsupported")

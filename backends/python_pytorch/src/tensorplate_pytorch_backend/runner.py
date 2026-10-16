@@ -9,15 +9,21 @@ load arbitrary user Python plugins outside the declared backend contract
 (per the V01-E05 closed decisions).
 
 Threads
-    ``serve_forever`` starts a reader thread and makes every backend call on
-    the thread that called it, except ``permits_job``, which the reader calls
-    to admit a job. The reader answers ``health_check`` itself and gives job
-    and session messages to the job table
+    ``serve_forever`` starts a reader thread and a VAD thread and makes every
+    other backend call on the thread that called it. The reader calls
+    ``permits_job`` to admit a job, answers ``health_check`` itself and gives
+    job and session messages to the job table
     (:mod:`~tensorplate_pytorch_backend.jobs`), which admits, cancels and
     releases without waiting for the backend. Every other frame and every
-    admitted job waits in one FIFO for the calling thread, so its calls
-    never overlap and run in arrival order. At most 8 jobs and 8 unary
-    requests wait; one more is refused with ``resource_exhausted``.
+    admitted job but ``vad_frames`` waits in one FIFO for the calling thread,
+    so its calls never overlap and run in arrival order. ``vad_frames`` jobs
+    wait in a lane of their own for the VAD thread, which runs one at a time
+    beside them; a load or unload waits for the one running. At most 8 jobs in
+    each lane and 8 unary requests wait; one more is refused with
+    ``resource_exhausted``. The threads share the GIL: a VAD job runs during
+    a decode only while the backend's native call releases it, as ONNX
+    Runtime's and CTranslate2's do; a backend that holds it stalls the VAD
+    lane for the length of its call.
     :func:`watch_parent`'s thread ends the process once the serving worker
     that started it is gone.
 
@@ -72,6 +78,7 @@ from tensorplate_pytorch_backend.backends import (
     NamedTensor,
     RuntimeCapability,
     SmolVLABackend,
+    VadBackend,
 )
 from tensorplate_pytorch_backend.configuration import ArtifactConfigError, read_artifact_config
 
@@ -263,7 +270,9 @@ class SidecarRunner:
         reader = threading.Thread(
             target=self._read_frames, args=(max_iterations,), name="sidecar-reader", daemon=True
         )
+        vad = threading.Thread(target=self._serve_vad, name="sidecar-vad", daemon=True)
         reader.start()
+        vad.start()
         try:
             while not self._ended and (work := self._table.take()) is not None:
                 if self._ended:
@@ -279,6 +288,18 @@ class SidecarRunner:
         if not self._at_limit:
             self._end_connection()
         reader.join(timeout=2 * WRITE_STALL_TIMEOUT_S)
+        vad.join(timeout=2 * WRITE_STALL_TIMEOUT_S)
+
+    def _serve_vad(self) -> None:
+        """The VAD thread: run the VAD lane's jobs until the lanes stop."""
+        try:
+            while not self._ended and (job := self._table.take_vad()) is not None:
+                if self._ended:
+                    break
+                self._table.run(job)
+        except Exception as exc:
+            logger.error("sidecar runner exiting on unexpected error: %s", sanitize.describe(exc))
+            self._end_connection()
 
     def _read_frames(self, limit: int | None) -> None:
         """The reader thread: route frames until EOF, an error or ``limit`` frames."""
@@ -495,7 +516,12 @@ class SidecarRunner:
         classes: tuple[str, ...] = ()
         if job_backend is not None:
             declared = job_backend.job_classes()
-            classes = tuple(name for name in jobs.LANE_JOB_CLASSES if name in declared)
+            runs_vad = isinstance(backend, VadBackend)
+            classes = tuple(
+                name
+                for name in jobs.LANE_JOB_CLASSES
+                if name in declared and (runs_vad or name != protocol.JOB_CLASS_VAD_FRAMES)
+            )
             if not classes:
                 backend.unload()
                 raise BackendError(

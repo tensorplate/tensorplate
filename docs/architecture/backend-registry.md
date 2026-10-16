@@ -931,8 +931,8 @@ live runner. A `job_submit` is checked in the order `JobRequest::create`
 checks it, and every message the sidecar sends for a job passes the
 `JobEventSequence` rules first.
 
-Of the runner profiles, the fixture profiles run `stt_decode` and
-`tts_synthesis`. `faster_whisper` runs `stt_decode` and `kokoro` runs
+Of the runner profiles, the fixture profiles run `stt_decode`,
+`tts_synthesis` and `vad_frames`. `faster_whisper` runs `stt_decode` and `kokoro` runs
 `tts_synthesis`, each as one batch decode or synthesis per job. A Whisper
 transcript carries the text and the tokens and no word units; the runner
 permits a job in a language its entry declares whose audio fits one model
@@ -940,21 +940,40 @@ input window. A Kokoro job returns the segment as one `audio_chunk`; the
 runner permits only its entry's language and voice at speed 1000. Either
 declares its class only when the model's sample rate is the job seam's, so a
 load that enables the capability for a model at another rate is answered
-`unsupported`. Both mappings are provisional. No lane runs `vad_frames`, so a
-submit for it fails with `job_class_unsupported`, and no job sends
-`job_progress`. An integer `job_delay_ms` (0 to 60000) in a fixture
+`unsupported`. Both mappings are provisional. The fixture profiles take
+`vad_frames` jobs of 512-sample frames, Silero's frame at 16 kHz, and refuse
+any other frame size with `job_not_permitted`; a frame's probability is its
+largest absolute sample over 32768 (silence 0, amplitude 16384 gives 0.5,
+-32768 gives 1), so a test scripts speech and silence with constant
+amplitudes. No job sends `job_progress`. A runner declares `vad_frames` only
+by implementing `VadBackend.run_vad` beside `job_classes`; a class it
+declares and cannot run is left out of `job_classes`. An integer
+`job_delay_ms` (0 to 60000) in a fixture
 profile's entry file holds each of its jobs open that long: a test hook,
 and one that any entry file of those profiles can set.
 
 - **Threads.** A reader thread reads frames, answers `health_check`, and
   admits, cancels and releases jobs in the job table (`jobs.py`). The thread
-  that runs the loop, the process's main thread, makes every backend call:
-  unary requests and admitted jobs wait for it in one FIFO, so calls never
-  overlap and run in arrival order. The reader's one backend call is
-  `permits_job`, which reads only what the load established.
-- **Bounds.** One job runs and at most 8 wait; a submit beyond that fails
-  with `resource_exhausted` and `job_capacity_exhausted`. At most 8 unary
-  requests wait; one more is answered `resource_exhausted`.
+  that runs the loop, the process's main thread, makes every backend call
+  but `run_vad`: unary requests and admitted jobs wait for it in one FIFO, so
+  those calls never overlap and run in arrival order. `vad_frames` jobs wait
+  in a lane of their own for a VAD thread, which runs them one at a time
+  and never behind the FIFO; a load or unload is not started while one runs.
+  The reader's one backend call is `permits_job`, which reads only what the
+  load established. The threads share Python's GIL: a VAD job overlaps a
+  decode only while the backend's native call has released it, as ONNX
+  Runtime's and CTranslate2's calls do. A backend that holds the GIL through
+  a call stalls the VAD lane until that call returns.
+- **Bounds.** In each lane one job runs and at most 8 wait; a submit beyond
+  that fails with `resource_exhausted` and `job_capacity_exhausted`, and
+  neither lane's jobs count against the other. At most 8 unary requests
+  wait; one more is answered `resource_exhausted`.
+- **Voice-activity state.** The job table keeps what a session's last
+  completed `vad_frames` job returned from `run_vad`, with its
+  `utterance_id`, and gives it to the session's next job of that utterance;
+  a job of another utterance gets none, so the voice-activity model starts
+  from reset. A job that ends without `job_completed`, `session_released`
+  and a load or unload drop it. The backend keeps no per-session state.
 - **Admission.** `job_accepted` is sent when the job is admitted, not when it
   starts. A message the sidecar cannot read, or a submit that reuses the id
   of an unreleased job or carries a zero in its identity, is answered with an
@@ -972,9 +991,9 @@ and one that any entry file of those profiles can set.
   at once when the session has no job. A submit for the session in between
   fails with `session_releasing`. After `session_released` the sidecar has
   forgotten the session: the same key later is a new session to it.
-- **Unload.** When `unload` or another `load_model` arrives, waiting jobs fail
-  with `unavailable` and `backend_unavailable`, the running job finishes
-  ahead of the unload, and a `job_submit` is refused as on a connection
+- **Unload.** When `unload` or another `load_model` arrives, waiting jobs of
+  both lanes fail with `unavailable` and `backend_unavailable`, the running
+  jobs finish ahead of the unload, and a `job_submit` is refused as on a connection
   without the capability until a load enables it again. A `job_cancel` or
   `session_release` still acts while that job is unreleased, so its
   `job_failed` (`cancelled`), `job_released` and `session_released` come

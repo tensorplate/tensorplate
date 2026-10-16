@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from tensorplate_pytorch_backend.job_objects import JobRequest, JobResult
+from tensorplate_pytorch_backend.job_objects import JobRequest, JobResult, VadResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,4 +124,24 @@ class JobBackend(Protocol):
     def run_job(self, request: JobRequest) -> JobResult: ...
 
 
-__all__ = ["Backend", "BackendError", "JobBackend", "NamedTensor", "RuntimeCapability"]
+@runtime_checkable
+class VadBackend(Protocol):
+    """What a job backend adds to run ``vad_frames`` jobs; optional.
+
+    ``run_vad`` runs on a thread of its own, alongside ``run_job`` and every
+    lifecycle call except ``load`` and ``unload``. ``state`` is what the
+    utterance's previous job returned, or None at its first job; the runner
+    keeps it, so it must not be changed in place.
+    """
+
+    def run_vad(self, request: JobRequest, state: object | None) -> tuple[VadResult, object]: ...
+
+
+__all__ = [
+    "Backend",
+    "BackendError",
+    "JobBackend",
+    "NamedTensor",
+    "RuntimeCapability",
+    "VadBackend",
+]
