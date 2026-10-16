@@ -23,7 +23,7 @@
     "result"
   ],
   "properties": {
-    "schema_version": { "type": "string", "const": "0.1" },
+    "schema_version": { "type": "string", "enum": ["0.1", "0.2"], "description": "0.2 adds per-utterance observations; 0.1 records remain readable." },
     "record_kind": {
       "type": "string",
       "const": "slice_measurement",
@@ -149,7 +149,134 @@
       }
     }
   },
+  "oneOf": [
+    {
+      "properties": {"schema_version": {"const": "0.1"}}
+    },
+    {
+      "properties": {
+        "schema_version": {"const": "0.2"},
+        "stt": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "properties": {
+                "sessions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["utterances"],
+                    "properties": {"client": {"type": "object", "required": ["audio_frames"]}}
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
   "definitions": {
+    "AudioFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_sample_offset", "end_sample_offset", "scheduled_ns", "sent_ns"],
+      "properties": {
+        "start_sample_offset": {"$ref": "#/definitions/Count"},
+        "end_sample_offset": {"$ref": "#/definitions/Count"},
+        "scheduled_ns": {"$ref": "#/definitions/Ns"},
+        "sent_ns": {"$ref": "#/definitions/Ns"}
+      }
+    },
+    "Partial": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at_ns", "revision", "text_bytes", "text_sha256"],
+      "properties": {
+        "at_ns": {"$ref": "#/definitions/Ns"},
+        "revision": {"type": "integer", "minimum": 0},
+        "text_bytes": {"$ref": "#/definitions/Count"},
+        "text_sha256": {"$ref": "#/definitions/Digest"}
+      }
+    },
+    "Utterance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "utterance_id",
+        "start_sample_offset",
+        "endpoint",
+        "final",
+        "partials",
+        "boundaries",
+        "measurements",
+        "cadence"
+      ],
+      "properties": {
+        "utterance_id": {"type": "integer", "minimum": 1},
+        "start_sample_offset": {"$ref": "#/definitions/Count"},
+        "endpoint": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["reason", "end_sample_offset"],
+          "properties": {
+            "reason": {
+              "type": "string",
+              "enum": ["silence", "client_finalize", "duration_limit", "half_close"]
+            },
+            "end_sample_offset": {"$ref": "#/definitions/Count"}
+          }
+        },
+        "final": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["finalize_sequence", "end_sample_offset", "segments", "text_bytes", "text_sha256"],
+          "description": "The FinalTranscript of the measured utterance, by size and digest. `text_bytes` counts the text without surrounding whitespace; the digest is of the text as received.",
+          "properties": {
+            "finalize_sequence": {"$ref": "#/definitions/Count"},
+            "end_sample_offset": {"$ref": "#/definitions/Count"},
+            "segments": {"$ref": "#/definitions/Count"},
+            "text_bytes": {"$ref": "#/definitions/Count"},
+            "text_sha256": {"$ref": "#/definitions/Digest"}
+          }
+        },
+        "partials": {"type": "array", "items": {"$ref": "#/definitions/Partial"}},
+        "boundaries": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["first_audio_sent", "last_audio_sent", "first_partial", "endpoint", "final_transcript"],
+          "properties": {
+            "first_audio_sent": {"$ref": "#/definitions/OptionalNs"},
+            "last_audio_sent": {"$ref": "#/definitions/OptionalNs"},
+            "first_partial": {"$ref": "#/definitions/OptionalNs"},
+            "endpoint": {"$ref": "#/definitions/OptionalNs"},
+            "final_transcript": {"$ref": "#/definitions/OptionalNs"}
+          }
+        },
+        "measurements": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["endpoint_to_final", "last_audio_to_endpoint", "last_audio_to_final", "first_audio_to_first_partial"],
+          "properties": {
+            "endpoint_to_final": {"$ref": "#/definitions/Measurement"},
+            "last_audio_to_endpoint": {"$ref": "#/definitions/Measurement"},
+            "last_audio_to_final": {"$ref": "#/definitions/Measurement"},
+            "first_audio_to_first_partial": {"$ref": "#/definitions/Measurement"}
+          }
+        },
+        "cadence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["partial_count", "revision_gaps", "intervals_ns"],
+          "properties": {
+            "partial_count": {"$ref": "#/definitions/Count"},
+            "revision_gaps": {"type": "array", "items": {"$ref": "#/definitions/Count"}},
+            "intervals_ns": {"type": "array", "items": {"$ref": "#/definitions/Ns"}}
+          }
+        }
+      }
+    },
     "Version": { "type": "string", "pattern": "^[0-9]+(\\.[0-9A-Za-z+-]+)*$" },
     "Digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "Text": { "type": "string", "pattern": "^[ -~]{1,128}$" },
@@ -198,7 +325,7 @@
         "to": { "type": "string", "minLength": 1 },
         "ended_by": {
           "type": "string",
-          "enum": ["ready", "partial_transcript", "final_transcript", "audio_chunk", "segment_completed"]
+          "enum": ["ready", "partial_transcript", "final_transcript", "endpoint_detected", "audio_chunk", "segment_completed"]
         },
         "ns": { "$ref": "#/definitions/OptionalNs" }
       }
@@ -315,6 +442,7 @@
       "additionalProperties": false,
       "required": ["index", "outcome", "stop_reason", "grpc_status", "open_refusal", "boundaries", "measurements", "client", "server", "server_stages"],
       "properties": {
+        "utterances": { "type": "array", "items": { "$ref": "#/definitions/Utterance" } },
         "index": { "$ref": "#/definitions/Count" },
         "outcome": { "$ref": "#/definitions/Outcome" },
         "stop_reason": { "$ref": "#/definitions/StopReason" },
@@ -360,6 +488,7 @@
           "required": ["events_sent", "frames_sent", "samples_sent", "bytes_sent", "pings_sent", "credit_waits", "finalize_sequence", "max_pacing_lag_ns", "input_lag_ns"],
           "properties": {
             "events_sent": { "$ref": "#/definitions/Count" },
+            "audio_frames": { "type": "array", "items": { "$ref": "#/definitions/AudioFrame" } },
             "frames_sent": { "$ref": "#/definitions/Count" },
             "samples_sent": { "$ref": "#/definitions/Count" },
             "bytes_sent": { "$ref": "#/definitions/Count" },

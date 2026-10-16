@@ -80,6 +80,22 @@ def stt_session(index: int, start: int, final_after_ms: int) -> dict[str, Any]:
         },
         closed=closed(input_audio_samples=SAMPLES, utterances_completed=1),
     )
+    frame_samples = FRAME_MS * RATE // 1000
+    first = session["boundaries"]["first_audio_sent"]
+    session["client"]["audio_frames"] = [
+        {
+            "start_sample_offset": n * frame_samples,
+            "end_sample_offset": (n + 1) * frame_samples,
+            "scheduled_ns": first + n * FRAME_MS * MS,
+            "sent_ns": first + n * FRAME_MS * MS + (MS if n == FRAMES - 1 else 0),
+        }
+        for n in range(FRAMES)
+    ]
+    session["client"]["max_pacing_lag_ns"] = MS
+    utterance = record_mod.new_utterance(1, 0)
+    utterance.update(endpoint=session["server"]["endpoint"], final=session["server"]["final"])
+    utterance["boundaries"].update(endpoint=final - MS, final_transcript=final)
+    session["utterances"].append(utterance)
     session.update(outcome="completed", grpc_status="OK")
     return session
 
@@ -133,7 +149,7 @@ def build_record(
     target = {"generation": 7, "descriptor_digest": DIGEST, "loopback": True, "connect_ns": 5 * MS}
     stated = provenance == "recorded"
     record: dict[str, Any] = {
-        "schema_version": "0.1",
+        "schema_version": record_mod.SCHEMA_VERSION,
         "record_kind": "slice_measurement",
         "provenance": provenance,
         "tool": {
@@ -222,6 +238,12 @@ def delay_input(record: dict[str, Any], mode: str, lag_ns: int) -> dict[str, Any
         for name in (*chain[chain.index(record_mod.INPUT[mode][1]) :], "session_closed"):
             session["boundaries"][name] += shift
         client["input_lag_ns"] = lag_ns
+        if mode == "stt":
+            client["audio_frames"][-1]["sent_ns"] += shift
+            client["max_pacing_lag_ns"] = lag_ns
+            for utterance in session["utterances"]:
+                for name in ("endpoint", "final_transcript"):
+                    utterance["boundaries"][name] += shift
     return record_mod.finalize(record)
 
 

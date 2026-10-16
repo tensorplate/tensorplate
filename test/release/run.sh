@@ -1274,7 +1274,7 @@ JSON
 # schema stays pinned to the protocol version.
 (
   walk="$(awk '/^  if python3 - "\$protocol" <<.PY.$/ { on = 1; next } on && /^PY$/ { exit } on' "$script")"
-  [[ "$walk" == *'state_tracks = {"protocol/schemas/agent_state.json"}'* ]] || {
+  [[ "$walk" == *'state_tracks = {'*'config/schemas/slice_measurement_record.json'* ]] || {
     echo "FAIL: could not lift the schema version walk out of $script" >&2; exit 1; }
   protocol_version="$(sed -n 's/^pub const PROTOCOL_VERSION: &str = "\(.*\)";$/\1/p' protocol/rust/src/lib.rs)"
   [[ -n "$protocol_version" ]] || { echo "FAIL: PROTOCOL_VERSION not found" >&2; exit 1; }
@@ -1312,6 +1312,15 @@ PY
 
   reset_tree
   expect_walk "the repository's schemas" pass
+
+  mutate config/schemas/slice_measurement_record.json 'd["properties"]["schema_version"] = {"const": "0.2"}'
+  expect_walk "a measurement record without its supported versions" fail \
+    "config/schemas/slice_measurement_record.json: root schema_version must be a non-empty enum"
+  reset_tree
+  mutate config/schemas/slice_measurement_record.json 'd["oneOf"][1]["properties"]["schema_version"]["const"] = "0.9"'
+  expect_walk "a measurement record branch outside its supported versions" fail \
+    "config/schemas/slice_measurement_record.json: schema_version const '0.9' is outside"
+  reset_tree
 
   mutate protocol/schemas/agent_state.json 'd["properties"]["schema_version"] = {"type": "string", "const": "0.1"}'
   expect_walk "a state-track root without its version list" fail \

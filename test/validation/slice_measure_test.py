@@ -77,6 +77,8 @@ def closed(**totals: int) -> dict:
 
 def stt_session(index: int, start: int, final_after_ms: int) -> dict:
     session = record_mod.new_session("stt", index, start)
+    session.pop("utterances")
+    session["client"].pop("audio_frames")
     last_due = start + 3 * MS + (FRAMES - 1) * FRAME_MS * MS
     last_audio = last_due + MS
     final = last_due + final_after_ms * MS
@@ -826,7 +828,7 @@ class SliceServer:
                 ready.limits.speech_to_text.min_frame_ms = 40
             if fault == "frame_max":
                 ready.limits.speech_to_text.max_frame_ms = 10
-            if fault == "utterance_limit":
+            if fault in ("duration_split", "utterance_limit"):
                 ready.limits.speech_to_text.max_utterance_ms = 100
             if fault == "credit":
                 ready.status.input_credit.bytes.limit = 1280
@@ -937,17 +939,60 @@ class SliceServer:
                     event.sequence,
                 )
                 self._expect(not limit or used <= limit, "input credit exceeded")
-                if fault == "early_endpoint":
+                if fault == "utterance_limit" and samples * 1000 > limits.max_utterance_ms * rate:
+                    yield self._closed(
+                        last,
+                        (pb.FAILURE_REASON_INVALID_EVENT, pb.ERROR_CODE_CONFIG_INVALID),
+                        input_audio_samples=samples,
+                    )
+                    return
+                splits = {
+                    "server_endpoints": (3, 7),
+                    "duration_split": (5, 10),
+                    "server_partial_late": (3,),
+                }.get(fault, ())
+                if len(self.seen["frames"]) in splits:
+                    reason = (
+                        pb.ENDPOINT_REASON_DURATION_LIMIT
+                        if fault == "duration_split"
+                        else pb.ENDPOINT_REASON_SILENCE
+                    )
                     yield self._emit(
                         endpoint_detected=pb.EndpointDetected(
-                            utterance_id=1,
+                            utterance_id=finals + 1,
                             end_sample_offset=samples,
+                            reason=reason,
+                        )
+                    )
+                    yield self._emit(
+                        final_transcript=pb.FinalTranscript(
+                            utterance_id=finals + 1,
+                            end_sample_offset=samples,
+                            segments=[pb.TranscriptSegment(text="synthetic")],
+                        )
+                    )
+                    finals += 1
+                    if fault == "server_partial_late":
+                        yield self._emit(
+                            partial_transcript=pb.PartialTranscript(
+                                utterance_id=finals,
+                                revision=1,
+                                text="late",
+                            )
+                        )
+                if fault in ("server_endpoint_twice", "endpoint_ahead", "utterance_zero"):
+                    yield self._emit(
+                        endpoint_detected=pb.EndpointDetected(
+                            utterance_id=0 if fault == "utterance_zero" else 1,
+                            end_sample_offset=samples + (32000 if fault == "endpoint_ahead" else 0),
                             reason=pb.ENDPOINT_REASON_SILENCE,
                         )
                     )
                 if fault == "partial" and len(self.seen["frames"]) <= 3:
                     text = ("", " \n", "synthetic")[len(self.seen["frames"]) - 1]
-                    partial = pb.PartialTranscript(utterance_id=1, revision=1, text=text)
+                    partial = pb.PartialTranscript(
+                        utterance_id=1, revision=len(self.seen["frames"]), text=text
+                    )
                     yield self._emit(partial_transcript=partial)
                 if len(self.seen["frames"]) % 2 == 0:
                     if fault == "credit":
@@ -975,13 +1020,13 @@ class SliceServer:
                         yield self._emit(pong=pb.Pong())
                     return
                 endpoint = pb.EndpointDetected(
-                    utterance_id=1,
+                    utterance_id=finals + 1,
                     end_sample_offset=samples,
                     reason=pb.ENDPOINT_REASON_CLIENT_FINALIZE,
                 )
                 text = {"empty": "", "blank": " \n"}.get(fault, "synthetic words")
                 final = pb.FinalTranscript(
-                    utterance_id=1,
+                    utterance_id=finals + 1,
                     segments=[pb.TranscriptSegment(end_us=samples * 1_000_000 // rate, text=text)],
                     end_sample_offset=samples,
                     finalize_sequence=0 if fault == "wrong_finalize" else finalized,
@@ -993,6 +1038,8 @@ class SliceServer:
                 if fault == "partial_late":
                     yield self._emit(partial_transcript=pb.PartialTranscript(utterance_id=1))
                 yield self._emit(final_transcript=final)
+                if fault == "final_twice":
+                    yield self._emit(final_transcript=final)
                 finals += 1
                 if fault == "ok_without_closed":
                     return
@@ -1181,7 +1228,10 @@ def check_sessions(harness: Harness) -> None:
     assert measured["call_start_to_first_transcript"]["ns"] >= 200 * MS + delay_ns
     assert measured["call_start_to_first_transcript"]["ended_by"] == "final_transcript"
     assert measured["session_initialization"]["ns"] == bounds["ready"] - bounds["call_start"] > 0
-    assert session["client"] | {"max_pacing_lag_ns": 0, "input_lag_ns": 0} == {
+    assert {k: v for k, v in session["client"].items() if k != "audio_frames"} | {
+        "max_pacing_lag_ns": 0,
+        "input_lag_ns": 0,
+    } == {
         "events_sent": 13,
         "frames_sent": 11,
         "samples_sent": 3360,
@@ -1212,6 +1262,8 @@ def check_sessions(harness: Harness) -> None:
     }
     assert session["server"]["closed"]["totals"]["input_audio_samples"] == 3360
     assert session["open_refusal"] is None
+    assert len(session["utterances"]) == 1
+    assert session["utterances"][0]["endpoint"]["reason"] == "client_finalize"
     stt_input = record["stt"]["input"]
     assert stt_input["audio_sha256"] == harness.audio["sha256"] and stt_input["frames"] == 11
     assert record["stt"]["target"]["loopback"] is True and record["stt"]["target"]["connect_ns"] > 0
@@ -1289,7 +1341,6 @@ STOP_CASES = (
     ("stt", "format", "ready_mismatch"),
     ("stt", "frame_limit", "input_outside_limits"),
     ("stt", "frame_max", "input_outside_limits"),
-    ("stt", "utterance_limit", "input_outside_limits"),
     ("tts", "text_limit", "input_outside_limits"),
     ("tts", "synthesis_limit", "input_outside_limits"),
     ("tts", "byte_credit", "input_outside_limits"),
@@ -1307,12 +1358,16 @@ STOP_CASES = (
     ("tts", "accepted_without_credit", "credit_missing"),
     ("tts", "closed_state", "unexpected_event"),
     ("stt", "partial_late", "unexpected_event"),
+    ("stt", "server_partial_late", "unexpected_event"),
     ("stt", "endpoint_twice", "unexpected_event"),
+    ("stt", "final_twice", "unexpected_event"),
     ("tts", "chunk_late", "unexpected_event"),
     ("tts", "segment_twice", "unexpected_event"),
     ("tts", "synthesis_twice", "unexpected_event"),
     ("stt", "clean_early", "unexpected_event"),
-    ("stt", "early_endpoint", "unexpected_event"),
+    ("stt", "server_endpoint_twice", "unexpected_event"),
+    ("stt", "endpoint_ahead", "unexpected_event"),
+    ("stt", "utterance_zero", "unexpected_event"),
     ("stt", "final_first", "unexpected_event"),
     ("tts", "early_synthesis", "unexpected_event"),
     ("tts", "wrong_segment", "unexpected_event"),
@@ -1331,6 +1386,7 @@ END_CASES = (
     ("stt", "slow_ready", "completed", "OK", "incomplete", "tts: not run"),
     ("stt", "fail_before_ready", "session_failed", "OK", "failed", "(backend_unavailable)"),
     ("stt", "fail_after_finalize", "session_failed", "OK", "failed", "session failed (oom)"),
+    ("stt", "utterance_limit", "session_failed", "OK", "failed", "session failed (invalid_event)"),
     ("stt", "stall", "timeout", None, "failed", "stt session 0: timeout"),
     ("tts", "segment_credit", "timeout", None, "failed", "tts session 0: timeout"),
     ("stt", "wrong_finalize", "completed", "OK", "failed", "final finalize_sequence is 0"),
@@ -1361,6 +1417,11 @@ def check_faults(harness: Harness) -> None:
         sessions[fault] = (session, server)
 
     assert not sessions["frame_limit"][1].seen["frames"], "audio was sent outside the limits"
+    session, server = sessions["utterance_limit"]
+    assert server.seen["frames"] == [320] * 6
+    assert session["boundaries"]["finalize_sent"] is None
+    assert session["utterances"] == []
+    assert session["server"]["closed"]["code"] == "config_invalid"
     for fault in ("no_byte_budget", "no_ready_status"):
         session, server = sessions[fault]
         assert session["boundaries"]["ready"] is not None and "text" not in server.seen
@@ -1552,7 +1613,7 @@ def replies(pb, mode: str, **knobs):
             if mode == "stt":
                 ready.input_format.CopyFrom(event.open.input_format)
             knobs.get("ready", lambda ready: None)(ready)
-            state.update(ready=ready, inputs=0, samples=0, last=0, pings=0, text=0)
+            state.update(ready=ready, inputs=0, samples=0, last=0, pings=0, text=0, utterance=1)
             yield 0, {"ready": ready}
             if "unasked" in knobs:
                 yield knobs["unasked"], returned(state, 0)
@@ -1567,8 +1628,28 @@ def replies(pb, mode: str, **knobs):
             if name == "audio":
                 state["samples"] += event.audio.sample_count
                 for text in knobs.get("partials", ())[position : position + 1]:
-                    partial = pb.PartialTranscript(utterance_id=1, revision=position + 1, text=text)
+                    partial = pb.PartialTranscript(
+                        utterance_id=state["utterance"],
+                        revision=knobs.get("revisions", {}).get(position, position + 1),
+                        text=text,
+                    )
                     yield 0, {"partial_transcript": partial}
+                if position in knobs.get("endpoints", {}):
+                    offset, reason = knobs["endpoints"][position]
+                    endpoint = pb.EndpointDetected(
+                        utterance_id=state["utterance"],
+                        end_sample_offset=offset,
+                        reason=reason,
+                    )
+                    final = pb.FinalTranscript(
+                        utterance_id=state["utterance"],
+                        end_sample_offset=offset,
+                        segments=[pb.TranscriptSegment(text="words")],
+                    )
+                    if not knobs.get("omit_endpoint"):
+                        yield 0, {"endpoint_detected": endpoint}
+                    yield knobs.get("final_delay", 0), {"final_transcript": final}
+                    state["utterance"] += 1
                 return
             count, every = knobs.get("chunks", 3), knobs.get("chunk_every", 0)
             state.update(text=len(event.text_segment.text.encode()), samples=count * 480)
@@ -1585,12 +1666,12 @@ def replies(pb, mode: str, **knobs):
             yield after + count * every, {"segment_completed": done}
         elif name == "finalize" and mode == "stt" and not knobs.get("stall"):
             endpoint = pb.EndpointDetected(
-                utterance_id=1,
+                utterance_id=state["utterance"],
                 end_sample_offset=state["samples"],
                 reason=pb.ENDPOINT_REASON_CLIENT_FINALIZE,
             )
             final = pb.FinalTranscript(
-                utterance_id=1,
+                utterance_id=state["utterance"],
                 segments=[pb.TranscriptSegment(text=knobs.get("final_text", "words"))],
                 end_sample_offset=state["samples"],
                 finalize_sequence=event.sequence,
@@ -1608,7 +1689,7 @@ def replies(pb, mode: str, **knobs):
                 input_audio_samples=state["samples"] if stt else 0,
                 input_text_bytes=state["text"],
                 output_audio_samples=0 if stt else state["samples"],
-                utterances_completed=int(stt),
+                utterances_completed=state["utterance"] if stt else 0,
                 segments_completed=int(not stt),
             )
             closed = pb.SessionClosed(
@@ -1691,7 +1772,9 @@ def check_stamps(harness: Harness) -> None:
             "final",
             {
                 "ready": recorded_ready(pb, "stt_ready"),
-                "endpoint_detected": pb.EndpointDetected(utterance_id=1),
+                "endpoint_detected": pb.EndpointDetected(
+                    utterance_id=1, reason=pb.ENDPOINT_REASON_CLIENT_FINALIZE
+                ),
                 "final_transcript": pb.FinalTranscript(utterance_id=1),
             },
         ),
@@ -1819,6 +1902,230 @@ def check_schedule(harness: Harness) -> None:
     assert (first["ns"], session["server"]["final"]["text_bytes"]) == (None, 0), session
 
 
+def check_utterances(harness: Harness) -> None:
+    pb = harness.bindings.pb
+    schema = record_mod.load_schema()
+    for fault, reason in (("server_endpoints", "silence"), ("duration_split", "duration_limit")):
+        record, session, server = harness.run("stt", fault)
+        assert session["outcome"] == "completed" and not server.violations, session
+        assert record["schema_version"] == "0.2"
+        utterances = session["utterances"]
+        assert [u["utterance_id"] for u in utterances] == [1, 2, 3]
+        assert [u["endpoint"]["reason"] for u in utterances] == [reason, reason, "client_finalize"]
+        assert all(
+            u["boundaries"]["endpoint"] < session["boundaries"]["finalize_sent"]
+            for u in utterances[:2]
+        )
+        assert [u["final"]["finalize_sequence"] for u in utterances] == [0, 0, 13]
+        assert session["server"]["final"] == utterances[-1]["final"]
+        assert record["stt"]["summary"]["call_start_to_first_transcript"]["count"] == 1
+        jsonschema.validate(record, schema)
+
+    # The first endpoint is delivered after frame six but splits frame two. Frame two,
+    # shared with the following utterance, must supply its last-audio timestamp.
+    record, session, script = scripted(
+        harness,
+        "stt",
+        endpoints={
+            5: (480, pb.ENDPOINT_REASON_SILENCE),
+            10: (3360, pb.ENDPOINT_REASON_DURATION_LIMIT),
+        },
+        final_delay=7 * MS,
+        final_text="",
+    )
+    assert session["outcome"] == "completed", session
+    first, second, empty = session["utterances"]
+    sent = script.sent("audio")
+    assert first["boundaries"]["last_audio_sent"] == sent[1]
+    assert second["boundaries"]["first_audio_sent"] == sent[1]
+    assert first["measurements"]["last_audio_to_endpoint"] == {
+        "from": "last_audio_sent",
+        "to": "endpoint",
+        "ended_by": "endpoint_detected",
+        "ns": 80 * MS,
+    }
+    assert first["measurements"]["last_audio_to_final"]["ns"] == 87 * MS
+    assert first["measurements"]["endpoint_to_final"]["ns"] == 7 * MS
+    assert empty["boundaries"]["first_audio_sent"] is None
+    assert empty["measurements"]["last_audio_to_final"]["ns"] is None
+    assert empty["final"]["text_bytes"] == 0
+    measured = session["measurements"]["call_start_to_first_transcript"]
+    assert measured["ns"] == 107 * MS
+    assert measured["to"] == "utterances/0/boundaries/final_transcript"
+    assert record["result"]["reasons"] == ["tts: not run"]
+    jsonschema.validate(record, schema)
+
+    record, session, _ = scripted(
+        harness,
+        "stt",
+        partials=("", "words", "more words"),
+        revisions={1: 3, 2: 4},
+    )
+    utterance = session["utterances"][0]
+    assert [p["revision"] for p in utterance["partials"]] == [1, 3, 4]
+    assert utterance["cadence"] == {
+        "partial_count": 3,
+        "revision_gaps": [0, 1, 0],
+        "intervals_ns": [20 * MS, 20 * MS],
+    }
+    assert utterance["measurements"]["first_audio_to_first_partial"]["ns"] == 0
+    assert utterance["final"] == session["server"]["final"]
+    assert utterance["measurements"]["endpoint_to_final"]["ns"] == 0
+    # A Finalize-only peer retains all the original session measurements.
+    assert session["measurements"]["last_audio_to_final_transcript"]["ns"] == 0
+    assert session["measurements"]["call_start_to_first_transcript"]["ns"] == 20 * MS
+    assert "more words" not in record_mod.dump(record)
+
+    # Revisions reset per utterance, while the earliest transcript can be an earlier
+    # final even if a later utterance supplies the session's first nonblank partial.
+    _, multiple, multiple_script = scripted(
+        harness,
+        "stt",
+        endpoints={2: (960, pb.ENDPOINT_REASON_SILENCE), 6: (2240, pb.ENDPOINT_REASON_SILENCE)},
+        partials=("", "", "", "later", "later words", "revised"),
+        revisions={0: 1, 1: 3, 2: 4, 3: 1, 4: 2, 5: 4},
+        final_delay=7 * MS,
+    )
+    assert [u["cadence"]["revision_gaps"] for u in multiple["utterances"]] == [
+        [0, 1, 0],
+        [0, 0, 1],
+        [],
+    ]
+    sent = multiple_script.sent("audio")
+    assert multiple["utterances"][1]["boundaries"]["first_audio_sent"] == sent[3]
+    assert multiple["utterances"][0]["boundaries"]["last_audio_sent"] == sent[2]
+    assert multiple["boundaries"]["first_partial"] == 60 * MS
+    assert multiple["measurements"]["call_start_to_first_transcript"]["ns"] == 47 * MS
+
+    # A revision can start at zero; only successive revisions must grow.
+    zero_record, zero_session, _ = scripted(
+        harness, "stt", partials=("one", "two", "three"), revisions={0: 0, 1: 1, 2: 3}
+    )
+    assert zero_session["outcome"] == "completed"
+    assert [p["revision"] for p in zero_session["utterances"][0]["partials"]] == [0, 1, 3]
+    assert zero_session["utterances"][0]["cadence"] == {
+        "partial_count": 3,
+        "revision_gaps": [0, 0, 1],
+        "intervals_ns": [20 * MS, 20 * MS],
+    }
+    jsonschema.validate(zero_record, schema)
+    bad_zero = copy.deepcopy(zero_record)
+    put("stt.sessions.0.utterances.0.partials.1.revision", 0)(bad_zero)
+    record_mod.finalize(bad_zero)
+    assert record_mod.check_record(bad_zero)[0] == "invalid"
+
+    # Exercise the actual 30-second duration boundary with virtual time, not a load client.
+    audio = harness.audio
+    try:
+        harness.audio = {
+            **audio,
+            "frames": [bytes(640)] * 1502,
+            "samples": 1502 * 320,
+            "bytes": 1502 * 640,
+        }
+        _, long_session, _ = scripted(
+            harness,
+            "stt",
+            endpoints={1499: (480000, pb.ENDPOINT_REASON_DURATION_LIMIT)},
+        )
+    finally:
+        harness.audio = audio
+    assert long_session["outcome"] == "completed"
+    assert long_session["utterances"][1]["start_sample_offset"] == 480000
+    assert long_session["utterances"][0]["boundaries"]["last_audio_sent"] == 29980 * MS
+
+    # Recompute claims after a malformed observation: these must fail for the raw invariant,
+    # not merely because the summary or a cached duration was left stale.
+    edits = (
+        (put("stt.sessions.0.utterances.0.partials.1.revision", 1), "revision order"),
+        (put("stt.sessions.0.utterances.0.partials.0.revision", -1), "schema"),
+        (put("stt.sessions.0.utterances.0.endpoint.reason", "unspecified"), "schema"),
+        (put("stt.sessions.0.utterances.0.partials.2.at_ns", 999 * MS), "partial outside"),
+        (put("stt.sessions.0.utterances.0.endpoint.end_sample_offset", 99999), "offset outside"),
+        (put("stt.sessions.0.utterances.0.start_sample_offset", 1), "start offset"),
+        (put("stt.sessions.0.utterances.0.boundaries.endpoint", None), "timestamp disagree"),
+        (put("stt.sessions.0.client.audio_frames.1.start_sample_offset", 1), "frame offsets"),
+        (put("stt.sessions.0.server.partials", 99), "events_received"),
+    )
+    for edit, needle in edits:
+        bad = copy.deepcopy(record)
+        edit(bad)
+        record_mod.finalize(bad)
+        status, detail = record_mod.check_record(bad)
+        assert status == "invalid" and needle in detail, (needle, status, detail)
+    for path in (
+        "cadence.partial_count",
+        "cadence.revision_gaps.1",
+        "cadence.intervals_ns.0",
+        "measurements.endpoint_to_final.ns",
+        "boundaries.last_audio_sent",
+    ):
+        bad = copy.deepcopy(record)
+        put("stt.sessions.0.utterances.0." + path, 123)(bad)
+        status, detail = record_mod.check_record(bad)
+        assert status == "invalid" and "differs" in detail, (path, status, detail)
+    bad = copy.deepcopy(record)
+    del bad["stt"]["sessions"][0]["utterances"]
+    assert record_mod.check_record(bad)[0] == "invalid"
+
+    # Final without its own endpoint remains a protocol failure before Finalize, too.
+    for partials in ((), ("one", "two")):
+        record, session, _ = scripted(
+            harness,
+            "stt",
+            endpoints={2: (960, pb.ENDPOINT_REASON_SILENCE)},
+            partials=partials,
+            omit_endpoint=True,
+        )
+        assert session["server"]["partials"] == len(partials)
+        assert (session["outcome"], session["stop_reason"]) == ("stopped", "unexpected_event")
+    for revision in (0, 1):
+        record, session, _ = scripted(
+            harness, "stt", partials=("one", "two"), revisions={0: revision, 1: revision}
+        )
+        assert (session["outcome"], session["stop_reason"]) == ("stopped", "unexpected_event")
+
+    def wrong_final_id(script, name, event):
+        for delay, body in replies(pb, "stt")(script, name, event):
+            if isinstance(body, dict) and "final_transcript" in body:
+                body["final_transcript"].utterance_id = 999
+            yield delay, body
+
+    script = Script(harness.bindings, wrong_final_id)
+    wrong = client_mod.measure(
+        harness.bindings,
+        stt=(client_mod.Target("192.0.2.1:7", *TARGET), harness.audio),
+        tts=None,
+        run=script,
+        gpu_sampling="off",
+    )
+    assert wrong["stt"]["sessions"][0]["stop_reason"] == "unexpected_event"
+    assert record_mod.check_record(wrong)[0] == "failed"
+
+
+def check_record_versions() -> None:
+    import slice_record_builder
+
+    old = json.loads(
+        (ROOT / "test/validation/fixtures/slice_measurement_record_no_session.json").read_text()
+    )
+    assert old["schema_version"] == "0.1"
+    jsonschema.validate(old, record_mod.load_schema())
+    assert record_mod.check_record(old)[0] == old["result"]["status"]
+    built = slice_record_builder.build_record(None, provenance="synthetic")
+    assert built["schema_version"] == "0.2"
+    jsonschema.validate(built, record_mod.load_schema())
+    assert record_mod.check_record(built)[0] == "complete"
+    # The same completed sessions remain readable with only the legacy fields.
+    legacy = copy.deepcopy(built)
+    legacy["schema_version"] = "0.1"
+    for session in legacy["stt"]["sessions"]:
+        session.pop("utterances")
+        session["client"].pop("audio_frames")
+    jsonschema.validate(legacy, record_mod.load_schema())
+    assert record_mod.check_record(legacy)[0] == "complete"
+
+
 def check_run_endings(harness: Harness) -> None:
     """A run that an error or an interrupt ends still gives a record, and it says so."""
 
@@ -1875,7 +2182,12 @@ def check_arrival_order(harness: Harness) -> None:
     """An event read before the client sent what it would answer is not that answer."""
     pb = harness.bindings.pb
     for mode, sent, handler, event in (
-        ("stt", "first_audio_sent", "_on_partial_transcript", pb.PartialTranscript(text="s")),
+        (
+            "stt",
+            "first_audio_sent",
+            "_on_partial_transcript",
+            pb.PartialTranscript(utterance_id=1, revision=1, text="s"),
+        ),
         ("tts", "text_segment_sent", "_on_audio_chunk", pb.AudioChunk(segment_id=1)),
     ):
         call = object.__new__(client_mod.Call)
@@ -1892,7 +2204,16 @@ def check_arrival_order(harness: Harness) -> None:
             raise AssertionError(f"{handler} took an event read before {sent}")
     call.session = record_mod.new_session("stt", 0, 0)
     call.session["boundaries"]["first_audio_sent"] = 50
-    call._on_partial_transcript(50, pb.PartialTranscript(text="s"))
+    call.session["client"]["samples_sent"] = 1
+    call.session["client"]["audio_frames"] = [
+        {
+            "start_sample_offset": 0,
+            "end_sample_offset": 1,
+            "sent_ns": 50,
+            "scheduled_ns": 50,
+        }
+    ]
+    call._on_partial_transcript(50, pb.PartialTranscript(utterance_id=1, revision=1, text="s"))
     assert call.session["boundaries"]["first_partial"] == 50
 
 
@@ -2206,6 +2527,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, signal.default_int_handler)
     check_nearest_rank()
     check_stage_list()
+    check_record_versions()
     with tempfile.TemporaryDirectory() as raw_tmp:
         work = Path(raw_tmp)
         good = synthetic_record()
@@ -2219,6 +2541,7 @@ def main() -> int:
         harness = Harness(bindings, work)
         check_stamps(harness)
         check_schedule(harness)
+        check_utterances(harness)
         check_run_endings(harness)
         check_sessions(harness)
         check_faults(harness)
