@@ -9,6 +9,7 @@ Lock order: the table lock, then the runner's write lock.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import threading
 from collections import deque
@@ -45,12 +46,23 @@ class Job:
     cancelled: bool = False
     #: Whether it waits in and runs on the VAD lane.
     vad: bool = False
-    #: Whether its completion may store the state it returns.
-    keeps_state: bool = True
+    #: Whether it ignores its session's state: the job before it ended unscored.
+    from_reset: bool = False
 
     @property
     def session(self) -> tuple[int, int]:
         return self.identity.session_key, self.identity.generation
+
+
+@dataclass(slots=True)
+class _VadSession:
+    """A session's last completed VAD job's utterance and state, and whether a gap follows."""
+
+    utterance_id: int = 0
+    state: object = None
+    #: Whether its next admitted job starts from reset: a job of the session ended
+    #: unscored with none of its jobs waiting behind it.
+    reset_next: bool = False
 
 
 def _message(kind: str, message_id: str = "", **fields: object) -> codec.SidecarFrame:
@@ -95,8 +107,7 @@ class JobTable:
         self._jobs: dict[int, Job] = {}
         self._running: Job | None = None
         self._vad_running: Job | None = None
-        #: Per session, the utterance whose last job completed and the state it returned.
-        self._vad_states: dict[tuple[int, int], tuple[int, object]] = {}
+        self._vad_sessions: dict[tuple[int, int], _VadSession] = {}
         self._releasing: set[tuple[int, int]] = set()
         self._backend: JobBackend | None = None
         self._classes: tuple[str, ...] = ()
@@ -130,7 +141,6 @@ class JobTable:
                 self._backend = None
                 queued = [work for work in self._lane if isinstance(work, Job)]
                 for job in [*queued, *self._vad_lane]:
-                    (self._vad_lane if job.vad else self._lane).remove(job)
                     self._end(job, protocol.ERR_UNAVAILABLE, "backend_unavailable")
             self._lane.append(frame)
             self._work.notify_all()
@@ -150,7 +160,7 @@ class JobTable:
             work = self._lane.popleft()
             if id(work) in self._closing:
                 self._closing.discard(id(work))
-                self._vad_states.clear()
+                self._vad_sessions.clear()
             if isinstance(work, Job):
                 self._running = work
             return work
@@ -212,10 +222,14 @@ class JobTable:
         state: object = None
         failure = None
         with self._lock:
-            held = self._vad_states.get(job.session) if job.vad else None
-        # A job of another utterance starts from reset state; its completion replaces the old.
-        if held is not None and request is not None and held[0] == request.utterance_id:
-            state = held[1]
+            held = self._vad_sessions.get(job.session) if job.vad and not job.from_reset else None
+            # A job of another utterance starts from reset state; its completion replaces the old.
+            if (
+                held is not None
+                and request is not None
+                and held.utterance_id == request.utterance_id
+            ):
+                state = held.state
         try:
             if request is None or backend is None:
                 raise BackendError(protocol.ERR_INTERNAL, "the job was released before it ran")
@@ -246,8 +260,9 @@ class JobTable:
                 except Exception as exc:
                     failure = _edge(exc)
                 else:
-                    if job.vad and job.keeps_state and request is not None:
-                        self._vad_states[job.session] = (request.utterance_id, state)
+                    if job.vad and request is not None:
+                        held = self._vad_sessions.setdefault(job.session, _VadSession())
+                        held.utterance_id, held.state = request.utterance_id, state
                     self._release(job)
             if failure is not None:
                 # Health has it before the job_failed that may prompt a look.
@@ -286,6 +301,8 @@ class JobTable:
             self._end(job, protocol.ERR_RESOURCE_EXHAUSTED, "job_capacity_exhausted")
         else:
             self._jobs[identity.job_id] = job
+            if job.vad and (held := self._vad_sessions.get(job.session)) is not None:
+                job.from_reset, held.reset_next = held.reset_next, False
             self._emit(job, protocol.KIND_JOB_ACCEPTED)
             (self._vad_lane if job.vad else self._lane).append(job)
             self._work.notify_all()
@@ -303,7 +320,6 @@ class JobTable:
         self._emit(job, protocol.KIND_JOB_CANCEL_ACKNOWLEDGED)
         # The running job ends when its backend call returns; a waiting one ends now.
         if job is not self._running and job is not self._vad_running:
-            (self._vad_lane if job.vad else self._lane).remove(job)
             self._end(job, protocol.ERR_CANCELLED)
 
     def _release_session(self, session: tuple[int, int]) -> None:
@@ -320,7 +336,7 @@ class JobTable:
         ):
             return
         self._releasing.discard(session)
-        self._vad_states.pop(session, None)
+        self._vad_sessions.pop(session, None)
         key, generation = session
         released = _message(protocol.KIND_SESSION_RELEASED, session_key=key, generation=generation)
         self._write(released, True)
@@ -335,12 +351,11 @@ class JobTable:
     def _end(
         self, job: Job, code: str, context: str | None = None, message: str | None = None
     ) -> None:
-        """Send ``job_failed`` for ``job`` and release it."""
-        if job.vad:  # the adapter starts a new utterance after it
-            self._vad_states.pop(job.session, None)
-            running = self._vad_running
-            if running is not None and running is not job and running.session == job.session:
-                running.keeps_state = False
+        """Take ``job`` out of the lane it waits in, send ``job_failed`` and release it."""
+        if job.vad:
+            self._interrupt(job)
+        elif job in self._lane:
+            self._lane.remove(job)
         fixed = sanitize.MESSAGES[code]
         try:
             error = job_objects.error_object(code, message or fixed, context)
@@ -348,6 +363,26 @@ class JobTable:
             error = job_objects.error_object(code, fixed, context)
         self._emit(job, protocol.KIND_JOB_FAILED, error=error)
         self._release(job)
+
+    def _interrupt(self, job: Job) -> None:
+        """Take a VAD job that ends unscored out of the lane, and reset what follows it.
+
+        Continuity follows lane order: the session's first job behind it starts
+        from reset, or, with none waiting, the session's next admitted job. A
+        running job has every waiting job behind it; a refused one held no place.
+        """
+        lane = self._vad_lane
+        if job in lane:
+            position = lane.index(job)
+            del lane[position]
+        else:
+            position = 0 if job.identity.job_id in self._jobs else len(lane)
+        behind = itertools.islice(lane, position, None)
+        following = next((other for other in behind if other.session == job.session), None)
+        if following is not None:
+            following.from_reset = True
+        else:
+            self._vad_sessions.setdefault(job.session, _VadSession()).reset_next = True
 
     def _release(self, job: Job) -> None:
         # The table lets go of the job and its buffers before it says so.

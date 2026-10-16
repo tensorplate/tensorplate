@@ -130,7 +130,8 @@ class VadBackend(Protocol):
 
     ``run_vad`` runs on a thread of its own, alongside ``run_job`` and every
     lifecycle call except ``load`` and ``unload``. ``state`` is what the
-    utterance's previous job returned, or None at its first job; the runner
+    utterance's previous job returned, or None when the job starts the
+    utterance or follows one that ended without ``job_completed``; the runner
     keeps it, so it must not be changed in place.
     """
 

@@ -972,10 +972,13 @@ and one that any entry file of those profiles can set.
   completed `vad_frames` job returned from `run_vad`, with its
   `utterance_id`, and gives it to the session's next job of that utterance;
   a job of another utterance gets none, so the voice-activity model starts
-  from reset. A job that ends without `job_completed`, `session_released`
-  and a load or unload drop it, and a job of the session running at that
-  moment stores nothing when it completes. The backend keeps no per-session
-  state.
+  from reset. Continuity follows the lane's order, not the time a job ends:
+  when a job ends without `job_completed`, the session's first job behind it
+  in the lane starts from reset, or, with none waiting, its next admitted
+  job does. A running job has every waiting job behind it; a refused one
+  never held a place, so the jobs ahead of it keep their state. Every
+  completed job stores what it returned. `session_released` and a load or
+  unload drop the state. The backend keeps no per-session state.
 - **Admission.** `job_accepted` is sent when the job is admitted, not when it
   starts. A message the sidecar cannot read, or a submit that reuses the id
   of an unreleased job or carries a zero in its identity, is answered with an
