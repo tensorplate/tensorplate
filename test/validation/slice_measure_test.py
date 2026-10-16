@@ -25,6 +25,7 @@ import os
 import queue
 import re
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -34,6 +35,7 @@ import time
 import wave
 from concurrent import futures
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 RECORD_TOOL = ROOT / "tools/validation/slice_measurement_record.py"
@@ -1157,7 +1159,10 @@ class Harness:
             server.stop(0)
         status, detail = record_mod.check_record(record)
         assert status == record["result"]["status"], (fault, status, detail)
-        assert record["run"] == {"ended_by": "completed", "error": None}, (fault, record["run"])
+        assert {k: v for k, v in record["run"].items() if k != "finished_ns"} == {
+            "ended_by": "completed",
+            "error": None,
+        }, (fault, record["run"])
         return record, record[mode]["sessions"][0], servicer
 
 
@@ -1730,6 +1735,7 @@ class HeldClock(client_mod.Run):
     """The real waits on a clock that reads what the test set."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.origin = self.at = 0
 
     def now(self) -> int:
@@ -1908,7 +1914,7 @@ def check_utterances(harness: Harness) -> None:
     for fault, reason in (("server_endpoints", "silence"), ("duration_split", "duration_limit")):
         record, session, server = harness.run("stt", fault)
         assert session["outcome"] == "completed" and not server.violations, session
-        assert record["schema_version"] == "0.2"
+        assert record["schema_version"] == "0.3"
         utterances = session["utterances"]
         assert [u["utterance_id"] for u in utterances] == [1, 2, 3]
         assert [u["endpoint"]["reason"] for u in utterances] == [reason, reason, "client_finalize"]
@@ -2140,7 +2146,10 @@ def check_run_endings(harness: Harness) -> None:
             harness, "stt", settings=settings, ended_by="error", on_finalize=fail_second
         )
     assert "RuntimeError: synthetic failure" in stderr.getvalue()
-    assert record["run"] == {"ended_by": "error", "error": "RuntimeError"}, record["run"]
+    assert {k: v for k, v in record["run"].items() if k != "finished_ns"} == {
+        "ended_by": "error",
+        "error": "RuntimeError",
+    }, record["run"]
     assert record["result"]["status"] == "failed", record["result"]
     assert "run: ended by an error (RuntimeError)" in record["result"]["reasons"]
     assert "synthetic failure" not in json.dumps(record)
@@ -2174,7 +2183,10 @@ def check_run_endings(harness: Harness) -> None:
         "on_finalize": lambda _: signal.raise_signal(signal.SIGINT),
     }
     record, session, script = scripted(harness, "tts", **interrupt)
-    assert record["run"] == {"ended_by": "interrupt", "error": None}, record["run"]
+    assert {k: v for k, v in record["run"].items() if k != "finished_ns"} == {
+        "ended_by": "interrupt",
+        "error": None,
+    }, record["run"]
     assert session is None and record["result"]["reasons"][0] == "run: interrupted"
 
 
@@ -2293,6 +2305,25 @@ def check_sampler(work: Path, silent: str) -> None:
             os.kill(query, signal.SIGKILL)
 
 
+@contextlib.contextmanager
+def unready_endpoint(work: Path, unix: bool = False):
+    """An in-process fake listener that never completes a gRPC handshake."""
+    with socket.socket(socket.AF_UNIX if unix else socket.AF_INET) as listener:
+        if unix:
+            path = work / "unready.sock"
+            listener.bind(str(path))
+            endpoint = "unix:" + str(path)
+        else:
+            listener.bind(("127.0.0.1", 0))
+            endpoint = f"127.0.0.1:{listener.getsockname()[1]}"
+        listener.listen(64)
+        try:
+            yield endpoint
+        finally:
+            if unix:
+                path.unlink()
+
+
 def check_inputs_and_gpu(harness: Harness) -> None:
     work = harness.work
 
@@ -2380,12 +2411,12 @@ def check_inputs_and_gpu(harness: Harness) -> None:
     assert harness.run("tts")[0]["gpu"]["status"] == "not_requested"
     check_sampler(work, str(silent))
 
-    # A target nothing listens on: the record says the channel never became ready.
-    target = client_mod.Target("127.0.0.1:1", *TARGET)
-    record = client_mod.measure(
-        harness.bindings, stt=(target, harness.audio), tts=None, event_timeout_ms=300,
-        gpu_sampling="off",
-    )  # fmt: skip
+    with unready_endpoint(work) as endpoint:
+        target = client_mod.Target(endpoint, *TARGET)
+        record = client_mod.measure(
+            harness.bindings, stt=(target, harness.audio), tts=None, event_timeout_ms=300,
+            gpu_sampling="off",
+        )  # fmt: skip
     assert record["stt"]["target"]["connect_ns"] is None and not record["stt"]["sessions"]
     assert record_mod.check_record(record) == (
         "failed",
@@ -2425,7 +2456,10 @@ def check_command(harness: Harness) -> None:
         assert record["result"] == {"status": "complete", "reasons": []}
         # Both targets are loopback, so the GPU is sampled; no commit, so nothing is `recorded`.
         assert record["gpu"]["status"] == "sampled" and record["provenance"] == "synthetic"
-        assert record["run"] == {"ended_by": "completed", "error": None}
+        assert {k: v for k, v in record["run"].items() if k != "finished_ns"} == {
+            "ended_by": "completed",
+            "error": None,
+        }
         assert record["worker"] == {"source": "not_stated", "version": None, "build": None}
         assert set(record["client_platform"]) == {
             "system", "release", "machine", "cpu_count", "cpu_model",
@@ -2436,6 +2470,11 @@ def check_command(harness: Harness) -> None:
         jsonschema.validate(record, json.loads(SCHEMA.read_text(encoding="utf-8")))
         assert run_check(record, work).returncode == 0
         for extra, needle in (
+            (["--sessions", "0"], "--sessions"),
+            (["--sessions", "65"], "--sessions"),
+            (["--stagger-ms", "-1"], "--stagger-ms"),
+            (["--expect-test-count", "0"], "--expect-test-count"),
+            (["--expect-test-count", "2049"], "--expect-test-count"),
             (["--iterations", "0"], "at least 1"),
             (["--source-commit", "abc"], "not a full commit id"),
             (["--stt-target", "d:7"], "is not DEPLOYMENT or DEPLOYMENT:GENERATION:DIGEST"),
@@ -2482,15 +2521,12 @@ def check_command(harness: Harness) -> None:
             "connect_ns": 0,
         }
 
-        # One target of two away from loopback, and no --gpu-sampling: nothing is sampled,
-        # though the fake nvidia-smi is there. Neither channel is given time to become ready.
-        mixed = [
-            "--event-timeout-ms", "1", "--stt-endpoint", "127.0.0.1:1",
-            "--tts-endpoint", "192.0.2.1:7",
-        ]  # fmt: skip
-        done = subprocess.run(
-            [*command, *mixed], capture_output=True, text=True, check=False, env=environment
-        )
+        # Unix endpoints are classified as non-loopback, without reaching another host.
+        with unready_endpoint(work) as tcp, unready_endpoint(work, unix=True) as unix:
+            mixed = ["--event-timeout-ms", "1", "--stt-endpoint", tcp, "--tts-endpoint", unix]
+            done = subprocess.run(
+                [*command, *mixed], capture_output=True, text=True, check=False, env=environment
+            )
         assert done.returncode == 1 and "the channel never became ready" in done.stderr, done
         record = json.loads(out.read_text(encoding="utf-8"))
         assert [record[mode]["target"]["loopback"] for mode in ("stt", "tts")] == [True, False]
@@ -2511,7 +2547,10 @@ def check_command(harness: Harness) -> None:
         _, stderr = servicer.client.communicate()
         assert servicer.client.returncode == 1 and "failed: run: interrupted" in stderr, stderr
         record = json.loads(servicer.out.read_text(encoding="utf-8"))
-        assert record["run"] == {"ended_by": "interrupt", "error": None}, record["run"]
+        assert {k: v for k, v in record["run"].items() if k != "finished_ns"} == {
+            "ended_by": "interrupt",
+            "error": None,
+        }, record["run"]
         before = servicer.seen["checkpoint"]
         assert before["run"]["ended_by"] is None and record_mod.check_record(before)[0] == "failed"
         for entry in (before, record):
@@ -2522,12 +2561,419 @@ def check_command(harness: Harness) -> None:
             server.stop(0)
 
 
+class ConcurrentServer:
+    """Gate concurrent Opens; each RPC has its own fake state."""
+
+    def __init__(self, bindings, count: int, fault: str = "") -> None:
+        self.bindings, self.count, self.fault = bindings, count, fault
+        self.lock = threading.Lock()
+        self.opened = threading.Condition(self.lock)
+        self.gate = threading.Event()
+        self.saved = threading.Event()
+        self.peers: list[str] = []
+        self.children: list[SliceServer] = []
+
+    def Session(self, requests, context):
+        first = next(requests)
+        with self.opened:
+            slot = len(self.children)
+            child_fault = (
+                self.fault if slot == 0 or self.fault in ("server_endpoints", "partial") else ""
+            )
+            if self.fault == "partial_zero":
+                child_fault = "partial"
+            child = SliceServer(self.bindings, child_fault)
+            self.children.append(child)
+            self.peers.append(context.peer())
+            self.opened.notify_all()
+            if len(self.children) % self.count == 0:
+                self.gate.set()
+        if self.fault != "checkpoint_stagger" and not self.gate.wait(10):
+            context.abort(grpc.StatusCode.INTERNAL, "batch never reached the gate")
+        if slot == 0 and self.fault in ("refuse_open", "deadline"):
+            status = (
+                grpc.StatusCode.RESOURCE_EXHAUSTED
+                if self.fault == "refuse_open"
+                else grpc.StatusCode.DEADLINE_EXCEEDED
+            )
+            context.abort(status, "synthetic failure")
+        if self.fault == "interrupt_peers":
+            if slot == 0:
+                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "synthetic refusal")
+            cancelled = threading.Event()
+            context.add_callback(cancelled.set)
+            assert cancelled.wait(10), "run left an outstanding call"
+            return
+        child.seen["audio_payload"] = bytearray()
+
+        def captured():
+            yield first
+            for event in requests:
+                child.seen["audio_payload"].extend(event.audio.data)
+                yield event
+
+        for event in child.Session(captured(), context):
+            if self.fault == "partial_zero" and event.WhichOneof("body") == "partial_transcript":
+                event.partial_transcript.revision -= 1
+            yield event
+
+
+class StaggerClock(client_mod.Run):
+    """Advance virtual launch time only after the previous Open reaches the fake's gate."""
+
+    def __init__(self, server: ConcurrentServer) -> None:
+        super().__init__()
+        self.server, self.at = server, 0
+        self.waits: list[int] = []
+
+    def now(self) -> int:
+        return self.at
+
+    def wait_until(self, until: int) -> None:
+        with self.server.opened:
+            assert self.server.opened.wait_for(
+                lambda: len(self.server.children) > len(self.waits), 10
+            )
+        if self.server.fault == "checkpoint_stagger":
+            assert self.server.saved.wait(10), (
+                "completed session was not checkpointed during stagger"
+            )
+        self.waits.append(until)
+        self.at = until
+
+    def take(self, inbound, until):
+        # TTS needs no pacing; every receive is released by the fake, not by a timer.
+        return inbound.get(timeout=10)
+
+
+def concurrent_record(harness: Harness, mode: str, count: int, fault: str = "", **settings):
+    servicer = ConcurrentServer(harness.bindings, count, fault)
+    server, endpoint = harness.serve(servicer)
+    run = StaggerClock(servicer) if settings.get("stagger_ms") else client_mod.Run()
+    target = client_mod.Target(endpoint, *TARGET)
+    saved: list[dict] = []
+    plan = harness.audio if mode == "stt" else harness.text
+
+    def checkpoint(item):
+        saved.append(copy.deepcopy(item))
+        if item[mode] and item[mode]["sessions"]:
+            servicer.saved.set()
+
+    with mock.patch.object(client_mod, "GpuSampler", wraps=client_mod.GpuSampler) as sampler:
+        try:
+            record = client_mod.measure(
+                harness.bindings,
+                stt=(target, plan) if mode == "stt" else None,
+                tts=(target, plan) if mode == "tts" else None,
+                sessions=count,
+                run=run,
+                gpu_sampling="off",
+                checkpoint=checkpoint,
+                **settings,
+            )
+        finally:
+            server.stop(0).wait()
+        assert sampler.call_count == 1
+    for item in [*saved, record]:
+        jsonschema.validate(item, record_mod.load_schema())
+        status, detail = record_mod.check_record(item)
+        assert status == item["result"]["status"], (status, detail)
+    assert len(servicer.peers) == len(set(servicer.peers)) == count * settings.get("iterations", 1)
+    assert not any(child.violations for child in servicer.children)
+    assert all(len(child.seen["opens"]) == 1 for child in servicer.children if child.seen["opens"])
+    return record, servicer, run, saved
+
+
+def check_concurrent_sessions(harness: Harness) -> None:
+    # The explicit default uses precisely the same observation path and measurements.
+    for mode in ("stt", "tts"):
+        implicit = scripted(harness, mode)[0]
+        explicit = scripted(harness, mode, settings={"sessions": 1})[0]
+        assert implicit[mode] == explicit[mode]
+        assert implicit["aggregate"] == explicit["aggregate"]
+        assert implicit["settings"] == explicit["settings"]
+        legacy = copy.deepcopy(explicit)
+        legacy["schema_version"] = "0.2"
+        legacy.pop("aggregate")
+        legacy["run"].pop("finished_ns")
+        for key in ("sessions", "stagger_ms", "expect_test_count"):
+            legacy["settings"].pop(key)
+        jsonschema.validate(legacy, record_mod.load_schema())
+        assert record_mod.check_record(legacy)[0] == explicit["result"]["status"]
+
+        record, server, _, saved = concurrent_record(
+            harness, mode, 4, "refuse_open", expect_test_count=8
+        )
+        aggregate = record["aggregate"]
+        assert record["settings"]["expect_test_count"] == 8
+        assert aggregate["sessions_recorded"] == aggregate["sessions_opened"] == 4
+        assert (aggregate["sessions_clean"], aggregate["sessions_failed"]) == (3, 1)
+        assert aggregate["failed_by_cause"] == [{"cause": "grpc:RESOURCE_EXHAUSTED", "count": 1}]
+        assert record["result"]["status"] == "failed"
+        samples = record[mode]["summary"]["session_initialization"]
+        assert (samples["count"], samples["misses"]) == (3, 1)
+        assert [s["index"] for s in record[mode]["sessions"]] == list(range(4))
+        assert len(saved) == 5
+        for child in server.children:
+            if child.seen["opens"]:
+                assert child.seen["opens"][0].resolved.deployment_id == TARGET[0]
+                if mode == "stt":
+                    assert child.seen["frames"] == [
+                        len(frame) // 2 for frame in harness.audio["frames"]
+                    ]
+                    assert child.seen["audio_payload"] == b"".join(harness.audio["frames"])
+
+    for fault, utterances, partials in (
+        ("server_endpoints", 3, 0),
+        ("partial", 1, 3),
+        ("partial_zero", 1, 3),
+    ):
+        record, _, _, _ = concurrent_record(harness, "stt", 4, fault)
+        assert record["aggregate"]["sessions_clean"] == 4
+        assert all(len(s["utterances"]) == utterances for s in record["stt"]["sessions"])
+        assert all(s["server"]["partials"] == partials for s in record["stt"]["sessions"])
+        measurements = record["aggregate"]["measurements"]["stt"]
+        assert measurements["endpoint_to_final"]["count"] == 4 * utterances
+        assert measurements["partial_interval"]["count"] == 4 * max(0, partials - 1)
+        if fault == "partial_zero":
+            for session in record["stt"]["sessions"]:
+                assert [p["revision"] for p in session["utterances"][0]["partials"]] == [0, 1, 2]
+
+    for fault, cause in (
+        ("deadline", "grpc:DEADLINE_EXCEEDED"),
+        ("wrong_mode_event", "stopped:unexpected_event"),
+    ):
+        record, _, _, _ = concurrent_record(harness, "tts", 4, fault)
+        assert record["aggregate"]["sessions_clean"] == 3
+        assert record["aggregate"]["failed_by_cause"] == [{"cause": cause, "count": 1}]
+
+    record, _, run, _ = concurrent_record(harness, "tts", 3, stagger_ms=25)
+    assert run.waits == [25 * MS, 50 * MS]
+    assert [s["connection"]["started_ns"] for s in record["tts"]["sessions"]] == [
+        0,
+        25 * MS,
+        50 * MS,
+    ]
+    assert record["aggregate"]["sessions_clean"] == 3
+    assert record["aggregate"]["wall_time_ns"] == 50 * MS
+    checkpointed, _, _, snapshots = concurrent_record(
+        harness, "tts", 3, "checkpoint_stagger", stagger_ms=25
+    )
+    assert checkpointed["aggregate"]["sessions_clean"] == 3
+    assert len(snapshots[1]["tts"]["sessions"]) == 1
+    for path, value, needle in (
+        ("tts.sessions.1.index", 0, "unique, ordered and in range"),
+        ("tts.sessions.2.index", 3, "unique, ordered and in range"),
+        ("tts.sessions.0.connection.started_ns", 100 * MS, "timestamps do not enclose"),
+        ("tts.sessions.0.connection.connect_ns", 100 * MS, "timestamps do not enclose"),
+        ("tts.sessions.2.connection.ended_ns", 0, "timestamps do not enclose"),
+        ("tts.sessions.0.connection.connect_ns", None, "unconnected session"),
+        ("settings.stagger_ms", 26, "respect stagger_ms"),
+        ("tts.target.connect_ns", 1, "first successful connection"),
+    ):
+        bad = copy.deepcopy(record)
+        put(path, value)(bad)
+        status, detail = record_mod.check_record(bad)
+        assert status == "invalid" and needle in detail, (path, status, detail)
+    bad = copy.deepcopy(record)
+    bad["tts"]["sessions"][0].pop("connection")
+    assert "require connection observations" in record_mod.check_record(bad)[1]
+    # Every session owns a channel even when a later batch uses the same endpoint.
+    record, _, _, _ = concurrent_record(harness, "tts", 3, iterations=2)
+    assert record["aggregate"]["sessions_clean"] == 6
+    bad = copy.deepcopy(record)
+    bad["tts"]["sessions"][3]["connection"]["started_ns"] = 0
+    assert "previous batch ended" in record_mod.check_record(bad)[1]
+
+
+def check_concurrent_endings(harness: Harness) -> None:
+    for error in (KeyboardInterrupt, ValueError):
+        servicer = ConcurrentServer(harness.bindings, 3, "interrupt_peers")
+        server, endpoint = harness.serve(servicer)
+        target = client_mod.Target(endpoint, *TARGET)
+
+        def checkpoint(record):
+            if record["tts"] and record["tts"]["sessions"]:
+                raise error()
+
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                record = client_mod.measure(
+                    harness.bindings,
+                    stt=None,
+                    tts=(target, harness.text),
+                    sessions=3,
+                    gpu_sampling="off",
+                    checkpoint=checkpoint,
+                )
+        finally:
+            server.stop(0).wait()
+        assert record["run"]["ended_by"] == ("interrupt" if error is KeyboardInterrupt else "error")
+        assert record_mod.check_record(record)[0] == "failed", record_mod.check_record(record)
+        jsonschema.validate(record, record_mod.load_schema())
+        assert record["aggregate"]["sessions_recorded"] == 3
+        assert record["aggregate"]["failed_by_cause"] == [
+            {"cause": "grpc:RESOURCE_EXHAUSTED", "count": 1},
+            {"cause": "stopped:run_stopped", "count": 2},
+        ]
+
+    with unready_endpoint(harness.work) as endpoint:
+        target = client_mod.Target(endpoint, *TARGET)
+        record = client_mod.measure(
+            harness.bindings,
+            stt=None,
+            tts=(target, harness.text),
+            sessions=4,
+            gpu_sampling="off",
+            event_timeout_ms=1,
+        )
+    assert record_mod.check_record(record)[0] == "failed", record_mod.check_record(record)
+    assert record["aggregate"]["sessions_opened"] == 0
+    assert record["aggregate"]["failed_by_cause"] == [{"cause": "channel_timeout", "count": 4}]
+
+
+def check_concurrent_command(harness: Harness) -> None:
+    servicer = ConcurrentServer(harness.bindings, 4, "refuse_open")
+    server, endpoint = harness.serve(servicer)
+    source = harness.work / "concurrent-text.txt"
+    source.write_text(TEXT)
+    out = harness.work / "concurrent-record.json"
+    try:
+        done = subprocess.run(
+            [
+                sys.executable,
+                str(CLIENT_TOOL),
+                "run",
+                "--out",
+                str(out),
+                "--tts-endpoint",
+                endpoint,
+                "--tts-target",
+                TARGET[0],
+                "--tts-language",
+                "en",
+                "--voice",
+                VOICE,
+                "--text-file",
+                str(source),
+                "--sessions",
+                "4",
+                "--stagger-ms",
+                "0",
+                "--expect-test-count",
+                "3",
+                "--gpu-sampling",
+                "off",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        server.stop(0).wait()
+    assert done.returncode == 1 and "3 sessions ended cleanly; 1 failed" in done.stdout, done
+    record = json.loads(out.read_text())
+    assert record["settings"]["sessions"] == 4 and record["settings"]["expect_test_count"] == 3
+    assert record_mod.check_record(record)[0] == "failed"
+    assert len(set(servicer.peers)) == 4
+
+
+def check_aggregates() -> None:
+    import slice_record_builder
+
+    record = slice_record_builder.build_record(None, provenance="synthetic")
+    record["schema_version"] = "0.3"
+    record["settings"].update(sessions=1, stagger_ms=0, expect_test_count=None)
+    record["run"]["finished_ns"] = 13000 * MS
+    # Pool intervals with unequal partial counts; averaging percentiles gives a different answer.
+    for session, intervals in zip(record["stt"]["sessions"], ((1, 2), (7,), (9, 11)), strict=True):
+        utterance = session["utterances"][0]
+        at = session["boundaries"]["first_audio_sent"]
+        for revision, delay in enumerate((0, *intervals), 1):
+            at += delay * MS
+            utterance["partials"].append(
+                {"at_ns": at, "revision": revision, "text_bytes": 1, "text_sha256": DIGEST}
+            )
+        session["server"]["partials"] = len(utterance["partials"])
+        session["server"]["events_received"] += len(utterance["partials"])
+        session["boundaries"]["first_partial"] = utterance["partials"][0]["at_ns"]
+    record_mod.finalize(record)
+    jsonschema.validate(record, record_mod.load_schema())
+    assert record_mod.check_record(record)[0] == "complete", record_mod.check_record(record)
+    aggregate = record["aggregate"]
+    assert (
+        aggregate["sessions_opened"],
+        aggregate["sessions_clean"],
+        aggregate["sessions_failed"],
+    ) == (6, 6, 0)
+    for mode, name, count, p50, p95, maximum in (
+        ("stt", "last_audio_to_final_transcript", 3, 200, 300, 300),
+        ("stt", "endpoint_to_final", 3, 1, 1, 1),
+        ("stt", "partial_interval", 5, 7, 11, 11),
+        ("tts", "segment_to_first_audio", 3, 80, 90, 90),
+    ):
+        value = aggregate["measurements"][mode][name]
+        assert (value["count"], value["p50_ns"], value["p95_ns"], value["max_ns"]) == (
+            count,
+            p50 * MS,
+            p95 * MS,
+            maximum * MS,
+        )
+    for path, value in (
+        ("aggregate.sessions_clean", 7),
+        ("aggregate.sessions_opened", 0),
+        ("aggregate.failed_by_cause", [{"cause": "grpc:UNAVAILABLE", "count": 1}]),
+        ("aggregate.measurements.stt.partial_interval.p95_ns", 10 * MS),
+        ("aggregate.wall_time_ns", 1),
+        ("run.finished_ns", 1),
+    ):
+        bad = copy.deepcopy(record)
+        put(path, value)(bad)
+        assert record_mod.check_record(bad)[0] == "invalid", path
+    for path, value in (
+        ("settings.sessions", 0),
+        ("settings.sessions", 65),
+        ("settings.stagger_ms", -1),
+        ("settings.expect_test_count", 0),
+        ("settings.expect_test_count", 2049),
+    ):
+        bad = copy.deepcopy(record)
+        put(path, value)(bad)
+        status, detail = record_mod.check_record(bad)
+        assert status == "invalid", path
+        if value in (65, 2049):
+            assert path in detail, (path, detail)
+        assert not jsonschema.Draft7Validator(record_mod.load_schema()).is_valid(bad), path
+    for field in ("aggregate", "settings.sessions", "run.finished_ns"):
+        bad = copy.deepcopy(record)
+        keys = field.split(".")
+        parent = bad
+        for key in keys[:-1]:
+            parent = parent[key]
+        parent.pop(keys[-1])
+        assert record_mod.check_record(bad)[0] == "invalid", field
+        assert not jsonschema.Draft7Validator(record_mod.load_schema()).is_valid(bad), field
+    record["stt"]["sessions"][1].update(outcome="stopped", stop_reason="unexpected_event")
+    record_mod.finalize(record)
+    assert record_mod.check_record(record)[0] == "failed"
+    assert record["aggregate"]["failed_by_cause"] == [
+        {"cause": "stopped:unexpected_event", "count": 1}
+    ]
+    for name, summary in record["stt"]["summary"].items():
+        assert record["aggregate"]["measurements"]["stt"][name] == summary
+    endpoint = record["aggregate"]["measurements"]["stt"]["endpoint_to_final"]
+    assert (endpoint["count"], endpoint["misses"]) == (2, 1)
+    value = record["aggregate"]["measurements"]["stt"]["partial_interval"]
+    assert (value["count"], value["misses"], value["p50_ns"]) == (4, 1, 2 * MS)
+
+
 def main() -> int:
     # A shell that started this in the background left SIGINT ignored; the interrupt cases send it.
     signal.signal(signal.SIGINT, signal.default_int_handler)
     check_nearest_rank()
     check_stage_list()
     check_record_versions()
+    check_aggregates()
     with tempfile.TemporaryDirectory() as raw_tmp:
         work = Path(raw_tmp)
         good = synthetic_record()
@@ -2543,6 +2989,9 @@ def main() -> int:
         check_schedule(harness)
         check_utterances(harness)
         check_run_endings(harness)
+        check_concurrent_sessions(harness)
+        check_concurrent_endings(harness)
+        check_concurrent_command(harness)
         check_sessions(harness)
         check_faults(harness)
         check_arrival_order(harness)

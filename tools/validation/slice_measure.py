@@ -38,6 +38,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -229,6 +230,7 @@ class Run:
 
     def __init__(self) -> None:
         self.origin = time.monotonic_ns()
+        self.cancelled = threading.Event()
 
     def now(self) -> int:
         return time.monotonic_ns() - self.origin
@@ -239,10 +241,19 @@ class Run:
 
     def take(self, inbound: queue.Queue[tuple[int, Any]], until: int) -> tuple[int, Any] | None:
         """What a call read next and when, or None once the clock reaches `until`."""
-        try:
-            return inbound.get(timeout=max(0, until - self.now()) / 1e9)
-        except queue.Empty:
-            return None
+        while True:
+            if self.cancelled.is_set():
+                raise _Stop("run_stopped")
+            try:
+                return inbound.get(timeout=min(0.1, max(0, until - self.now()) / 1e9))
+            except queue.Empty:
+                if self.now() >= until:
+                    return None
+
+    def wait_until(self, until: int) -> None:
+        """Wait for the next session's launch, independently of its peers' progress."""
+        if self.cancelled.wait(max(0, until - self.now()) / 1e9):
+            raise _Stop("run_stopped")
 
     @contextlib.contextmanager
     def connect(
@@ -251,14 +262,29 @@ class Run:
         """A stub on a ready channel and the time to it, or neither when it never was ready."""
         import grpc
 
-        with grpc.insecure_channel(endpoint) as channel:
+        # gRPC otherwise shares a transport between channels to the same endpoint.
+        with grpc.insecure_channel(
+            endpoint, options=(("grpc.use_local_subchannel_pool", 1),)
+        ) as channel:
             started = self.now()
+            ready = grpc.channel_ready_future(channel)
             try:
-                grpc.channel_ready_future(channel).result(timeout=timeout_ms / 1000)
-            except grpc.FutureTimeoutError:
-                yield None, None
-            else:
-                yield bindings.rpc.SessionServiceStub(channel), self.now() - started
+                while not self.cancelled.is_set():
+                    remaining = timeout_ms / 1000 - (self.now() - started) / 1e9
+                    try:
+                        ready.result(timeout=max(0, min(0.1, remaining)))
+                        yield (
+                            bindings.rpc.SessionServiceStub(channel),
+                            self.now() - started,
+                        )
+                        return
+                    except grpc.FutureTimeoutError:
+                        if remaining <= 0:
+                            yield None, None
+                            return
+                raise _Stop("run_stopped")
+            finally:
+                ready.cancel()
 
 
 def sample_gpu(program: str, interval_ms: int, alive: Callable[[], bool] | None = None) -> int:
@@ -877,12 +903,98 @@ def run_section(
             save()
 
 
+def run_concurrent_section(
+    run: Run, bindings: Bindings, mode: str, target: Target, plan: dict[str, Any],
+    iterations: int, count: int, stagger_ms: int, timeout_ms: int,
+    record: dict[str, Any], save: Callable[[], None],
+) -> None:  # fmt: skip
+    """Each batch owns independent channels; only the coordinator publishes results."""
+    section = record[mode] = {
+        "target": {
+            "generation": target.generation,
+            "descriptor_digest": target.descriptor_digest,
+            "loopback": target.is_loopback(),
+            "connect_ns": None,
+        },
+        "input": declared_input(mode, plan),
+        "sessions": [],
+        "summary": {},
+    }
+
+    def one(
+        index: int, previous: queue.Queue[int] | None, started: queue.Queue[int]
+    ) -> dict[str, Any] | None:
+        try:
+            if previous is not None:
+                run.wait_until(previous.get() + stagger_ms * MS)
+        except _Stop:
+            return None
+        finally:
+            # Release the next launch even when this one was cancelled before connecting.
+            at = run.now()
+            started.put(at)
+        session = record_mod.new_session(mode, index, at)
+        connect_ns = None
+        try:
+            with run.connect(bindings, target.endpoint, timeout_ms) as (
+                stub,
+                connect_ns,
+            ):
+                if stub is not None:
+                    session = run_session(
+                        run, bindings, stub, mode, index, target, plan, timeout_ms
+                    )
+        except _Stop as stop:
+            session.update(outcome="stopped", stop_reason=stop.args[0])
+        session["connection"] = {
+            "started_ns": at,
+            "connect_ns": connect_ns,
+            "ended_ns": run.now(),
+        }
+        return session
+
+    def publish(session: dict[str, Any]) -> None:
+        section["sessions"].append(session)
+        section["sessions"].sort(key=lambda entry: entry["index"])
+        # Keep the legacy target field as the first successful connection's duration.
+        connected = [s["connection"]["connect_ns"] for s in section["sessions"]]
+        section["target"]["connect_ns"] = next((n for n in connected if n is not None), None)
+
+    pool = ThreadPoolExecutor(max_workers=count)
+    pending = set()
+    try:
+        for iteration in range(iterations):
+            previous: queue.Queue[int] | None = None
+            for offset in range(count):
+                started: queue.Queue[int] = queue.Queue()
+                pending.add(pool.submit(one, iteration * count + offset, previous, started))
+                previous = started
+            for future in as_completed(pending):
+                session = future.result()
+                if session is not None:
+                    publish(session)
+                pending.remove(future)
+                save()
+    finally:
+        if pending:
+            run.cancelled.set()
+        pool.shutdown(wait=True)
+        for future in pending:
+            if not future.cancelled() and future.exception() is None:
+                session = future.result()
+                if session is not None:
+                    publish(session)
+
+
 def measure(
     bindings: Bindings,
     *,
     stt: tuple[Target, dict[str, Any]] | None,
     tts: tuple[Target, dict[str, Any]] | None,
     iterations: int = 1,
+    sessions: int = 1,
+    stagger_ms: int = 0,
+    expect_test_count: int | None = None,
     event_timeout_ms: int = 30_000,
     provenance: str = "synthetic",
     source_commit: str | None = None,
@@ -900,6 +1012,10 @@ def measure(
     and after each one. An error or an interrupt ends the run and is
     recorded; it is not raised.
     """
+    if not 1 <= sessions <= 64 or stagger_ms < 0:
+        raise MeasureError("--sessions is 1 to 64; --stagger-ms is nonnegative")
+    if expect_test_count is not None and not 1 <= expect_test_count <= 2048:
+        raise MeasureError("--expect-test-count is 1 to 2048")
     run = run or Run()
     requested = {"stt": stt, "tts": tts}
     serving = all(section[0].is_loopback() for section in requested.values() if section)
@@ -937,13 +1053,16 @@ def measure(
         "percentile_method": "nearest_rank",
         "settings": {
             "iterations": iterations,
+            "sessions": sessions,
+            "stagger_ms": stagger_ms,
+            "expect_test_count": expect_test_count,
             "event_timeout_ms": event_timeout_ms,
             "max_input_lag_ms": record_mod.MAX_INPUT_LAG_MS,
         },
         "stt": None,
         "tts": None,
         "gpu": sampler.section("the run did not end", [], serving),
-        "run": {"ended_by": None, "error": None},
+        "run": {"ended_by": None, "error": None, "finished_ns": None},
         "result": {},
     }
 
@@ -956,6 +1075,20 @@ def measure(
         save()
         for mode, section in requested.items():
             if section is not None:
+                if sessions > 1:
+                    run_concurrent_section(
+                        run,
+                        bindings,
+                        mode,
+                        *section,
+                        iterations,
+                        sessions,
+                        stagger_ms,
+                        event_timeout_ms,
+                        record,
+                        save,
+                    )
+                    continue
                 run_section(
                     run,
                     bindings,
@@ -973,6 +1106,7 @@ def measure(
         traceback.print_exc()
         record["run"].update(ended_by="error", error=type(error).__name__)
     record["gpu"] = sampler.finish(serving)
+    record["run"]["finished_ns"] = run.now()
     return record_mod.finalize(record)
 
 
@@ -998,6 +1132,18 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--worker-version", help="the serving worker's release, as the operator knows")
     run.add_argument("--worker-build", help="the serving worker's build, as the operator knows it")
     run.add_argument("--iterations", type=int, default=1)
+    run.add_argument(
+        "--sessions",
+        type=int,
+        default=1,
+        help="concurrent sessions per batch (1 to 64)",
+    )
+    run.add_argument("--stagger-ms", type=int, default=0, help="delay between session launches")
+    run.add_argument(
+        "--expect-test-count",
+        type=int,
+        help="operator-stated qualification count; recorded without querying the agent",
+    )
     run.add_argument("--event-timeout-ms", type=int, default=30_000)
     run.add_argument(
         "--gpu-sampling",
@@ -1028,6 +1174,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if min(args.iterations, args.event_timeout_ms, args.gpu_interval_ms) < 1:
             raise MeasureError("iterations, timeouts and intervals are at least 1")
+        if not 1 <= args.sessions <= 64 or args.stagger_ms < 0:
+            raise MeasureError("--sessions is 1 to 64; --stagger-ms is nonnegative")
+        if args.expect_test_count is not None and not 1 <= args.expect_test_count <= 2048:
+            raise MeasureError("--expect-test-count is 1 to 2048")
         if not 20 <= args.frame_ms <= 320:
             raise MeasureError("a frame is 20 to 320 ms, the bounds of the stream schema")
         if args.source_commit and re.fullmatch("[0-9a-f]{40}", args.source_commit) is None:
@@ -1070,6 +1220,9 @@ def main(argv: list[str] | None = None) -> int:
                 stt=stt,
                 tts=tts,
                 iterations=args.iterations,
+                sessions=args.sessions,
+                stagger_ms=args.stagger_ms,
+                expect_test_count=args.expect_test_count,
                 event_timeout_ms=args.event_timeout_ms,
                 provenance=provenance,
                 source_commit=args.source_commit,
@@ -1084,7 +1237,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{name}: cannot measure: {exc}", file=sys.stderr)
         return record_mod.EXIT_NO_VERDICT
     status, detail = record_mod.check_record(record)
-    print(f"{name}: {status}: {detail}", file=sys.stdout if status == "complete" else sys.stderr)
+    aggregate = record.get("aggregate")
+    if aggregate is not None:
+        print(
+            f"{name}: {aggregate['sessions_clean']} sessions ended cleanly; "
+            f"{aggregate['sessions_failed']} failed"
+        )
+    print(
+        f"{name}: {status}: {detail}",
+        file=sys.stdout if status == "complete" else sys.stderr,
+    )
     return record_mod.exit_status(status)
 
 

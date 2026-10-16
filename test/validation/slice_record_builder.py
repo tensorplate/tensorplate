@@ -149,7 +149,7 @@ def build_record(
     target = {"generation": 7, "descriptor_digest": DIGEST, "loopback": True, "connect_ns": 5 * MS}
     stated = provenance == "recorded"
     record: dict[str, Any] = {
-        "schema_version": record_mod.SCHEMA_VERSION,
+        "schema_version": "0.2",
         "record_kind": "slice_measurement",
         "provenance": provenance,
         "tool": {
