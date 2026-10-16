@@ -390,7 +390,7 @@ class JobTable:
         if following is not None:
             following.from_reset = True
         else:
-            self._reset_next(job.session)
+            self._reset_next(job.session, job)
 
     def _reset_unrun(self, header: dict[str, Any]) -> None:
         """A ``vad_frames`` submit that runs nothing resets its session's next job."""
@@ -404,8 +404,17 @@ class JobTable:
             return  # no session reads from it, so there is none to reset
         self._reset_next(session)
 
-    def _reset_next(self, session: tuple[int, int]) -> None:
-        self._vad_sessions.setdefault(session, _VadSession()).reset_next = True
+    def _reset_next(self, session: tuple[int, int], ending: Job | None = None) -> None:
+        held = self._vad_sessions.get(session)
+        if held is None:
+            # A session with no entry starts from reset, unless a job of it completes first.
+            if not any(
+                job.vad and job.session == session and job is not ending
+                for job in self._jobs.values()
+            ):
+                return
+            held = self._vad_sessions[session] = _VadSession()
+        held.reset_next = True
 
     def _release(self, job: Job) -> None:
         # The table lets go of the job and its buffers before it says so.

@@ -408,6 +408,37 @@ def test_a_vad_frames_submit_the_reader_answers_busy_resets_its_sessions_next_jo
     assert _Recording.given == [(1, None), (3, None), (4, "after 3")]
 
 
+def test_vad_submits_that_run_nothing_keep_no_state_for_a_session_without_jobs(
+    connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer, gate = _recording(connect, monkeypatch)
+    answer = digest(exchange(peer, {**vad_submit(3, session_key=3), "schema_version": "9.9"}))
+    assert (answer[0], *answer[2:]) == (ERROR_EVENT, "unsupported")
+    answer = digest(exchange(peer, {**vad_submit(4), "generation": 2}, b""))
+    assert (answer[0], *answer[2:]) == (ERROR_EVENT, "config_invalid")
+    # Session 5 has a decode job only.
+    assert read_after(peer, submit(50, session_key=5)) == (ACCEPTED, 50)
+    for session_key in (2, 5):
+        refused = vad_submit(session_key, session_key=session_key, frames=1)
+        refused["input"].update(frame_samples=768, payload_length=768 * 2)
+        peer.send(refused)
+        assert read(peer, 2) == ended(session_key, FAILED, "unsupported", "job_not_permitted")
+    gate.set()
+    assert sorted(read(peer, 4)) == sorted([*ended(1), *ended(50)])
+    assert_quiet(peer)
+    assert list(peer.runner._table._vad_sessions) == [(1, 1)]
+
+
+def test_a_sessions_only_vad_job_that_fails_keeps_no_state_for_the_session(
+    connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peer, gate = _recording(connect, monkeypatch, failing={1})
+    gate.set()
+    assert read(peer, 2) == ended(1, FAILED, "inference_failed")
+    assert_quiet(peer)
+    assert peer.runner._table._vad_sessions == {}
+
+
 def test_a_cancelled_last_waiting_job_leaves_the_jobs_ahead_of_it_their_state(
     connect: Callable[..., Peer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
