@@ -250,10 +250,13 @@ class SessionDispatch {
   /// more audio before a Finalize or half-close then fails the session, an
   /// automatic endpoint in between or not. The bytes are copied before the
   /// call returns. The frame's credit returns when it joins the utterance
-  /// being collected, which the dispatch ends itself (`automatic_endpoint`,
-  /// DurationLimit) as soon as it holds SessionTerms::max_utterance, without
-  /// waiting for more audio; what it collected stays
-  /// readable for as long as a backend job may read it.
+  /// being collected or, where voice activity decides the utterance, once
+  /// all of it was scored. The dispatch ends an utterance itself
+  /// (`automatic_endpoint`, DurationLimit) as soon as it holds
+  /// SessionTerms::max_utterance, without waiting for more audio or, with
+  /// voice activity, once the frame that reaches or passes it was scored;
+  /// what it collected stays readable for as long as a backend job may read
+  /// it.
   virtual void audio(std::uint64_t session_key, std::span<const std::byte> frame) = 0;
 
   /// One text segment, after SessionManager::accept_input, charged exactly

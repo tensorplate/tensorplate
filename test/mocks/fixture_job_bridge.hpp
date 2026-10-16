@@ -195,6 +195,11 @@ class FixtureJobBridge final : public BoundedJobBridge {
   /// The same for the one lane that runs `job_class`.
   void hold_jobs(JobClass job_class);
   void release_jobs();
+  void release_jobs(JobClass job_class);
+  /// From now until let_job_releases_go(), a job that ran is not released
+  /// when it ends: it stays among the unreleased jobs the capacity counts.
+  void hold_job_releases();
+  void let_job_releases_go();
   /// The next job whose work returns fails with `error`.
   void fail_next_job(Error error);
   /// What health() answers while the backend runs jobs.
@@ -256,6 +261,9 @@ class FixtureJobBridge final : public BoundedJobBridge {
   Lane voice_activity_;
   /// Jobs a lost backend failed; released by unload().
   std::vector<std::uint64_t> unreleased_;
+  bool job_releases_held_ = false;
+  /// Jobs that ended while releases were held.
+  std::vector<std::uint64_t> held_releases_;
   std::optional<Error> next_failure_;
   Result<void> health_;
 

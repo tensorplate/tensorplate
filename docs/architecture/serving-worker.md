@@ -1489,11 +1489,13 @@ and delivered in either drain.
 **Input.** Input belongs to the dispatch from the call that hands it
 over; `audio` copies the frame before it returns. Audio credit returns
 when a frame joins the utterance being collected, not when the utterance
-is decoded. The dispatch keeps that utterance within the longest the
+is decoded; where voice activity decides the utterance, once all of the
+frame was scored. The dispatch keeps that utterance within the longest the
 terms grant by ending it itself: an `automatic_endpoint`, with the
 duration-limit reason on its endpoint, as soon as the utterance holds
-that much and without waiting for more audio. What it collected stays readable
-for as long as a backend job may read it, which is until the backend
+that much and without waiting for more audio; with voice detection, once
+the frame that reaches or passes it was scored. What it collected stays
+readable for as long as a backend job may read it, which is until the backend
 reports that job released, and is dropped then. A text segment's waiting
 credit returns when its work starts and its active slot when the last
 item of its output was delivered.
@@ -1581,8 +1583,8 @@ it for a speech deployment
 ([The speech dispatch in the worker](#the-speech-dispatch-in-the-worker)).
 
 It is **provisional**: the least that serves one transcription and one
-synthesis, standing in for the mode handlers that will own windows,
-partial transcripts and endpointing.
+synthesis, standing in for the mode handlers that will own windows and
+partial transcripts.
 
 - **Audio input** (16 kHz mono 16-bit PCM, frames of 20 to 320 ms). A
   client Finalize, a half-close or the 30-second limit ends the
@@ -1598,7 +1600,47 @@ partial transcripts and endpointing.
   being decoded and two behind it), and a fourth, ended by the limit or
   by a Finalize, fails the session with `resource_exhausted`
   (`utterance_backlog_exceeded`). No stream reason names that, so a
-  stream reports it as `internal`.
+  stream reports it as `internal`. A half-close ends the open utterance
+  without that check: it ends the input, so nothing can follow it.
+- **Voice detection.** When the bridge answers that the backend runs
+  `vad_frames` (`runs`, asked once, when the dispatch is created), every
+  audio session's utterances are found by voice activity, as the
+  [voice detection policy](#voice-detection-policy) decides from the
+  backend's scores; every faster_whisper deployment runs it. The dispatch
+  cuts each session's audio into frames of 512 samples, whatever the
+  client's frames, and sends the frames not yet scored as one `vad_frames`
+  job, up to 32 frames, under one utterance key: a new key after a silence
+  endpoint, a Finalize or a half-close, so that the backend starts its
+  state afresh; the same key across a 30-second split. An utterance runs
+  from its onset to its endpoint, and its endpoint is offered as it ends,
+  before its decode; the final follows. Audio before the earliest sample
+  an onset could still name is dropped. A frame's input credit returns
+  once all of it was scored, so audio not yet scored stays within the
+  session's one second of credit and a slow lane slows the client rather
+  than failing it. Once an utterance ended, nothing after its end is
+  scored until its final was produced: the audio that follows waits, its
+  credit held, so at most a second of it is kept. A Finalize or a
+  half-close ends the utterance once every whole frame before it was
+  scored: in speech, from its onset to the Finalize's sample, the frame
+  left unscored included (split at the 30-second limit first if that
+  frame takes it past); in silence, an utterance that holds nothing, so a
+  final without segments and no decode. With such a backend a Finalize
+  therefore follows the detector: audio it ends that holds no onset, a
+  single speech frame included, is silence. So is an utterance that starts
+  at a 30-second split and lies wholly inside the silence run ending it,
+  the whole run at most: a final without segments, and no decode. A
+  `vad_frames` job that fails fails its session as a decode does. The
+  finalization of an automatic endpoint that a client Finalize joined is
+  completed by the Finalize's own final, unless
+  the endpoint's final was produced before the dispatch saw that Finalize:
+  the finalization then completes with it, and the Finalize is still
+  answered by a final of its own once its frames were scored, ahead of
+  any Finalize after it. An endpoint waiting for room in the output queue
+  does not hold its utterance's decode back, but the finalization it
+  belongs to completes only once the endpoint was queued. A backend that
+  does not run `vad_frames` leaves the session as above: a Finalize, a
+  half-close or the limit ends the utterance and its endpoint is offered
+  with its final.
 - **Text input.** A segment is one `tts_synthesis` with the session's
   language and voice at normal speed. Its single audio result stays in
   the backend's buffer and is cut from there into chunks of 20 ms: a
@@ -1616,16 +1658,21 @@ partial transcripts and endpointing.
   bounds the sum: enough such readers exhaust the pool, and other
   sessions' jobs then fail for want of a buffer. Only the number of
   sessions against the pool's size bounds it.
-- **One lane.** One job is in flight for the whole dispatch, and sessions
-  are served in the order their work became ready. A job keeps the lane
-  until the backend ends it, also when its session was cancelled
-  meanwhile, or failed at the job's deadline (below): that is where a
-  cancel waits behind the backend. With one job in flight nothing else is
-  queued behind it in the backend. The
-  dispatch records the longest wait between a session's release and the
-  backend's acknowledgement (`stats()`), for measuring that cost. The
-  scheduler's public contract is not involved: no speech job passes
-  through `InferScheduler`.
+- **One lane, and one for voice activity.** One decode or synthesis is in
+  flight for the whole dispatch, and sessions are served in the order
+  their work became ready. A job keeps the lane until the backend
+  reports it released, which follows its result, also when its session
+  was cancelled meanwhile, or failed at the job's deadline (below): that
+  is where a cancel waits behind the backend. With one such job open
+  nothing else of its lane is queued behind it in the backend.
+  `vad_frames` jobs go beside it, never behind it: one a session in
+  flight and at most eight across the dispatch (`kVadJobsInFlight`), each
+  counted until the backend reports it released, sessions in turn, which
+  the sidecar's voice-activity lane (one running, eight waiting) always
+  takes. The dispatch records the longest wait between a session's
+  release and the backend's acknowledgement (`stats()`), for measuring
+  that cost. The scheduler's public contract is not involved: no speech
+  job passes through `InferScheduler`.
 
 **The job's deadline and the release's bound.** Both are
 **provisional**: `SpeechDispatchOptions` defaults, which no configuration
@@ -1636,7 +1683,8 @@ long input will resize them.
 - A job that has not ended `job_deadline_base` (10 s) plus
   `job_deadline_per_audio_second` (0.5 s) for each second of its audio
   after its submit has missed its deadline. A decode counts its input,
-  at most 30 s, so its deadline is 10 to 25 s; a synthesis counts the 30
+  at most 30 s, so its deadline is 10 to 25 s; a `vad_frames` job its
+  frames, at most 1.024 s; a synthesis counts the 30
   s a segment may yield, since its length is known only once it ran, so
   25 s. A live session whose job missed its deadline fails with
   `timeout` (`deadline_missed`), and its release cancels the job; a
@@ -1653,8 +1701,8 @@ long input will resize them.
   utterance costs the same encoder pass as the measured one and more
   decoder tokens; the time is not linear in the audio.
 - A session's release must be acknowledged within `release_bound` (10 s)
-  of its request or, when its job is the one in flight, of that job's
-  deadline, whichever is later. The bound is fixed when the release is
+  of its request or of the deadline of each of its jobs in flight,
+  whichever is later. The bound is fixed when the release is
   asked, so a job that ends before the backend acknowledges the release
   does not bring it forward. A release the bridge refused counts as never
   acknowledged. When a release passes its bound the dispatch calls
@@ -1678,15 +1726,15 @@ long input will resize them.
 **What it cannot refuse before admission.** `negotiate` refuses an input
 kind the dispatch was not built for, an audio format other than the one
 above, and a language or voice that a job request could not carry. It
-does not ask the bridge which job classes the backend runs (`runs`), and
-the bridge has no query for the languages or voices the loaded profile
+asks the bridge only whether the backend runs `vad_frames`, and the
+bridge has no query for the languages or voices the loaded profile
 permits, so a job class, a language or a voice the backend refuses fails
 the session at its first job, after it was reported ready.
 
 **Threads.** One thread of the dispatch makes every report to the
 manager, every offer to an output queue and every bridge call but two:
 `create()` registers the sink, and `stop()` releases the sessions still
-open, and cancels the job of one whose release was refused, on its
+open, and cancels the jobs of one whose release was refused, on its
 caller's thread, once that thread has ended. The
 binding's calls and the bridge's callbacks only queue for it under one
 mutex, which is held for nothing else: no call to the manager, a queue,
@@ -1736,11 +1784,18 @@ A job the backend's loss ends applies the `backend_reset` event to every
 session the dispatch holds, not only to the job's: a session whose cancel
 still waits for its release ends as failed and keeps its slot until the
 release is confirmed, and a session whose job waits in the lane never
-submits it. After a
+submits it. A lost backend releases its jobs only at the unload and
+refuses every submit, so from the first `backend_reset` only a running
+job holds a place in either lane. After a
 backend was lost with no job open, nothing is delivered: the
-session learns of it at its next job, from the refused submit. A
-capacity refusal is not a load condition here: one job is in flight and
-the dispatch is the bridge's only submitter, so it means that invariant
+session learns of it at its next job, from the refused submit; a job
+whose result arrived just before such a loss is never reported released
+and keeps its place until the unload. A
+capacity refusal is not a load condition here: the dispatch counts a job
+until the backend reports it released, as the adapter does, so at most
+one decode or synthesis and eight `vad_frames` jobs are open, nine of the
+16 the adapter keeps open, and the dispatch is the bridge's only
+submitter, so it means that invariant
 was broken, and it fails the session the same way however it arrives.
 The table's last row covers the bridge's generic refusals, which pass
 through as they are and read on a stream as their code does:
@@ -1777,9 +1832,9 @@ while that bound is 1010 ms away, once a millisecond while the clock stands
 
 `VadPolicy` (`runtime/src/serving/session/vad_policy.hpp`, internal) is
 the per-session rule that turns voice-activity probabilities into
-utterance boundaries. Nothing calls it yet: the speech dispatch above
-still ends an utterance only on a client Finalize, a half-close or the
-30-second limit. It is pure (no clock, no thread, no allocation) and
+utterance boundaries; the speech dispatch above runs one for each audio
+session when the backend runs `vad_frames`. It is pure (no clock, no
+thread, no allocation) and
 reads one probability per frame of 512 samples at 16 kHz, the frames
 back to back from sample zero or from where a reset put them.
 
@@ -1797,6 +1852,9 @@ back to back from sample zero or from where a reset put them.
   utterance at the limit and the next one at the frame's end.
 - `reset(end)` is the dispatch ending an utterance itself: the policy
   returns to silence and its next frame and next onset start at `end`.
+- `earliest_utterance_start()` is the open utterance's first sample, or
+  in silence the earliest sample the next onset could name; no utterance
+  takes audio before it.
 - Offsets are absolute and never reset across utterances. An internal
   end b is `ceil(b * R / 16000)` samples at the input rate R (8,000 or
   16,000), and an internal interval [a, b) is
@@ -1867,18 +1925,18 @@ the unloaded session.
 
 It is **provisional**, as the dispatch is. The worker serves
 `streaming.max_sessions` stream sessions at a time, one by default, with
-one job in flight across them ([Several stream
-sessions](#several-stream-sessions)). It grants both input kinds whatever
-the model runs: its configuration does not say which job classes a
-deployment has, so a session whose mode the backend does not run is
-admitted and fails at its first job: the bridge refuses a job of a class
-the backend did not declare when it is submitted, and the session ends as
-`backend_unsupported_capability`. Nothing is refused at negotiation beyond
-what a job request could not carry, and one job is in flight. The
-dispatch's two bounds on a session (`utterance_backlog_exceeded`,
-`synthesis_audio_limit_exceeded`) have no reason of their own in the
-stream schema: the listener's mapping names such a failure `internal`,
-which no test drives through a worker.
+one decode or synthesis in flight across them and voice-activity jobs
+beside it ([Several stream sessions](#several-stream-sessions)). It grants
+both input kinds whatever the model runs: its configuration does not say
+which job classes a deployment has, so a session whose mode the backend
+does not run is admitted and fails at its first job: the bridge refuses a
+job of a class the backend did not declare when it is submitted, and the
+session ends as `backend_unsupported_capability`. Nothing is refused at
+negotiation beyond what a job request could not carry, and one decode or
+synthesis is in flight. The dispatch's two bounds on a session
+(`utterance_backlog_exceeded`, `synthesis_audio_limit_exceeded`) have no
+reason of their own in the stream schema: the listener's mapping names
+such a failure `internal`, which no test drives through a worker.
 
 **What one client can hold.** Each session holds one of the worker's
 `streaming.max_sessions` places, and an `Open` while every place is held
@@ -2050,11 +2108,12 @@ cancel is the listener's change.
 carries the dispatch's counters as of the last step of its thread:
 `jobs_submitted`, `jobs_completed`, `jobs_failed`, `jobs_discarded`,
 `releases_refused`, `jobs_past_deadline`, `releases_past_bound` and
-`longest_release_wait_ms`. A job the unload ends is in none of
-`jobs_completed`, `jobs_failed`, `jobs_discarded` and `releases_refused`,
-and a job the bridge refuses when it is submitted is in none of the
-counters. No metric is exported for them. A stall adds the `speech backend
-stalled` line above.
+`longest_release_wait_ms`. The job counters include `vad_frames` jobs,
+up to one for every 512 samples of a session's audio. A job the unload
+ends is in none of `jobs_completed`, `jobs_failed`, `jobs_discarded` and
+`releases_refused`, and a job the bridge refuses when it is submitted is
+in none of the counters. No metric is exported for them. A stall adds
+the `speech backend stalled` line above.
 
 **Tests.** `test/integration/speech_worker_test.cpp` drives a worker over
 gRPC in process: one transcription and one synthesis segment, each against
@@ -2115,19 +2174,22 @@ schema allows 1 to 2,048, the control channel's bound. This worker
 refuses more than 64 with `config_invalid`, because no memory budget
 charges what a session holds yet:
 
-- an audio session holds at most 3,915,008 bytes outside the buffer
-  manager: three ended utterances waiting for their finals and the one
-  being collected, each allocated at its longest, 960,000 bytes (30
-  seconds), when its first frame arrives; up to one second of frames
-  handed to the dispatch and not yet taken (32,000 bytes) and the frame
+- an audio session holds at most 3,951,104 bytes outside the buffer
+  manager: three ended utterances waiting for their finals, 960,000 bytes
+  (30 seconds) each at most, and the audio being collected, allocated at
+  its longest when its first frame arrives: 960,000 bytes, or with voice
+  detection 992,000 (the longest utterance and the second of credit that
+  may follow its last scored frame) and under 4,096 bytes of scores and
+  frame records; up to one second of frames handed to the dispatch and
+  not yet taken (32,000 bytes) and the frame
   being taken (up to 10,240 bytes); and its transcripts, up to 16,384
   bytes in its output queue as the queue charges them, one waiting
   outside it and the last one sent still encoded in the stream, up to
   8,192 bytes of text each. A decode copies its utterance into the
   buffer manager and frees the session's copy; that input stays until
-  the backend reports the job released, up to 960,000 bytes for each
-  decode not yet released (the python_pytorch adapter keeps at most 16
-  jobs unreleased);
+  the backend reports the job released, up to 960,000 bytes for the one
+  decode not yet released, and up to 32,768 bytes for each of the at
+  most eight `vad_frames` jobs not yet released;
 - a text session holds the synthesized result of its segment, up to
   1,440,000 bytes (30 seconds at 24 kHz), in the buffer manager the worker
   shares with HTTP, 256 MiB by default, and up to 126,592 bytes outside
@@ -2136,10 +2198,10 @@ charges what a session holds yet:
   last one sent, still encoded in the stream (960 bytes each); up to
   16,384 bytes of other messages in the queue; and its text, 4,096 bytes
   in the segment being synthesized and 8,192 waiting;
-- so 64 sessions hold at most about 351 MB of host memory, 64 x
-  (3,915,008 + 1,440,000 + 126,592) bytes, counting both kinds for every
-  session although each holds one or the other, plus the input of each
-  decode not yet released; the buffer manager holds about 92 MB of it,
+- so 64 sessions hold at most about 353 MB of host memory, 64 x
+  (3,951,104 + 1,440,000 + 126,592) bytes, counting both kinds for every
+  session although each holds one or the other, plus the input of the
+  jobs not yet released; the buffer manager holds about 92 MB of it,
   64 x 1,440,000 bytes, plus those inputs.
 
 The bound goes once that memory is charged against the deployment's
@@ -2151,11 +2213,14 @@ it is refused
 `session_count_limit` at once; gRPC's subchannel pool may put two
 channels opened with equal arguments on one connection.
 
-The sessions share the dispatch's one job in flight. Sessions take turns
-in the order their work became ready, and a session whose job ends goes
-behind the sessions that wait if it has more: one job per session in
-turn, never two of one session's jobs while another session waits. A
-session holds a waiting job or a running one, never both.
+The sessions share the dispatch's one decode or synthesis in flight.
+Sessions take turns in the order their work became ready, and a session
+whose job ends goes behind the sessions that wait if it has more: one job
+per session in turn, never two of one session's jobs while another
+session waits. A session holds a waiting job or a running one, never
+both. Its `vad_frames` jobs take turns the same way in a lane of their
+own, one a session and at most eight across the dispatch, each counted
+until the backend releases it.
 
 Each job a session owes therefore waits behind the jobs of the sessions
 ahead of it in the lane, up to `max_sessions - 1` of them, each bounded by
@@ -2163,7 +2228,15 @@ its own deadline (10 s plus 0.5 s per second of audio, 25 s for a
 30-second utterance), and the wait counts against the session's finalize
 deadline:
 
-- a `Finalize` owes one decode, within 10 s of it;
+- a `Finalize` owes one decode, within 10 s of it; with voice detection
+  also the `vad_frames` jobs for the frames before it, a second decode
+  when the frame left unscored splits its utterance at 30 s, and, when it
+  joined an automatic endpoint's finalization, that endpoint's decode, all
+  within 10 s of the endpoint. A `Finalize` taken while an earlier one still
+  waits for its frames (the finalization that one joined completed first)
+  owes that one's `vad_frames` jobs and decode too, so up to three decodes
+  within 10 s of the endpoint, and the earlier `Finalize`'s final is bound
+  by its jobs' deadlines only;
 - a half-close owes up to four decodes, one after another: the three
   ended utterances still waiting for their finals, then the one it ends,
   all within 10 s of it. A retire or a stop drains every session at once

@@ -30,6 +30,8 @@ constexpr std::uint16_t kNormalSpeed = 1000;
 /// The utterances of a session that ended and have no final yet: the one
 /// being decoded and those behind it. One more fails the session.
 constexpr std::size_t kEndedUtterances = 3;
+/// A voice-detected utterance is split where the session's longest one ends.
+static_assert(VadProfile{}.max_utterance == std::chrono::seconds{kLongestSeconds});
 constexpr std::uint64_t kMicrosPerSecond = 1'000'000;
 /// The shortest timed wait for a bound not yet due: a clock moved by hand can
 /// stand just short of one for as long as a test likes.
@@ -53,10 +55,11 @@ Error not_served(const char* message, const char* context) {
 }
 
 /// Input the manager accepted that was not handed over yet, or is still
-/// being worked on, keeps its depth above zero.
-bool input_owed(const SessionManager& manager, std::uint64_t key) {
+/// being worked on, keeps its depth above `held`: the frames handed over
+/// whose credit the dispatch holds.
+bool input_owed(const SessionManager& manager, std::uint64_t key, std::size_t held) {
   const auto status = manager.status(key);
-  return !status || status->input_queue_depth != 0;
+  return !status || status->input_queue_depth > held;
 }
 
 Error wrong_input_kind() {
@@ -106,7 +109,7 @@ struct SpeechJobDispatch::Moved {
 
 struct SpeechJobDispatch::JobEnded {
   std::uint64_t job_id = 0;
-  std::variant<TranscriptResult, SpeechAudio, Error> outcome;
+  std::variant<TranscriptResult, SpeechAudio, VadResult, Error> outcome;
 };
 
 struct SpeechJobDispatch::Command {
@@ -123,10 +126,13 @@ struct SpeechJobDispatch::Command {
     bool task_output = false;
   };
   struct SessionReleased {};
+  struct JobReleased {
+    std::uint64_t job_id = 0;
+  };
 
   std::uint64_t session_key = 0;
   std::variant<Opened, Moved, AudioIn, WaitingSegment, FinalizeIn, Delivered, JobEnded,
-               SessionReleased>
+               SessionReleased, JobReleased>
       body;
 };
 
@@ -154,8 +160,13 @@ struct SpeechJobDispatch::Core final : JobEventSink {
   // NOLINTNEXTLINE(bugprone-exception-escape)
   void on_failed(const JobEvent& event) noexcept override { job_ended(event); }
   void on_cancel_acknowledged(const JobEvent& /*event*/) noexcept override {}
+  // NOLINTNEXTLINE(bugprone-exception-escape)
   void on_released(const JobEvent& event) noexcept override {
     (void)take_input(event.identity().job_id);
+    Command command;
+    command.session_key = event.identity().session_key;
+    command.body = Command::JobReleased{event.identity().job_id};
+    post(std::move(command));
   }
   // NOLINTNEXTLINE(bugprone-exception-escape)
   void on_session_released(std::uint64_t session_key,
@@ -174,11 +185,14 @@ struct SpeechJobDispatch::Core final : JobEventSink {
         result.has_value() ? std::get_if<TranscriptResult>(&result->payload()) : nullptr;
     const auto* chunk =
         result.has_value() ? std::get_if<AudioChunkResult>(&result->payload()) : nullptr;
+    const auto* vad = result.has_value() ? std::get_if<VadResult>(&result->payload()) : nullptr;
     if (transcript != nullptr) {
       ended.outcome = *transcript;
     } else if (chunk != nullptr) {
       ended.outcome = SpeechAudio{HeldBuffer{buffers, chunk->pcm.buffer}, chunk->pcm.byte_offset,
                                   chunk->pcm.byte_size};
+    } else if (vad != nullptr) {
+      ended.outcome = *vad;
     } else {
       ended.outcome = event.error().value_or(Error::make(
           Error::Code::Internal, "a job ended with no speech result", "unexpected_job_result"));
@@ -239,11 +253,19 @@ Result<std::unique_ptr<SpeechJobDispatch>> SpeechJobDispatch::create(
     return unexpected(Error::make(Error::Code::ConfigInvalid,
                                   "speech dispatch needs a nonzero generation", "generation_zero"));
   }
+  std::optional<VadPolicy> detection;
+  if (bridge->runs(JobClass::VadFrames)) {
+    auto policy = VadPolicy::create(VadProfile{});
+    if (!policy) {
+      return unexpected(policy.error());
+    }
+    detection = *policy;
+  }
   auto core = std::make_shared<Core>(buffers);
   std::unique_ptr<SpeechJobDispatch> dispatch;
   try {
     dispatch = std::unique_ptr<SpeechJobDispatch>(
-        new SpeechJobDispatch(std::move(bridge), core, clock, std::move(options)));
+        new SpeechJobDispatch(std::move(bridge), core, clock, std::move(options), detection));
   } catch (const std::system_error&) {
     return unexpected(Error::make(Error::Code::Internal, "speech dispatch thread could not start",
                                   "dispatch_thread_unavailable"));
@@ -256,11 +278,13 @@ Result<std::unique_ptr<SpeechJobDispatch>> SpeechJobDispatch::create(
 
 SpeechJobDispatch::SpeechJobDispatch(std::shared_ptr<BoundedJobBridge> bridge,
                                      std::shared_ptr<Core> core, const SchedulerClock& clock,
-                                     SpeechDispatchOptions options)
+                                     SpeechDispatchOptions options,
+                                     std::optional<VadPolicy> detection)
     : bridge_(std::move(bridge)),
       core_(std::move(core)),
       clock_(clock),
       options_(std::move(options)),
+      detection_(detection),
       thread_([this] { run(); }) {}
 
 SpeechJobDispatch::~SpeechJobDispatch() {
@@ -313,14 +337,21 @@ void SpeechJobDispatch::stop() noexcept {
       }
     }
     // A release the bridge refused cancelled nothing either.
-    if (in_flight_) {
-      const auto owner = sessions_.find(in_flight_->session_key);
+    const auto cancel_if_refused = [this](const InFlight& job) {
+      const auto owner = sessions_.find(job.session_key);
       if (owner != sessions_.end() && owner->second.release_refused) {
-        (void)bridge_->cancel(in_flight_->job_id);
+        (void)bridge_->cancel(job.job_id);
       }
+    };
+    if (in_flight_) {
+      cancel_if_refused(*in_flight_);
+    }
+    for (const auto& [job_id, job] : vad_in_flight_) {
+      cancel_if_refused(job);
     }
     sessions_.clear();
     lane_.clear();
+    vad_lane_.clear();
   });
 }
 
@@ -467,7 +498,11 @@ SpeechJobDispatch::Step SpeechJobDispatch::take_step() {
 void SpeechJobDispatch::handle(SessionManager& manager, Command command) {
   const std::uint64_t key = command.session_key;
   if (auto* opened = std::get_if<Command::Opened>(&command.body)) {
-    sessions_[key].terms = std::move(opened->terms);
+    Session& session = sessions_[key];
+    session.terms = std::move(opened->terms);
+    if (detection_ && session.terms.input_kind == SessionInputKind::Audio) {
+      session.detection.emplace(*detection_);
+    }
     return;
   }
   if (auto* ended = std::get_if<JobEnded>(&command.body)) {
@@ -481,6 +516,11 @@ void SpeechJobDispatch::handle(SessionManager& manager, Command command) {
     }
   } else if (const auto* transition = std::get_if<Moved>(&command.body)) {
     moved(manager, key, *transition);
+  } else if (const auto* released = std::get_if<Command::JobReleased>(&command.body)) {
+    // The backend counts a job open until it is released, and so do the lanes.
+    if (unreleased_vad_.erase(released->job_id) == 0 && unreleased_job_ == released->job_id) {
+      unreleased_job_.reset();
+    }
   }
   if (const auto it = sessions_.find(key); it != sessions_.end()) {
     hand_over(manager, key, it->second, command);
@@ -493,8 +533,12 @@ void SpeechJobDispatch::hand_over(SessionManager& manager, std::uint64_t key, Se
                                   Command& command) {
   const bool takes_audio = session.terms.input_kind == SessionInputKind::Audio;
   if (const auto* input = std::get_if<Command::AudioIn>(&command.body)) {
-    // On a session that takes text the credit refuses this as wrong_input_kind.
-    if (manager.release_audio_input(key, 1, input->frame.size())) {
+    // On a session that takes text the credit refuses this as
+    // wrong_input_kind; with voice detection it returns once it was scored,
+    // or at once, the frame dropped, when the session has ended.
+    if (session.detection && !session.ended) {
+      keep_audio(session, input->frame);
+    } else if (manager.release_audio_input(key, 1, input->frame.size())) {
       take_audio(manager, key, session, input->frame);
     } else {
       session.ended = true;
@@ -509,8 +553,12 @@ void SpeechJobDispatch::hand_over(SessionManager& manager, std::uint64_t key, Se
     session.owed_finalize -= std::min(session.owed_finalize, 1U);
     if (!takes_audio) {
       session.finalize_sequence = asked->client_sequence;
+    } else if (session.detection) {
+      session.detection->pending.push_back(PendingEnd{
+          session.samples_accepted, EndpointReason::ClientFinalize, asked->client_sequence});
     } else if (may_end_utterance(manager, key, session)) {
-      end_utterance(session, EndpointReason::ClientFinalize, asked->client_sequence);
+      end_utterance(session, session.open_start, session.samples_accepted,
+                    EndpointReason::ClientFinalize, asked->client_sequence);
     }
   } else if (const auto* delivered = std::get_if<Command::Delivered>(&command.body)) {
     // Any delivery can make room for a held item; only task output counts.
@@ -584,39 +632,34 @@ void SpeechJobDispatch::acknowledge(SessionManager& manager, std::uint64_t key) 
 }
 
 void SpeechJobDispatch::job_ended(SessionManager& manager, std::uint64_t key, JobEnded& ended) {
-  if (!in_flight_ || in_flight_->job_id != ended.job_id) {
-    ++stats_.jobs_discarded;
+  const bool voice_activity = vad_in_flight_.erase(ended.job_id) != 0;
+  if (!voice_activity) {
+    if (!in_flight_ || in_flight_->job_id != ended.job_id) {
+      ++stats_.jobs_discarded;
+      return;
+    }
+    // Its deadline no longer applies; its lane stays taken until it is
+    // released.
+    in_flight_.reset();
+  }
+  Session* const served = serving_session(manager, key, ended, voice_activity);
+  if (served == nullptr) {
     return;
   }
-  // The lane is free whatever became of the job's session.
-  in_flight_.reset();
-  const auto it = sessions_.find(key);
-  const auto* error = std::get_if<Error>(&ended.outcome);
-  const bool served = it != sessions_.end() && !it->second.ended;
-  if (error != nullptr && backend_was_reset(*error)) {
-    ++(served ? stats_.jobs_failed : stats_.jobs_discarded);
-    reset_every_session(manager, *error);
-    return;
-  }
-  if (!served) {
-    ++stats_.jobs_discarded;
-    return;
-  }
-  Session& session = it->second;
-  session.job = JobState::None;
-  if (error != nullptr) {
-    ++stats_.jobs_failed;
-    fail_for_backend(manager, key, session, *error);
-    return;
-  }
+  Session& session = *served;
   ++stats_.jobs_completed;
+  if (auto* vad = std::get_if<VadResult>(&ended.outcome); vad != nullptr && voice_activity) {
+    session.detection->scores.insert(session.detection->scores.end(), vad->probabilities.begin(),
+                                     vad->probabilities.end());
+    return;
+  }
   if (auto* transcript = std::get_if<TranscriptResult>(&ended.outcome);
-      transcript != nullptr && !session.ended_utterances.empty()) {
+      transcript != nullptr && !voice_activity && !session.ended_utterances.empty()) {
     session.ended_utterances.front().transcript = std::move(*transcript);
     return;
   }
   if (auto* speech = std::get_if<SpeechAudio>(&ended.outcome);
-      speech != nullptr && session.active && !session.active->synthesized) {
+      speech != nullptr && !voice_activity && session.active && !session.active->synthesized) {
     const StreamAudioFormat& format = session.terms.audio_format;
     const std::uint64_t granted =
         static_cast<std::uint64_t>(session.terms.max_synthesis_audio.count()) *
@@ -637,17 +680,52 @@ void SpeechJobDispatch::job_ended(SessionManager& manager, std::uint64_t key, Jo
                    "unexpected_job_result"));
 }
 
+SpeechJobDispatch::Session* SpeechJobDispatch::serving_session(SessionManager& manager,
+                                                               std::uint64_t key,
+                                                               const JobEnded& ended,
+                                                               bool voice_activity) {
+  const auto it = sessions_.find(key);
+  const auto* error = std::get_if<Error>(&ended.outcome);
+  const bool served = it != sessions_.end() && !it->second.ended;
+  if (error != nullptr && backend_was_reset(*error)) {
+    ++(served ? stats_.jobs_failed : stats_.jobs_discarded);
+    reset_every_session(manager, *error);
+    return nullptr;
+  }
+  if (!served) {
+    ++stats_.jobs_discarded;
+    return nullptr;
+  }
+  Session& session = it->second;
+  (voice_activity ? session.detection->job : session.job) = JobState::None;
+  if (error != nullptr) {
+    ++stats_.jobs_failed;
+    fail_for_backend(manager, key, session, *error);
+    return nullptr;
+  }
+  return &session;
+}
+
 void SpeechJobDispatch::check_bounds(SessionManager& manager) {
   const auto now = clock_.now();
-  if (in_flight_ && !in_flight_->past_deadline && now >= in_flight_->deadline) {
-    in_flight_->past_deadline = true;
+  const auto check = [&](InFlight& job) {
+    if (job.past_deadline || now < job.deadline) {
+      return;
+    }
+    job.past_deadline = true;
     ++stats_.jobs_past_deadline;
-    const std::uint64_t key = in_flight_->session_key;
-    if (const auto it = sessions_.find(key); it != sessions_.end() && !it->second.ended) {
-      fail(manager, key, it->second,
+    if (const auto it = sessions_.find(job.session_key);
+        it != sessions_.end() && !it->second.ended) {
+      fail(manager, job.session_key, it->second,
            Error::make(Error::Code::Timeout, "the session's job did not end within its deadline",
                        "deadline_missed"));
     }
+  };
+  if (in_flight_) {
+    check(*in_flight_);
+  }
+  for (auto& [job_id, job] : vad_in_flight_) {
+    check(job);
   }
   for (auto& [key, session] : sessions_) {
     if (!session.releasing || session.past_bound || now < session.release_bound_at) {
@@ -674,6 +752,11 @@ std::optional<SchedulerClock::TimePoint> SpeechJobDispatch::next_bound() const {
   if (in_flight_ && !in_flight_->past_deadline) {
     consider(in_flight_->deadline);
   }
+  for (const auto& [job_id, job] : vad_in_flight_) {
+    if (!job.past_deadline) {
+      consider(job.deadline);
+    }
+  }
   for (const auto& [key, session] : sessions_) {
     if (session.releasing && !session.past_bound) {
       consider(session.release_bound_at);
@@ -684,22 +767,30 @@ std::optional<SchedulerClock::TimePoint> SpeechJobDispatch::next_bound() const {
 
 SchedulerClock::TimePoint SpeechJobDispatch::release_due(std::uint64_t key,
                                                          const Session& session) const {
-  // A release cancels the session's job, which ends only when its work does.
-  const bool job_in_flight = in_flight_ && in_flight_->session_key == key;
-  return std::max(session.release_asked,
-                  job_in_flight ? in_flight_->deadline : SchedulerClock::TimePoint{}) +
-         options_.release_bound;
+  // A release cancels the session's jobs, which end only when their work does.
+  SchedulerClock::TimePoint latest = session.release_asked;
+  if (in_flight_ && in_flight_->session_key == key) {
+    latest = std::max(latest, in_flight_->deadline);
+  }
+  for (const auto& [job_id, job] : vad_in_flight_) {
+    if (job.session_key == key) {
+      latest = std::max(latest, job.deadline);
+    }
+  }
+  return latest + options_.release_bound;
 }
 
 SchedulerClock::Duration SpeechJobDispatch::job_deadline(const JobRequest& request,
                                                          const Session& session) const {
   // A synthesis's audio is known only once it has run: its granted maximum.
   const StreamAudioFormat& format = session.terms.audio_format;
-  const auto* audio = std::get_if<AudioFrames>(&request.payload());
-  const std::uint64_t bytes =
-      audio != nullptr ? audio->pcm.byte_size
-                       : static_cast<std::uint64_t>(session.terms.max_segment_audio.count()) *
-                             format.bytes_per_second() / 1000;
+  std::uint64_t bytes = static_cast<std::uint64_t>(session.terms.max_segment_audio.count()) *
+                        format.bytes_per_second() / 1000;
+  if (const auto* audio = std::get_if<AudioFrames>(&request.payload())) {
+    bytes = audio->pcm.byte_size;
+  } else if (const auto* frames = std::get_if<VadFrames>(&request.payload())) {
+    bytes = frames->pcm.byte_size;
+  }
   return options_.job_deadline_base +
          per_audio(options_.job_deadline_per_audio_second, bytes, format.bytes_per_second());
 }
@@ -711,8 +802,16 @@ void SpeechJobDispatch::want_job(std::uint64_t key, Session& session) {
   }
 }
 
+void SpeechJobDispatch::want_vad(std::uint64_t key, Session& session) {
+  if (session.detection->job == JobState::None) {
+    session.detection->job = JobState::Queued;
+    vad_lane_.push_back(key);
+  }
+}
+
 void SpeechJobDispatch::start_next(SessionManager& manager) {
-  while (!in_flight_ && !lane_.empty()) {
+  while (!(backend_lost_ ? in_flight_.has_value() : unreleased_job_.has_value()) &&
+         !lane_.empty()) {
     const std::uint64_t key = lane_.front();
     lane_.pop_front();
     const auto it = sessions_.find(key);
@@ -730,13 +829,52 @@ void SpeechJobDispatch::start_next(SessionManager& manager) {
     // Recorded before the submit: the job's events may overtake its return.
     core_->hold_input(job_id, std::move(input));
     in_flight_ = InFlight{job_id, key, clock_.now() + job_deadline(*request, session)};
+    unreleased_job_ = job_id;
     session.job = JobState::Running;
     const auto submitted = bridge_->submit(std::move(request).value());
     if (!submitted) {
       // No event follows a refused submit, `released` included.
       (void)core_->take_input(job_id);
       in_flight_.reset();
+      unreleased_job_.reset();
       session.job = JobState::None;
+      fail_for_backend(manager, key, session, submitted.error());
+      continue;
+    }
+    ++stats_.jobs_submitted;
+  }
+  start_voice_activity(manager);
+}
+
+void SpeechJobDispatch::start_voice_activity(SessionManager& manager) {
+  while ((backend_lost_ ? vad_in_flight_.size() : unreleased_vad_.size()) < kVadJobsInFlight &&
+         !vad_lane_.empty()) {
+    const std::uint64_t key = vad_lane_.front();
+    vad_lane_.pop_front();
+    const auto it = sessions_.find(key);
+    if (it == sessions_.end() || it->second.ended) {
+      continue;
+    }
+    Session& session = it->second;
+    Detection& detection = *session.detection;
+    detection.job = JobState::None;
+    HeldBuffer input;
+    auto request = next_vad_request(manager, key, session, input);
+    if (!request) {
+      continue;
+    }
+    const std::uint64_t job_id = request->identity().job_id;
+    core_->hold_input(job_id, std::move(input));
+    vad_in_flight_.emplace(job_id,
+                           InFlight{job_id, key, clock_.now() + job_deadline(*request, session)});
+    unreleased_vad_.insert(job_id);
+    detection.job = JobState::Running;
+    const auto submitted = bridge_->submit(std::move(request).value());
+    if (!submitted) {
+      (void)core_->take_input(job_id);
+      vad_in_flight_.erase(job_id);
+      unreleased_vad_.erase(job_id);
+      detection.job = JobState::None;
       fail_for_backend(manager, key, session, submitted.error());
       continue;
     }
@@ -787,13 +925,52 @@ std::optional<JobRequest> SpeechJobDispatch::next_request(SessionManager& manage
   return std::move(decode).value();
 }
 
+std::optional<JobRequest> SpeechJobDispatch::next_vad_request(SessionManager& manager,
+                                                              std::uint64_t key, Session& session,
+                                                              HeldBuffer& input) {
+  Detection& detection = *session.detection;
+  const std::uint64_t frame_samples = detection.policy.profile().frame_samples;
+  const std::uint64_t until =
+      detection.pending.empty() ? session.samples_accepted : detection.pending.front().end_sample;
+  const auto frames = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+      (until - detection.submitted_end) / frame_samples, kMaxVadFramesPerJob));
+  const std::uint64_t width = session.terms.audio_format.bytes_per_sample();
+  const std::size_t size = frames * frame_samples * width;
+  const auto buffer = core_->buffers.allocate(size);
+  if (!buffer) {
+    fail(manager, key, session, buffer.error());
+    return std::nullopt;
+  }
+  input = HeldBuffer{core_->buffers, *buffer};
+  const auto bytes = core_->buffers.data(*buffer);
+  if (!bytes) {
+    fail(manager, key, session, bytes.error());
+    return std::nullopt;
+  }
+  const auto from =
+      session.open_audio.begin() +
+      static_cast<std::ptrdiff_t>((detection.submitted_end - session.open_start) * width);
+  std::copy(from, from + static_cast<std::ptrdiff_t>(size), bytes->begin());
+  auto request = JobRequest::create(
+      JobIdentity{next_job_id_++, key, options_.generation}, JobClass::VadFrames,
+      VadFrames{kJobInputAudioFormat, PcmWindow{*buffer, 0, size},
+                static_cast<std::uint32_t>(frame_samples), frames, detection.utterance_id},
+      JobOptions{});
+  if (!request) {
+    fail(manager, key, session, request.error());
+    return std::nullopt;
+  }
+  detection.submitted_end += frames * frame_samples;
+  return std::move(request).value();
+}
+
 void SpeechJobDispatch::take_audio(SessionManager& manager, std::uint64_t key, Session& session,
                                    std::span<const std::byte> frame) {
   const std::uint64_t width = session.terms.audio_format.bytes_per_sample();
   const std::uint64_t longest = static_cast<std::uint64_t>(session.terms.max_utterance.count()) *
                                 session.terms.audio_format.sample_rate_hz / 1000;
   while (!frame.empty() && !session.ended) {
-    const std::uint64_t room = longest - (session.samples_accepted - session.utterance_start);
+    const std::uint64_t room = longest - (session.samples_accepted - session.open_start);
     const auto part = frame.first(std::min<std::uint64_t>(frame.size(), room * width));
     if (session.open_audio.empty()) {
       // At its longest from the start, so it never grows past the audio it may hold.
@@ -802,20 +979,29 @@ void SpeechJobDispatch::take_audio(SessionManager& manager, std::uint64_t key, S
     session.open_audio.insert(session.open_audio.end(), part.begin(), part.end());
     session.samples_accepted += part.size() / width;
     frame = frame.subspan(part.size());
-    if (session.samples_accepted - session.utterance_start < longest) {
+    if (session.samples_accepted - session.open_start < longest) {
       continue;
     }
-    if (!may_end_utterance(manager, key, session)) {
+    if (!end_automatically(manager, key, session, session.open_start, session.samples_accepted,
+                           EndpointReason::DurationLimit)) {
       return;
     }
-    // The sink shows the finalization this starts before the utterance's job
-    // can end, so it is recorded from there.
-    if (!manager.apply(key, Event::AutomaticEndpoint)) {
-      session.ended = true;
-      return;
-    }
-    end_utterance(session, EndpointReason::DurationLimit, 0);
   }
+}
+
+void SpeechJobDispatch::keep_audio(Session& session, std::span<const std::byte> frame) {
+  const StreamAudioFormat& format = session.terms.audio_format;
+  if (session.open_audio.capacity() == 0) {
+    // The longest utterance, and the unscored audio the input credit allows
+    // past its last scored frame.
+    session.open_audio.reserve(static_cast<std::size_t>(
+        format.bytes_per_second() *
+        (static_cast<std::uint64_t>(session.terms.max_utterance.count()) / 1000 +
+         static_cast<std::uint64_t>(SessionBudgets::kInputAudioWindow.count()))));
+  }
+  session.open_audio.insert(session.open_audio.end(), frame.begin(), frame.end());
+  session.samples_accepted += frame.size() / format.bytes_per_sample();
+  session.detection->held_credit.push_back({session.samples_accepted, frame.size()});
 }
 
 bool SpeechJobDispatch::may_end_utterance(SessionManager& manager, std::uint64_t key,
@@ -830,21 +1016,49 @@ bool SpeechJobDispatch::may_end_utterance(SessionManager& manager, std::uint64_t
   return true;
 }
 
-void SpeechJobDispatch::end_utterance(Session& session, EndpointReason reason,
-                                      std::uint64_t finalize_sequence) {
-  session.ended_utterances.push_back({session.utterance_start, session.samples_accepted,
-                                      std::move(session.open_audio), reason, finalize_sequence,
-                                      std::nullopt});
-  session.utterance_start = session.samples_accepted;
-  session.open_audio = {};
+void SpeechJobDispatch::end_utterance(Session& session, std::uint64_t first, std::uint64_t end,
+                                      EndpointReason reason, std::uint64_t finalize_sequence) {
+  const std::uint64_t width = session.terms.audio_format.bytes_per_sample();
+  const auto begin = session.open_audio.begin();
+  const auto from = begin + static_cast<std::ptrdiff_t>((first - session.open_start) * width);
+  const auto to = begin + static_cast<std::ptrdiff_t>((end - session.open_start) * width);
+  const std::uint64_t utterance_id = ++session.utterances;
+  session.ended_utterances.push_back({utterance_id, first, end, std::vector<std::byte>(from, to),
+                                      reason, finalize_sequence, std::nullopt});
+  session.open_audio.erase(begin, to);
+  session.open_start = end;
+  session.ended_at = end;
+  // Detected by the dispatch itself: the client learns of it before the final.
+  if (session.detection) {
+    session.held.push_back(
+        make_task_output_item(EndpointDetectedOutput{utterance_id, end, reason}));
+  }
+}
+
+bool SpeechJobDispatch::end_automatically(SessionManager& manager, std::uint64_t key,
+                                          Session& session, std::uint64_t first, std::uint64_t end,
+                                          EndpointReason reason) {
+  if (!may_end_utterance(manager, key, session)) {
+    return false;
+  }
+  // The sink shows the finalization this starts before the utterance's job
+  // can end, so it is recorded from there.
+  if (!manager.apply(key, Event::AutomaticEndpoint)) {
+    session.ended = true;
+    return false;
+  }
+  end_utterance(session, first, end, reason, 0);
+  return true;
 }
 
 void SpeechJobDispatch::complete_drain(SessionManager& manager, std::uint64_t key,
                                        Session& session) {
-  if (session.owed_finalize != 0 || session.undelivered != 0) {
+  // A Finalize whose frames are still to be scored is owed too.
+  if (session.owed_finalize != 0 || session.undelivered != 0 ||
+      (session.detection && !session.detection->pending.empty())) {
     return;
   }
-  if (input_owed(manager, key)) {
+  if (input_owed(manager, key, session.detection ? session.detection->held_credit.size() : 0)) {
     return;
   }
   // Nothing is accepted after a drain started, so nothing follows this.
@@ -861,6 +1075,7 @@ void SpeechJobDispatch::fail(SessionManager& manager, std::uint64_t key, Session
 // The backend's reset ends every session it served, not only the job's; a
 // session whose cancel still waits for its release ends as failed instead.
 void SpeechJobDispatch::reset_every_session(SessionManager& manager, const Error& error) {
+  backend_lost_ = true;
   for (auto& [key, session] : sessions_) {
     session.ended = true;
     (void)manager.apply(key, Event::BackendReset, error);
@@ -888,6 +1103,12 @@ void SpeechJobDispatch::pump(SessionManager& manager, std::uint64_t key, Session
   while (!session.ended) {
     if (!session.held.empty()) {
       if (!offer_held(manager, key, session)) {
+        // With voice detection an endpoint waiting for room does not hold its
+        // utterance's decode back; the finalization still waits for it.
+        if (!session.ended && session.detection && !session.ended_utterances.empty() &&
+            session.ended_utterances.front().needs_decode()) {
+          want_job(key, session);
+        }
         return;
       }
       continue;
@@ -923,16 +1144,17 @@ bool SpeechJobDispatch::offer_held(SessionManager& manager, std::uint64_t key, S
 bool SpeechJobDispatch::complete_utterance(SessionManager& manager, std::uint64_t key,
                                            Session& session) {
   EndedUtterance& head = session.ended_utterances.front();
-  // An utterance without audio runs no job: a request could not carry it.
-  if (head.end_sample > head.first_sample && !head.transcript.has_value()) {
+  if (head.needs_decode()) {
     want_job(key, session);
     return false;
   }
   const EndedUtterance done = std::move(head);
   session.ended_utterances.pop_front();
   // One completion answers every finalization the manager has merged, so it
-  // waits for a client's Finalize that is still to be handed over.
-  if (session.finalizing && session.owed_finalize == 0) {
+  // waits for a client's Finalize that is still to be handed over, or whose
+  // frames are still to be scored.
+  if (session.finalizing && session.owed_finalize == 0 &&
+      !(session.detection && !session.detection->pending.empty())) {
     const auto completed = manager.apply(key, Event::FinalizeCompleted);
     if (!completed) {
       session.ended = true;
@@ -944,7 +1166,7 @@ bool SpeechJobDispatch::complete_utterance(SessionManager& manager, std::uint64_
     }
   }
   FinalTranscriptOutput transcript;
-  transcript.utterance_id = ++session.utterances;
+  transcript.utterance_id = done.utterance_id;
   transcript.end_sample_offset = done.end_sample;
   transcript.finalize_sequence = done.finalize_sequence;
   if (done.transcript.has_value() && !done.transcript->text.empty()) {
@@ -952,8 +1174,10 @@ bool SpeechJobDispatch::complete_utterance(SessionManager& manager, std::uint64_
     transcript.segments.push_back({start_micros(done.first_sample, rate),
                                    end_micros(done.end_sample, rate), done.transcript->text});
   }
-  session.held.push_back(make_task_output_item(
-      EndpointDetectedOutput{transcript.utterance_id, done.end_sample, done.reason}));
+  if (!session.detection) {
+    session.held.push_back(make_task_output_item(
+        EndpointDetectedOutput{done.utterance_id, done.end_sample, done.reason}));
+  }
   session.held.push_back(make_task_output_item(std::move(transcript)));
   return true;
 }
@@ -963,19 +1187,141 @@ bool SpeechJobDispatch::advance_audio(SessionManager& manager, std::uint64_t key
   if (!session.ended_utterances.empty()) {
     return complete_utterance(manager, key, session);
   }
+  if (session.detection && advance_detection(manager, key, session)) {
+    return true;
+  }
   if (!session.draining || session.owed_finalize != 0) {
     return false;
   }
-  if (session.close_open_utterance && session.samples_accepted > session.utterance_start) {
+  if (session.close_open_utterance && session.samples_accepted > session.ended_at) {
     // A frame accepted before the half-close belongs to this utterance.
-    if (input_owed(manager, key)) {
+    if (input_owed(manager, key, session.detection ? session.detection->held_credit.size() : 0)) {
       return false;
     }
-    end_utterance(session, EndpointReason::HalfClose, 0);
-    return true;
+    if (!session.detection) {
+      end_utterance(session, session.open_start, session.samples_accepted,
+                    EndpointReason::HalfClose, 0);
+      return true;
+    }
+    if (session.detection->pending.empty()) {
+      session.detection->pending.push_back(
+          PendingEnd{session.samples_accepted, EndpointReason::HalfClose, 0});
+      return true;
+    }
+    return false;
   }
   complete_drain(manager, key, session);
   return false;
+}
+
+bool SpeechJobDispatch::advance_detection(SessionManager& manager, std::uint64_t key,
+                                          Session& session) {
+  Detection& detection = *session.detection;
+  // While draining, only what a Finalize or a half-close ends is scored.
+  if (session.draining && detection.pending.empty()) {
+    return false;
+  }
+  if (!detection.scores.empty()) {
+    return observe_score(manager, key, session);
+  }
+  const std::uint64_t frame_samples = detection.policy.profile().frame_samples;
+  if (!detection.pending.empty() &&
+      detection.policy.next_frame_start() + frame_samples > detection.pending.front().end_sample) {
+    return end_as_asked(manager, key, session);
+  }
+  const std::uint64_t until =
+      detection.pending.empty() ? session.samples_accepted : detection.pending.front().end_sample;
+  if (until - detection.submitted_end >= frame_samples) {
+    want_vad(key, session);
+  }
+  return false;
+}
+
+bool SpeechJobDispatch::observe_score(SessionManager& manager, std::uint64_t key,
+                                      Session& session) {
+  Detection& detection = *session.detection;
+  const float probability = detection.scores.front();
+  detection.scores.pop_front();
+  // Only an utterance in speech is split or ended.
+  const std::uint64_t start = detection.policy.utterance_start().value_or(0);
+  const auto outcome = detection.policy.observe(probability);
+  if (!outcome) {
+    fail(manager, key, session, outcome.error());
+    return false;
+  }
+  if (outcome->duration_split &&
+      !end_automatically(manager, key, session, start, *outcome->duration_split,
+                         EndpointReason::DurationLimit)) {
+    return false;
+  }
+  if (outcome->silence_endpoint) {
+    const std::uint64_t end = *outcome->silence_endpoint;
+    const std::uint64_t first = outcome->duration_split.value_or(start);
+    // Only after a split can an utterance lie wholly inside the silence run
+    // that ends it: it holds no speech, so it is not decoded.
+    const bool silent = end - first <= detection.policy.silence_run_samples();
+    if (!end_automatically(manager, key, session, silent ? end : first, end,
+                           EndpointReason::Silence)) {
+      return false;
+    }
+    ++detection.utterance_id;
+  }
+  let_go(manager, key, session, detection.policy.next_frame_start());
+  return !session.ended;
+}
+
+bool SpeechJobDispatch::end_as_asked(SessionManager& manager, std::uint64_t key, Session& session) {
+  Detection& detection = *session.detection;
+  const PendingEnd asked = detection.pending.front();
+  const std::uint64_t longest = static_cast<std::uint64_t>(session.terms.max_utterance.count()) *
+                                session.terms.audio_format.sample_rate_hz / 1000;
+  // In silence the utterance holds nothing: its final has no segments.
+  std::uint64_t first = detection.policy.utterance_start().value_or(asked.end_sample);
+  // The frame left unscored can take an utterance in speech past the longest.
+  if (asked.end_sample - first > longest) {
+    if (!end_automatically(manager, key, session, first, first + longest,
+                           EndpointReason::DurationLimit)) {
+      return false;
+    }
+    first += longest;
+  }
+  if (!may_end_utterance(manager, key, session)) {
+    return false;
+  }
+  if (const auto reset = detection.policy.reset(asked.end_sample); !reset) {
+    fail(manager, key, session, reset.error());
+    return false;
+  }
+  detection.pending.pop_front();
+  detection.submitted_end = asked.end_sample;
+  ++detection.utterance_id;
+  end_utterance(session, first, asked.end_sample, asked.reason, asked.finalize_sequence);
+  let_go(manager, key, session, asked.end_sample);
+  return !session.ended;
+}
+
+void SpeechJobDispatch::let_go(SessionManager& manager, std::uint64_t key, Session& session,
+                               std::uint64_t scored) {
+  Detection& detection = *session.detection;
+  const std::uint64_t keep_from = detection.policy.earliest_utterance_start();
+  if (keep_from > session.open_start) {
+    const std::uint64_t width = session.terms.audio_format.bytes_per_sample();
+    session.open_audio.erase(
+        session.open_audio.begin(),
+        session.open_audio.begin() +
+            static_cast<std::ptrdiff_t>((keep_from - session.open_start) * width));
+    session.open_start = keep_from;
+  }
+  std::uint32_t frames = 0;
+  std::uint64_t bytes = 0;
+  while (!detection.held_credit.empty() && detection.held_credit.front().end_sample <= scored) {
+    ++frames;
+    bytes += detection.held_credit.front().bytes;
+    detection.held_credit.pop_front();
+  }
+  if (frames != 0 && !manager.release_audio_input(key, frames, bytes)) {
+    session.ended = true;
+  }
 }
 
 bool SpeechJobDispatch::advance_text(SessionManager& manager, std::uint64_t key, Session& session) {
