@@ -170,3 +170,58 @@ the CI workflows themselves. If you want to compare a local run to CI,
 rerun the corresponding workflow job locally with
 [`act`](https://github.com/nektos/act) or read the YAML in
 [`.github/workflows/`](../../.github/workflows/).
+
+## TensorRT SDK build without a GPU
+
+The optional `tensorrt-sdk` job in `tensorrt-sdk.yml` requires the real SDK with
+`TP_ENABLE_TENSORRT=ON` and `TP_REQUIRE_TENSORRT_SDK=ON`. It builds the
+worker and tests, checks the worker's ELF dependencies on `nvinfer` and
+`cudart`, and runs `--version` to prove only that the loader resolves the
+libraries: this flag returns before worker initialization. It also runs
+T1/T2/T3 tests. TensorRT tests cover registration, capabilities, empty-file
+rejection, and a non-empty invalid-engine case that expects `LoadFailed`.
+The junk-engine case runs only where a usable CUDA driver and device exist;
+otherwise it reports `GTEST_SKIP` because the TensorRT runtime needs a driver
+to get past `createInferRuntime`. Thus `createInferRuntime` without a driver
+is unverified on the hosted runner. This is compile/link coverage, not evidence
+of successful engine creation or inference. The existing no-SDK and sanitizer
+jobs remain separate.
+
+The workflow runs on every push to main/develop. Pull requests run it only
+when they touch `runtime/`, `serving_worker/`, `include/`, `cmake/`,
+`CMakeLists.txt`, `vcpkg.json`, `test/`, `tools/ci/*tensorrt*`, or the workflow
+file itself. Keep this check optional in branch protection: a skipped,
+path-filtered required workflow blocks unrelated pull requests. An SDK
+build regression caused outside those paths is caught on the develop push.
+
+The exact NVIDIA package pins and repository URL live in
+[`tools/ci/tensorrt-sdk-versions.sh`](../../tools/ci/tensorrt-sdk-versions.sh), including
+CUDA development dependencies. The installer uses NVIDIA's checksum-pinned
+keyring package, checks its download/checksum/install status explicitly, and
+uses the authenticated apt repository. APT verifies the signed repository
+index and checks package hashes as it downloads them into a fresh temporary
+archive directory. No SDK archive cache is restored or saved; the temporary
+directory is removed on exit. It installs neither a GPU
+driver nor the full CUDA toolkit. `cuda-driver-dev` supplies link stubs, not
+a kernel driver. `nvcc` supplies the toolkit discovery metadata CMake uses;
+TensorPlate's sources still compile with the job's Clang toolchain.
+
+The x86 TensorRT packages belong to the same 10.3 API family as the
+[recorded Jetson build](../validation/sdk-e2e-validation.md#observed-evidence-yolov8n-on-jetson-orin-nano-2026-06-18).
+NVIDIA's [JetPack 6.2 stack](https://developer.nvidia.com/embedded/jetpack-sdk-62)
+pairs TensorRT 10.3 with CUDA 12.6; the x86 TensorRT packages were built for
+CUDA 12.5 and are tested here with that toolkit. The adapter uses the same
+TensorRT 10 deletion, named-tensor, shape/address and `enqueueV3` APIs on
+both architectures. Serialized engines still need to match their target GPU.
+
+To reproduce the job, use a disposable Ubuntu 22.04 amd64 container with
+CMake 3.25+, Clang 14, Ninja, curl, CA certificates, Python and vcpkg at the
+manifest baseline. The installer modifies the container's apt sources and
+installed packages. Run `tools/ci/install-tensorrt-sdk.sh`,
+source `tools/ci/tensorrt-sdk-versions.sh`, and use the job's configure/build/test
+commands with your own build directory and `-DCUDAToolkit_ROOT="$CUDAToolkit_ROOT"`.
+It needs roughly 2.5 GB of package downloads and 6.5 GB installed SDK space,
+plus build space. Every fresh job downloads those packages again (typically
+about one to two minutes on a hosted runner). The summary records APT's
+reported download bytes/time and total download/install time, excluding
+repository and keyring setup.

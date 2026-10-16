@@ -328,6 +328,10 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- Hosted amd64 CI builds and links the worker against pinned TensorRT and
+  CUDA development packages and runs device-free tests in an optional,
+  path-filtered workflow, with fresh SDK downloads and timing. (XE-01)
+
 - The `faster_whisper` runner profile runs `vad_frames` jobs with the Silero
   voice-activity model the faster-whisper wheel carries, on one ONNX Runtime
   CPU session per load with one intra-op and one inter-op thread and
