@@ -35,6 +35,8 @@ import torchaudio
 from torchaudio.functional import forced_align, merge_tokens
 
 RATE = 16000
+# wav2vec 2.0's feature encoder emits one frame per 320 samples at 16 kHz.
+STRIDE = 320
 HARAKAT_AND_TATWEEL = "".join(chr(c) for c in range(0x064B, 0x0653)) + chr(0x0670) + chr(0x0640)
 
 
@@ -89,15 +91,15 @@ class Aligner:
             for s in merge_tokens(path[0], scores[0].exp(), blank=self.blank)
             if s.token != self.index[self.separator]
         ]
-        ratio = samples.shape[-1] / frames
-        onset = int(spans[0].start * ratio)
-        end = min(samples.shape[-1], int(spans[-1].end * ratio))
+        onset = spans[0].start * STRIDE
+        end = min(samples.shape[-1], spans[-1].end * STRIDE)
         return {
             "aligned": True,
             "edge_oov": edge_oov,
             "speech_onset_sample": onset,
             "speech_end_sample": end,
             "frames": frames,
+            "stride": STRIDE,
             "score": round(sum(s.score for s in spans) / len(spans), 4),
             "words_aligned": len(kept),
             "words": len(words),

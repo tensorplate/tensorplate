@@ -12,6 +12,7 @@ pool and its exclusions. The aligner runs between the steps:
     speech_corpus_build.py candidates PLAN --sources DIR --work DIR
     speech_corpus_align.py WORK/align-jobs.json WORK/labels.jsonl --arabic-model DIR
     speech_corpus_build.py build PLAN --sources DIR --work DIR --root CORPUS [--sv56 BIN]
+    speech_corpus_build.py restride-labels LABELS OUT
 
 `noise` takes the noise pool; the screen steps decode it and print the
 exclusions the plan records. `candidates` lists every source file a pool may
@@ -20,7 +21,8 @@ writes the aligner's jobs. `build` applies the rules that need the labels,
 selects each quota in a seeded order under the speaker and text caps, writes
 the clean, noisy and telephony files, the manifest and the labels selection
 read under the empty directory CORPUS, and records what every rule withheld
-per source. `speech_corpus.py check --root --rebuild` verifies the result.
+per source. `restride-labels` converts labels the aligner recorded before it used the
+model's 320-sample stride. `speech_corpus.py check --root --rebuild` verifies the result.
 Reading FLAC or float WAV sources needs the soundfile package.
 """
 
@@ -60,10 +62,56 @@ RULE_FULL_SCALE = f"{FULL_SCALE_LIMIT} or more samples at 16-bit full scale"
 RULE_TEXT_POOLS = "reference text used in the other pool"
 RULE_UNALIGNED = "first or last word not aligned"
 RULE_EDGE = "labelled speech within 20 ms of the file's start or end"
-LABEL_RULES = (RULE_UNALIGNED, RULE_EDGE)
+SCORE_FLOOR = 0.2
+SPAN_FLOOR_SAMPLES = 1920
+ONSET_TOLERANCE_SAMPLES = 800
+RULE_SCORE = f"aligner score below {SCORE_FLOOR}"
+RULE_SPAN = "labelled speech shorter than 120 ms"
+RULE_ENERGY = "under 1 s, labelled onset more than 50 ms from the band-energy onset"
+LABEL_RULES = (RULE_UNALIGNED, RULE_SCORE, RULE_SPAN, RULE_EDGE, RULE_ENERGY)
+# The band-energy onset: the first of 3 consecutive 10 ms frames whose 300-3400 Hz energy is
+# within 25 dB of the clip's loudest frame. The band is two Butterworth (RBJ) high-pass
+# biquads at 300 Hz, then two low-pass biquads at 3400 Hz, for 16 kHz; their coefficients
+# are fixed here so every machine computes the same onset.
+ENERGY_ONSET = "tp-band-energy-onset-300-3400hz-25db-3x10ms-v1"
+_HIGH_PASS = (
+    0.920066158429168,
+    -1.840132316858336,
+    0.920066158429168,
+    -1.8337326589246479,
+    0.8465319747920238,
+)
+_LOW_PASS = (
+    0.2271179639348646,
+    0.4542359278697292,
+    0.2271179639348646,
+    -0.2766646145182034,
+    0.185136470257662,
+)
+BAND_SECTIONS = (_HIGH_PASS, _HIGH_PASS, _LOW_PASS, _LOW_PASS)
+ENERGY_FRAME = 160
+ENERGY_RANGE_DB = 25
+ENERGY_RUN = 3
+# What the plan states; a build refuses a plan that states other rules than these.
+LABEL_RULES_PLAN = {
+    "score_floor": SCORE_FLOOR,
+    "span_floor_samples": SPAN_FLOOR_SAMPLES,
+    "energy_onset": ENERGY_ONSET,
+    "energy_check_below_samples": corpus.ONE_SECOND,
+    "onset_tolerance_samples": ONSET_TOLERANCE_SAMPLES,
+}
+# wav2vec 2.0's feature encoder emits one frame per 320 samples at 16 kHz.
+ALIGNER_STRIDE = 320
 CLASSES = ("negation", "numerals", "repetition", "window_seam")
 SCREEN_LETTERS = 10
-LABEL_FIELDS = ("aligned", "edge_oov", "speech_onset_sample", "speech_end_sample")
+LABEL_FIELDS = (
+    "aligned",
+    "edge_oov",
+    "speech_onset_sample",
+    "speech_end_sample",
+    "score",
+    "stride",
+)
 
 NEGATION = {
     "en": {
@@ -153,6 +201,69 @@ def semantic_classes(text: str, language: str, speech_samples: int) -> list[str]
     if speech_samples > WINDOW_SEAM_SAMPLES:
         found.append("window_seam")
     return found
+
+
+def band_energies(samples: list[int]) -> list[float]:
+    """Energy per 10 ms frame of the samples after the 300-3400 Hz band filter."""
+    out = [float(x) for x in samples]
+    for b0, b1, b2, a1, a2 in BAND_SECTIONS:
+        x1 = x2 = y1 = y2 = 0.0
+        filtered = []
+        for x in out:
+            y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+            x2, x1, y2, y1 = x1, x, y1, y
+            filtered.append(y)
+        out = filtered
+    return [
+        sum(v * v for v in out[i : i + ENERGY_FRAME])
+        for i in range(0, len(out) - ENERGY_FRAME + 1, ENERGY_FRAME)
+    ]
+
+
+def energy_onset(samples: list[int]) -> int | None:
+    """The band-energy onset in samples, or None when no run of frames qualifies."""
+    energies = band_energies(samples)
+    if not energies or max(energies) <= 0:
+        return None
+    threshold = max(energies) * 10 ** (-ENERGY_RANGE_DB / 10)
+    run = 0
+    for index, energy in enumerate(energies):
+        run = run + 1 if energy >= threshold else 0
+        if run == ENERGY_RUN:
+            return (index - ENERGY_RUN + 1) * ENERGY_FRAME
+    return None
+
+
+def onset_disagrees(label_onset: int, band_onset: int | None) -> bool:
+    return band_onset is None or abs(label_onset - band_onset) > ONSET_TOLERANCE_SAMPLES
+
+
+def _energy_onset_of(path: str) -> int | None:
+    return energy_onset(read_source_audio(Path(path))[1])
+
+
+def restride_label(result: dict[str, Any]) -> dict[str, Any]:
+    """A label the aligner recorded at int(frame * samples / frames), recovered to the
+    model's frame * 320. Near 320 samples a frame, each recorded sample is one frame's."""
+    if "stride" in result or not result.get("aligned"):
+        return result
+    if "samples" not in result or "frames" not in result:
+        raise BuildError(f"{result['id']}: no samples and frames to recover its frames from")
+    ratio = result["samples"] / result["frames"]
+
+    def frame(sample: int) -> int:
+        near = int(sample / ratio)
+        found = [k for k in range(max(0, near - 2), near + 3) if int(k * ratio) == sample]
+        if not found:
+            raise BuildError(f"{result['id']}: sample {sample} is no frame's")
+        return found[0]
+
+    return {
+        **result,
+        "speech_onset_sample": frame(result["speech_onset_sample"]) * ALIGNER_STRIDE,
+        "speech_end_sample": frame(result["speech_end_sample"]) * ALIGNER_STRIDE,
+        "stride": ALIGNER_STRIDE,
+    }
 
 
 def select_order(version: str, candidate: dict[str, Any]) -> str:
@@ -609,6 +720,10 @@ def build_step(
     labels_path: Path | None = None,
 ) -> None:
     version = plan["corpus"]["version"]
+    if plan.get("label_rules") != LABEL_RULES_PLAN:
+        raise BuildError(
+            f"the plan states label rules {plan.get('label_rules')}, not {LABEL_RULES_PLAN}"
+        )
     if root is not None and root.exists() and any(root.iterdir()):
         raise BuildError(f"{root} is not empty; a build writes a whole corpus")
     found = json.loads((work / "candidates.json").read_text(encoding="utf-8"))
@@ -625,11 +740,27 @@ def build_step(
         if not result["aligned"] or result["edge_oov"]:
             c["withheld"] = RULE_UNALIGNED
             continue
+        if result.get("stride") != ALIGNER_STRIDE:
+            raise BuildError(
+                f"{c['key']}: a label not on {ALIGNER_STRIDE}-sample frames; "
+                "restride-labels converts it"
+            )
         c["onset"], c["end"] = result["speech_onset_sample"], result["speech_end_sample"]
-        if c["onset"] < EDGE_SAMPLES or c["samples"] - c["end"] < EDGE_SAMPLES:
+        if result["score"] < SCORE_FLOOR:
+            c["withheld"] = RULE_SCORE
+        elif c["end"] - c["onset"] < SPAN_FLOOR_SAMPLES:
+            c["withheld"] = RULE_SPAN
+        elif c["onset"] < EDGE_SAMPLES or c["samples"] - c["end"] < EDGE_SAMPLES:
             c["withheld"] = RULE_EDGE
-            continue
-        c["bin"] = corpus.duration_bin(c["end"] - c["onset"])
+        else:
+            c["bin"] = corpus.duration_bin(c["end"] - c["onset"])
+    short = [c for c in found if c.get("bin") == "lt1s"]
+    with ProcessPoolExecutor(workers) as pool:
+        onsets = pool.map(_energy_onset_of, [str(sources / c["path"]) for c in short], chunksize=16)
+        for c, onset in zip(short, onsets, strict=True):
+            c["energy_onset"] = onset
+            if onset_disagrees(c["onset"], onset):
+                c["withheld"] = RULE_ENERGY
     taken: set[str] = set()
     chosen: list[dict[str, Any]] = []
     unfilled = []
@@ -735,9 +866,22 @@ def build_step(
         if source["id"] == plan["noise"]["source"]:
             entry["selection"] = pool_noise["selection"]
         manifest_sources.append(entry)
+    filed_keys = sorted(c["key"] for c in found if c["key"] in labels and examined(c))
+    by_key = {c["key"]: c for c in found}
+    unmeasured = [k for k in filed_keys if "onset" in by_key[k] and "energy_onset" not in by_key[k]]
+    with ProcessPoolExecutor(workers) as pool:
+        onsets = pool.map(
+            _energy_onset_of, [str(sources / by_key[k]["path"]) for k in unmeasured], chunksize=4
+        )
+        for key, onset in zip(unmeasured, onsets, strict=True):
+            by_key[key]["energy_onset"] = onset
     filed = [
-        {"id": key, **{k: labels[key].get(k) for k in LABEL_FIELDS}}
-        for key in sorted(c["key"] for c in found if c["key"] in labels and examined(c))
+        {
+            "id": key,
+            **{k: labels[key].get(k) for k in LABEL_FIELDS},
+            "energy_onset_sample": by_key[key].get("energy_onset"),
+        }
+        for key in filed_keys
     ]
     (root / "labels.jsonl").write_text(
         "".join(json.dumps(line, sort_keys=True) + "\n" for line in filed), encoding="utf-8"
@@ -905,7 +1049,27 @@ def dump_manifest(manifest: dict[str, Any]) -> str:
     return "{\n" + ",\n".join(parts) + "\n}\n"
 
 
+def restride_step(labels: Path, out: Path) -> None:
+    lines = labels.read_text(encoding="utf-8").splitlines()
+    converted = [restride_label(json.loads(line)) for line in lines]
+    out.write_text(
+        "".join(json.dumps(x, sort_keys=True) + "\n" for x in converted), encoding="utf-8"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["restride-labels"]:
+        restride = argparse.ArgumentParser(prog="speech_corpus_build.py restride-labels")
+        restride.add_argument("labels", type=Path)
+        restride.add_argument("out", type=Path)
+        paths = restride.parse_args(argv[1:])
+        try:
+            restride_step(paths.labels, paths.out)
+        except BuildError as exc:
+            print(f"speech-corpus-build: {exc}", file=sys.stderr)
+            return 1
+        return 0
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "step", choices=("noise", "screen-jobs", "screen-exclusions", "candidates", "build")

@@ -96,6 +96,68 @@ def ordered(keys: list[str]) -> list[str]:
     return sorted(keys, key=lambda k: build.order_key(VERSION, "select", "s", k))
 
 
+def tone(total: int, start: int, hz: float, amplitude: float, stop: int | None = None) -> list[int]:
+    end = total if stop is None else stop
+    return [
+        round(amplitude * math.sin(2 * math.pi * hz * i / SECOND)) if start <= i < end else 0
+        for i in range(total)
+    ]
+
+
+def mix(*parts: list[int]) -> list[int]:
+    return [sum(values) for values in zip(*parts, strict=True)]
+
+
+def check_energy_onset() -> None:
+    speech = tone(SECOND, 8000, 1000, 8000)
+    assert build.energy_onset(speech) == 8000
+    assert build.energy_onset([0] * SECOND) is None
+    assert build.energy_onset(mix(speech, tone(SECOND, 0, 100, 8000))) == 8000, "below the band"
+    assert build.energy_onset(mix(speech, tone(SECOND, 0, 7500, 8000))) == 8000, "above it"
+    quieter = mix(speech, tone(SECOND, 1600, 1000, 8000 * 10 ** (-24 / 20)))
+    assert build.energy_onset(quieter) == 1600, "24 dB below the peak is within the range"
+    quietest = mix(speech, tone(SECOND, 1600, 1000, 8000 * 10 ** (-26 / 20)))
+    assert build.energy_onset(quietest) == 8000, "26 dB below is not"
+    # The band filter rings for a frame after a burst, so an n-frame burst reads n + 1.
+    one_frame = mix(speech, tone(SECOND, 1600, 1000, 8000, stop=1760))
+    assert build.energy_onset(one_frame) == 8000, "two frames are no run of three"
+    two_frames = mix(speech, tone(SECOND, 1600, 1000, 8000, stop=1920))
+    assert build.energy_onset(two_frames) == 1600, "three frames are"
+    assert build.energy_onset(tone(SECOND, 8160, 1000, 8000)) == 8160, "10 ms frames"
+    assert build.onset_disagrees(4000, 3200) is False
+    assert build.onset_disagrees(2400, 3200) is False
+    assert build.onset_disagrees(4001, 3200) is True
+    assert build.onset_disagrees(2399, 3200) is True
+    assert build.onset_disagrees(3200, None) is True
+
+
+def check_restride() -> None:
+    ratio = SECOND / 49
+    old = {"id": "x", "aligned": True, "samples": SECOND, "frames": 49, "score": 0.9}
+    line = {**old, "speech_onset_sample": int(10 * ratio), "speech_end_sample": int(40 * ratio)}
+    assert build.restride_label(line) == {
+        **old,
+        "speech_onset_sample": 3200,
+        "speech_end_sample": 12800,
+        "stride": 320,
+    }
+    last = {**line, "speech_end_sample": SECOND}
+    assert build.restride_label(last)["speech_end_sample"] == 49 * 320, "the last frame"
+    # 16003 samples in 49 frames: the last frame's int(49 * ratio) rounds down to 16002.
+    rounded = {**old, "samples": 16003, "speech_onset_sample": 0, "speech_end_sample": 16002}
+    assert build.restride_label(rounded)["speech_end_sample"] == 49 * 320
+    strided = build.restride_label(line)
+    assert build.restride_label(strided) == strided, "converted once"
+    unaligned = {"id": "y", "aligned": False, "edge_oov": True, "samples": SECOND}
+    assert build.restride_label(unaligned) == unaligned
+    filed = {k: v for k, v in line.items() if k not in ("samples", "frames")}
+    expect_error(lambda: build.restride_label(filed), "no samples and frames")
+    expect_error(
+        lambda: build.restride_label({**line, "speech_onset_sample": int(10 * ratio) + 1}),
+        "is no frame's",
+    )
+
+
 def check_select() -> None:
     quota = {"source": "s", "pool": "held_out", "bin": "1to5s", "count": 2}
     keys = ordered([f"f{i}" for i in range(6)])
@@ -300,6 +362,11 @@ AT_START = first_key("15-1-", below=FIRST_USABLE, source="ls-test")
 AT_END = first_key("15-2-", below=FIRST_USABLE, source="ls-test")
 GSC_USABLE = ["yes/aa01_nohash_0", "yes/aa01_nohash_1", "yes/aa02_nohash_0", "no/aa03_nohash_0"]
 LAST_GSC = max(build.order_key(VERSION, "select", "gsc", u) for u in GSC_USABLE)
+FIRST_GSC = min(build.order_key(VERSION, "select", "gsc", u) for u in GSC_USABLE)
+# Keywords the label rules withhold, named to come before every usable one.
+GSC_LOW_SCORE = first_key("yes/ls", below=FIRST_GSC, source="gsc")
+GSC_SHORT = first_key("yes/sh", below=FIRST_GSC, source="gsc")
+GSC_LATE_ONSET = first_key("yes/lo", below=FIRST_GSC, source="gsc")
 # An unaligned keyword after every usable one: the quotas fill before it.
 GSC_LATE = first_key("yes/zz", above=LAST_GSC, source="gsc")
 
@@ -348,7 +415,8 @@ def make_sources(base: Path) -> Sources:
         rows.append(f"{sentence}\t{name}\t{raw}\tsentence {sentence} read\tx\t0\tFEMALE")
     (base / "fl/test.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
     lists: dict[str, list[str]] = {"held": [], "tune": []}
-    for line, pool in [(u, "held") for u in GSC_USABLE + [GSC_LATE]] + [
+    held = [*GSC_USABLE, GSC_LATE, GSC_LOW_SCORE, GSC_SHORT, GSC_LATE_ONSET]
+    for line, pool in [(u, "held") for u in held] + [
         ("up/bb01_nohash_0", "tune"),
         ("off/bb02_nohash_0", "tune"),
     ]:
@@ -422,6 +490,7 @@ def make_plan() -> dict[str, Any]:
             },
         },
         "aligners": {"en": "synthetic-aligner"},
+        "label_rules": dict(build.LABEL_RULES_PLAN),
         "semantic": {"per_class": 1},
         "source_fields": [
             "id",
@@ -544,13 +613,30 @@ def write_labels(work: Path, s: Sources) -> list[dict[str, Any]]:
             "speech_onset_sample": onset,
             "speech_end_sample": end,
             "score": 0.9,
+            "stride": 320,
         }
         name = job["id"].split("/", 1)[1]
         if name == EDGE_OOV:
             result["edge_oov"] = True
         if name in (UNALIGNED, GSC_LATE):
             result = {"aligned": False, "edge_oov": False}
-        edges = {AT_START: (319, end), AT_END: (onset, 48000 - 319), "16-1-0000": (320, 47680)}
+        if name == GSC_LOW_SCORE:
+            result["score"] = 0.19
+        if name == "no/aa03_nohash_0":
+            # The only usable "no", and at both floors: a score of 0.2 and 120 ms are kept.
+            result["score"] = 0.2
+        edges = {
+            AT_START: (319, end),
+            AT_END: (onset, 48000 - 319),
+            "16-1-0000": (320, 47680),
+            GSC_SHORT: (onset, onset + 1919),
+            # Under both floors: the score rule, checked first, counts it.
+            GSC_LOW_SCORE: (onset, onset + 1900),
+            "no/aa03_nohash_0": (onset, onset + 1920),
+            GSC_LATE_ONSET: (onset + 801, end),
+            # Over 1 s, a label far from the energy onset is kept.
+            "11-1-0000": (onset + 1600, end),
+        }
         if name in edges:
             result["speech_onset_sample"], result["speech_end_sample"] = edges[name]
         lines.append(json.dumps({"id": job["id"], **result}))
@@ -626,6 +712,23 @@ def check_build() -> None:
         for name in set(names):
             group = [found[j["id"]] for j, n in zip(jobs, names, strict=True) if n == name]
             assert group == sorted(group, key=lambda c: build.select_order(VERSION, c))
+        stated = {**plan["label_rules"], "score_floor": 0.3}
+        expect_error(
+            lambda: build.build_step({**plan, "label_rules": stated}, base, work, None, None, 2),
+            "the plan states label rules",
+        )
+        unstated = {k: v for k, v in plan.items() if k != "label_rules"}
+        expect_error(
+            lambda: build.build_step(unstated, base, work, None, None, 2),
+            "the plan states label rules None",
+        )
+        written = (work / "labels.jsonl").read_text(encoding="utf-8")
+        old_frames = written.replace(', "stride": 320', "", 1)
+        (work / "labels.jsonl").write_text(old_frames, encoding="utf-8")
+        expect_error(
+            lambda: build.build_step(plan, base, work, None, None, 2), "restride-labels converts it"
+        )
+        (work / "labels.jsonl").write_text(written, encoding="utf-8")
         build.build_step(plan, base, work, None, None, 2)
         build.build_step(plan, base, work, root, None, 2)
         text = (root / "manifest.json").read_text(encoding="utf-8")
@@ -654,13 +757,26 @@ def check_build() -> None:
             {"rule": build.RULE_TEXT_POOLS, "excluded": 1},
         ], selection["ls-test"]
         assert selection["fl"] == []
-        assert selection["gsc"] == [{"rule": build.RULE_FORMAT, "excluded": 2}], (
-            "a label rule counts only the files a quota examined"
-        )
+        assert selection["gsc"] == [
+            {"rule": build.RULE_SCORE, "excluded": 1},
+            {"rule": build.RULE_SPAN, "excluded": 1},
+            {"rule": build.RULE_FORMAT, "excluded": 2},
+            {"rule": build.RULE_ENERGY, "excluded": 1},
+        ], "a label rule counts only the files a quota examined"
         assert selection["noise-src"][0] == {"rule": "recording shorter than 30 s", "excluded": 2}
         filed = [json.loads(line) for line in (root / "labels.jsonl").read_text().splitlines()]
         assert [x["id"] for x in filed] == sorted(x["id"] for x in filed)
-        assert all(sorted(x) == sorted(("id", *build.LABEL_FIELDS)) for x in filed)
+        assert all(
+            sorted(x) == sorted(("id", *build.LABEL_FIELDS, "energy_onset_sample")) for x in filed
+        )
+        energy = {x["id"]: x["energy_onset_sample"] for x in filed}
+        assert energy["ls-test/11-1-0000"] == s.spans["ls-test/11-1-0000"][0], (
+            "every examined label's energy onset is filed"
+        )
+        assert energy[f"ls-test/{UNALIGNED}"] is None
+        assert "11-1-0000" in chosen, "over 1 s, the energy onset is recorded, not a rule"
+        assert not chosen & {GSC_LOW_SCORE, GSC_SHORT, GSC_LATE_ONSET}
+        assert "no/aa03_nohash_0" in chosen
         filed_ids = {x["id"] for x in filed}
         assert {f"ls-test/{n}" for n in (EDGE_OOV, UNALIGNED, AT_START, AT_END)} <= filed_ids
         assert f"gsc/{GSC_LATE}" not in filed_ids
@@ -700,6 +816,8 @@ def check_build() -> None:
 def main() -> int:
     check_conversions()
     check_semantic_classes()
+    check_energy_onset()
+    check_restride()
     check_select()
     check_noise_choice()
     check_fixtures()

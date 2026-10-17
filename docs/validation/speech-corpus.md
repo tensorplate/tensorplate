@@ -177,19 +177,42 @@ speech_corpus.py check CORPUS/manifest.json --root CORPUS --rebuild --frozen
 | 10 or more samples at 16-bit full scale | a clipped recording |
 | reference text used in the other pool | the check refuses a transcript in both pools; only files the rules above left are compared |
 | first or last word not aligned | the labels would miss part of the speech |
+| aligner score below 0.2 | the aligner's mean token probability says it did not find the text in the audio |
+| labelled speech shorter than 120 ms | no reference word is that short; the label is not the speech |
 | labelled speech within 20 ms of the file's start or end | the file may cut the speech off, so a label at its edge is not the speech's |
+| under 1 s, labelled onset more than 50 ms from the band-energy onset | a single word's onset sits at its first rise in energy |
 
-- The last two rules need labels. They are counted only up to the last file
+- The last five rules need labels. They are counted only up to the last file
   a quota examined, so the counts do not depend on how far the aligner ran
   past it.
+- The plan states the label rules (`label_rules`), and the build refuses a
+  plan that states other values than the tool applies.
+- **The band-energy onset** (`tp-band-energy-onset-300-3400hz-25db-3x10ms-v1`):
+  - the samples pass two Butterworth high-pass biquads at 300 Hz, then two
+    low-pass biquads at 3400 Hz, with coefficients fixed in the tool;
+  - the onset is the start of the first of 3 consecutive 10 ms frames whose
+    energy is within 25 dB of the clip's loudest frame.
+- **Why the energy check covers only the under-1 s bin.** It is a cross-check,
+  not the label. On longer clips, breaths, clicks and handling noise before
+  speech fall inside the band, and the crude onset cannot tell them from
+  speech; the filed corpus's README gives the counts. So the longer bins are
+  checked by ear instead. The build files every
+  examined label's energy onset (`energy_onset_sample` in `labels.jsonl`),
+  and the onset listen-check draws half of its longer clips from those whose
+  energy onset is more than 100 ms from the label. Ends are not
+  cross-checked: a CTC aligner ends a word early, and no gate times from the
+  end.
 - A float source is converted to 16 bits by `round-half-even(x * 32767)`,
   clipped; a 16-bit source keeps its samples.
 
 **Labels.**
 - `tools/validation/speech_corpus_align.py` labels each candidate by CTC
   forced alignment of its reference text. The onset is the start of the
-  first aligned word and the end the end of the last, at the aligner's 20 ms
-  frame resolution.
+  first aligned word and the end the end of the last, at the model's 20 ms
+  frames: frame `k` is sample `320 * k`.
+- Labels recorded before the aligner used that stride were placed at
+  `k * samples / frames`. `speech_corpus_build.py restride-labels` converts
+  them exactly: each label maps back to one frame index.
 - The aligners are not the product's voice activity detector, so a latency
   measured from these labels includes the detector's own delay:
 
