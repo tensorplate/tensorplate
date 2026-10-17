@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/tts_text_corpus.json",
+  "title": "Text-to-speech evaluation text corpus",
+  "description": "The frozen text inputs of the text-to-speech release gates, checked by tools/validation/tts_corpus.py: every sentence with its source, license and phoneme-token count under the speech runtime's locked phonemizer, the sentences the listening review transcribes, and the queued multi-segment sequences. The checker derives each sentence's stratum and critical classes from its count and text and refuses a corpus that claims otherwise.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "corpus", "language", "voice", "tokenizer", "sources", "sentences", "listening", "queued_sequences"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "0.1" },
+    "corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]*$", "description": "Part of every reference clip's seed." }
+      }
+    },
+    "language": { "type": "string", "minLength": 1, "description": "The language tag the bundle declares, passed to the phonemizer as the runner passes it." },
+    "voice": { "type": "string", "minLength": 1 },
+    "tokenizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule", "lock", "lock_sha256", "kokoro", "misaki", "spacy", "en_core_web_sm", "espeak_ng"],
+      "properties": {
+        "rule": { "type": "string", "const": "kokoro-kpipeline-g2p-length-v1", "description": "A sentence's count is the length of the phoneme string that kokoro's KPipeline(lang_code=<language>, trf=False).g2p returns for it, the string the Kokoro runner bounds and synthesizes." },
+        "lock": { "type": "string", "const": "packaging/speech-runtime/lock/kokoro.txt" },
+        "lock_sha256": { "$ref": "#/definitions/Sha256" },
+        "kokoro": { "type": "string", "minLength": 1 },
+        "misaki": { "type": "string", "minLength": 1 },
+        "spacy": { "type": "string", "minLength": 1 },
+        "en_core_web_sm": { "type": "string", "minLength": 1 },
+        "espeak_ng": { "type": "string", "minLength": 1, "description": "The distribution package version of libespeak-ng1 the counts were made with; the phonemizer falls back to it for words outside its lexicon." }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "license", "attribution", "url", "sha256"],
+        "properties": {
+          "id": { "type": "string", "enum": ["cmu-arctic", "libritts-r", "authored"] },
+          "title": { "type": "string", "minLength": 1 },
+          "license": { "type": "string", "minLength": 1 },
+          "attribution": { "type": "string", "minLength": 1 },
+          "url": { "type": ["string", "null"], "description": "Where the source's text was fetched from; null for text written for this corpus." },
+          "sha256": { "oneOf": [{ "$ref": "#/definitions/Sha256" }, { "type": "null" }], "description": "The digest of the fetched file; null for text written for this corpus." },
+          "md5": { "type": "string", "pattern": "^[0-9a-f]{32}$", "description": "The digest the source publishes for the file, where it publishes one." },
+          "text_form": { "type": "string", "enum": ["original"], "description": "Which of the source's transcripts a sentence's text is; the check requires it of libritts-r." }
+        }
+      }
+    },
+    "sentences": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "text", "source", "source_id", "phoneme_tokens", "stratum", "critical"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "text": { "type": "string", "minLength": 1 },
+          "source": { "type": "string", "enum": ["cmu-arctic", "libritts-r", "authored"] },
+          "source_id": { "type": ["string", "null"], "description": "The utterance's identifier in its source; null for text written for this corpus." },
+          "phoneme_tokens": { "type": "integer", "minimum": 1, "maximum": 200 },
+          "stratum": { "type": "string", "enum": ["t1to20", "t21to100", "t101to200"] },
+          "critical": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["negation", "numeral"] }
+          }
+        }
+      }
+    },
+    "listening": {
+      "type": "array",
+      "description": "The sentence ids whose candidate audio listeners transcribe.",
+      "items": { "type": "string" }
+    },
+    "queued_sequences": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "segments"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "segments": { "type": "array", "minItems": 2, "maxItems": 3, "items": { "type": "string" } }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "Sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

@@ -191,6 +191,13 @@ jobs:
         shell: bash
         run: test/validation/speech_quality_test.py
 
+      # Checks the filed text-to-speech corpus, breaks each rule of the check
+      # once, and runs counting and the reference recorder against fakes of
+      # kokoro and torch; the schema cross-check needs the same jsonschema.
+      - name: Text-to-speech corpus
+        shell: bash
+        run: test/validation/tts_corpus_test.py
+
       # Runs the streaming footprint harness against fake packages whose
       # worker adds known amounts to its size and resident set, and breaks
       # each guard of the record check once. The fake worker is compiled

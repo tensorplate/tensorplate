@@ -70,3 +70,10 @@ the locked setuptools with a fixed timestamp and umask, and their lock lines car
 digest of the wheel that build produces;
 `test/packaging/verify_speech_runtime_packages.sh` rebuilds both and fails
 when either stops matching.
+
+A change to `lock/kokoro.txt` invalidates the phoneme counts of the
+text-to-speech corpus, which `tools/validation/tts_corpus.py check` then
+refuses. Re-record them in the environment built from the new lock with
+`tools/validation/tts_corpus.py count CORPUS --model-config MODEL/config.json --write CORPUS`,
+as [`docs/validation/tts-text-corpus.md`](../../docs/validation/tts-text-corpus.md)
+describes, and commit the corpus with the lock.
