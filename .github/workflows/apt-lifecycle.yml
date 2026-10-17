@@ -178,6 +178,13 @@ jobs:
         shell: bash
         run: test/validation/candidate_qualify_test.py
 
+      # Builds a corpus from synthetic sources in each reader's layout, checks it
+      # with the manifest check and its audio rebuilt, and shows each selection
+      # rule withholding the file it names.
+      - name: Speech corpus build
+        shell: bash
+        run: test/validation/speech_corpus_build_test.py
+
       # Renders a synthetic corpus with the corpus tool and breaks each rule of
       # the manifest check once; the schema cross-check needs the same jsonschema.
       - name: Speech corpus recipes and manifest
