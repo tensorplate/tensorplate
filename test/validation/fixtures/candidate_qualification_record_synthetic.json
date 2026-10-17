@@ -12,7 +12,7 @@
     "source_commit": "0000000000000000000000000000000000000000",
     "transport_preference": "binary"
   },
-  "recorded_at_utc": "2026-10-17T03:47:54Z",
+  "recorded_at_utc": "2026-10-17T05:11:13Z",
   "request_timeout_ms": 8000,
   "subject": {
     "suite": "stt",
@@ -97,7 +97,7 @@
       "deployment_id": "qualify-stt-predecessor",
       "bundle_digest": "sha256:eb2759a89b5a8661f16da06fd612cc94806a04a6308effe5b08d1cbaff38c6f5",
       "phase": "active",
-      "wall_ms": 27,
+      "wall_ms": 50,
       "status": "ok"
     },
     "deploy": {
@@ -105,7 +105,7 @@
       "transaction_id": "txn-2",
       "phase": "active",
       "bundle_digest": "sha256:7f9785b0e739f8dc2461b0962fbc87a87066d1af12c08c2ca8bafbb64c44ffd1",
-      "wall_ms": 26,
+      "wall_ms": 44,
       "status": "ok",
       "failure": null
     },
@@ -148,7 +148,7 @@
       "method": "rollback",
       "status": "ok",
       "restored_deployment_id": "qualify-stt-predecessor",
-      "wall_ms": 25,
+      "wall_ms": 48,
       "reason": null
     }
   },
@@ -236,13 +236,6 @@
               }
             ]
           }
-        },
-        "retirement_wait": {
-          "status": "not_needed",
-          "bound_ms": 60000,
-          "wall_ms": 0,
-          "worker_pids": [],
-          "remaining_pids": []
         }
       },
       "candidate_warm_idle": {
@@ -308,13 +301,6 @@
               }
             ]
           }
-        },
-        "retirement_wait": {
-          "status": "not_needed",
-          "bound_ms": 60000,
-          "wall_ms": 0,
-          "worker_pids": [],
-          "remaining_pids": []
         }
       },
       "candidate_load": {
@@ -445,13 +431,6 @@
               }
             ]
           }
-        },
-        "retirement_wait": {
-          "status": "not_needed",
-          "bound_ms": 60000,
-          "wall_ms": 0,
-          "worker_pids": [],
-          "remaining_pids": []
         }
       }
     }
@@ -480,7 +459,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101089,
+          "exchange_wall_us": 102093,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -511,7 +490,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101008,
+          "exchange_wall_us": 101404,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -542,7 +521,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101218,
+          "exchange_wall_us": 101658,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -573,7 +552,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101038,
+          "exchange_wall_us": 101224,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -604,7 +583,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101134,
+          "exchange_wall_us": 101366,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -636,9 +615,9 @@
         "failed_count": 0,
         "exchange_wall_us": {
           "count": 5,
-          "min": 101008,
-          "median": 101089,
-          "max": 101218
+          "min": 101224,
+          "median": 101404,
+          "max": 102093
         },
         "rtf": {
           "count": 5,
@@ -671,7 +650,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101085,
+          "exchange_wall_us": 101544,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -702,7 +681,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101009,
+          "exchange_wall_us": 101488,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -733,7 +712,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101044,
+          "exchange_wall_us": 101262,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -764,7 +743,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 100961,
+          "exchange_wall_us": 101265,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -795,7 +774,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 100987,
+          "exchange_wall_us": 101205,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -827,9 +806,9 @@
         "failed_count": 0,
         "exchange_wall_us": {
           "count": 5,
-          "min": 100961,
-          "median": 101009,
-          "max": 101085
+          "min": 101205,
+          "median": 101265,
+          "max": 101544
         },
         "rtf": {
           "count": 5,
@@ -866,7 +845,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101131,
+          "exchange_wall_us": 101373,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -897,7 +876,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101081,
+          "exchange_wall_us": 101484,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -928,7 +907,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101017,
+          "exchange_wall_us": 101132,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -959,7 +938,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 100921,
+          "exchange_wall_us": 101282,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -990,7 +969,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 100966,
+          "exchange_wall_us": 101177,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1022,9 +1001,9 @@
         "failed_count": 0,
         "exchange_wall_us": {
           "count": 5,
-          "min": 100921,
-          "median": 101017,
-          "max": 101131
+          "min": 101132,
+          "median": 101282,
+          "max": 101484
         },
         "rtf": {
           "count": 5,
@@ -1061,7 +1040,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101105,
+          "exchange_wall_us": 101439,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1092,7 +1071,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101117,
+          "exchange_wall_us": 101533,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1123,7 +1102,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101030,
+          "exchange_wall_us": 101332,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1154,7 +1133,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 100966,
+          "exchange_wall_us": 101204,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1185,7 +1164,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101006,
+          "exchange_wall_us": 101210,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1217,9 +1196,9 @@
         "failed_count": 0,
         "exchange_wall_us": {
           "count": 5,
-          "min": 100966,
-          "median": 101030,
-          "max": 101117
+          "min": 101204,
+          "median": 101332,
+          "max": 101533
         },
         "rtf": {
           "count": 5,
@@ -1255,7 +1234,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101100,
+          "exchange_wall_us": 101494,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1286,7 +1265,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101007,
+          "exchange_wall_us": 101531,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1317,7 +1296,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 100948,
+          "exchange_wall_us": 101176,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1348,7 +1327,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 100947,
+          "exchange_wall_us": 101226,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1379,7 +1358,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 100960,
+          "exchange_wall_us": 101241,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1411,9 +1390,9 @@
         "failed_count": 0,
         "exchange_wall_us": {
           "count": 5,
-          "min": 100947,
-          "median": 100960,
-          "max": 101100
+          "min": 101176,
+          "median": 101241,
+          "max": 101531
         },
         "rtf": {
           "count": 5,
