@@ -44,7 +44,15 @@ requirements in the locked environment, markers evaluated there, and keeps
 what `kokoro.txt` and `base.txt` pin: 82 pins in all, among them thinc,
 blis, numpy, segments, joblib, docopt and transformers. torch is not among
 them: its pin lives in `lock/torch.txt` with sympy and networkx, which only
-torch requires, and the phonemizer computes nothing with it.
+torch requires, and the phonemizer computes nothing with it. The two files
+hold 85 pins; the other three, `curated-tokenizers`, `curated-transformers`
+and `spacy-curated-transformers`, are out too. kokoro requires `misaki[en]`,
+and the closure evaluates each requirement with no extra requested, so it
+does not follow the extra to them. They are imported all the same: spaCy
+registers them as plugins when it builds a pipeline. But they serve
+transformer pipelines, the phonemizer runs `en_core_web_sm` with
+`trf=False`, and registering them computes nothing, so a change to their
+pins leaves the counts as they are.
 `tts_corpus.py g2p-pins`, run in the locked environment, derives the list
 from the installed packages' metadata and fails when `G2P_PINS` differs. The
 pins live in two lock files, `packaging/speech-runtime/lock/kokoro.txt` and

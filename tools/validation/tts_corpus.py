@@ -81,6 +81,8 @@ G2P_DIRECT = (
 # The runtime-requirement closure of G2P_DIRECT in the locked environment, as
 # `tts_corpus.py g2p-pins` derives it there, kept to what G2P_LOCKS pin. torch, which
 # kokoro requires, is pinned in lock/torch.txt and computes no part of the phonemes.
+# The curated-* plugins kokoro.txt pins come in through misaki's `en` extra, which the
+# closure does not follow; spaCy registers them, but they compute nothing for trf=False.
 G2P_PINS = (
     "addict",
     "annotated-doc",
