@@ -46,6 +46,7 @@ RATE_8K = 8000
 LEVEL_DBOV = -26
 FULL_SCALE = 32768
 GAIN_BITS = 30
+SNR_SET_DB = (5, 10, 15, 20)
 
 # Bounds of the duration bins in 16 kHz samples of labelled speech.
 ONE_SECOND = RATE_16K
@@ -111,6 +112,21 @@ def noisy_seed(corpus_version: str, clip_id: str) -> int:
     return int.from_bytes(digest[:8], "big")
 
 
+def assigned_snr(files: list[dict[str, Any]]) -> dict[str, int]:
+    """Each clean speech clip's noisy SNR: round-robin over the set in sorted id order,
+    within each pool, language and duration bin, so every group is balanced."""
+    groups: dict[tuple[str, str, str], list[str]] = {}
+    for entry in files:
+        if entry["codec"] == "clean16k" and entry["suite"] == "speech":
+            key = (entry["pool"], entry["language"], entry["duration_bin"])
+            groups.setdefault(key, []).append(entry["id"])
+    return {
+        clip_id: SNR_SET_DB[index % len(SNR_SET_DB)]
+        for ids in groups.values()
+        for index, clip_id in enumerate(sorted(ids))
+    }
+
+
 def noise_offset(seed: int, noise_samples: int, clip_samples: int) -> int:
     """Where the excerpt starts: the seed modulo the number of starts that fit."""
     if noise_samples < clip_samples:
@@ -145,7 +161,12 @@ def render_noisy(
 
 
 def level_dbov(samples: list[int], onset: int, end: int) -> float:
-    return 10 * math.log10(span_power(samples, onset, end) / ((end - onset) * FULL_SCALE**2))
+    return achieved_dbov(span_power(samples, onset, end), end - onset)
+
+
+def achieved_dbov(levelled_span_power: int, span_samples: int) -> float:
+    """The span RMS level a telephony rendering records as its exact integer power."""
+    return 10 * math.log10(levelled_span_power / (span_samples * FULL_SCALE**2))
 
 
 def render_telephony(
@@ -154,12 +175,14 @@ def render_telephony(
     """Level the labelled speech to -26 dBov, then the 8 kHz mu-law telephony recipe.
 
     A gain that would push a sample past 16 bits is lowered to the largest that
-    does not; `achieved_dbov` then reads below the target. Silence is not levelled.
+    does not, and the level then reads below the target. The level is recorded as
+    the levelled span's integer power, so a rebuild compares it exactly. Silence is
+    not levelled.
     """
     if labels is None:
         return audio.telephony_8k_ulaw_bytes(clean), {
             "level_gain_q30": None,
-            "achieved_dbov": None,
+            "levelled_span_power": None,
         }
     onset, end = labels
     power = span_power(clean, onset, end)
@@ -171,7 +194,7 @@ def render_telephony(
     levelled = [apply_gain(s, gain) for s in clean]
     return audio.telephony_8k_ulaw_bytes(levelled), {
         "level_gain_q30": gain,
-        "achieved_dbov": round(level_dbov(levelled, onset, end), 2),
+        "levelled_span_power": span_power(levelled, onset, end),
     }
 
 
@@ -227,6 +250,8 @@ def _check_shape(entry: dict[str, Any]) -> None:
     )
     if (entry["encoding"], entry["rate"]) != expected:
         raise ManifestError(f"{name}: {entry['codec']} is {expected[0]} at {expected[1]} Hz")
+    if entry["encoding"] == "mulaw" and entry["size"] != entry["samples"]:
+        raise ManifestError(f"{name}: headerless mu-law has one byte per sample")
     if clean != (entry["derived_from"] is None) or clean != (entry["source"] is not None):
         raise ManifestError(f"{name}: a clean file names its source, a derived file its clean file")
     kind = None if entry["recipe"] is None else entry["recipe"]["kind"]
@@ -277,6 +302,7 @@ def _check_derived(
     clean: dict[str, Any],
     noise: dict[str, dict[str, Any]],
     manifest: dict[str, Any],
+    snr: dict[str, int],
 ) -> None:
     name = entry["id"]
     if clean["codec"] != "clean16k":
@@ -306,8 +332,10 @@ def _check_derived(
             raise ManifestError(f"{name}: labels are not those inherited from {clean['id']}")
     recipe = entry["recipe"]
     if entry["codec"] == "noisy16k":
-        if recipe["snr_db"] not in manifest["recipes"]["noisy16k"]["snr_db"]:
-            raise ManifestError(f"{name}: {recipe['snr_db']} dB is not in the corpus SNR set")
+        if recipe["snr_db"] != snr[clean["id"]]:
+            raise ManifestError(
+                f"{name}: {recipe['snr_db']} dB is not the {snr[clean['id']]} dB the corpus assigns"
+            )
         if recipe["seed"] != noisy_seed(manifest["corpus"]["version"], clean["id"]):
             raise ManifestError(f"{name}: the seed is not the one the corpus version derives")
         mixed = noise.get(recipe["noise"])
@@ -325,7 +353,10 @@ def _check_derived(
             raise ManifestError(f"{name}: the noise offset is not the one the seed derives")
     else:
         speech = entry["suite"] == "speech"
-        levelled = (recipe["level_gain_q30"] is not None, recipe["achieved_dbov"] is not None)
+        levelled = (
+            recipe["level_gain_q30"] is not None,
+            recipe["levelled_span_power"] is not None,
+        )
         if levelled != (speech, speech) or (not speech and recipe["sv56_dbov"] is not None):
             raise ManifestError(f"{name}: speech is levelled and measured, silence is neither")
 
@@ -355,7 +386,7 @@ def _check_pools(files: list[dict[str, Any]], noise: list[dict[str, Any]]) -> No
 
 def _check_recordings(files: list[dict[str, Any]]) -> None:
     """Each clean file is a distinct recording; an utterance recurs only in a concatenation."""
-    clean = [entry for entry in files if entry["source"] is not None]
+    clean = [entry for entry in files if entry["codec"] == "clean16k"]
     _unique(clean, "pcm_sha256", "clean file")
     # Silence clips may be several excerpts of one long file.
     single = [
@@ -478,6 +509,7 @@ def check_manifest(
             )
     files = manifest["files"]
     by_id = _unique(files, "id", "file")
+    snr = assigned_snr(files)
     _unique(files + manifest["noise"], "path", "audio")
     for entry in files:
         _check_shape(entry)
@@ -494,7 +526,7 @@ def check_manifest(
                 raise ManifestError(
                     f"{entry['id']}: derived from {entry['derived_from']!r}, which is not listed"
                 )
-            _check_derived(entry, clean, noise, manifest)
+            _check_derived(entry, clean, noise, manifest, snr)
             if (
                 frozen
                 and entry["codec"] == "telephony8k"

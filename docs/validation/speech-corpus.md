@@ -38,6 +38,9 @@ power, which clears the square root of the power ratio and the decibel
 fraction together.
 
 **noisy16k.**
+- The SNR is assigned, not chosen: within each pool, language and duration
+  bin, the clean speech clips in sorted id order take 5, 10, 15 and 20 dB in
+  turn, so every group is balanced across the four.
 - The seed is the first eight bytes of
   SHA-256(`<corpus version>/noisy16k/<clean file id>`), as a big-endian
   integer, so seeds stay stable when clips are added. The noise excerpt starts
@@ -55,7 +58,10 @@ fraction together.
 - The labelled speech is levelled to an RMS of -26 dBov, where 0 dBov is a
   full-scale 16-bit square wave.
 - If the level gain would push any sample past 16 bits, it is lowered to the
-  largest gain that does not. `achieved_dbov` then reads below the target.
+  largest gain that does not, and the level then reads below the target.
+- The manifest records the level as the levelled span's exact integer power
+  (`levelled_span_power`), so a rebuild compares it without floating point;
+  `speech_corpus.achieved_dbov` turns it into dBov.
 - The levelled clip goes through the qualification tool's telephony recipe,
   `tp-telephony8k-fir63-g711stl-v1` in `tools/validation/candidate_audio.py`:
   - the 63-tap Q15 low-pass decimator `tp-fir63-blackman-q15-v1`;
@@ -107,8 +113,9 @@ Without `--root`, the check runs on the manifest alone:
   to either recipe invalidates the manifest's renderings;
 - duration bins against labels, and inherited labels, lengths and fields
   against each derived file's clean file;
-- each seed against the corpus version, and each noise offset against the
-  seed and the noise file's length;
+- each SNR against the corpus's assignment, each seed against the corpus
+  version, and each noise offset against the seed and the noise file's length;
+- a mu-law file's size against its sample count;
 - transcript digests against their text, pool separation and distinct
   recordings.
 

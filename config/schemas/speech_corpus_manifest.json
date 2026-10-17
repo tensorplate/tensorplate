@@ -35,9 +35,10 @@
         "noisy16k": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["snr_db", "seed_rule"],
+          "required": ["snr_db", "snr_rule", "seed_rule"],
           "properties": {
-            "snr_db": { "type": "array", "items": { "type": "integer", "enum": [5, 10, 15, 20] }, "minItems": 1 },
+            "snr_db": { "type": "array", "const": [5, 10, 15, 20] },
+            "snr_rule": { "type": "string", "const": "round-robin-sorted-clean-id-v1", "description": "Each clean speech clip's noisy SNR is the set's entry at its index modulo four among the sorted ids of the clean speech clips of its pool, language and duration bin." },
             "seed_rule": { "type": "string", "const": "sha256-version-noisy16k-clip-v1", "description": "The seed is the first eight bytes, big-endian, of SHA-256 over <corpus version>/noisy16k/<clean file id>; the noise offset is the seed modulo (noise samples - clip samples + 1)." }
           }
         },
@@ -178,11 +179,11 @@
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["kind", "level_gain_q30", "achieved_dbov", "sv56_dbov"],
+              "required": ["kind", "level_gain_q30", "levelled_span_power", "sv56_dbov"],
               "properties": {
                 "kind": { "type": "string", "const": "telephony8k" },
                 "level_gain_q30": { "type": ["integer", "null"], "minimum": 0, "description": "The level gain applied before decimation, in Q30; null for silence, which is not levelled." },
-                "achieved_dbov": { "type": ["number", "null"], "description": "Span RMS level after the gain, at 16 kHz." },
+                "levelled_span_power": { "type": ["integer", "null"], "minimum": 1, "description": "Sum of squares of the levelled 16 kHz samples over the labelled speech; its RMS level in dBov is derived from it and the span length. Null for silence." },
                 "sv56_dbov": { "type": ["number", "null"], "description": "The active speech level ITU-T STL sv56demo measures on the levelled 16 kHz signal, recorded as a cross-check; null until recorded." }
               }
             }

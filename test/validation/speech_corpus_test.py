@@ -76,6 +76,37 @@ def check_arithmetic() -> None:
     assert corpus.noisy_seed("v1", "en-a.clean16k") == int.from_bytes(rule, "big")
 
 
+def check_snr_assignment() -> None:
+    def clip(clip_id: str, pool: str, language: str, bin_: str, **kw: str) -> dict[str, Any]:
+        entry = {"id": clip_id, "pool": pool, "language": language, "duration_bin": bin_}
+        entry.update(codec="clean16k", suite="speech")
+        entry.update(kw)
+        return entry
+
+    files = [
+        clip("e", "held_out", "en", "1to5s"),
+        clip("b", "held_out", "en", "1to5s"),
+        clip("d", "held_out", "en", "1to5s"),
+        clip("a", "held_out", "en", "1to5s"),
+        clip("c", "held_out", "en", "1to5s"),
+        clip("f", "held_out", "en", "lt1s"),
+        clip("g", "held_out", "ar", "1to5s"),
+        clip("h", "tuning", "en", "1to5s"),
+        clip("s", "held_out", "en", "1to5s", suite="silence"),
+        clip("n", "held_out", "en", "1to5s", codec="noisy16k"),
+    ]
+    assert corpus.assigned_snr(files) == {
+        "a": 5,
+        "b": 10,
+        "c": 15,
+        "d": 20,
+        "e": 5,
+        "f": 5,
+        "g": 5,
+        "h": 5,
+    }
+
+
 def check_bins_and_labels() -> None:
     for samples, expected in (
         (15999, "lt1s"),
@@ -109,7 +140,12 @@ def check_bins_and_labels() -> None:
 
 def check_noisy() -> None:
     onset, end = 24000, 40000
-    clean = sine_burst(48000, onset, end, 8000, 440)
+    # Not silent outside the labels, so speech measured over the whole clip would miss.
+    hum = seeded_noise(48000, 6, 2000)
+    clean = [
+        s if onset <= i < end else n
+        for i, (s, n) in enumerate(zip(sine_burst(48000, onset, end, 8000, 440), hum, strict=True))
+    ]
     noise = seeded_noise(100000, 3, 3000)
     for snr in (5, 10, 15, 20):
         mixed, made = corpus.render_noisy(clean, onset, end, noise, snr_db=snr, seed=11)
@@ -160,7 +196,8 @@ def check_telephony() -> None:
         for i, (s, n) in enumerate(zip(sine_burst(48000, onset, end, 1000, 400), hum, strict=True))
     ]
     data, made = corpus.render_telephony(clean, (onset, end))
-    assert len(data) == 24000 and abs(made["achieved_dbov"] - corpus.LEVEL_DBOV) < 0.02
+    level = corpus.achieved_dbov(made["levelled_span_power"], end - onset)
+    assert len(data) == 24000 and abs(level - corpus.LEVEL_DBOV) < 0.02
     decoded = [audio.ulaw_decode(b) for b in data]
     low, high = corpus.telephony_labels(onset, end)
     # Measured on the wire: a 400 Hz tone passes the decimator and mu-law nearly unchanged.
@@ -169,16 +206,18 @@ def check_telephony() -> None:
         [corpus.apply_gain(s, made["level_gain_q30"]) for s in clean]
     )
 
-    # A gain that would push the spike past 16 bits is lowered to fit.
+    # A gain that would push a sample past 16 bits is lowered to fit, whether the
+    # largest sample is inside the labels or, as here, outside them.
     spiky = sine_burst(48000, onset, end, 300, 400)
-    spiky[30000] = 20000
+    spiky[30000] = 12000
+    spiky[5000] = -20000
     data, made = corpus.render_telephony(spiky, (onset, end))
     assert made["level_gain_q30"] == (audio.INT16_MAX << corpus.GAIN_BITS) // 20000
-    assert made["achieved_dbov"] < corpus.LEVEL_DBOV
+    assert corpus.achieved_dbov(made["levelled_span_power"], end - onset) < corpus.LEVEL_DBOV
 
     hiss = seeded_noise(16000, 5, 50)
     data, made = corpus.render_telephony(hiss, None)
-    assert made == {"level_gain_q30": None, "achieved_dbov": None}
+    assert made == {"level_gain_q30": None, "levelled_span_power": None}
     assert data == audio.telephony_8k_ulaw_bytes(hiss)
     try:
         corpus.render_telephony([0] * 16000, (0, 16000))
@@ -230,12 +269,18 @@ class Corpus:
         self.clean("ar-b", "held_out", "ar", "crowd", (4000, 12000), 16000, None, None)
         self.clean("en-c", "tuning", "en", "read", (3001, 99001), 104000, "s2", "three four")
         self.clean("sil-d", "held_out", None, "read", None, 20001, None, None)
-        for clip_id, snr, noise_id in (
-            ("en-a", 10, "noise-held-exact"),
-            ("ar-b", 5, "noise-held-1"),
-            ("en-c", 20, "noise-tuning-1"),
+        self.clean("en-e", "held_out", "en", "read", (8000, 36000), 48000, "s3", "five six")
+        snr = corpus.assigned_snr(self.files)
+        assert corpus.assigned_snr(list(reversed(self.files))) == snr
+        # en-a and en-e share a pool, language and bin, so they take the first two SNRs.
+        assert (snr["en-a.clean16k"], snr["en-e.clean16k"], snr["en-c.clean16k"]) == (5, 10, 5)
+        for clip_id, noise_id in (
+            ("en-a", "noise-held-exact"),
+            ("ar-b", "noise-held-1"),
+            ("en-c", "noise-tuning-1"),
+            ("en-e", "noise-held-1"),
         ):
-            self.noisy(clip_id, snr, noise_id)
+            self.noisy(clip_id, snr[f"{clip_id}.clean16k"], noise_id)
         for clip_id in ("en-a", "ar-b", "en-c", "sil-d"):
             self.telephony(clip_id)
 
@@ -376,6 +421,7 @@ class Corpus:
                 },
                 "noisy16k": {
                     "snr_db": [5, 10, 15, 20],
+                    "snr_rule": "round-robin-sorted-clean-id-v1",
                     "seed_rule": "sha256-version-noisy16k-clip-v1",
                 },
                 "tools": [
@@ -460,9 +506,6 @@ def check_rules(good: dict[str, Any], root: Path) -> None:
     def reasonless_exclusion(m: dict[str, Any]) -> None:
         m["noise"][2]["exclusion_reason"] = None
 
-    def narrow_snr_set(m: dict[str, Any]) -> None:
-        m["recipes"]["noisy16k"]["snr_db"] = [10, 20]
-
     def shared_source_file(m: dict[str, Any]) -> None:
         file_entry(m, "en-c.clean16k")["source"]["file_ids"] = ["en-a.src"]
 
@@ -512,11 +555,16 @@ def check_rules(good: dict[str, Any], root: Path) -> None:
             set_field("en-a.noisy16k", "source", good["files"][0]["source"]),
             "a clean file names its source",
         ),
-        (set_field("en-a.clean16k", "recipe", good["files"][4]["recipe"]), "carries recipe"),
+        (
+            set_field("en-a.clean16k", "recipe", file_entry(good, "en-a.noisy16k")["recipe"]),
+            "carries recipe",
+        ),
         (set_field("en-a.clean16k", "labels", None), "labels is required for speech"),
         (set_field("sil-d.clean16k", "language", "en"), "language is required for speech"),
         (set_field("sil-d.clean16k", "semantic", ["negation"]), "silence carries no semantic"),
         (set_field("en-a.clean16k", "labels", "speech_end_sample", 48001), "is outside"),
+        (set_field("en-a.clean16k", "labels", "speech_end_sample", 8000), "is outside"),
+        (set_field("en-a.telephony8k", "size", 24001), "one byte per sample"),
         (set_field("en-a.clean16k", "labels", "method", "inherited"), "only a derived file's"),
         (set_field("en-a.noisy16k", "labels", "method", "human"), "only a derived file's"),
         (set_field("en-a.clean16k", "duration_bin", "gt5to30s"), "is bin '1to5s'"),
@@ -528,11 +576,15 @@ def check_rules(good: dict[str, Any], root: Path) -> None:
         (set_field("en-a.noisy16k", "pool", "tuning"), "pool differs from its clean file"),
         (set_field("en-a.noisy16k", "semantic", []), "semantic differs from its clean file"),
         (set_field("en-a.noisy16k", "samples", 47999), "its recipe makes 48000"),
-        (set_field("en-a.telephony8k", "samples", 48000), "its recipe makes 24000"),
+        (
+            lambda m: file_entry(m, "en-a.telephony8k").update(samples=48000, size=48000),
+            "its recipe makes 24000",
+        ),
         (set_field("en-c.telephony8k", "labels", "speech_end_sample", 49500), "inherited"),
         (set_field("en-c.telephony8k", "labels", "human_verified", True), "inherited"),
         (set_field("en-a.noisy16k", "labels", "speech_onset_sample", 8001), "inherited"),
-        (narrow_snr_set, "5 dB is not in the corpus SNR set"),
+        (set_field("en-e.noisy16k", "recipe", "snr_db", 5), "5 dB is not the 10 dB the corpus"),
+        (set_field("en-a.noisy16k", "recipe", "snr_db", 20), "20 dB is not the 5 dB the corpus"),
         (set_field("en-a.noisy16k", "recipe", "seed", 1), "the seed is not"),
         (set_field("en-a.noisy16k", "recipe", "noise", "absent"), "noise 'absent'"),
         (set_field("en-a.noisy16k", "recipe", "noise", "noise-held-2"), "which is excluded"),
@@ -542,7 +594,10 @@ def check_rules(good: dict[str, Any], root: Path) -> None:
         (set_field("ar-b.noisy16k", "recipe", "noise_offset_sample", 0), "offset is not the one"),
         (set_field("sil-d.telephony8k", "recipe", "level_gain_q30", 5), "silence is neither"),
         (set_field("sil-d.telephony8k", "recipe", "sv56_dbov", -26.0), "silence is neither"),
-        (set_field("en-a.telephony8k", "recipe", "achieved_dbov", None), "silence is neither"),
+        (
+            set_field("en-a.telephony8k", "recipe", "levelled_span_power", None),
+            "silence is neither",
+        ),
         (set_field("en-a.telephony8k", "recipe", "level_gain_q30", None), "silence is neither"),
         (shared_source_file, "source file ('read', 'en-a.src') is in both"),
         (shared_speaker, "speaker ('s2',) is in both"),
@@ -560,6 +615,11 @@ def check_rules(good: dict[str, Any], root: Path) -> None:
             copy_of.update(id=f"{clip_id}-again.clean16k", path=f"{clip_id}-again.wav")
             copy_of.update(pcm_sha256="2" * 64)
             copy_of["source"]["file_ids"] = file_ids
+            if copy_of["labels"] is not None:
+                # A bin of its own, so the SNRs its original's group assigns do not move.
+                onset = copy_of["labels"]["speech_onset_sample"]
+                copy_of["labels"]["speech_end_sample"] = onset + 500
+                copy_of["duration_bin"] = "lt1s"
             m["files"].append(copy_of)
 
         return mutate
@@ -588,7 +648,7 @@ def check_rules(good: dict[str, Any], root: Path) -> None:
     refused(good, lambda m: None, "needs the corpus root", rebuild=True)
     refused(good, set_field("en-a.clean16k", "sha256", "1" * 64), "sha256 is", root=root)
     refused(good, set_field("en-a.clean16k", "pcm_sha256", "1" * 64), "pcm_sha256", root=root)
-    refused(good, set_field("en-a.telephony8k", "size", 1), "size is", root=root)
+    refused(good, set_field("en-a.clean16k", "size", 1), "size is", root=root)
     refused(
         good, lambda m: m["noise"][0].update(size=1), "noise/noise-tuning-1.wav: size is", root=root
     )
@@ -621,8 +681,8 @@ def check_rules(good: dict[str, Any], root: Path) -> None:
     )
     refused(
         good,
-        set_field("en-a.telephony8k", "recipe", "achieved_dbov", -25.0),
-        "rebuilt achieved_dbov",
+        set_field("en-a.telephony8k", "recipe", "levelled_span_power", 1),
+        "rebuilt levelled_span_power",
         root=root,
         rebuild=True,
     )
@@ -641,6 +701,7 @@ def check_schema(good: dict[str, Any]) -> None:
         (set_field("en-a.noisy16k", "recipe", "snr_db", 7), "snr"),
         (set_field("en-a.noisy16k", "recipe", "kind", "telephony8k"), "recipe"),
         (lambda m: m["recipes"]["telephony8k"].update(recipe="tp-fir63-blackman-q15-v1"), "id"),
+        (lambda m: m["recipes"]["noisy16k"].update(snr_db=[10, 20]), "snr set"),
     ):
         broken = copy.deepcopy(good)
         mutate(broken)
@@ -682,28 +743,29 @@ def check_cli(good: dict[str, Any], root: Path) -> None:
         assert corpus.main(["summary", str(path)]) == 0
     summary = json.loads(out.getvalue())
     assert summary == {
-        "files": 11,
+        "files": 13,
         "strata": {
             "held_out/silence/None/clean16k/None": 1,
             "held_out/silence/None/telephony8k/None": 1,
             "held_out/speech/ar/clean16k/lt1s": 1,
             "held_out/speech/ar/noisy16k/lt1s": 1,
             "held_out/speech/ar/telephony8k/lt1s": 1,
-            "held_out/speech/en/clean16k/1to5s": 1,
-            "held_out/speech/en/noisy16k/1to5s": 1,
+            "held_out/speech/en/clean16k/1to5s": 2,
+            "held_out/speech/en/noisy16k/1to5s": 2,
             "held_out/speech/en/telephony8k/1to5s": 1,
             "tuning/speech/en/clean16k/gt5to30s": 1,
             "tuning/speech/en/noisy16k/gt5to30s": 1,
             "tuning/speech/en/telephony8k/gt5to30s": 1,
         },
-        "distinct_references": {"held_out/ar": 1, "held_out/en": 1, "tuning/en": 1},
-        "files_per_source": {"crowd": 3, "read": 8},
-        "noisy_per_snr_db": {"held_out/10": 1, "held_out/5": 1, "tuning/20": 1},
+        "distinct_references": {"held_out/ar": 1, "held_out/en": 2, "tuning/en": 1},
+        "files_per_source": {"crowd": 3, "read": 10},
+        "noisy_per_snr_db": {"held_out/10": 1, "held_out/5": 2, "tuning/5": 1},
     }, summary
 
 
 def main() -> int:
     check_arithmetic()
+    check_snr_assignment()
     check_bins_and_labels()
     check_noisy()
     check_telephony()
@@ -711,8 +773,8 @@ def main() -> int:
         root = Path(tmp) / "corpus"
         built = Corpus(root)
         good = built.manifest()
-        assert corpus.check_manifest(good) == 11
-        assert corpus.check_manifest(good, root=root, rebuild=True) == 11
+        assert corpus.check_manifest(good) == 13
+        assert corpus.check_manifest(good, root=root, rebuild=True) == 13
         check_schema(good)
         check_rules(good, root)
         check_cli(good, root)
