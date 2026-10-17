@@ -117,7 +117,8 @@ Without `--root`, the check runs on the manifest alone:
   version, and each noise offset against the seed and the noise file's length;
 - a mu-law file's size against its sample count;
 - transcript digests against their text, pool separation and distinct
-  recordings.
+  recordings;
+- no semantic class listed twice on one file.
 
 With `--root`, it also reads every file and noise file, under that directory
 only, and compares the sizes, sample counts, rates and both digests.

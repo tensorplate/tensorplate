@@ -263,6 +263,8 @@ def _check_shape(entry: dict[str, Any]) -> None:
             raise ManifestError(f"{name}: {field} is required for speech and absent for silence")
     if not speech and (entry["semantic"] or entry["codec"] == "noisy16k"):
         raise ManifestError(f"{name}: silence carries no semantic class and has no noisy rendering")
+    if len(set(entry["semantic"])) != len(entry["semantic"]):
+        raise ManifestError(f"{name}: a semantic class is listed twice")
     labels = entry["labels"]
     if labels is not None:
         onset, end = labels["speech_onset_sample"], labels["speech_end_sample"]
