@@ -298,9 +298,6 @@ class SpeechJobDispatch final : public SessionDispatch {
     std::deque<float> scores;
     /// End of the frames submitted for scoring.
     std::uint64_t submitted_end = 0;
-    /// The utterance key of the next voice-activity job: a new one starts
-    /// the backend's state afresh.
-    std::uint64_t utterance_id = 1;
     JobState job = JobState::None;
     std::deque<HeldFrame> held_credit;
     /// Oldest first: a finalization can complete before the dispatch sees

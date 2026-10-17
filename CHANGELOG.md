@@ -1312,6 +1312,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The serving worker's speech dispatch keeps one voice-activity state for
+  each audio session. Every `vad_frames` job of a session now carries the
+  same utterance key, so the backend scores the session's audio as one
+  stream across silence endpoints, 30-second splits and Finalizes; it used
+  to start the state afresh after each silence endpoint, Finalize or
+  half-close. A soft onset after a pause is now scored in the state the
+  audio before it left, as Silero is used on a stream. A Finalize that
+  ends inside a 512-sample frame leaves that frame's samples before it
+  unscored, and the state carries over them. (V030-E04-F03-T02)
+
 - The `faster_whisper` runner profile decodes each `stt_decode` job in one
   pass over its window: one encoder pass over the window padded to the
   model's 30-second input, one greedy decode without timestamps, and the word

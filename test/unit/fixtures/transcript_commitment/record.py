@@ -11,7 +11,7 @@ replay names as missing, "no recorded decode of [start, end)" or "no recorded
 voice activity from start", and runs the replay again until it names nothing.
 A decode is one stt_decode job's single pass (whisper_window); voice activity is
 the sidecar's own Silero session run over the clip from `start` to its end in
-jobs of 32 frames, from reset state as each utterance's first job is. An entry an
+jobs of 32 frames, from reset state where the replay resets it. An entry an
 earlier record of the same clip, model, settings and library versions already
 holds (--reuse) is taken from it instead of run again. The record names files by
 their SHA-256 only, never by path.

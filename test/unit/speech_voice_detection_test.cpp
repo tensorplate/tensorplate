@@ -316,11 +316,11 @@ TEST(SpeechVoiceDetection, AFinalizeInSilenceYieldsAFinalWithoutSegmentsAndNoDec
   ASSERT_TRUE(binding.settle());
   EXPECT_TRUE(jobs_of(speech, JobClass::SttDecode).empty());
   EXPECT_EQ(binding.live_state(key), State::Active);
-  // Each Finalize starts the backend's state afresh.
+  // The backend's state goes on past each Finalize.
   const auto vad = jobs_of(speech, JobClass::VadFrames);
   ASSERT_EQ(vad.size(), 2U);
   EXPECT_EQ(std::get<VadFrames>(vad[0].payload()).utterance_id, 1U);
-  EXPECT_EQ(std::get<VadFrames>(vad[1].payload()).utterance_id, 2U);
+  EXPECT_EQ(std::get<VadFrames>(vad[1].payload()).utterance_id, 1U);
 }
 
 TEST(SpeechVoiceDetection, AHalfCloseEndsTheUtteranceOnceItsFramesWereScored) {
@@ -416,13 +416,80 @@ TEST(SpeechVoiceDetection, AudioAfterAnEndpointWaitsUnscoredUntilItsUtterancesFi
   binding.finalize(key, 6);
   ASSERT_NO_FATAL_FAILURE(
       binding.expect_final(key, EndpointReason::ClientFinalize, 2, 42 * kVadFrame, following, 6));
-  // The scoring went on from the endpoint, its state afresh.
+  // The scoring went on from the endpoint in the same state.
   const auto vad = jobs_of(speech, JobClass::VadFrames);
   ASSERT_GT(vad.size(), scored_before.size());
-  for (std::size_t index = 0; index < vad.size(); ++index) {
-    EXPECT_EQ(std::get<VadFrames>(vad[index].payload()).utterance_id,
-              index < scored_before.size() ? 1U : 2U);
+  for (const auto& request : vad) {
+    EXPECT_EQ(std::get<VadFrames>(request.payload()).utterance_id, 1U);
   }
+}
+
+/// Every voice-activity job of the session carries the first one's
+/// utterance key, so the backend scores them in one state.
+void expect_one_voice_activity_state(const SpeechUnderTest& speech, std::uint64_t key) {
+  std::vector<std::uint64_t> utterances;
+  for (const auto& request : jobs_of(speech, JobClass::VadFrames)) {
+    if (request.identity().session_key == key) {
+      utterances.push_back(std::get<VadFrames>(request.payload()).utterance_id);
+    }
+  }
+  ASSERT_FALSE(utterances.empty());
+  EXPECT_EQ(std::count(utterances.begin(), utterances.end(), utterances.front()),
+            static_cast<std::ptrdiff_t>(utterances.size()));
+}
+
+// A soft onset after a pause may score as speech only in the state the
+// frames before it left. The fixture's voice activity is stateless: the
+// case pins the key the frames after each endpoint are scored under.
+TEST(SpeechVoiceDetection, FramesAfterAPauseGoUnderTheKeyOfTheUtteranceBeforeIt) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  // Utterance 1 ends at frame 42; speech starts again at frame 80, 1.2 s
+  // later, and the tenth quiet frame after it ends at 106.
+  const Bytes first = join(voiced(16'000, 21), quiet(6'000, 22));
+  const Bytes audio = join(join(first, quiet(80 * kVadFrame - first.size() / 2, 23)),
+                           join(voiced(8'000, 24), quiet(6'000, 25)));
+  ASSERT_TRUE(binding.audio_in_long_frames(key, first));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::Silence, 1, 0,
+                                               samples_of(audio, 0, 42 * kVadFrame), 0));
+  const std::size_t before = scored_ends(speech, key).size();
+  ASSERT_TRUE(
+      binding.audio_in_long_frames(key, samples_of(audio, first.size() / 2, audio.size() / 2)));
+  const std::uint64_t onset = 80 * kVadFrame - 2'560;
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::Silence, 2, onset,
+                                               samples_of(audio, onset, 106 * kVadFrame), 0));
+  binding.audio(key, quiet(1'024, 29));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_GT(scored_ends(speech, key).size(), before);
+  EXPECT_EQ(final_decodes(speech, key), (Windows{{0, 42 * kVadFrame}, {onset, 106 * kVadFrame}}));
+  ASSERT_NO_FATAL_FAILURE(expect_one_voice_activity_state(speech, key));
+}
+
+// A Finalize inside a frame leaves the frame's samples before it unscored;
+// the frames after it go on in the same state.
+TEST(SpeechVoiceDetection, AFinalizeInsideAFrameKeepsTheStateForTheNextUtterancesFrames) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  // Nine whole frames and 192 samples.
+  const Bytes first = voiced(4'800, 26);
+  binding.audio(key, first);
+  binding.finalize(key, 1);
+  ASSERT_NO_FATAL_FAILURE(
+      binding.expect_final(key, EndpointReason::ClientFinalize, 1, 0, first, 1));
+  ASSERT_TRUE(binding.settle());
+  const std::size_t before = jobs_of(speech, JobClass::VadFrames).size();
+  // The frames start again at the Finalize: speech in the first 16, and the
+  // tenth quiet one after them ends 26 frames on.
+  const Bytes second = join(voiced(8'000, 27), quiet(6'000, 28));
+  ASSERT_TRUE(binding.audio_in_long_frames(key, second));
+  ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::Silence, 2, 4'800,
+                                               samples_of(second, 0, 26 * kVadFrame), 0));
+  ASSERT_TRUE(binding.settle());
+  EXPECT_GT(jobs_of(speech, JobClass::VadFrames).size(), before);
+  EXPECT_EQ(final_decodes(speech, key), (Windows{{0, 4'800}, {4'800, 4'800 + 26 * kVadFrame}}));
+  ASSERT_NO_FATAL_FAILURE(expect_one_voice_activity_state(speech, key));
 }
 
 // One job scores the frames on both sides of a silence endpoint: the credit
@@ -567,6 +634,8 @@ TEST(SpeechVoiceDetection, AFinalizeWaitingInTurnIsScoredOnlyToItsOwnEnd) {
   const auto after_race = std::upper_bound(ends.begin(), ends.end(), endpoint);
   ASSERT_NE(after_race, ends.end());
   EXPECT_EQ(*after_race, endpoint + 6 * kVadFrame);
+  // Finalize 7 ends on a frame's end; the frames after it keep the key.
+  ASSERT_NO_FATAL_FAILURE(expect_one_voice_activity_state(speech, key));
 }
 
 TEST(SpeechVoiceDetection, TheLongestUtteranceIsSplitAndScoringGoesOnUnderOneState) {
@@ -594,6 +663,12 @@ TEST(SpeechVoiceDetection, TheLongestUtteranceIsSplitAndScoringGoesOnUnderOneSta
   binding.finalize(key, 5);
   ASSERT_NO_FATAL_FAILURE(binding.expect_final(key, EndpointReason::ClientFinalize, 2, kLongest,
                                                samples_of(audio, kLongest, kLongest + 4'000), 5));
+  // The job that scored the split may have scored every frame up to the
+  // Finalize: frames after it make sure a job follows the split.
+  const std::size_t before = jobs_of(speech, JobClass::VadFrames).size();
+  binding.audio(key, quiet(1'024, 24));
+  ASSERT_TRUE(binding.settle());
+  ASSERT_GT(jobs_of(speech, JobClass::VadFrames).size(), before);
   for (const auto& request : jobs_of(speech, JobClass::VadFrames)) {
     EXPECT_EQ(std::get<VadFrames>(request.payload()).utterance_id, 1U);
   }

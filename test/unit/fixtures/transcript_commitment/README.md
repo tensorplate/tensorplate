@@ -16,20 +16,19 @@ How a replay asks (`"utterances"` in each record):
   activity policy over the clip's frame probabilities, one 512-sample
   frame at a time; in each utterance a decode of the ring's window once
   320 ms past its speech start are scored and again after each further
-  160 ms (the profile's initial accumulation and decode stride), the tail at
-  its endpoint, and the voice activity model's state reset after each
-  endpoint, as the sidecar resets it for each utterance. A run of voice
-  activity starts at the clip's start or at such a reset and goes to the
-  clip's end, in jobs of 32 frames.
+  160 ms (the profile's initial accumulation and decode stride), and the
+  tail at its endpoint. Unlike the dispatch, the replay resets the voice
+  activity model's state after each endpoint: a run of voice activity
+  starts at the clip's start or at such a reset and goes to the clip's
+  end, in jobs of 32 frames.
 - `whole clip`: the clip as one utterance from its first sample, decoded
   320 ms in and every 160 ms after, without voice activity.
 
 The replay scores a frame and decodes a due window at once; the dispatch
 takes as long as its jobs do, so a busy decode lane decodes later windows.
-Likewise the replay resets the voice activity state at the frame after an
-endpoint, as a session paced in real time does; the dispatch resets it at
-the first voice activity job it submits after the endpoint, which can be
-later when jobs are already in flight.
+The dispatch keeps one voice activity state over a session's audio and
+never resets it at an endpoint, so after the first endpoint a session's
+voice activity, and with it its utterances, can differ from the replay's.
 
 Voice detection splits the English clip's repeated words ("ask", "what",
 "can do for") into separate utterances, and no Arabic repetition falls
