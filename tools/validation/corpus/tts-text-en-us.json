@@ -1,0 +1,4334 @@
+{
+  "schema_version": "0.1",
+  "corpus": {
+    "name": "tts-text-en-us",
+    "version": "2"
+  },
+  "language": "en-US",
+  "voice": "af_heart",
+  "tokenizer": {
+    "rule": "kokoro-kpipeline-g2p-length-v1",
+    "lock": "packaging/speech-runtime/lock/kokoro.txt",
+    "g2p_pins_sha256": "4fee18c4521ffd155b3d55c7611eabf098c865edc4bfb4bba73db61d63a65a15",
+    "kokoro": "0.9.4",
+    "misaki": "0.9.4",
+    "spacy": "3.8.16",
+    "en_core_web_sm": "3.8.0",
+    "espeak_ng": "1.51+dfsg-12build1"
+  },
+  "sources": [
+    {
+      "id": "cmu-arctic",
+      "title": "CMU ARCTIC prompt list (cmuarctic.data)",
+      "license": "CMU-ARCTIC",
+      "attribution": "CMU ARCTIC databases, Carnegie Mellon University, Copyright (c) 2003. Permission to use, copy, modify and license for any purpose is granted without fee, provided the copyright notice, conditions and disclaimer are retained, modifications are marked and the authors' names are not deleted; the prompts are used unmodified. See http://www.festvox.org/cmu_arctic/ The notice, conditions and disclaimer are kept verbatim in tools/validation/corpus/cmu-arctic-COPYING.txt.",
+      "url": "http://festvox.org/cmu_arctic/cmuarctic.data",
+      "sha256": "60e3d9a4dc33732c9100baadd747312bdc1a200fc891766507397289753a25c7"
+    },
+    {
+      "id": "libritts-r",
+      "title": "LibriTTS-R test-clean (openslr 141)",
+      "license": "CC-BY-4.0",
+      "attribution": "LibriTTS-R: A Restored Multi-Speaker Text-to-Speech Corpus, Y. Koizumi, H. Zen, S. Karita, Y. Ding, K. Yatabe, N. Morioka, M. Bacchiani, Y. Zhang, W. Han and A. Bapna, 2023; CC BY 4.0. Text used unmodified. License: https://creativecommons.org/licenses/by/4.0/",
+      "url": "https://www.openslr.org/resources/141/test_clean.tar.gz",
+      "sha256": "d4a2a7cdeeb68a6cfd628559739879bcb29556364cc13f38413930d59369a7f1",
+      "md5": "4d373d453eb96c0691e598061bbafab7",
+      "text_form": "original"
+    },
+    {
+      "id": "authored",
+      "title": "Sentences written for this corpus",
+      "license": "CC0-1.0",
+      "attribution": "The TensorPlate authors, dedicated to the public domain under CC0 1.0.",
+      "url": null,
+      "sha256": null
+    }
+  ],
+  "sentences": [
+    {
+      "id": "arctic-a0030",
+      "text": "I had faith in them.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0030",
+      "phoneme_tokens": 20,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0098",
+      "text": "Shall I carry you.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0098",
+      "phoneme_tokens": 17,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0158",
+      "text": "Does that look good.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0158",
+      "phoneme_tokens": 20,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0207",
+      "text": "How much was it.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0207",
+      "phoneme_tokens": 16,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0287",
+      "text": "Keep an eye on him.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0287",
+      "phoneme_tokens": 20,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0329",
+      "text": "Ah, indeed.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0329",
+      "phoneme_tokens": 11,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0389",
+      "text": "Mab, she said.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0389",
+      "phoneme_tokens": 14,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "arctic-a0484",
+      "text": "No-sir-ee.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0484",
+      "phoneme_tokens": 10,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "arctic-a0562",
+      "text": "What the flaming.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0562",
+      "phoneme_tokens": 16,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0166",
+      "text": "Fast, but endure.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0166",
+      "phoneme_tokens": 19,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0211",
+      "text": "This is eighteen eighty.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0211",
+      "phoneme_tokens": 20,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0228",
+      "text": "You were engaged.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0228",
+      "phoneme_tokens": 16,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0435",
+      "text": "Well, did they eat.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0435",
+      "phoneme_tokens": 18,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0454",
+      "text": "Eighteen, he added.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0454",
+      "phoneme_tokens": 17,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-001",
+      "text": "Yes.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 5,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-002",
+      "text": "No.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 4,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-003",
+      "text": "Okay, thanks.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 14,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-004",
+      "text": "Sure.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 5,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-005",
+      "text": "Got it.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 8,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-006",
+      "text": "One moment, please.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 20,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-007",
+      "text": "Thank you!",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 9,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-008",
+      "text": "Hello there.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 11,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-009",
+      "text": "Goodbye.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 8,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-010",
+      "text": "Sounds good.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 12,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-011",
+      "text": "I'm sorry?",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 10,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-012",
+      "text": "Not right now.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 14,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-013",
+      "text": "Never mind.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-014",
+      "text": "Don't worry.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 12,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-015",
+      "text": "I can't hear you.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 17,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-016",
+      "text": "That's not it.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 14,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-017",
+      "text": "Nobody answered.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 17,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-018",
+      "text": "Nothing yet.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 12,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-020",
+      "text": "Gate 12.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 12,
+      "stratum": "t1to20",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-021",
+      "text": "It's 4:30.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 17,
+      "stratum": "t1to20",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "authored-023",
+      "text": "Pay $5.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 17,
+      "stratum": "t1to20",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-024",
+      "text": "Page 7.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 12,
+      "stratum": "t1to20",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-025",
+      "text": "Wait.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 5,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-026",
+      "text": "Please hold.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 12,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-027",
+      "text": "Of course.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 10,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-028",
+      "text": "Right away.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 10,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-029",
+      "text": "You're welcome.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-030",
+      "text": "Good morning.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-031",
+      "text": "Good night!",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 10,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-032",
+      "text": "Excuse me.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-033",
+      "text": "Let's go.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 10,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-034",
+      "text": "Try again.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 11,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-035",
+      "text": "Almost done.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-036",
+      "text": "All set.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 9,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-037",
+      "text": "Is that right?",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 14,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-038",
+      "text": "Really?",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 7,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-039",
+      "text": "Hmm, let me check.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 19,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-040",
+      "text": "Turn left.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 12,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-041",
+      "text": "Stop here.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 11,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-042",
+      "text": "Keep going.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 11,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-043",
+      "text": "Next, please.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 14,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-044",
+      "text": "Welcome back.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-045",
+      "text": "Done!",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 5,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-046",
+      "text": "Absolutely.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 12,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-047",
+      "text": "Maybe later.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-048",
+      "text": "Neither one.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 12,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-049",
+      "text": "Not today.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 11,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-050",
+      "text": "No problem.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-051",
+      "text": "I don't know.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-052",
+      "text": "Who's calling?",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 12,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-053",
+      "text": "Speak up.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 10,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-054",
+      "text": "Battery low.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 12,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-055",
+      "text": "Step 3.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 11,
+      "stratum": "t1to20",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-057",
+      "text": "Volume 8.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-058",
+      "text": "See you soon.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 12,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-059",
+      "text": "Have a nice day.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 16,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-060",
+      "text": "Over here.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 11,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-061",
+      "text": "Fine.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 5,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-062",
+      "text": "Great job!",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 11,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-063",
+      "text": "Hold on.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 10,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-064",
+      "text": "Me too.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 8,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-065",
+      "text": "Why not?",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 9,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-066",
+      "text": "Happy birthday!",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 15,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-067",
+      "text": "Ready when you are.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 17,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-068",
+      "text": "It won't start.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 16,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-069",
+      "text": "Platform 9.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 16,
+      "stratum": "t1to20",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-070",
+      "text": "Exit 14B.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 19,
+      "stratum": "t1to20",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-071",
+      "text": "Seat 23A.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 20,
+      "stratum": "t1to20",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-072",
+      "text": "Aisle 6.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 10,
+      "stratum": "t1to20",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-075",
+      "text": "I haven't eaten.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 16,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1089-134686-000007-000003",
+      "text": "What music?",
+      "source": "libritts-r",
+      "source_id": "1089_134686_000007_000003",
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1089-134691-000022-000000",
+      "text": "--Duck him!",
+      "source": "libritts-r",
+      "source_id": "1089_134691_000022_000000",
+      "phoneme_tokens": 10,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1284-1180-000045-000001",
+      "text": "A Patchwork Girl?",
+      "source": "libritts-r",
+      "source_id": "1284_1180_000045_000001",
+      "phoneme_tokens": 18,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1580-141083-000045-000003",
+      "text": "Which chair?\"",
+      "source": "libritts-r",
+      "source_id": "1580_141083_000045_000003",
+      "phoneme_tokens": 11,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1580-141083-000056-000001",
+      "text": "There are others.",
+      "source": "libritts-r",
+      "source_id": "1580_141083_000056_000001",
+      "phoneme_tokens": 15,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1580-141084-000050-000003",
+      "text": "Watson you here!",
+      "source": "libritts-r",
+      "source_id": "1580_141084_000050_000003",
+      "phoneme_tokens": 16,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1995-1826-000012-000000",
+      "text": "\"Nonsense!",
+      "source": "libritts-r",
+      "source_id": "1995_1826_000012_000000",
+      "phoneme_tokens": 11,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1995-1826-000012-000002",
+      "text": "Show off.",
+      "source": "libritts-r",
+      "source_id": "1995_1826_000012_000002",
+      "phoneme_tokens": 8,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1995-1826-000038-000001",
+      "text": "I declare!",
+      "source": "libritts-r",
+      "source_id": "1995_1826_000038_000001",
+      "phoneme_tokens": 11,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1995-1826-000039-000000",
+      "text": "\"Is that so?\"",
+      "source": "libritts-r",
+      "source_id": "1995_1826_000039_000000",
+      "phoneme_tokens": 15,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-237-126133-000025-000000",
+      "text": "That brought Polly to.",
+      "source": "libritts-r",
+      "source_id": "237_126133_000025_000000",
+      "phoneme_tokens": 20,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-237-134500-000019-000001",
+      "text": "Don't you?\"",
+      "source": "libritts-r",
+      "source_id": "237_134500_000019_000001",
+      "phoneme_tokens": 10,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-260-123286-000048-000003",
+      "text": "I prepare to fire.",
+      "source": "libritts-r",
+      "source_id": "260_123286_000048_000003",
+      "phoneme_tokens": 20,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-2830-3979-000011-000000",
+      "text": "\"And what is that?\"",
+      "source": "libritts-r",
+      "source_id": "2830_3979_000011_000000",
+      "phoneme_tokens": 20,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-4446-2273-000038-000003",
+      "text": "I hope so.\"",
+      "source": "libritts-r",
+      "source_id": "4446_2273_000038_000003",
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-4970-29093-000040-000000",
+      "text": "\"To-morrow.",
+      "source": "libritts-r",
+      "source_id": "4970_29093_000040_000000",
+      "phoneme_tokens": 9,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-5142-33396-000030-000001",
+      "text": "'A fire!",
+      "source": "libritts-r",
+      "source_id": "5142_33396_000030_000001",
+      "phoneme_tokens": 9,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-5142-36377-000004-000012",
+      "text": "I looked at my watch.",
+      "source": "libritts-r",
+      "source_id": "5142_36377_000004_000012",
+      "phoneme_tokens": 20,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-5683-32865-000044-000000",
+      "text": "'That?",
+      "source": "libritts-r",
+      "source_id": "5683_32865_000044_000000",
+      "phoneme_tokens": 6,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-6829-68771-000042-000001",
+      "text": "\"I abhor crowds.",
+      "source": "libritts-r",
+      "source_id": "6829_68771_000042_000001",
+      "phoneme_tokens": 18,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-6930-75918-000029-000000",
+      "text": "\"What do you mean?\"",
+      "source": "libritts-r",
+      "source_id": "6930_75918_000029_000000",
+      "phoneme_tokens": 19,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-6930-75918-000031-000000",
+      "text": "\"I am fatigued.\"",
+      "source": "libritts-r",
+      "source_id": "6930_75918_000031_000000",
+      "phoneme_tokens": 16,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7021-79730-000049-000001",
+      "text": "By Authority.",
+      "source": "libritts-r",
+      "source_id": "7021_79730_000049_000001",
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7021-85628-000015-000000",
+      "text": "And so he did.",
+      "source": "libritts-r",
+      "source_id": "7021_85628_000015_000000",
+      "phoneme_tokens": 17,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7127-75947-000013-000000",
+      "text": "\"Explain yourself?\"",
+      "source": "libritts-r",
+      "source_id": "7127_75947_000013_000000",
+      "phoneme_tokens": 20,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7127-75947-000029-000001",
+      "text": "Ah!",
+      "source": "libritts-r",
+      "source_id": "7127_75947_000029_000001",
+      "phoneme_tokens": 3,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0009",
+      "text": "He turned sharply, and faced Gregson across the table.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0009",
+      "phoneme_tokens": 56,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0012",
+      "text": "Gregson shoved back his chair and rose to his feet.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0012",
+      "phoneme_tokens": 50,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0015",
+      "text": "It's the aurora borealis.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0015",
+      "phoneme_tokens": 26,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0021",
+      "text": "It fairly clubbed me into recognizing it.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0021",
+      "phoneme_tokens": 44,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0026",
+      "text": "It occurred to me that there would have to be an accounting.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0026",
+      "phoneme_tokens": 52,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0065",
+      "text": "They closed now until his fingers were like cords of steel.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0065",
+      "phoneme_tokens": 61,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0081",
+      "text": "What if she did not come to the rock.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0081",
+      "phoneme_tokens": 37,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0100",
+      "text": "You must sleep, he urged.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0100",
+      "phoneme_tokens": 26,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0121",
+      "text": "They ate dinner at the fifth, and rested for two hours.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0121",
+      "phoneme_tokens": 54,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0147",
+      "text": "A moment before he was intoxicated by a joy that was almost madness.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0147",
+      "phoneme_tokens": 71,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0152",
+      "text": "Philip thrust himself against it and entered.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0152",
+      "phoneme_tokens": 46,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0157",
+      "text": "He had worshiped her, as Dante might have worshiped Beatrice.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0157",
+      "phoneme_tokens": 60,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0162",
+      "text": "That's the sub-foreman, explained Thorpe.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0162",
+      "phoneme_tokens": 38,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0171",
+      "text": "And when you come back in a few days, bring Eileen.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0171",
+      "phoneme_tokens": 51,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "arctic-a0176",
+      "text": "For the first time in his life he was yearning for a scrap.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0176",
+      "phoneme_tokens": 60,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0184",
+      "text": "Don't you see, I'm chewing this thing in two.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0184",
+      "phoneme_tokens": 40,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0195",
+      "text": "But a strange thing happened.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0195",
+      "phoneme_tokens": 28,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0208",
+      "text": "Youth had come back to her, freed from the yoke of oppression.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0208",
+      "phoneme_tokens": 59,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0218",
+      "text": "The ringing of the big bell aroused him.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0218",
+      "phoneme_tokens": 38,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0234",
+      "text": "Why, the average review is more nauseating than cod liver oil.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0234",
+      "phoneme_tokens": 62,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0255",
+      "text": "You won't die of malnutrition, be sure of that.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0255",
+      "phoneme_tokens": 47,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0259",
+      "text": "Think of investing in such an adventure.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0259",
+      "phoneme_tokens": 40,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0266",
+      "text": "They handled two men already, both grub-thieves.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0266",
+      "phoneme_tokens": 48,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0289",
+      "text": "They are not regular oyster pirates, Nicholas continued.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0289",
+      "phoneme_tokens": 58,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0316",
+      "text": "We had been chased by them ourselves, more than once.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0316",
+      "phoneme_tokens": 51,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0319",
+      "text": "And the Edinburgh Evening News says, with editorial gloom.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0319",
+      "phoneme_tokens": 58,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0321",
+      "text": "The log on which Lop-Ear was lying got adrift.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0321",
+      "phoneme_tokens": 47,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0331",
+      "text": "Poor little Crooked-Leg was terribly scared.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0331",
+      "phoneme_tokens": 44,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0343",
+      "text": "You mean for this State, General, Alberta.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0343",
+      "phoneme_tokens": 43,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0362",
+      "text": "Nope, not the slightest idea.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0362",
+      "phoneme_tokens": 29,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0367",
+      "text": "There is not an iota of truth in it, certainly not.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0367",
+      "phoneme_tokens": 52,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0371",
+      "text": "It issued a rate of forty two dollars a car on charcoal.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0371",
+      "phoneme_tokens": 60,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0410",
+      "text": "So we have to fit the boat throughout with oil lamps as well.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0410",
+      "phoneme_tokens": 57,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0442",
+      "text": "You live on an income which your father earned.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0442",
+      "phoneme_tokens": 46,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0466",
+      "text": "Captain West may be a Samurai, but he is also human.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0466",
+      "phoneme_tokens": 58,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-a0483",
+      "text": "Beyond dispute, Corry Hutchinson had married Mabel Holmes.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0483",
+      "phoneme_tokens": 58,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "arctic-a0502",
+      "text": "Anything unusual or abnormal was sufficient to send a fellow to Molokai.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_a0502",
+      "phoneme_tokens": 76,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0009",
+      "text": "I'd say there was going to be a glorious scrap.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0009",
+      "phoneme_tokens": 46,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0011",
+      "text": "His eyes never took themselves for an instant from his companion's face.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0011",
+      "phoneme_tokens": 73,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0020",
+      "text": "He made no reply as he waited for Whittemore to continue.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0020",
+      "phoneme_tokens": 60,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "arctic-b0025",
+      "text": "Now, you understand.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0025",
+      "phoneme_tokens": 21,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0037",
+      "text": "Philip knew that she was not an Indian.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0037",
+      "phoneme_tokens": 38,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0042",
+      "text": "Ten minutes had not elapsed since he had dropped the handkerchief.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0042",
+      "phoneme_tokens": 64,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0046",
+      "text": "Philip produced a couple of cigars and took a chair opposite him.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0046",
+      "phoneme_tokens": 65,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0049",
+      "text": "There was nothing more, except a large ink blot under the words.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0049",
+      "phoneme_tokens": 66,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0055",
+      "text": "She was even more beautiful than when I saw her, before.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0055",
+      "phoneme_tokens": 58,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0075",
+      "text": "In that case he could not miss them, if he used caution.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0075",
+      "phoneme_tokens": 55,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0078",
+      "text": "There was pride and strength, the ring of triumph in his voice.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0078",
+      "phoneme_tokens": 59,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0080",
+      "text": "Tomorrow it will be strong enough for you to stand upon.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0080",
+      "phoneme_tokens": 54,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0087",
+      "text": "They will search for us between their camp and Churchill.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0087",
+      "phoneme_tokens": 52,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0117",
+      "text": "That's Thorpe's, said the young engineer.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0117",
+      "phoneme_tokens": 37,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0119",
+      "text": "Billinger may arrive in time.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0119",
+      "phoneme_tokens": 28,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "arctic-b0133",
+      "text": "There followed a roar that shook the earth.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0133",
+      "phoneme_tokens": 36,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0139",
+      "text": "Together they ate the rabbit.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0139",
+      "phoneme_tokens": 26,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0140",
+      "text": "They edged nearer, and stood shoulder to shoulder facing their world.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0140",
+      "phoneme_tokens": 64,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0141",
+      "text": "It was beating and waiting in the ambush of those black pits.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0141",
+      "phoneme_tokens": 58,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0156",
+      "text": "For that reason Le Beau had chosen him to fight the big fight.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0156",
+      "phoneme_tokens": 61,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "arctic-b0168",
+      "text": "The Indian felt the worship of her warm in his heart.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0168",
+      "phoneme_tokens": 54,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0189",
+      "text": "That is what distinguishes all of us from the lower animals.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0189",
+      "phoneme_tokens": 61,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0192",
+      "text": "Outsiders are allowed five minute speeches, the sick man urged.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0192",
+      "phoneme_tokens": 60,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0195",
+      "text": "Nobody knows how the natives got them.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0195",
+      "phoneme_tokens": 38,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0200",
+      "text": "We leave the eventuality to time and law.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0200",
+      "phoneme_tokens": 43,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0205",
+      "text": "You were destroying my life.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0205",
+      "phoneme_tokens": 26,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0233",
+      "text": "So she said, the irate skipper dashed on.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0233",
+      "phoneme_tokens": 40,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0242",
+      "text": "The Japanese understood as we could never school ourselves or hope to understand.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0242",
+      "phoneme_tokens": 81,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0274",
+      "text": "From the source of light a harsh voice said.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0274",
+      "phoneme_tokens": 41,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0277",
+      "text": "Two of the Folk were already up.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0277",
+      "phoneme_tokens": 32,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0295",
+      "text": "All right, Sir, replied Jock with great regret.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0295",
+      "phoneme_tokens": 47,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0299",
+      "text": "Miss Brodie's smile was slightly sarcastic.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0299",
+      "phoneme_tokens": 42,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "arctic-b0331",
+      "text": "His partners had starved and died on the Stewart.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0331",
+      "phoneme_tokens": 51,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0347",
+      "text": "But ever his gaze returned to that Crouched Venus on the piano.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0347",
+      "phoneme_tokens": 65,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0363",
+      "text": "She was built primarily to sail.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0363",
+      "phoneme_tokens": 33,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0369",
+      "text": "You see, we were teaching ourselves.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0369",
+      "phoneme_tokens": 32,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0419",
+      "text": "Your father's fifth command, he nodded.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0419",
+      "phoneme_tokens": 38,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0427",
+      "text": "The sunsets grow more bizarre and spectacular off this coast of the Argentine.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0427",
+      "phoneme_tokens": 78,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0434",
+      "text": "The steward has just tendered me a respectful bit of advice.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0434",
+      "phoneme_tokens": 63,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0439",
+      "text": "The land exchanged its austere robes for the garb of a smiling wanton.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0439",
+      "phoneme_tokens": 70,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0441",
+      "text": "And there was Ethel Baird, whom also you must remember.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0441",
+      "phoneme_tokens": 56,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "arctic-b0449",
+      "text": "Also, she wouldn't walk.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0449",
+      "phoneme_tokens": 23,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0461",
+      "text": "By virtue of that power we shall remain in power.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0461",
+      "phoneme_tokens": 49,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0464",
+      "text": "I could not agree with Ernest.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0464",
+      "phoneme_tokens": 30,
+      "stratum": "t21to100",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0467",
+      "text": "Let us run them for ourselves.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0467",
+      "phoneme_tokens": 32,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "arctic-b0516",
+      "text": "Zilla relaxed her sour mouth long enough to sigh her satisfaction.",
+      "source": "cmu-arctic",
+      "source_id": "arctic_b0516",
+      "phoneme_tokens": 66,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-019",
+      "text": "Call 911.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 27,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-022",
+      "text": "Room 204.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 23,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-056",
+      "text": "Order 42 is ready.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 27,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-073",
+      "text": "Version 2.1.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 22,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-074",
+      "text": "Flight 237.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 33,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-076",
+      "text": "It's 72 degrees.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 26,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-077",
+      "text": "Your appointment is on May 14, 2027 at 3:45 PM.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 87,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "authored-079",
+      "text": "Please call 555-0142 before 6 o'clock.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 72,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-080",
+      "text": "Flight 237 to Denver now boards at gate B7.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 74,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-081",
+      "text": "The temperature will drop to -5 degrees tonight.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 54,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-082",
+      "text": "Take 2 tablets every 8 hours, but no more than 6 in a day.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 69,
+      "stratum": "t21to100",
+      "critical": [
+        "negation",
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-083",
+      "text": "Your order number is 48213, and it ships in 3 to 5 days.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 99,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-084",
+      "text": "I did not say 15, I said 50.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 42,
+      "stratum": "t21to100",
+      "critical": [
+        "negation",
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-085",
+      "text": "We never open before 10 AM on Sundays.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 48,
+      "stratum": "t21to100",
+      "critical": [
+        "negation",
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-086",
+      "text": "There are 1,024 bytes in a kilobyte, not 1,000.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 74,
+      "stratum": "t21to100",
+      "critical": [
+        "negation",
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-087",
+      "text": "The meeting moved from March 3 to March 13.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 50,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-088",
+      "text": "Don't send the package to 221 Baker Street; send it to 212.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 98,
+      "stratum": "t21to100",
+      "critical": [
+        "negation",
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-089",
+      "text": "Nobody has called about the 2 o'clock delivery yet.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 54,
+      "stratum": "t21to100",
+      "critical": [
+        "negation",
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-090",
+      "text": "The code is 7 7 4 1, and it doesn't expire.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 60,
+      "stratum": "t21to100",
+      "critical": [
+        "negation",
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-091",
+      "text": "In 1969, 2 astronauts walked on the Moon.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 60,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-092",
+      "text": "Your balance is $0.37, so the payment can't go through.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 68,
+      "stratum": "t21to100",
+      "critical": [
+        "negation",
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-093",
+      "text": "The train leaves at 7:05 and arrives at 9:50.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 63,
+      "stratum": "t21to100",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "authored-094",
+      "text": "Room 1408 is on the 14th floor, not the 4th.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 62,
+      "stratum": "t21to100",
+      "critical": [
+        "negation",
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-3570-5694-000011-000004",
+      "text": "Costly entertainments, such as the potlatch or the ball, are peculiarly adapted to serve this end.",
+      "source": "libritts-r",
+      "source_id": "3570_5694_000011_000004",
+      "phoneme_tokens": 100,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-4446-2275-000009-000001",
+      "text": "She looked at his heavy shoulders and big, determined head, thrust forward like a catapult in leash.",
+      "source": "libritts-r",
+      "source_id": "4446_2275_000009_000001",
+      "phoneme_tokens": 100,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-4507-16021-000036-000005",
+      "text": "And so it goes on.",
+      "source": "libritts-r",
+      "source_id": "4507_16021_000036_000005",
+      "phoneme_tokens": 21,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-6829-68769-000019-000003",
+      "text": "Come this way, please.\"",
+      "source": "libritts-r",
+      "source_id": "6829_68769_000019_000003",
+      "phoneme_tokens": 21,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "authored-078",
+      "text": "The total comes to $1,249.99, including tax.",
+      "source": "authored",
+      "source_id": null,
+      "phoneme_tokens": 105,
+      "stratum": "t101to200",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1089-134686-000024-000005",
+      "text": "Why was the sacrament of the eucharist instituted under the two species of bread and wine if Jesus Christ be present body and blood, soul and divinity, in the bread alone and in the wine alone?",
+      "source": "libritts-r",
+      "source_id": "1089_134686_000024_000005",
+      "phoneme_tokens": 196,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1089-134691-000003-000000",
+      "text": "He set off abruptly for the Bull, walking rapidly lest his father's shrill whistle might call him back; and in a few moments he had rounded the curve at the police barrack and was safe.",
+      "source": "libritts-r",
+      "source_id": "1089_134691_000003_000000",
+      "phoneme_tokens": 184,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1089-134691-000025-000003",
+      "text": "But he, apart from them and in silence, remembered in what dread he stood of the mystery of his own body.",
+      "source": "libritts-r",
+      "source_id": "1089_134691_000025_000003",
+      "phoneme_tokens": 108,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1089-134691-000035-000000",
+      "text": "His throat ached with a desire to cry aloud, the cry of a hawk or eagle on high, to cry piercingly of his deliverance to the winds.",
+      "source": "libritts-r",
+      "source_id": "1089_134691_000035_000000",
+      "phoneme_tokens": 131,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1089-134691-000046-000000",
+      "text": "She was alone and still, gazing out to sea; and when she felt his presence and the worship of his eyes her eyes turned to him in quiet sufferance of his gaze, without shame or wantonness.",
+      "source": "libritts-r",
+      "source_id": "1089_134691_000046_000000",
+      "phoneme_tokens": 183,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1188-133604-000004-000005",
+      "text": "You see how doubly, how intimately, opposed the ideas are; yet how difficult to explain without apparent contradiction.",
+      "source": "libritts-r",
+      "source_id": "1188_133604_000004_000005",
+      "phoneme_tokens": 119,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-121-127105-000042-000001",
+      "text": "Then he became as communicative as we could desire and indeed gave us his best reason for being so.",
+      "source": "libritts-r",
+      "source_id": "121_127105_000042_000001",
+      "phoneme_tokens": 102,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1284-1181-000003-000002",
+      "text": "Margolotte had first made the girl's form from the patchwork quilt and then she had dressed it with a patchwork skirt and an apron with pockets in it--using the same gay material throughout.",
+      "source": "libritts-r",
+      "source_id": "1284_1181_000003_000002",
+      "phoneme_tokens": 184,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-1320-122612-000020-000003",
+      "text": "The impressions of footsteps were numerous, but they all appeared like those of men who had wandered about the spot, without any design to quit it.",
+      "source": "libritts-r",
+      "source_id": "1320_122612_000020_000003",
+      "phoneme_tokens": 142,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1580-141083-000015-000002",
+      "text": "The alternative was that someone passing had observed the key in the door, had known that I was out, and had entered to look at the papers.",
+      "source": "libritts-r",
+      "source_id": "1580_141083_000015_000002",
+      "phoneme_tokens": 134,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1580-141083-000066-000002",
+      "text": "What could he do? He caught up everything which would betray him, and he rushed into your bedroom to conceal himself.\"",
+      "source": "libritts-r",
+      "source_id": "1580_141083_000066_000002",
+      "phoneme_tokens": 116,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1580-141084-000044-000000",
+      "text": "The unfortunate tutor was certainly in a state of pitiable agitation when we found him in his chambers.",
+      "source": "libritts-r",
+      "source_id": "1580_141084_000044_000000",
+      "phoneme_tokens": 106,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1995-1836-000041-000000",
+      "text": "\"I thought the only excuse for fighting was a great Right; if Right is on neither side or simultaneously on both, then War is not only Hell but Damnation.\"",
+      "source": "libritts-r",
+      "source_id": "1995_1836_000041_000000",
+      "phoneme_tokens": 157,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1995-1837-000025-000000",
+      "text": "She stood on the island, ethereal, splendid, like some tall, dark, and gorgeous flower of the storied East.",
+      "source": "libritts-r",
+      "source_id": "1995_1837_000025_000000",
+      "phoneme_tokens": 107,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-2300-131720-000016-000010",
+      "text": "I had never seen one, and did not know how it worked, with the result that we soon burned up the babbitt metal in the bearings and spent a good part of the night getting them in order.",
+      "source": "libritts-r",
+      "source_id": "2300_131720_000016_000010",
+      "phoneme_tokens": 184,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-2300-131720-000016-000012",
+      "text": "They found an engine somewhat loose in the bearings, and there followed remarks which would not look well in print.",
+      "source": "libritts-r",
+      "source_id": "2300_131720_000016_000012",
+      "phoneme_tokens": 108,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-2300-131720-000018-000000",
+      "text": "On July 4th the Sunbury plant was put into commercial operation by Edison, and he remained a week studying its conditions and watching for any unforeseen difficulty that might arise.",
+      "source": "libritts-r",
+      "source_id": "2300_131720_000018_000000",
+      "phoneme_tokens": 187,
+      "stratum": "t101to200",
+      "critical": [
+        "numeral"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-2300-131720-000032-000005",
+      "text": "The investors in the enterprise were ready and anxious to meet the extra cost of putting the wires underground.",
+      "source": "libritts-r",
+      "source_id": "2300_131720_000032_000005",
+      "phoneme_tokens": 111,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-2300-131720-000042-000003",
+      "text": "The boilers were fired by wood, as the economical transportation of coal was a physical impossibility.",
+      "source": "libritts-r",
+      "source_id": "2300_131720_000042_000003",
+      "phoneme_tokens": 105,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-237-126133-000010-000000",
+      "text": "\"Well,\" said Van, and he showed signs of relenting a little at that; \"but Percy is perfectly awful, mamma, you don't know; and he feels so smart too,\" he said vindictively.",
+      "source": "libritts-r",
+      "source_id": "237_126133_000010_000000",
+      "phoneme_tokens": 174,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-237-126133-000059-000000",
+      "text": "\"So I hope,\" said Mrs. Whitney; \"and father, I do believe they'll repay you; for I do think there's good blood there; these children have a look about them that shows them worthy to be trusted.\"",
+      "source": "libritts-r",
+      "source_id": "237_126133_000059_000000",
+      "phoneme_tokens": 187,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-237-134493-000002-000006",
+      "text": "From the graveyard gate one can count a dozen gayly painted farmhouses; the gilded weather-vanes on the big red barns wink at each other across the green and brown and yellow fields.",
+      "source": "libritts-r",
+      "source_id": "237_134493_000002_000006",
+      "phoneme_tokens": 185,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-260-123440-000015-000000",
+      "text": "As she said this she looked down at her hands, and was surprised to see that she had put on one of the Rabbit's little white kid gloves while she was talking.",
+      "source": "libritts-r",
+      "source_id": "260_123440_000015_000000",
+      "phoneme_tokens": 152,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-260-123440-000021-000001",
+      "text": "The Mouse gave a sudden leap out of the water, and seemed to quiver all over with fright. 'Oh, I beg your pardon!' cried Alice hastily, afraid that she had hurt the poor animal's feelings.",
+      "source": "libritts-r",
+      "source_id": "260_123440_000021_000001",
+      "phoneme_tokens": 185,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-2830-3979-000019-000001",
+      "text": "It presents like no other of Luther's writings the central thought of Christianity, the justification of the sinner for the sake of Christ's merits alone.",
+      "source": "libritts-r",
+      "source_id": "2830_3979_000019_000001",
+      "phoneme_tokens": 151,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-2830-3980-000070-000001",
+      "text": "If he says, \"Thou shalt be damned,\" you tell him: \"No, for I fly to Christ who gave Himself for my sins.",
+      "source": "libritts-r",
+      "source_id": "2830_3980_000070_000001",
+      "phoneme_tokens": 108,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-2961-961-000011-000003",
+      "text": "But two terms must be united by a third, which is a mean between them; and had the earth been a surface only, one mean would have sufficed, but two means are required to unite solid bodies.",
+      "source": "libritts-r",
+      "source_id": "2961_961_000011_000003",
+      "phoneme_tokens": 191,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-3570-5695-000000-000000",
+      "text": "With the disappearance of servitude, the number of vicarious consumers attached to any one gentleman tends, on the whole, to decrease.",
+      "source": "libritts-r",
+      "source_id": "3570_5695_000000_000000",
+      "phoneme_tokens": 134,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-3570-5695-000004-000002",
+      "text": "The leisure class stands at the head of the social structure in point of reputability; and its manner of life and its standards of worth therefore afford the norm of reputability for the community.",
+      "source": "libritts-r",
+      "source_id": "3570_5695_000004_000002",
+      "phoneme_tokens": 200,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-4077-13754-000002-000001",
+      "text": "Then, in their hasty departure, the soldiers disposed of everything outside of actual necessities in the way of accouterment and camp equipage.",
+      "source": "libritts-r",
+      "source_id": "4077_13754_000002_000001",
+      "phoneme_tokens": 141,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-4077-13754-000003-000001",
+      "text": "It could not be doubted that war was imminent; already the conflict had begun, and a picked part of the army was away in the western wilds, doing nothing for any phase of the public good.",
+      "source": "libritts-r",
+      "source_id": "4077_13754_000003_000001",
+      "phoneme_tokens": 189,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-4077-13754-000023-000001",
+      "text": "Today the Church of Jesus Christ of Latter-day Saints is stronger than ever before; and the people are confident that it is at its weakest stage for all time to come.",
+      "source": "libritts-r",
+      "source_id": "4077_13754_000023_000001",
+      "phoneme_tokens": 163,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-4446-2273-000019-000001",
+      "text": "Heaven knows how she managed to keep it whole, through all our wanderings, or in what baskets and bundles and theatre trunks it hasn't been stowed away.",
+      "source": "libritts-r",
+      "source_id": "4446_2273_000019_000001",
+      "phoneme_tokens": 148,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-4446-2273-000022-000001",
+      "text": "But I don't like it so well as this.\" Bartley held the yellow wine against the light and squinted into it as he turned the glass slowly about.",
+      "source": "libritts-r",
+      "source_id": "4446_2273_000022_000001",
+      "phoneme_tokens": 143,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-4446-2273-000035-000004",
+      "text": "When they reached the house where Hilda lodged, Bartley went across the court with her, and up the dark old stairs to the third landing; and there he had kissed her for the first time.",
+      "source": "libritts-r",
+      "source_id": "4446_2273_000035_000004",
+      "phoneme_tokens": 175,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-4446-2275-000016-000000",
+      "text": "He rose and pushed the chair behind him and began to walk miserably about the room, seeming to find it too small for him.",
+      "source": "libritts-r",
+      "source_id": "4446_2275_000016_000000",
+      "phoneme_tokens": 123,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-4507-16021-000029-000003",
+      "text": "They constitute two different orders of facts which correspond to each other, which are always interlaced, and which often bring forth results.",
+      "source": "libritts-r",
+      "source_id": "4507_16021_000029_000003",
+      "phoneme_tokens": 144,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-4992-41797-000016-000001",
+      "text": "Her only interests in life were her younger brother Cyril, delicate and timid, and in continual terror of his father,--and a passion for drawing and sketching that was fairly devouring in its intensity.",
+      "source": "libritts-r",
+      "source_id": "4992_41797_000016_000001",
+      "phoneme_tokens": 199,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-4992-41797-000025-000006",
+      "text": "Oh, mother, there's always so much spare room in your heart,--for you took in Julia and yet we never felt the difference,--won't you make a place for Olive?",
+      "source": "libritts-r",
+      "source_id": "4992_41797_000025_000006",
+      "phoneme_tokens": 148,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-5105-28233-000019-000001",
+      "text": "Ben Zoof, however, did not despair of ultimately converting the captain, and meanwhile had resolved never to leave him.",
+      "source": "libritts-r",
+      "source_id": "5105_28233_000019_000001",
+      "phoneme_tokens": 122,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-5105-28233-000022-000000",
+      "text": "Ben Zoof's eyes glistened with delight; and from that moment Hector Servadac and Montmartre held equal places in his affection.",
+      "source": "libritts-r",
+      "source_id": "5105_28233_000022_000000",
+      "phoneme_tokens": 130,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-5105-28240-000013-000002",
+      "text": "After rounding the peak, she steered direct for the channel to which Servadac by his gestures was pointing her, and was not long in entering the creek.",
+      "source": "libritts-r",
+      "source_id": "5105_28240_000013_000002",
+      "phoneme_tokens": 148,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-5105-28241-000006-000000",
+      "text": "For a few miles she followed the line hitherto presumably occupied by the coast of Algeria; but no land appeared to the south.",
+      "source": "libritts-r",
+      "source_id": "5105_28241_000006_000000",
+      "phoneme_tokens": 126,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-5105-28241-000012-000001",
+      "text": "The earth has undoubtedly entered upon a new orbit, but she is not incurring any probable risk of being precipitated onto the sun.\"",
+      "source": "libritts-r",
+      "source_id": "5105_28241_000012_000001",
+      "phoneme_tokens": 138,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-5105-28241-000022-000002",
+      "text": "Perhaps the depths might disclose what the surface failed to reveal, and Count Timascheff, anxious that Servadac should have every facility afforded him for solving his doubts, called for the sounding-line.",
+      "source": "libritts-r",
+      "source_id": "5105_28241_000022_000002",
+      "phoneme_tokens": 197,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-5142-36377-000008-000005",
+      "text": "\"A little cracked\"--that in the popular phrase was my impression of the stranger who now made his appearance in the supper-room.",
+      "source": "libritts-r",
+      "source_id": "5142_36377_000008_000005",
+      "phoneme_tokens": 120,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-5142-36377-000013-000003",
+      "text": "I liked Naomi Colebrook at first sight; liked her pleasant smile; liked her hearty shake of the hand when we were presented to each other.",
+      "source": "libritts-r",
+      "source_id": "5142_36377_000013_000003",
+      "phoneme_tokens": 137,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-5142-36600-000011-000000",
+      "text": "Our supposed naturalist having proceeded thus far in his investigation, would next enquire whether the races of men, when crossed, were in any degree sterile.",
+      "source": "libritts-r",
+      "source_id": "5142_36600_000011_000000",
+      "phoneme_tokens": 161,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-5639-40744-000008-000002",
+      "text": "Having come to this resolution, he hastened back to remove Leocadia before daylight appeared, which would compel him to keep her in his room all the following day.",
+      "source": "libritts-r",
+      "source_id": "5639_40744_000008_000002",
+      "phoneme_tokens": 156,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-5639-40744-000015-000000",
+      "text": "Many gentlemen followed him, greatly distressed at the sad accident which had befallen the general favourite; for it was soon on everybody's lips that the sufferer was little Luis.",
+      "source": "libritts-r",
+      "source_id": "5639_40744_000015_000000",
+      "phoneme_tokens": 179,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-5639-40744-000015-000002",
+      "text": "The gentleman who had humanely taken charge of him being of eminent rank, and well known, they easily found their way to his house, and arrived there just as Luis was under the surgeon's hands.",
+      "source": "libritts-r",
+      "source_id": "5639_40744_000015_000002",
+      "phoneme_tokens": 190,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-5639-40744-000033-000000",
+      "text": "At last they sat down to a merry supper to the sound of music, for the performers, who had been previously engaged, were now arrived.",
+      "source": "libritts-r",
+      "source_id": "5639_40744_000033_000000",
+      "phoneme_tokens": 132,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-5683-32865-000010-000004",
+      "text": "It seemed to me to indicate a great deal more than mere indifference--something of aversion, and nearer to a positive emotion than anything I had yet seen in that exquisitely apathetic face.",
+      "source": "libritts-r",
+      "source_id": "5683_32865_000010_000004",
+      "phoneme_tokens": 190,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-5683-32866-000008-000000",
+      "text": "'You seem to be very sensible, Mr. De Cresseron; pray tell me, frankly, what do you think of all this?'",
+      "source": "libritts-r",
+      "source_id": "5683_32866_000008_000000",
+      "phoneme_tokens": 112,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-5683-32866-000020-000001",
+      "text": "'I really don't think Wylder cares twopence about her, or she about him,' and Stanley Lake laughed gently and sleepily.",
+      "source": "libritts-r",
+      "source_id": "5683_32866_000020_000001",
+      "phoneme_tokens": 120,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-5683-32866-000045-000006",
+      "text": "I was always a lover of such antiquities, but I confess at that moment I would have vastly preferred a sprightly modern chintz and a trumpery little French bed in a corner of the Brandon Arms.",
+      "source": "libritts-r",
+      "source_id": "5683_32866_000045_000006",
+      "phoneme_tokens": 200,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-6829-68769-000036-000001",
+      "text": "He was of sturdy, athletic build and dressed neatly in a suit that was of coarse material but well brushed and cared for.",
+      "source": "libritts-r",
+      "source_id": "6829_68769_000036_000001",
+      "phoneme_tokens": 122,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-6829-68769-000068-000001",
+      "text": "It was a busy place, perhaps the busiest in the whole of the Eighth District, and in it were employed a large number of men.",
+      "source": "libritts-r",
+      "source_id": "6829_68769_000068_000001",
+      "phoneme_tokens": 122,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-6829-68769-000074-000000",
+      "text": "\"That doesn't interest me, especially, sir,\" answered Kenneth, smiling. \"I'm not electioneering just now.",
+      "source": "libritts-r",
+      "source_id": "6829_68769_000074_000000",
+      "phoneme_tokens": 105,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-6829-68769-000092-000001",
+      "text": "He detested the grasping disposition that would endeavor to take advantage of his evident desire to help young Gates.",
+      "source": "libritts-r",
+      "source_id": "6829_68769_000092_000001",
+      "phoneme_tokens": 118,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-6829-68771-000010-000009",
+      "text": "The office of Sheriff would pay about two thousand a year, and this sum Hopkins agreed to pay the liveryman and so relieve him of all the annoyance of earning it.",
+      "source": "libritts-r",
+      "source_id": "6829_68771_000010_000009",
+      "phoneme_tokens": 154,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-6829-68771-000022-000002",
+      "text": "I counted on Eliza Parsons, the new girl I hired for the linen room and to do mending; but Eliza said she had a headache this morning and couldn't stand the sun, So I let her off.",
+      "source": "libritts-r",
+      "source_id": "6829_68771_000022_000002",
+      "phoneme_tokens": 188,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-6829-68771-000044-000002",
+      "text": "Beth was a beautiful girl--the handsomest of the three cousins, by far; yet Eliza surpassed her in natural charm, and seemed well aware of the fact.",
+      "source": "libritts-r",
+      "source_id": "6829_68771_000044_000002",
+      "phoneme_tokens": 146,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-6930-76324-000014-000003",
+      "text": "First they took turns sweeping, as best they could, with a very ancient and frowsy broom, the thick, moth-eaten carpet.",
+      "source": "libritts-r",
+      "source_id": "6930_76324_000014_000003",
+      "phoneme_tokens": 113,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-7021-79730-000057-000000",
+      "text": "The mother, in managing the case in this way, relies partly on convincing the reason of the child, and partly on an appeal to her affection.",
+      "source": "libritts-r",
+      "source_id": "7021_79730_000057_000000",
+      "phoneme_tokens": 137,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7021-79740-000003-000002",
+      "text": "Such persons may be interested in the manner in which Delia made use of the children's dolls as a means of guiding and governing their little mothers.",
+      "source": "libritts-r",
+      "source_id": "7021_79740_000003_000002",
+      "phoneme_tokens": 146,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-7021-79740-000009-000001",
+      "text": "If Delia had attempted to give precisely the same lecture to the children themselves, they would very soon have become restless and uneasy, and it would have made very little impression upon them.",
+      "source": "libritts-r",
+      "source_id": "7021_79740_000009_000001",
+      "phoneme_tokens": 190,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-7021-79740-000010-000006",
+      "text": "I observe that, when you both wish for the same thing, you don't quarrel for it and try to pull it away from one another; but one waits like a lady until the other has done with it.",
+      "source": "libritts-r",
+      "source_id": "7021_79740_000010_000006",
+      "phoneme_tokens": 182,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7021-79759-000009-000003",
+      "text": "Every strong impression which you make upon his perceptive powers must have a very lasting influence, and even the impression itself may, in some cases, be forever indelible.",
+      "source": "libritts-r",
+      "source_id": "7021_79759_000009_000003",
+      "phoneme_tokens": 177,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7021-85628-000004-000002",
+      "text": "He put his hands in his trousers pockets and went out for a walk, for he did not begrudge anybody's seeing how fine he was.",
+      "source": "libritts-r",
+      "source_id": "7021_85628_000004_000002",
+      "phoneme_tokens": 128,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7021-85628-000012-000000",
+      "text": "And then he said good-bye to Lars with a nod; but Lars only made faces at him, for he was very much put out because he could not cheat Anders out of his cap which his mother had made.",
+      "source": "libritts-r",
+      "source_id": "7021_85628_000012_000000",
+      "phoneme_tokens": 189,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-7021-85628-000013-000001",
+      "text": "She called him a little gentleman and said that he was so fine that he might go to the royal court ball.",
+      "source": "libritts-r",
+      "source_id": "7021_85628_000013_000001",
+      "phoneme_tokens": 103,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7021-85628-000027-000000",
+      "text": "\"Well, but now?\" said the Princess; and she filled his pockets with cakes, and put her own heavy gold chain around his neck, and bent down and kissed him.",
+      "source": "libritts-r",
+      "source_id": "7021_85628_000027_000000",
+      "phoneme_tokens": 153,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7021-85628-000037-000000",
+      "text": "But when his big brother heard that he had refused to give his cap for a King's golden crown, he said that Anders was a stupid.",
+      "source": "libritts-r",
+      "source_id": "7021_85628_000037_000000",
+      "phoneme_tokens": 131,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-7127-75946-000039-000003",
+      "text": "The queens had taken their seats upon a magnificent dias or platform, erected upon the borders of the lake, in a theater of wonderful elegance of construction.",
+      "source": "libritts-r",
+      "source_id": "7127_75946_000039_000003",
+      "phoneme_tokens": 164,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-7127-75946-000040-000002",
+      "text": "The Elements, subaltern powers of mythology, together with their attributes, hastened to follow their gracious sovereign.",
+      "source": "libritts-r",
+      "source_id": "7127_75946_000040_000002",
+      "phoneme_tokens": 114,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7127-75946-000040-000007",
+      "text": "His legs, the best-shaped at court, were displayed to great advantage in flesh-colored silken hose, of silk so fine and so transparent that it seemed almost like flesh itself.",
+      "source": "libritts-r",
+      "source_id": "7127_75946_000040_000007",
+      "phoneme_tokens": 177,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7127-75946-000040-000008",
+      "text": "The most beautiful pale-lilac satin shoes, with bows of flowers and leaves, imprisoned his small feet.",
+      "source": "libritts-r",
+      "source_id": "7127_75946_000040_000008",
+      "phoneme_tokens": 101,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7127-75946-000043-000000",
+      "text": "\"Nothing whatever,\" replied the courtier, as pale as death; \"but your majesty has not thought of Fruits.\"",
+      "source": "libritts-r",
+      "source_id": "7127_75946_000043_000000",
+      "phoneme_tokens": 101,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7127-75946-000058-000001",
+      "text": "Their flattery pleased, as much as De Guiche's courage had astonished him, and he simply replied: \"I did not tell you to return, comte.\"",
+      "source": "libritts-r",
+      "source_id": "7127_75946_000058_000001",
+      "phoneme_tokens": 135,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-7127-75947-000023-000009",
+      "text": "When she perceived the young man, she rose, like a woman surprised in the midst of ideas she was desirous of concealing from herself.",
+      "source": "libritts-r",
+      "source_id": "7127_75947_000023_000009",
+      "phoneme_tokens": 131,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7127-75947-000025-000003",
+      "text": "Well, I can understand it; all women who are possessed of any feeling do, and one never finds them dull or lonely when removed from the giddy vortex of these exciting amusements.",
+      "source": "libritts-r",
+      "source_id": "7127_75947_000025_000003",
+      "phoneme_tokens": 184,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7176-88083-000003-000001",
+      "text": "This branch was thrust out very obligingly in just the place where this most singular of ducks would have desired it if it had been consulted in the matter.",
+      "source": "libritts-r",
+      "source_id": "7176_88083_000003_000001",
+      "phoneme_tokens": 155,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7176-88083-000020-000002",
+      "text": "His flies, as befitted these amber-brown, tumultuous northern streams, were large and conspicuous--a Parmacheenie Belle for the tail fly, with a Montreal and a Red Hackle for the drops.",
+      "source": "libritts-r",
+      "source_id": "7176_88083_000020_000002",
+      "phoneme_tokens": 183,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-7176-92135-000003-000002",
+      "text": "The successful playwright is indeed a man to be envied. Leaving aside for the moment the question of super-tax, the prizes which fall to his lot are worth something of an effort.",
+      "source": "libritts-r",
+      "source_id": "7176_92135_000003_000002",
+      "phoneme_tokens": 174,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-7176-92135-000012-000000",
+      "text": "These few remarks are called a soliloquy, being addressed rather to the world in general than to any particular person on the stage.",
+      "source": "libritts-r",
+      "source_id": "7176_92135_000012_000000",
+      "phoneme_tokens": 135,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7176-92135-000085-000001",
+      "text": "Let us assume that Lord Arthur asks Lord John what a cynic is--the question of what a cynic is having arisen quite naturally in the course of the plot.",
+      "source": "libritts-r",
+      "source_id": "7176_92135_000085_000001",
+      "phoneme_tokens": 152,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7176-92135-000085-000002",
+      "text": "Let us assume further that you wish Lord John to reply, \"A cynic is a man who knows the price of everything and the value of nothing.\"",
+      "source": "libritts-r",
+      "source_id": "7176_92135_000085_000002",
+      "phoneme_tokens": 134,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7176-92135-000085-000004",
+      "text": "Now this answer, even if it comes quite fresh to the stalls, will lose much of its effect if it is said without the assistance of a cigarette.",
+      "source": "libritts-r",
+      "source_id": "7176_92135_000085_000004",
+      "phoneme_tokens": 137,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7729-102255-000002-000005",
+      "text": "That summer's emigration, however, being mainly from the free States, greatly changed the relative strength of the two parties.",
+      "source": "libritts-r",
+      "source_id": "7729_102255_000002_000005",
+      "phoneme_tokens": 122,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7729-102255-000010-000015",
+      "text": "While the Governor's proclamation spoke of serving writs, the notices of the conspirators sounded the note of the real contest.",
+      "source": "libritts-r",
+      "source_id": "7729_102255_000010_000015",
+      "phoneme_tokens": 126,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7729-102255-000010-000016",
+      "text": "\"Now is the time to show game, and if we are defeated this time, the Territory is lost to the South,\" said the leaders.",
+      "source": "libritts-r",
+      "source_id": "7729_102255_000010_000016",
+      "phoneme_tokens": 113,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-7729-102255-000040-000003",
+      "text": "In this incident, contrasting the creative and the destructive spirit of the factions, the Emigrant Aid Society of Massachusetts finds its most honorable and triumphant vindication.",
+      "source": "libritts-r",
+      "source_id": "7729_102255_000040_000003",
+      "phoneme_tokens": 182,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8224-274384-000022-000000",
+      "text": "What the parliament was most intent upon, was not their treaty with the king, to whom they paid little regard, but that with the Scots.",
+      "source": "libritts-r",
+      "source_id": "8224_274384_000022_000000",
+      "phoneme_tokens": 132,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8224-274384-000026-000002",
+      "text": "And though the contributions which they had levied, as well as the price of their living at free quarters, must be deducted, yet still the sum which they insisted on was very considerable.",
+      "source": "libritts-r",
+      "source_id": "8224_274384_000026_000002",
+      "phoneme_tokens": 186,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8224-274384-000032-000001",
+      "text": "On his journey, the whole country flocked to behold him, moved partly by curiosity, partly by compassion and affection.",
+      "source": "libritts-r",
+      "source_id": "8224_274384_000032_000001",
+      "phoneme_tokens": 121,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8230-279154-000008-000000",
+      "text": "In the second place, images without beliefs are insufficient to constitute memory; and habits are still more insufficient.",
+      "source": "libritts-r",
+      "source_id": "8230_279154_000008_000000",
+      "phoneme_tokens": 123,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8230-279154-000019-000002",
+      "text": "Nevertheless, whatever a sceptic might urge in theory, we cannot practically doubt that we got up this morning, that we did various things yesterday, that a great war has been taking place, and so on.",
+      "source": "libritts-r",
+      "source_id": "8230_279154_000019_000002",
+      "phoneme_tokens": 198,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8455-210777-000011-000000",
+      "text": "\"I am sure we are all delighted to hear the ladies speak in so pleasant a manner,\" said First-Lieutenant Crosstrees, an officer with whom I have since become particularly intimate.",
+      "source": "libritts-r",
+      "source_id": "8455_210777_000011_000000",
+      "phoneme_tokens": 178,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8455-210777-000018-000000",
+      "text": "Then we began to think of the hospitality of the island, and the officers of the John Bright were asked to dine with us on the following day.",
+      "source": "libritts-r",
+      "source_id": "8455_210777_000018_000000",
+      "phoneme_tokens": 136,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8455-210777-000023-000009",
+      "text": "When this captain should have taken himself and his vessel back to England, I would retire to a small farm which I possessed at the farthest side of the island, and there in seclusion would I end my days.",
+      "source": "libritts-r",
+      "source_id": "8455_210777_000023_000009",
+      "phoneme_tokens": 198,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8455-210777-000025-000000",
+      "text": "\"It is a duty,\" said I. \"But your power is so superior to any that I can advance, as to make us here feel that there is no disgrace in yielding to it.",
+      "source": "libritts-r",
+      "source_id": "8455_210777_000025_000000",
+      "phoneme_tokens": 153,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8455-210777-000033-000000",
+      "text": "I thought for a little what answer it would best become me to give to this question, but I paused only for a moment or two.",
+      "source": "libritts-r",
+      "source_id": "8455_210777_000033_000000",
+      "phoneme_tokens": 123,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8463-287645-000005-000004",
+      "text": "Julius' color was nearly jet black, and his speech was very good considering his lack of book learning; his bearing was entirely self-possessed and commendable.",
+      "source": "libritts-r",
+      "source_id": "8463_287645_000005_000004",
+      "phoneme_tokens": 160,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8463-294828-000047-000001",
+      "text": "I left instructions for shipping my containers of stuffed animals and dried plants to Paris, France.",
+      "source": "libritts-r",
+      "source_id": "8463_294828_000047_000001",
+      "phoneme_tokens": 102,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8463-294828-000064-000000",
+      "text": "At this order, which was relayed to the engine by means of a compressed-air device, the mechanics activated the start-up wheel. Steam rushed whistling into the gaping valves.",
+      "source": "libritts-r",
+      "source_id": "8463_294828_000064_000000",
+      "phoneme_tokens": 168,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8463-294828-000069-000000",
+      "text": "The escort of boats and tenders still followed the frigate and only left us when we came abreast of the lightship, whose two signal lights mark the entrance of the narrows to Upper New York Bay.",
+      "source": "libritts-r",
+      "source_id": "8463_294828_000069_000000",
+      "phoneme_tokens": 192,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-8555-284447-000020-000000",
+      "text": "While Trot was observing this dreadful machine the door opened and in walked the Six Snubnosed Princesses, all in a row and with their chins up, as if they disdained everyone but themselves.",
+      "source": "libritts-r",
+      "source_id": "8555_284447_000020_000000",
+      "phoneme_tokens": 182,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-8555-284449-000032-000000",
+      "text": "\"No,\" said Trot, positively, \"there's been enough patching in this country and I won't have any more of it.",
+      "source": "libritts-r",
+      "source_id": "8555_284449_000032_000000",
+      "phoneme_tokens": 101,
+      "stratum": "t101to200",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    }
+  ],
+  "listening": [
+    "authored-001",
+    "authored-012",
+    "authored-018",
+    "authored-024",
+    "authored-032",
+    "authored-061",
+    "authored-065",
+    "authored-068",
+    "authored-069",
+    "librittsr-6829-68771-000042-000001",
+    "arctic-a0021",
+    "arctic-a0081",
+    "arctic-a0176",
+    "arctic-b0011",
+    "arctic-b0037",
+    "arctic-b0331",
+    "arctic-b0467",
+    "arctic-b0516",
+    "authored-079",
+    "authored-089",
+    "librittsr-2300-131720-000016-000012",
+    "librittsr-2300-131720-000018-000000",
+    "librittsr-2830-3979-000019-000001",
+    "librittsr-4992-41797-000025-000006",
+    "librittsr-5142-36377-000008-000005",
+    "librittsr-5683-32866-000020-000001",
+    "librittsr-7127-75947-000025-000003",
+    "librittsr-7176-92135-000085-000004",
+    "librittsr-8455-210777-000033-000000",
+    "librittsr-8463-287645-000005-000004"
+  ],
+  "queued_sequences": [
+    {
+      "id": "q-001",
+      "segments": [
+        "librittsr-4446-2273-000022-000001",
+        "authored-042"
+      ]
+    },
+    {
+      "id": "q-002",
+      "segments": [
+        "librittsr-3570-5695-000000-000000",
+        "librittsr-1284-1180-000045-000001",
+        "authored-036"
+      ]
+    },
+    {
+      "id": "q-003",
+      "segments": [
+        "librittsr-5142-36377-000008-000005",
+        "authored-040"
+      ]
+    },
+    {
+      "id": "q-004",
+      "segments": [
+        "librittsr-7729-102255-000002-000005",
+        "authored-071",
+        "authored-034"
+      ]
+    },
+    {
+      "id": "q-005",
+      "segments": [
+        "librittsr-6930-76324-000014-000003",
+        "authored-059"
+      ]
+    },
+    {
+      "id": "q-006",
+      "segments": [
+        "librittsr-8463-294828-000069-000000",
+        "authored-007",
+        "librittsr-7021-79730-000049-000001"
+      ]
+    },
+    {
+      "id": "q-007",
+      "segments": [
+        "librittsr-7021-85628-000037-000000",
+        "authored-042"
+      ]
+    },
+    {
+      "id": "q-008",
+      "segments": [
+        "librittsr-1580-141083-000066-000002",
+        "librittsr-5142-36377-000004-000012",
+        "librittsr-2830-3979-000011-000000"
+      ]
+    },
+    {
+      "id": "q-009",
+      "segments": [
+        "librittsr-8455-210777-000018-000000",
+        "arctic-b0166"
+      ]
+    },
+    {
+      "id": "q-010",
+      "segments": [
+        "librittsr-5105-28241-000022-000002",
+        "librittsr-1995-1826-000039-000000",
+        "arctic-a0158"
+      ]
+    },
+    {
+      "id": "q-011",
+      "segments": [
+        "librittsr-7021-85628-000013-000001",
+        "authored-005"
+      ]
+    },
+    {
+      "id": "q-012",
+      "segments": [
+        "librittsr-8463-294828-000064-000000",
+        "arctic-a0389",
+        "arctic-b0228"
+      ]
+    },
+    {
+      "id": "q-013",
+      "segments": [
+        "librittsr-1089-134691-000003-000000",
+        "librittsr-260-123286-000048-000003"
+      ]
+    },
+    {
+      "id": "q-014",
+      "segments": [
+        "librittsr-1188-133604-000004-000005",
+        "arctic-a0030",
+        "authored-064"
+      ]
+    },
+    {
+      "id": "q-015",
+      "segments": [
+        "librittsr-7176-88083-000020-000002",
+        "authored-049"
+      ]
+    },
+    {
+      "id": "q-016",
+      "segments": [
+        "librittsr-7729-102255-000010-000015",
+        "authored-041",
+        "authored-020"
+      ]
+    },
+    {
+      "id": "q-017",
+      "segments": [
+        "librittsr-2300-131720-000042-000003",
+        "authored-035"
+      ]
+    },
+    {
+      "id": "q-018",
+      "segments": [
+        "librittsr-7021-79740-000003-000002",
+        "authored-049",
+        "librittsr-1995-1826-000012-000002"
+      ]
+    },
+    {
+      "id": "q-019",
+      "segments": [
+        "librittsr-5639-40744-000015-000002",
+        "authored-002"
+      ]
+    },
+    {
+      "id": "q-020",
+      "segments": [
+        "librittsr-7021-85628-000027-000000",
+        "authored-061",
+        "librittsr-6930-75918-000031-000000"
+      ]
+    },
+    {
+      "id": "q-021",
+      "segments": [
+        "librittsr-3570-5695-000004-000002",
+        "authored-034"
+      ]
+    },
+    {
+      "id": "q-022",
+      "segments": [
+        "librittsr-1580-141083-000015-000002",
+        "authored-053",
+        "authored-015"
+      ]
+    },
+    {
+      "id": "q-023",
+      "segments": [
+        "librittsr-7127-75946-000043-000000",
+        "authored-030"
+      ]
+    },
+    {
+      "id": "q-024",
+      "segments": [
+        "librittsr-7127-75946-000058-000001",
+        "authored-038",
+        "librittsr-1580-141083-000045-000003"
+      ]
+    },
+    {
+      "id": "q-025",
+      "segments": [
+        "librittsr-4077-13754-000002-000001",
+        "authored-031"
+      ]
+    },
+    {
+      "id": "q-026",
+      "segments": [
+        "librittsr-7127-75946-000040-000002",
+        "authored-024",
+        "authored-006"
+      ]
+    },
+    {
+      "id": "q-027",
+      "segments": [
+        "librittsr-7021-79730-000057-000000",
+        "authored-003"
+      ]
+    },
+    {
+      "id": "q-028",
+      "segments": [
+        "librittsr-4446-2275-000016-000000",
+        "authored-039",
+        "authored-051"
+      ]
+    },
+    {
+      "id": "q-029",
+      "segments": [
+        "librittsr-5683-32866-000045-000006",
+        "arctic-b0228"
+      ]
+    },
+    {
+      "id": "q-030",
+      "segments": [
+        "librittsr-8555-284447-000020-000000",
+        "authored-040",
+        "authored-034"
+      ]
+    },
+    {
+      "id": "q-031",
+      "segments": [
+        "librittsr-1580-141084-000044-000000",
+        "authored-020"
+      ]
+    },
+    {
+      "id": "q-032",
+      "segments": [
+        "librittsr-7176-92135-000085-000004",
+        "librittsr-237-134500-000019-000001",
+        "arctic-b0435"
+      ]
+    },
+    {
+      "id": "q-033",
+      "segments": [
+        "librittsr-8463-294828-000047-000001",
+        "authored-062"
+      ]
+    },
+    {
+      "id": "q-034",
+      "segments": [
+        "librittsr-8224-274384-000026-000002",
+        "authored-005",
+        "authored-060"
+      ]
+    },
+    {
+      "id": "q-035",
+      "segments": [
+        "librittsr-5105-28241-000012-000001",
+        "arctic-a0158"
+      ]
+    },
+    {
+      "id": "q-036",
+      "segments": [
+        "librittsr-1089-134686-000024-000005",
+        "librittsr-1580-141084-000050-000003",
+        "arctic-b0228"
+      ]
+    },
+    {
+      "id": "q-037",
+      "segments": [
+        "librittsr-4446-2273-000035-000004",
+        "arctic-b0228"
+      ]
+    },
+    {
+      "id": "q-038",
+      "segments": [
+        "librittsr-4446-2273-000019-000001",
+        "authored-036",
+        "librittsr-2830-3979-000011-000000"
+      ]
+    },
+    {
+      "id": "q-039",
+      "segments": [
+        "librittsr-7021-79740-000010-000006",
+        "authored-046"
+      ]
+    },
+    {
+      "id": "q-040",
+      "segments": [
+        "librittsr-8455-210777-000033-000000",
+        "librittsr-237-126133-000025-000000",
+        "librittsr-6829-68771-000042-000001"
+      ]
+    },
+    {
+      "id": "q-041",
+      "segments": [
+        "librittsr-2830-3980-000070-000001",
+        "authored-010"
+      ]
+    },
+    {
+      "id": "q-042",
+      "segments": [
+        "librittsr-5142-36600-000011-000000",
+        "authored-012",
+        "librittsr-1995-1826-000038-000001"
+      ]
+    },
+    {
+      "id": "q-043",
+      "segments": [
+        "librittsr-6829-68769-000074-000000",
+        "authored-026"
+      ]
+    },
+    {
+      "id": "q-044",
+      "segments": [
+        "librittsr-8463-287645-000005-000004",
+        "authored-059",
+        "librittsr-260-123286-000048-000003"
+      ]
+    },
+    {
+      "id": "q-045",
+      "segments": [
+        "librittsr-2300-131720-000016-000012",
+        "authored-003"
+      ]
+    },
+    {
+      "id": "q-046",
+      "segments": [
+        "librittsr-7127-75946-000039-000003",
+        "librittsr-7127-75947-000013-000000",
+        "librittsr-5683-32865-000044-000000"
+      ]
+    },
+    {
+      "id": "q-047",
+      "segments": [
+        "librittsr-8555-284449-000032-000000",
+        "authored-035"
+      ]
+    },
+    {
+      "id": "q-048",
+      "segments": [
+        "librittsr-1995-1837-000025-000000",
+        "librittsr-1995-1826-000038-000001",
+        "librittsr-2830-3979-000011-000000"
+      ]
+    },
+    {
+      "id": "q-049",
+      "segments": [
+        "librittsr-260-123440-000021-000001",
+        "authored-030"
+      ]
+    },
+    {
+      "id": "q-050",
+      "segments": [
+        "librittsr-8455-210777-000011-000000",
+        "librittsr-7021-85628-000015-000000",
+        "arctic-b0166"
+      ]
+    },
+    {
+      "id": "q-051",
+      "segments": [
+        "librittsr-7021-85628-000012-000000",
+        "librittsr-1089-134691-000022-000000"
+      ]
+    },
+    {
+      "id": "q-052",
+      "segments": [
+        "librittsr-1089-134691-000035-000000",
+        "authored-002",
+        "arctic-a0389"
+      ]
+    },
+    {
+      "id": "q-053",
+      "segments": [
+        "librittsr-1089-134691-000046-000000",
+        "authored-051"
+      ]
+    },
+    {
+      "id": "q-054",
+      "segments": [
+        "librittsr-6829-68769-000036-000001",
+        "authored-071",
+        "authored-059"
+      ]
+    },
+    {
+      "id": "q-055",
+      "segments": [
+        "librittsr-8455-210777-000023-000009",
+        "authored-025"
+      ]
+    },
+    {
+      "id": "q-056",
+      "segments": [
+        "librittsr-6829-68769-000092-000001",
+        "librittsr-1284-1180-000045-000001",
+        "authored-065"
+      ]
+    },
+    {
+      "id": "q-057",
+      "segments": [
+        "librittsr-2300-131720-000032-000005",
+        "librittsr-237-126133-000025-000000"
+      ]
+    },
+    {
+      "id": "q-058",
+      "segments": [
+        "librittsr-2300-131720-000016-000010",
+        "librittsr-1995-1826-000012-000000",
+        "authored-033"
+      ]
+    },
+    {
+      "id": "q-059",
+      "segments": [
+        "librittsr-237-126133-000010-000000",
+        "authored-034"
+      ]
+    },
+    {
+      "id": "q-060",
+      "segments": [
+        "librittsr-5683-32865-000010-000004",
+        "authored-035",
+        "authored-006"
+      ]
+    },
+    {
+      "id": "q-061",
+      "segments": [
+        "librittsr-7127-75946-000040-000007",
+        "librittsr-1580-141084-000050-000003"
+      ]
+    },
+    {
+      "id": "q-062",
+      "segments": [
+        "librittsr-6829-68771-000010-000009",
+        "authored-017",
+        "authored-023"
+      ]
+    },
+    {
+      "id": "q-063",
+      "segments": [
+        "librittsr-7729-102255-000010-000016",
+        "librittsr-6930-75918-000029-000000"
+      ]
+    },
+    {
+      "id": "q-064",
+      "segments": [
+        "librittsr-5639-40744-000033-000000",
+        "librittsr-6930-75918-000029-000000",
+        "authored-046"
+      ]
+    },
+    {
+      "id": "q-065",
+      "segments": [
+        "librittsr-8224-274384-000022-000000",
+        "authored-041"
+      ]
+    },
+    {
+      "id": "q-066",
+      "segments": [
+        "librittsr-5105-28233-000022-000000",
+        "authored-061",
+        "librittsr-1580-141084-000050-000003"
+      ]
+    },
+    {
+      "id": "q-067",
+      "segments": [
+        "librittsr-1089-134691-000025-000003",
+        "authored-046"
+      ]
+    },
+    {
+      "id": "q-068",
+      "segments": [
+        "librittsr-6829-68769-000068-000001",
+        "authored-014",
+        "authored-053"
+      ]
+    },
+    {
+      "id": "q-069",
+      "segments": [
+        "librittsr-2961-961-000011-000003",
+        "authored-003"
+      ]
+    },
+    {
+      "id": "q-070",
+      "segments": [
+        "librittsr-5683-32866-000008-000000",
+        "librittsr-1995-1826-000012-000002",
+        "librittsr-1580-141083-000056-000001"
+      ]
+    },
+    {
+      "id": "q-071",
+      "segments": [
+        "librittsr-7021-85628-000004-000002",
+        "arctic-a0207"
+      ]
+    },
+    {
+      "id": "q-072",
+      "segments": [
+        "librittsr-1995-1836-000041-000000",
+        "arctic-a0329",
+        "authored-010"
+      ]
+    },
+    {
+      "id": "q-073",
+      "segments": [
+        "librittsr-7176-92135-000012-000000",
+        "librittsr-1284-1180-000045-000001"
+      ]
+    },
+    {
+      "id": "q-074",
+      "segments": [
+        "librittsr-5105-28233-000019-000001",
+        "authored-057",
+        "authored-031"
+      ]
+    },
+    {
+      "id": "q-075",
+      "segments": [
+        "librittsr-7176-88083-000003-000001",
+        "arctic-b0166"
+      ]
+    },
+    {
+      "id": "q-076",
+      "segments": [
+        "librittsr-121-127105-000042-000001",
+        "librittsr-5683-32865-000044-000000",
+        "authored-067"
+      ]
+    },
+    {
+      "id": "q-077",
+      "segments": [
+        "librittsr-4992-41797-000016-000001",
+        "authored-031"
+      ]
+    },
+    {
+      "id": "q-078",
+      "segments": [
+        "librittsr-5639-40744-000008-000002",
+        "librittsr-1580-141083-000056-000001",
+        "authored-066"
+      ]
+    },
+    {
+      "id": "q-079",
+      "segments": [
+        "librittsr-5105-28241-000006-000000",
+        "arctic-b0454"
+      ]
+    },
+    {
+      "id": "q-080",
+      "segments": [
+        "librittsr-7127-75947-000023-000009",
+        "librittsr-1995-1826-000012-000000",
+        "authored-055"
+      ]
+    },
+    {
+      "id": "q-081",
+      "segments": [
+        "librittsr-2300-131720-000018-000000",
+        "arctic-a0158"
+      ]
+    },
+    {
+      "id": "q-082",
+      "segments": [
+        "librittsr-260-123440-000015-000000",
+        "arctic-a0329",
+        "authored-004"
+      ]
+    },
+    {
+      "id": "q-083",
+      "segments": [
+        "librittsr-7021-79759-000009-000003",
+        "librittsr-5142-33396-000030-000001"
+      ]
+    },
+    {
+      "id": "q-084",
+      "segments": [
+        "librittsr-1320-122612-000020-000003",
+        "authored-013",
+        "arctic-b0211"
+      ]
+    },
+    {
+      "id": "q-085",
+      "segments": [
+        "librittsr-4992-41797-000025-000006",
+        "authored-011"
+      ]
+    },
+    {
+      "id": "q-086",
+      "segments": [
+        "librittsr-5639-40744-000015-000000",
+        "authored-010",
+        "librittsr-7127-75947-000029-000001"
+      ]
+    },
+    {
+      "id": "q-087",
+      "segments": [
+        "librittsr-4077-13754-000003-000001",
+        "authored-052"
+      ]
+    },
+    {
+      "id": "q-088",
+      "segments": [
+        "librittsr-8455-210777-000025-000000",
+        "authored-026",
+        "librittsr-5142-36377-000004-000012"
+      ]
+    },
+    {
+      "id": "q-089",
+      "segments": [
+        "librittsr-6829-68771-000022-000002",
+        "arctic-a0329"
+      ]
+    },
+    {
+      "id": "q-090",
+      "segments": [
+        "librittsr-7176-92135-000003-000002",
+        "librittsr-1580-141084-000050-000003",
+        "arctic-b0166"
+      ]
+    },
+    {
+      "id": "q-091",
+      "segments": [
+        "librittsr-5683-32866-000020-000001",
+        "librittsr-1580-141083-000045-000003"
+      ]
+    },
+    {
+      "id": "q-092",
+      "segments": [
+        "librittsr-8224-274384-000032-000001",
+        "authored-063",
+        "librittsr-260-123286-000048-000003"
+      ]
+    },
+    {
+      "id": "q-093",
+      "segments": [
+        "librittsr-7176-92135-000085-000002",
+        "librittsr-1580-141083-000045-000003"
+      ]
+    },
+    {
+      "id": "q-094",
+      "segments": [
+        "librittsr-5142-36377-000013-000003",
+        "librittsr-2830-3979-000011-000000",
+        "authored-016"
+      ]
+    },
+    {
+      "id": "q-095",
+      "segments": [
+        "librittsr-237-126133-000059-000000",
+        "authored-035"
+      ]
+    },
+    {
+      "id": "q-096",
+      "segments": [
+        "librittsr-5105-28240-000013-000002",
+        "authored-047",
+        "authored-058"
+      ]
+    },
+    {
+      "id": "q-097",
+      "segments": [
+        "librittsr-7127-75946-000040-000008",
+        "librittsr-7021-85628-000015-000000"
+      ]
+    },
+    {
+      "id": "q-098",
+      "segments": [
+        "librittsr-8230-279154-000019-000002",
+        "authored-012",
+        "authored-071"
+      ]
+    },
+    {
+      "id": "q-099",
+      "segments": [
+        "librittsr-7176-92135-000085-000001",
+        "authored-050"
+      ]
+    },
+    {
+      "id": "q-100",
+      "segments": [
+        "librittsr-8230-279154-000008-000000",
+        "authored-024",
+        "authored-037"
+      ]
+    }
+  ]
+}

@@ -354,6 +354,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The text-to-speech evaluation corpus for `en-US` and `af_heart`,
+  `tools/validation/corpus/tts-text-en-us.json`
+  (`config/schemas/tts_text_corpus.json`): sentences from the CMU ARCTIC
+  prompts, LibriTTS-R test-clean and text written for it, each with its
+  license, its phoneme-token count under the speech runtime's locked
+  phonemizer and whether that count depends on the espeak-ng fallback; at
+  least 100 in each of the 1-20, 21-100 and 101-200 token strata with the
+  stratum edges and the 200-token bound held by lexicon-only sentences, a
+  balanced listening set and 100 queued sequences of a long first segment
+  and short followers. `tools/validation/tts_corpus.py` checks it with
+  strata and critical classes derived rather than trusted and the counts
+  held to the digest of the lock's phonemizer pins, re-counts it with the
+  runner's phonemizer under the recorded `libespeak-ng1` version, and
+  records the listening review's reference arm: kokoro's own pipeline in
+  float32 on the CPU, seeded per clip, with the clips written outside the
+  repository and identified by digest. (V030-E05-F05-T02)
+
 - A speech-to-text deployment whose bundle declares 8 kHz mono G.711 mu-law
   input serves it: the agent renders the descriptor's input formats into the
   worker's `streaming.input_audio_formats`, which the serving worker passes
