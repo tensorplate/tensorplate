@@ -510,6 +510,16 @@ def with_errors(built: Built, ids: list[str], errors: int) -> dict[str, Any]:
     return hypotheses
 
 
+def dashed(manifest: dict[str, Any]) -> dict[str, Any]:
+    """The manifest with each English reference ending in a standalone dash, a raw word only."""
+    manifest = copy.deepcopy(manifest)
+    for entry in manifest["files"]:
+        if entry["language"] == "en":
+            text = entry["transcript"]["text"] + " \u2014"
+            entry["transcript"] = {"sha256": sha(text.encode()), "text": text}
+    return manifest
+
+
 def stratum(record: dict[str, Any], language: str, codec: str) -> dict[str, Any]:
     return next(s for s in record["strata"] if (s["language"], s["codec"]) == (language, codec))
 
@@ -651,6 +661,27 @@ def check_wer_gates(scorer: Scorer) -> None:
     assert stratum(delta, "en", "noisy16k")["delta_pp"] == round(4300 / words, 3)
     inside = scorer.score(built.arm("streaming", with_errors(built, noisy, 42)))
     assert stratum(inside, "en", "noisy16k")["verdict"] == "pass"
+    # The rate, the ceiling and the distance divide by the normalized words, not the raw ones.
+    manifest = dashed(scorer.manifest)
+    at_ceiling = scorer.score(
+        built.arm("streaming", with_errors(built, noisy, 525)),
+        built.arm("batch", with_errors(built, noisy, 525)),
+        manifest,
+    )
+    row = stratum(at_ceiling, "en", "noisy16k")
+    assert (row["reference_words"], row["raw_reference_words"]) == (words, words + 100)
+    assert row["streaming"]["wer_percent"] == 25.0 and row["verdict"] == "pass"
+    assert row["streaming"]["raw_errors"] == 525 + 100
+    assert row["streaming"]["raw_wer_percent"] == round(62500 / (words + 100), 3)
+    over = scorer.score(
+        built.arm("streaming", with_errors(built, noisy, 526)),
+        built.arm("batch", with_errors(built, noisy, 526)),
+        manifest,
+    )
+    assert stratum(over, "en", "noisy16k")["verdict"] == "fail"
+    delta = scorer.score(built.arm("streaming", with_errors(built, noisy, 43)), manifest=manifest)
+    row = stratum(delta, "en", "noisy16k")
+    assert (row["delta_pp"], row["verdict"]) == (round(4300 / words, 3), "fail")
     # A batch arm worse than streaming leaves a negative distance, not a failure.
     better = scorer.score(batch=built.arm("batch", with_errors(built, noisy, 100)))
     assert stratum(better, "en", "noisy16k")["delta_pp"] < 0
