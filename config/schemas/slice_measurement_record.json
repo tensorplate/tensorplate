@@ -381,6 +381,7 @@
                       },
                       "utterances": {
                         "items": {
+                          "required": ["speech_timing"],
                           "properties": {
                             "boundaries": {
                               "required": [
@@ -567,6 +568,16 @@
         "cadence"
       ],
       "properties": {
+        "speech_timing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["onset_input_lag_ns", "end_input_lag_ns", "end_reason"],
+          "properties": {
+            "onset_input_lag_ns": {"$ref": "#/definitions/OptionalNs"},
+            "end_input_lag_ns": {"$ref": "#/definitions/OptionalNs"},
+            "end_reason": {"enum": [null, "unmapped", "not_provided", "merged_utterance", "input_lag"]}
+          }
+        },
         "utterance_id": {"type": "integer", "minimum": 1},
         "start_sample_offset": {"$ref": "#/definitions/Count"},
         "endpoint": {
@@ -802,7 +813,7 @@
       "required": ["index", "outcome", "stop_reason", "grpc_status", "open_refusal", "boundaries", "measurements", "client", "server", "server_stages"],
       "properties": {
         "connection": { "$ref": "#/definitions/Connection" },
-        "speech_alignment": {"type": "object", "additionalProperties": false, "required": ["status", "utterance_ids"], "properties": {"status": {"enum": ["not_provided", "incomplete", "count_mismatch", "interval_mismatch", "timing_mismatch", "matched"]}, "utterance_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}}}},
+        "speech_alignment": {"type": "object", "additionalProperties": false, "required": ["status", "utterance_ids"], "properties": {"status": {"enum": ["not_provided", "incomplete", "count_mismatch", "interval_mismatch", "timing_mismatch", "matched", "merged"]}, "utterance_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}}}},
         "utterances": { "type": "array", "items": { "$ref": "#/definitions/Utterance" } },
         "index": { "$ref": "#/definitions/Count" },
         "outcome": { "$ref": "#/definitions/Outcome" },

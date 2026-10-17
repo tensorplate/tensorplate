@@ -1046,7 +1046,29 @@ def check_streaming_line() -> None:
     annotated_line = index_mod.streaming_line(
         index_mod.slice_record.finalize(annotated), envelope()
     )
-    assert annotated_line == concurrent_line
+    onset = annotated["aggregate"]["measurements"]["stt"]["onset_to_first_partial"]
+    assert annotated_line["metrics"] == {
+        **concurrent_line["metrics"],
+        "stt.onset_to_first_partial.count": onset["count"],
+        "stt.onset_to_first_partial.misses": onset["misses"],
+        **{
+            f"stt.onset_to_first_partial.{p}_ms": round(onset[f"{p}_ns"] / 1e6, 3)
+            for p in ("p50", "p95", "p99")
+        },
+    }
+    assert onset["count"] == 3 and onset["misses"] == 0
+    assert {k: v for k, v in annotated_line.items() if k != "metrics"} == {
+        k: v for k, v in concurrent_line.items() if k != "metrics"
+    }
+    annotated["stt"]["sessions"][0].update(outcome="stopped", stop_reason="unexpected_event")
+    failed_onset = index_mod.streaming_line(index_mod.slice_record.finalize(annotated), envelope())
+    assert failed_onset["metrics"]["stt.onset_to_first_partial.count"] == 2
+    assert failed_onset["metrics"]["stt.onset_to_first_partial.misses"] == 1
+    annotated["stt"]["input"]["speech_annotations"] = None
+    no_onset = index_mod.streaming_line(index_mod.slice_record.finalize(annotated), envelope())
+    assert no_onset["metrics"]["stt.onset_to_first_partial.count"] == 0
+    assert no_onset["metrics"]["stt.onset_to_first_partial.misses"] == 0
+    assert "stt.onset_to_first_partial.p50_ms" not in no_onset["metrics"]
 
     refusals = index_mod.streaming_line(stream_mod.build_refusal_record(commit), envelope())
     assert refusals["result"] == "completed_with_refusals"

@@ -199,44 +199,70 @@ boundary or duration is inferred from the first audio frame.
 The mapping assumes server utterance IDs follow the clip's speech in order;
 IDs need not be consecutive. A server utterance counts as speech when it
 has a nonblank partial or final. Empty endpoint/Finalize responses in
-silence are excluded. The tool pairs those utterances with annotations in
-order only after the session completes and only when counts agree, every
-annotated interval fits its paired wire input interval, and no response
-precedes its annotated frame's send time. `speech_alignment.utterance_ids`
-records the resulting IDs in annotation order.
+silence are excluded. After the session completes, every annotation must
+fit a speech utterance's wire input interval, and every speech utterance
+must contain an annotated onset. `speech_alignment.utterance_ids` lists
+one server ID per annotation, in annotation order.
 
-A split or merge that changes the counts records `count_mismatch`; matching
-counts with incompatible offsets record `interval_mismatch`; incompatible
-response times record `timing_mismatch`. Failed or unfinished sessions with
-annotations record `incomplete`. All these states leave the ID mapping empty
-and **all speech-based timings in that session null**. The tool never shifts
-later annotations to repair a mismatch. Without speech ends, a split with
-no transcript in the extra interval may be undetectable; matching counts
-and intervals cannot establish semantic identity. Operators must inspect
-segmentation before using these measurements as evidence.
+Consecutive annotations may merge into one server utterance when a pause
+is shorter than the server's silence endpoint. Repeated IDs record this
+merge, and `speech_alignment.status` is `merged`. The **first annotation**
+in the server utterance supplies its onset. Its speech end stays unknown:
+`speech_end` and `speech_end_to_final.ns` are null, with
+`speech_timing.end_reason: "merged_utterance"`. Other, unmerged utterances
+in that session can still measure speech end normally.
 
-For a matched utterance, `boundaries.speech_onset` is the actual caller
-`sent_ns` of the frame containing the onset sample. An onset inside a frame
-uses that frame's send time, without interpolation; an onset exactly at a
-frame boundary uses the following frame. `boundaries.speech_end` uses the
-frame holding `end_sample_offset - 1`, the last speech sample. An omitted
-end leaves this boundary null. Both use the caller's pacing clock and
-include credit delays in the recorded send time; scheduled times and
-pacing lag remain separately available.
+Splits, drops and incompatible offsets record `count_mismatch` or
+`interval_mismatch`; a hypothesis preceding its annotated frame's schedule
+records `timing_mismatch`. Failed or unfinished sessions with annotations
+record `incomplete`. These states leave the ID mapping empty and all
+speech-based timings in that session null. The tool never shifts later
+annotations to repair a mismatch. Without speech ends, a split with no
+transcript in the extra interval may be undetectable; compatible intervals
+cannot establish semantic identity. Inspect segmentation before using the
+measurements as evidence.
+
+`boundaries.speech_onset` is the caller's `scheduled_ns` for the frame
+containing the onset sample. An onset inside a frame uses that frame's
+schedule without interpolation; an onset exactly at a frame boundary uses
+the following frame. `boundaries.speech_end` uses the schedule of the frame
+holding `end_sample_offset - 1`, the last speech sample. An omitted end
+leaves this boundary null with `speech_timing.end_reason: "not_provided"`;
+an unmapped utterance uses `"unmapped"`.
+
+Each boundary's actual send delay is retained in
+`speech_timing.onset_input_lag_ns` or `end_input_lag_ns`. A delay **greater
+than 100 ms** voids the measurement starting at that boundary; exactly
+100 ms is eligible. A late speech-end input also records
+`end_reason: "input_lag"`. The schedule and lag remain in the record even
+when the duration is null. Withholding input credit therefore lengthens
+the measured latency or makes the sample unavailable; it cannot shorten it.
 
 | Measurement | From | To |
 | --- | --- | --- |
-| `onset_to_first_partial` | `speech_onset` | `first_nonempty_partial`, the receipt of the first nonblank partial |
+| `onset_to_first_partial` | `speech_onset` | first nonblank hypothesis receipt, partial or final |
 | `speech_end_to_final` | `speech_end` | `final_transcript` receipt |
 
-`first_nonempty_partial` is independent of the existing `first_partial`,
-which still includes blank hypotheses. Finals never substitute for a
-missing partial. The old first-audio measurements keep their meanings.
-Missing boundaries yield null durations. The aggregate pools these raw
-per-utterance measurements across sessions, with unavailable or failed
-observations counted as misses. Optional missing speech observations do not
-change the existing session summaries or the run's result; a successful
-run without annotations does not establish speech-onset latency.
+The name `onset_to_first_partial` is retained, but very short speech whose
+first hypothesis is its final supplies a sample at that final's actual
+arrival. The measurement's `ended_by` is `partial_transcript` or
+`final_transcript`, and `to` names `first_nonempty_partial` or
+`final_transcript` respectively. Empty or whitespace-only hypotheses
+supply no sample. `first_nonempty_partial` remains a partial-only boundary;
+the existing `first_partial` still includes blank hypotheses. Existing
+first-audio measurements keep their meanings.
+
+The aggregate counts only annotated speech: one observation per mapped
+server utterance, including one per merged group. An unannotated trailing
+Finalize in silence is neither a sample nor a miss. A missing hypothesis,
+late input or unavailable speech end counts as a miss for its annotated
+utterance. When a failed session or invalid mapping prevents grouping,
+each clip annotation counts as a miss; no annotations means zero samples
+and zero misses. The validation index includes the onset metric's count,
+misses and P50/P95/P99 alongside the existing STT measures when the record
+has that distribution. Optional speech observations do not change the
+legacy session summaries or the run's result; a successful run without
+annotations does not establish speech-onset latency.
 
 ## What the record holds
 

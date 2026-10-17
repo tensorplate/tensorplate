@@ -9,10 +9,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 ### Fixed
 
 - The streaming slice measurement tool accepts per-utterance speech sample
-  annotations beside WAV clips and measures speech onset to the first
-  nonblank partial, plus speech end to final. It records segmentation
-  mismatches without guessing, preserves first-audio timings, and pools
-  the new measurements across concurrent sessions. Measurement records
+  annotations beside WAV clips and measures scheduled speech onset to the
+  first nonblank partial or final hypothesis, plus speech end to final.
+  Inputs over 100 ms late supply no sample. Merged utterances use their
+  first annotated onset and explicitly refuse an ambiguous speech end;
+  splits and drops supply no timings. Aggregates exclude unannotated
+  utterances, and validation indexes include onset latency. Existing
+  first-audio timings retain their meanings. Measurement records
   advance to 0.4; records from 0.1 through 0.3 remain readable.
 
 - SDK-enabled x86 workers start without NVIDIA libraries and reject unusable TensorRT drivers before runtime construction. Jetson keeps direct SDK linkage; release builds still disable TensorRT.

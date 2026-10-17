@@ -231,10 +231,10 @@ def check_speech_annotations(annotations: Any, samples: int) -> None:
         previous_end = end
 
 
-def speech_sample_time(session: dict[str, Any], sample: int) -> int | None:
+def speech_frame(session: dict[str, Any], sample: int) -> dict[str, Any] | None:
     return next(
         (
-            f["sent_ns"]
+            f
             for f in session["client"]["audio_frames"]
             if f["start_sample_offset"] <= sample < f["end_sample_offset"]
         ),
@@ -242,68 +242,116 @@ def speech_sample_time(session: dict[str, Any], sample: int) -> int | None:
     )
 
 
+def first_hypothesis(utterance: dict[str, Any]) -> tuple[int | None, str, str]:
+    candidates = [
+        (p["at_ns"], "first_nonempty_partial", "partial_transcript")
+        for p in utterance["partials"]
+        if p["text_bytes"]
+    ]
+    if utterance["final"] is not None and utterance["final"]["text_bytes"]:
+        candidates.append(
+            (utterance["boundaries"]["final_transcript"], "final_transcript", "final_transcript")
+        )
+    return (
+        min(candidates, key=lambda candidate: candidate[0])
+        if candidates
+        else (None, "first_nonempty_partial", "partial_transcript")
+    )
+
+
 def derive_speech_alignment(section: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
-    """Match annotated speech to nonblank server utterances in observation order."""
+    """Pair annotations by wire interval; repeated IDs explicitly record a merge."""
     annotations = section["input"]["speech_annotations"]
-    status, ids = "not_provided", []
-    if annotations is not None:
-        spoken = [
-            u
-            for u in session["utterances"]
-            if any(p["text_bytes"] for p in u["partials"])
-            or (u["final"] is not None and u["final"]["text_bytes"])
-        ]
-        if session["outcome"] != "completed":
-            status = "incomplete"
-        elif len(spoken) != len(annotations):
-            status = "count_mismatch"
-        elif any(
-            u["endpoint"] is None
-            or not u["start_sample_offset"]
-            <= a["onset_sample_offset"]
-            < a.get("end_sample_offset", a["onset_sample_offset"] + 1)
-            <= u["endpoint"]["end_sample_offset"]
-            for u, a in zip(spoken, annotations)
-        ):
-            status = "interval_mismatch"
-        elif any(
-            observed is not None and (sent is None or observed < sent)
-            for u, a in zip(spoken, annotations)
-            for observed, sent in (
-                (
-                    next((p["at_ns"] for p in u["partials"] if p["text_bytes"]), None),
-                    speech_sample_time(session, a["onset_sample_offset"]),
-                ),
-                (
-                    u["boundaries"]["final_transcript"],
-                    speech_sample_time(
-                        session, a.get("end_sample_offset", a["onset_sample_offset"] + 1) - 1
-                    ),
-                ),
-            )
-        ):
-            status = "timing_mismatch"
-        else:
-            status, ids = "matched", [u["utterance_id"] for u in spoken]
-    return {"status": status, "utterance_ids": ids}
+    if annotations is None:
+        return {"status": "not_provided", "utterance_ids": []}
+    if session["outcome"] != "completed":
+        return {"status": "incomplete", "utterance_ids": []}
+    spoken = [u for u in session["utterances"] if first_hypothesis(u)[0] is not None]
+    ids = [
+        next(
+            (
+                u["utterance_id"]
+                for u in spoken
+                if u["endpoint"] is not None
+                and u["start_sample_offset"]
+                <= a["onset_sample_offset"]
+                < u["endpoint"]["end_sample_offset"]
+            ),
+            None,
+        )
+        for a in annotations
+    ]
+    status = "matched"
+    if len(spoken) > len(annotations):
+        status = "count_mismatch"
+    elif set(ids) != {u["utterance_id"] for u in spoken}:
+        status = "interval_mismatch"
+    else:
+        for u in spoken:
+            group = [a for a, uid in zip(annotations, ids) if uid == u["utterance_id"]]
+            if any(
+                a.get("end_sample_offset", a["onset_sample_offset"] + 1)
+                > u["endpoint"]["end_sample_offset"]
+                for a in group
+            ):
+                status = "interval_mismatch"
+                break
+            # Only the first onset is meaningful when several annotations merged.
+            observations = [(first_hypothesis(u)[0], group[0]["onset_sample_offset"])]
+            if len(group) == 1 and "end_sample_offset" in group[0]:
+                observations.append(
+                    (u["boundaries"]["final_transcript"], group[0]["end_sample_offset"] - 1)
+                )
+            if any(
+                at is not None
+                and (
+                    speech_frame(session, sample) is None
+                    or at < speech_frame(session, sample)["scheduled_ns"]
+                )
+                for at, sample in observations
+            ):
+                status = "timing_mismatch"
+                break
+        if status == "matched" and len(spoken) < len(annotations):
+            status = "merged"
+    return {"status": status, "utterance_ids": ids if status in ("matched", "merged") else []}
 
 
-def derive_speech_boundaries(
+def derive_speech_observations(
     section: dict[str, Any], session: dict[str, Any], utterance: dict[str, Any]
 ) -> dict[str, Any]:
-    result = dict.fromkeys(("speech_onset", "speech_end", "first_nonempty_partial"))
-    result["first_nonempty_partial"] = next(
+    boundaries = dict.fromkeys(("speech_onset", "speech_end", "first_nonempty_partial"))
+    boundaries["first_nonempty_partial"] = next(
         (p["at_ns"] for p in utterance["partials"] if p["text_bytes"]), None
     )
+    timing: dict[str, Any] = {
+        "onset_input_lag_ns": None,
+        "end_input_lag_ns": None,
+        "end_reason": "unmapped",
+    }
     ids = derive_speech_alignment(section, session)["utterance_ids"]
-    if utterance["utterance_id"] in ids:
-        annotation = section["input"]["speech_annotations"][ids.index(utterance["utterance_id"])]
-        for boundary, sample in (
-            ("speech_onset", annotation["onset_sample_offset"]),
-            ("speech_end", annotation.get("end_sample_offset", 0) - 1),
+    indices = [i for i, uid in enumerate(ids) if uid == utterance["utterance_id"]]
+    if indices:
+        annotation = section["input"]["speech_annotations"][indices[0]]
+        merged = len(indices) > 1
+        timing["end_reason"] = "merged_utterance" if merged else "not_provided"
+        for boundary, sample, lag_key in (
+            ("speech_onset", annotation["onset_sample_offset"], "onset_input_lag_ns"),
+            (
+                "speech_end",
+                -1 if merged else annotation.get("end_sample_offset", 0) - 1,
+                "end_input_lag_ns",
+            ),
         ):
-            result[boundary] = speech_sample_time(session, sample)
-    return result
+            frame = speech_frame(session, sample)
+            if frame is not None:
+                boundaries[boundary] = frame["scheduled_ns"]
+                timing[lag_key] = frame["sent_ns"] - frame["scheduled_ns"]
+        if timing["end_input_lag_ns"] is not None:
+            timing["end_reason"] = (
+                "input_lag" if timing["end_input_lag_ns"] > MAX_INPUT_LAG_MS * 1_000_000 else None
+            )
+    return {"boundaries": boundaries, "timing": timing}
 
 
 def new_utterance(utterance_id: int, start: int) -> dict[str, Any]:
@@ -371,22 +419,23 @@ def derive_utterance_measurements(utterance: dict[str, Any]) -> dict[str, Any]:
         ),
     )
     if "speech_onset" in boundaries:
+        _, hypothesis_boundary, hypothesis_event = first_hypothesis(utterance)
         timings += (
-            (
-                "onset_to_first_partial",
-                "speech_onset",
-                "first_nonempty_partial",
-                "partial_transcript",
-            ),
+            ("onset_to_first_partial", "speech_onset", hypothesis_boundary, hypothesis_event),
             ("speech_end_to_final", "speech_end", "final_transcript", "final_transcript"),
         )
     for name, start, end, event in timings:
         a, b = boundaries[start], boundaries[end]
+        lag_key = {"speech_onset": "onset_input_lag_ns", "speech_end": "end_input_lag_ns"}.get(
+            start
+        )
+        lag = utterance["speech_timing"][lag_key] if lag_key else None
+        late = lag is not None and lag > MAX_INPUT_LAG_MS * 1_000_000
         result[name] = {
             "from": start,
             "to": end,
             "ended_by": event,
-            "ns": None if a is None or b is None else b - a,
+            "ns": None if a is None or b is None or late else b - a,
         }
     return result
 
@@ -540,11 +589,26 @@ def derive_aggregate(record: dict[str, Any]) -> dict[str, Any]:
                 samples["max_pacing_lag"].append(session["client"]["max_pacing_lag_ns"])
             for utterance in session.get("utterances", []):
                 for name, entry in derive_utterance_measurements(utterance).items():
-                    samples[name].append(entry["ns"] if cause is None else None)
+                    if name not in ("onset_to_first_partial", "speech_end_to_final"):
+                        samples[name].append(entry["ns"] if cause is None else None)
                 samples["partial_interval"].extend(
                     ns if cause is None else None
                     for ns in derive_cadence(utterance)["intervals_ns"]
                 )
+            if mode == "stt" and record["schema_version"] == "0.4":
+                alignment = derive_speech_alignment(section, session)
+                ids = set(alignment["utterance_ids"])
+                for name in ("onset_to_first_partial", "speech_end_to_final"):
+                    if ids:
+                        samples[name].extend(
+                            derive_utterance_measurements(u)[name]["ns"] if cause is None else None
+                            for u in session["utterances"]
+                            if u["utterance_id"] in ids
+                        )
+                    else:
+                        samples[name].extend(
+                            None for _ in section["input"]["speech_annotations"] or []
+                        )
         measurements[mode] = {name: distribution(values) for name, values in samples.items()}
     return {
         "sessions_recorded": recorded,
@@ -746,9 +810,9 @@ def finalize(record: dict[str, Any]) -> dict[str, Any]:
             if mode == "stt" and record["schema_version"] == "0.4":
                 session["speech_alignment"] = derive_speech_alignment(section, session)
                 for utterance in session["utterances"]:
-                    utterance["boundaries"].update(
-                        derive_speech_boundaries(section, session, utterance)
-                    )
+                    speech = derive_speech_observations(section, session, utterance)
+                    utterance["boundaries"].update(speech["boundaries"])
+                    utterance["speech_timing"] = speech["timing"]
             for utterance in session.get("utterances", []):
                 utterance["boundaries"] = derive_utterance_boundaries(session, utterance)
                 utterance["measurements"] = derive_utterance_measurements(utterance)
@@ -1211,11 +1275,14 @@ def check_record(record: Any) -> tuple[str, str]:
                             derive_speech_alignment(section, session),
                         )
                         for utterance in session["utterances"]:
-                            expected_speech = derive_speech_boundaries(section, session, utterance)
+                            speech = derive_speech_observations(section, session, utterance)
                             _require_derived(
                                 "speech boundaries",
-                                {k: utterance["boundaries"][k] for k in expected_speech},
-                                expected_speech,
+                                {k: utterance["boundaries"][k] for k in speech["boundaries"]},
+                                speech["boundaries"],
+                            )
+                            _require_derived(
+                                "speech timing", utterance["speech_timing"], speech["timing"]
                             )
                 if (
                     finished is not None

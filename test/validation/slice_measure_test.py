@@ -1649,7 +1649,7 @@ def replies(pb, mode: str, **knobs):
                     final = pb.FinalTranscript(
                         utterance_id=state["utterance"],
                         end_sample_offset=offset,
-                        segments=[pb.TranscriptSegment(text="words")],
+                        segments=[pb.TranscriptSegment(text=knobs.get("endpoint_text", "words"))],
                     )
                     if not knobs.get("omit_endpoint"):
                         yield 0, {"endpoint_detected": endpoint}
@@ -2124,6 +2124,8 @@ def check_speech_timing(harness: Harness) -> None:
         assert record["stt"]["input"]["speech_annotations"] is None
         assert session["speech_alignment"] == {"status": "not_provided", "utterance_ids": []}
         assert session["utterances"][0]["boundaries"]["speech_onset"] is None
+        summary = record["aggregate"]["measurements"]["stt"]["onset_to_first_partial"]
+        assert (summary["count"], summary["misses"]) == (0, 0)
         for onset, frame_index in ((0, 0), (100, 0), (320, 1), (321, 1)):
             annotated([{"onset_sample_offset": onset, "end_sample_offset": 640}])
             record, session, _ = scripted(harness, "stt", partials=["", " ", "words"])
@@ -2131,14 +2133,17 @@ def check_speech_timing(harness: Harness) -> None:
             bounds, measures = utterance["boundaries"], utterance["measurements"]
             frames = session["client"]["audio_frames"]
             assert session["speech_alignment"] == {"status": "matched", "utterance_ids": [1]}
-            assert bounds["speech_onset"] == frames[frame_index]["sent_ns"]
-            assert bounds["speech_end"] == frames[1]["sent_ns"]  # exclusive end at a frame edge
+            assert bounds["speech_onset"] == frames[frame_index]["scheduled_ns"]
+            assert (
+                bounds["speech_end"] == frames[1]["scheduled_ns"]
+            )  # exclusive end at a frame edge
             assert bounds["first_nonempty_partial"] == utterance["partials"][2]["at_ns"]
             assert bounds["first_partial"] == utterance["partials"][0]["at_ns"]
             assert measures["onset_to_first_partial"]["ns"] == (2 - frame_index) * 20 * MS
+            assert measures["onset_to_first_partial"]["ended_by"] == "partial_transcript"
             assert (
                 measures["speech_end_to_final"]["ns"]
-                == bounds["final_transcript"] - frames[1]["sent_ns"]
+                == bounds["final_transcript"] - frames[1]["scheduled_ns"]
             )
             assert measures["first_audio_to_first_partial"]["ns"] == 0
             jsonschema.validate(record, record_mod.load_schema())
@@ -2165,7 +2170,7 @@ def check_speech_timing(harness: Harness) -> None:
         )
         frame = session["client"]["audio_frames"][2]
         assert frame["sent_ns"] > frame["scheduled_ns"]
-        assert session["utterances"][0]["boundaries"]["speech_onset"] == frame["sent_ns"]
+        assert session["utterances"][0]["boundaries"]["speech_onset"] == frame["scheduled_ns"]
         annotated(
             [
                 {
@@ -2177,11 +2182,11 @@ def check_speech_timing(harness: Harness) -> None:
         record, session, _ = scripted(harness, "stt")
         assert (
             session["utterances"][0]["boundaries"]["speech_onset"]
-            == session["client"]["audio_frames"][-1]["sent_ns"]
+            == session["client"]["audio_frames"][-1]["scheduled_ns"]
         )
         assert (
             session["utterances"][0]["boundaries"]["speech_end"]
-            == session["client"]["audio_frames"][-1]["sent_ns"]
+            == session["client"]["audio_frames"][-1]["scheduled_ns"]
         )
         bad = copy.deepcopy(record)
         bad["stt"]["input"]["speech_annotations"] = [{"onset_sample_offset": original["samples"]}]
@@ -2205,6 +2210,18 @@ def check_speech_timing(harness: Harness) -> None:
         assert session["utterances"][0]["boundaries"]["speech_end"] is None
         assert session["utterances"][0]["measurements"]["speech_end_to_final"]["ns"] is None
         record, session, _ = scripted(harness, "stt")
+        measurement = session["utterances"][0]["measurements"]["onset_to_first_partial"]
+        assert measurement["ended_by"] == "final_transcript"
+        assert measurement["to"] == "final_transcript"
+        assert (
+            measurement["ns"]
+            == session["utterances"][0]["boundaries"]["final_transcript"] - 20 * MS
+        )
+        # Equal clock readings retain wire observation order: partial precedes final.
+        record, session, _ = scripted(harness, "stt", partials=[""] * 10 + ["words"])
+        measurement = session["utterances"][0]["measurements"]["onset_to_first_partial"]
+        assert measurement["ended_by"] == "partial_transcript"
+        record, session, _ = scripted(harness, "stt", partials=["", " "], final_text=" ")
         assert session["utterances"][0]["measurements"]["onset_to_first_partial"]["ns"] is None
 
         annotated(
@@ -2224,9 +2241,40 @@ def check_speech_timing(harness: Harness) -> None:
         record_mod.finalize(record)
         assert session["speech_alignment"]["utterance_ids"] == [7, 42]
         assert record_mod.check_record(record)[0] == record["result"]["status"]
-        # A server merge, or a split of one annotation, cannot be paired by ordinal alone.
+        dropped, dropped_session, _ = scripted(
+            harness, "stt", endpoints=knobs["endpoints"], endpoint_text=""
+        )
+        assert dropped_session["speech_alignment"]["status"] == "interval_mismatch"
+        dropped_summary = dropped["aggregate"]["measurements"]["stt"]["onset_to_first_partial"]
+        assert (dropped_summary["count"], dropped_summary["misses"]) == (0, 2)
+        # A merged server utterance uses the first onset and refuses an ambiguous end.
         record, session, _ = scripted(harness, "stt", partials=["words"])
-        assert session["speech_alignment"]["status"] == "count_mismatch"
+        assert session["speech_alignment"] == {"status": "merged", "utterance_ids": [1, 1]}
+        merged = session["utterances"][0]
+        assert merged["measurements"]["onset_to_first_partial"]["ns"] == 0
+        assert merged["measurements"]["onset_to_first_partial"]["ended_by"] == "partial_transcript"
+        assert merged["boundaries"]["speech_end"] is None
+        assert merged["measurements"]["speech_end_to_final"]["ns"] is None
+        assert merged["speech_timing"]["end_reason"] == "merged_utterance"
+        assert record["aggregate"]["measurements"]["stt"]["onset_to_first_partial"]["count"] == 1
+        assert record["aggregate"]["measurements"]["stt"]["speech_end_to_final"]["misses"] == 1
+        # Merges do not prevent the following unmerged utterance from measuring its end.
+        annotated(
+            [
+                {"onset_sample_offset": 0, "end_sample_offset": 160},
+                {"onset_sample_offset": 321, "end_sample_offset": 640},
+                {"onset_sample_offset": 1000, "end_sample_offset": 1600},
+            ]
+        )
+        record, session, _ = scripted(harness, "stt", **knobs)
+        assert session["speech_alignment"] == {"status": "merged", "utterance_ids": [1, 1, 2]}
+        assert session["utterances"][0]["speech_timing"]["end_reason"] == "merged_utterance"
+        assert session["utterances"][1]["speech_timing"]["end_reason"] is None
+        assert session["utterances"][1]["measurements"]["speech_end_to_final"]["ns"] is not None
+        assert record["aggregate"]["measurements"]["stt"]["onset_to_first_partial"]["count"] == 2
+        summary = record["aggregate"]["measurements"]["stt"]["speech_end_to_final"]
+        assert (summary["count"], summary["misses"]) == (1, 1)
+        # A split still invalidates the mapping.
         annotated([{"onset_sample_offset": 0, "end_sample_offset": 1600}])
         record, session, _ = scripted(harness, "stt", **knobs)
         assert session["speech_alignment"]["status"] == "count_mismatch"
@@ -2251,6 +2299,8 @@ def check_speech_timing(harness: Harness) -> None:
         )
         assert session["speech_alignment"] == {"status": "matched", "utterance_ids": [1]}
         assert session["utterances"][1]["boundaries"]["speech_onset"] is None
+        summary = record["aggregate"]["measurements"]["stt"]["onset_to_first_partial"]
+        assert (summary["count"], summary["misses"]) == (1, 0)
         # A partial followed by an empty final is still a speech observation.
         record, session, _ = scripted(harness, "stt", partials=["words"], final_text="")
         assert session["speech_alignment"]["status"] == "matched"
@@ -2258,6 +2308,23 @@ def check_speech_timing(harness: Harness) -> None:
             harness, "stt", stall=True, settings={"event_timeout_ms": 250}
         )
         assert session["speech_alignment"]["status"] == "incomplete"
+
+        # Adjacent annotations (exclusive end == next onset) are valid, including a merge.
+        annotated(
+            [
+                {"onset_sample_offset": 0, "end_sample_offset": 960},
+                {"onset_sample_offset": 960, "end_sample_offset": 1600},
+            ]
+        )
+        record, session, _ = scripted(harness, "stt", **knobs)
+        assert session["speech_alignment"]["status"] == "matched"
+        record, session, _ = scripted(harness, "stt")
+        assert session["speech_alignment"]["status"] == "merged"
+        assert session["utterances"][0]["speech_timing"]["end_reason"] == "merged_utterance"
+        assert (
+            session["utterances"][0]["measurements"]["onset_to_first_partial"]["ended_by"]
+            == "final_transcript"
+        )
 
         annotated([{"onset_sample_offset": 0, "end_sample_offset": 160}])
         record, _, _, _ = concurrent_record(harness, "stt", 2, "partial")
@@ -2272,6 +2339,44 @@ def check_speech_timing(harness: Harness) -> None:
         assert record_mod.check_record(record)[0] == "failed"
         for name in ("onset_to_first_partial", "speech_end_to_final"):
             assert record["aggregate"]["measurements"]["stt"][name]["misses"] == 1
+
+        # Staggered STT uses real paced clocks; the synthetic StaggerClock is TTS-only.
+        record, _, _, _ = concurrent_record(
+            harness, "stt", 2, "partial", stagger_ms=10, run=client_mod.Run()
+        )
+        assert record["settings"]["stagger_ms"] == 10
+        assert all(s["speech_alignment"]["status"] == "matched" for s in record["stt"]["sessions"])
+        assert record["aggregate"]["measurements"]["stt"]["onset_to_first_partial"]["count"] == 2
+
+        # Exactly 100 ms of lag is eligible; one ns more voids that input's sample.
+        for lag in (100 * MS, 100 * MS + 1):
+            annotated([{"onset_sample_offset": 641, "end_sample_offset": 960}])
+            record, session, _ = scripted(
+                harness,
+                "stt",
+                hold={1: 20 * MS + lag},
+                partials=["", "", "words"],
+                ready=lambda r: setattr(r.status.input_credit.bytes, "limit", 640),
+            )
+            utterance = session["utterances"][0]
+            assert utterance["boundaries"]["speech_onset"] == 40 * MS
+            assert utterance["speech_timing"]["onset_input_lag_ns"] == lag
+            assert utterance["speech_timing"]["end_input_lag_ns"] == lag
+            assert utterance["speech_timing"]["end_reason"] == (
+                None if lag == 100 * MS else "input_lag"
+            )
+            for name in ("onset_to_first_partial", "speech_end_to_final"):
+                sample = utterance["measurements"][name]["ns"]
+                assert (sample is None) == (lag > 100 * MS)
+                summary = record["aggregate"]["measurements"]["stt"][name]
+                assert (summary["count"], summary["misses"]) == (
+                    (1, 0) if lag == 100 * MS else (0, 1)
+                )
+            if lag == 100 * MS:
+                assert utterance["measurements"]["onset_to_first_partial"]["ns"] == lag
+            bad = copy.deepcopy(record)
+            bad["stt"]["sessions"][0]["utterances"][0]["speech_timing"]["onset_input_lag_ns"] = 0
+            assert record_mod.check_record(bad)[0] == "invalid"
 
         for document in (
             "{",

@@ -280,7 +280,11 @@ def streaming_line(record: dict[str, Any], envelope: dict[str, Any]) -> dict[str
         else:
             sessions = "none: the run ended before a session did"
         checks[f"{mode}.sessions"] = sessions
-        for name, summary in section["summary"].items():
+        summaries = dict(section["summary"])
+        onset = record.get("aggregate", {}).get("measurements", {}).get(mode) or {}
+        if mode == "stt" and "onset_to_first_partial" in onset:
+            summaries["onset_to_first_partial"] = onset["onset_to_first_partial"]
+        for name, summary in summaries.items():
             prefix = f"{mode}.{name}"
             metrics[f"{prefix}.count"] = summary["count"]
             metrics[f"{prefix}.misses"] = summary["misses"]
