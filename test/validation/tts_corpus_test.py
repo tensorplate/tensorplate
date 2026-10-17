@@ -38,10 +38,51 @@ import jsonschema  # noqa: E402
 import tts_corpus as tts  # noqa: E402
 
 LOCK_BYTES = (ROOT / "packaging/speech-runtime/lock/kokoro.txt").read_bytes()
+G2P_PINS = (
+    "addict",
+    "en-core-web-sm",
+    "espeakng-loader",
+    "kokoro",
+    "misaki",
+    "num2words",
+    "phonemizer-fork",
+    "regex",
+    "spacy",
+)
 
 
 def sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def lock_lines(lock: bytes) -> dict[str, str]:
+    return {line.split("==")[0]: line for line in lock.decode().splitlines() if "==" in line}
+
+
+def pins_sha(lock: bytes) -> str:
+    """The g2p pins digest, written out: the named lines, whitespace collapsed, in order."""
+    lines = lock_lines(lock)
+    return sha("".join(" ".join(lines[name].split()) + "\n" for name in G2P_PINS).encode())
+
+
+def relock(path: Path, name: str, line: str | None) -> None:
+    """Replace one pin's line in a lock file, or drop it."""
+    kept = []
+    for old in path.read_text(encoding="utf-8").splitlines():
+        if old.split("==")[0] != name:
+            kept.append(old)
+        elif line is not None:
+            kept.append(line)
+    path.write_text("".join(f"{k}\n" for k in kept), encoding="utf-8")
+
+
+def rehash(line: str) -> str:
+    return line.split("--hash=sha256:")[0] + "--hash=sha256:" + "0" * 64
+
+
+LOCK_VERSIONS = {
+    name: line.split("==")[1].split()[0] for name, line in lock_lines(LOCK_BYTES).items()
+}
 
 
 def word(index: int) -> str:
@@ -105,7 +146,7 @@ def synthetic() -> dict[str, Any]:
         "tokenizer": {
             "rule": "kokoro-kpipeline-g2p-length-v1",
             "lock": "packaging/speech-runtime/lock/kokoro.txt",
-            "lock_sha256": sha(LOCK_BYTES),
+            "g2p_pins_sha256": pins_sha(LOCK_BYTES),
             "kokoro": "0.9.4",
             "misaki": "0.9.4",
             "spacy": "3.8.16",
@@ -256,14 +297,19 @@ def check_derivations() -> None:
 def check_rules(good: dict[str, Any]) -> None:
     assert tts.check_corpus(good) == 330
     refused(good, lambda c: c.update(extra=1), "does not match its schema")
-    refused(good, lambda c: c["tokenizer"].update(lock_sha256="0" * 64), "counted under lock")
+    assert tts.G2P_PINS == G2P_PINS
+    refused(
+        good, lambda c: c["tokenizer"].update(g2p_pins_sha256="0" * 64), "counted under g2p pins"
+    )
     refused(
         good,
-        lambda c: c["tokenizer"].update(lock_sha256="0" * 64),
-        f"{tts.LOCK} is {sha(LOCK_BYTES)}; re-record the counts with `tts_corpus.py count CORPUS"
-        " --model-config MODEL/config.json --write CORPUS` in the locked environment"
-        " (docs/validation/tts-text-corpus.md)",
+        lambda c: c["tokenizer"].update(g2p_pins_sha256="0" * 64),
+        f"{tts.LOCK}'s {', '.join(G2P_PINS)} pins are {pins_sha(LOCK_BYTES)}; re-record the"
+        " counts with `tts_corpus.py count CORPUS --model-config MODEL/config.json --write"
+        " CORPUS` in the environment built from that lock (docs/validation/tts-text-corpus.md)",
     )
+    # The digest of the whole lock file is not the digest of its g2p pins.
+    refused(good, lambda c: c["tokenizer"].update(g2p_pins_sha256=sha(LOCK_BYTES)), "counted under")
     for field in ("kokoro", "misaki", "spacy", "en_core_web_sm"):
         refused(good, lambda c, f=field: c["tokenizer"].update({f: "0.0.1"}), f"tokenizer {field}")
         # Another locked package's version is still not this package's pin.
@@ -629,12 +675,7 @@ class Fakes:
         self.max_threads: int | None = None
         self.model: object = None
         self.during: Callable[[], None] | None = None
-        self.versions = {
-            "kokoro": "0.9.4",
-            "misaki": "0.9.4",
-            "spacy": "3.8.16",
-            "en-core-web-sm": "3.8.0",
-        }
+        self.versions = {name: LOCK_VERSIONS[name] for name in G2P_PINS}
         fakes = self
         torch = types.ModuleType("torch")
         torch.float32 = object()  # type: ignore[attr-defined]
@@ -786,12 +827,12 @@ def check_count(good: dict[str, Any], scratch: Path) -> None:
         expect_error(lambda: count(wrong), "s-5: 6 tokens, recorded 7")
         written = scratch / "written.json"
         stale = copy.deepcopy(good)
-        stale["tokenizer"].update(lock_sha256="0" * 64, misaki="0.0.1", espeak_ng="old")
+        stale["tokenizer"].update(g2p_pins_sha256="0" * 64, misaki="0.0.1", espeak_ng="old")
         recount("s-6", 150)(stale)
         sentence(stale, "s-6")["critical"] = ["numeral"]
         assert count(stale, write=written) == ["s-6: 7 tokens, recorded 150"]
         rewritten = json.loads(written.read_bytes())
-        assert rewritten["tokenizer"]["espeak_ng"] == "9.9-test"
+        assert rewritten["tokenizer"] == good["tokenizer"] | {"espeak_ng": "9.9-test"}
         assert sentence(rewritten, "s-6") == sentence(good, "s-6")
         assert tts.check_corpus(rewritten, repo_root=repo) == 330
         for i in range(11):
@@ -806,6 +847,10 @@ def check_count(good: dict[str, Any], scratch: Path) -> None:
             lambda: count(copy.deepcopy(good)), "installed misaki 0.9.3 is not the lock's 0.9.4"
         )
         fakes.versions["misaki"] = "0.9.4"
+        for name in G2P_PINS:
+            fakes.versions[name] = "0.0.1"
+            expect_error(lambda: count(copy.deepcopy(good)), f"installed {name} 0.0.1")
+            fakes.versions[name] = LOCK_VERSIONS[name]
         fakes.fallback = None
         expect_error(lambda: count(copy.deepcopy(good)), "espeak fallback is unavailable")
         fakes.fallback = NO_ATTRIBUTE
@@ -840,6 +885,30 @@ def check_count(good: dict[str, Any], scratch: Path) -> None:
             lambda: tts.count_corpus(copy.deepcopy(good), model / "config.json", repo_root=repo3),
             "pins no tts-kokoro-candidate bundle",
         )
+    check_lock_scope(good, scratch / "scope", model)
+
+
+def check_lock_scope(good: dict[str, Any], scratch: Path, model: Path) -> None:
+    """Only the g2p pins' lines of the lock are the corpus's; any of them changing refuses it."""
+    repo = fake_repo(scratch, model)
+    lock = repo / tts.LOCK
+    lines = lock_lines(LOCK_BYTES)
+    for name, line in lines.items():
+        if name in G2P_PINS:
+            continue
+        relock(lock, name, rehash(line))
+    relock(lock, "kokoro", lines["kokoro"].replace(" --hash", "   --hash"))
+    assert lock.read_bytes() != LOCK_BYTES
+    assert tts.check_corpus(copy.deepcopy(good), repo_root=repo) == 330
+    for name in G2P_PINS:
+        relock(lock, name, rehash(lines[name]))
+        refused(good, lambda c: None, "counted under g2p pins", repo_root=repo)
+        relock(lock, name, lines[name])
+        assert tts.check_corpus(copy.deepcopy(good), repo_root=repo) == 330
+    relock(lock, "regex", None)
+    refused(good, lambda c: None, f"{tts.LOCK} pins no regex", repo_root=repo)
+    relock(lock, "kokoro", None)
+    refused(good, lambda c: None, f"{tts.LOCK} pins no kokoro, regex", repo_root=repo)
 
 
 def check_reference(good: dict[str, Any], scratch: Path) -> None:
@@ -850,9 +919,8 @@ def check_reference(good: dict[str, Any], scratch: Path) -> None:
     (model / "voices/af_heart.pt").write_bytes(b"voice")
     (model / "voices/af_bella.pt").write_bytes(b"bella voice")
     repo = fake_repo(scratch / "ref", model, voices=("af_heart", "af_bella"))
-    # A lock unlike the repository's, so the record's digest is shown to be the given root's.
-    with (repo / tts.LOCK).open("a", encoding="utf-8") as lock:
-        lock.write("# the reference tests' lock\n")
+    # A g2p pin unlike the repository's, so the record's digest is shown to be the given root's.
+    relock(repo / tts.LOCK, "regex", rehash(lock_lines(LOCK_BYTES)["regex"]))
     small = copy.deepcopy(good)
     small["sentences"] = small["sentences"][:3]
     tokens = {s["text"]: s["phoneme_tokens"] for s in good["sentences"]}
@@ -887,7 +955,7 @@ def check_reference(good: dict[str, Any], scratch: Path) -> None:
             "misaki": "0.9.4",
             "spacy": "3.8.16",
             "en_core_web_sm": "3.8.0",
-            "lock_sha256": sha((repo / tts.LOCK).read_bytes()),
+            "g2p_pins_sha256": pins_sha((repo / tts.LOCK).read_bytes()),
             "espeak_ng": "9.9-ref",
             "torch": "0.0.0+fake",
             "device": "cpu",
@@ -1004,11 +1072,10 @@ def check_reference(good: dict[str, Any], scratch: Path) -> None:
         fakes.versions["kokoro"] = "0.9.5"
         expect_error(lambda: record(scratch / "out7"), "installed kokoro 0.9.5")
         fakes.versions["kokoro"] = "0.9.4"
-        for name in ("spacy", "en-core-web-sm"):
-            locked = fakes.versions[name]
+        for name in G2P_PINS:
             fakes.versions[name] = "0.0.1"
             expect_error(lambda: record(scratch / "out7a"), f"installed {name} 0.0.1")
-            fakes.versions[name] = locked
+            fakes.versions[name] = LOCK_VERSIONS[name]
         fakes.max_threads = 0
         zero = scratch / "zero-threads"
         expect_error(lambda: record(zero), "the reference record does not match its schema")
@@ -1087,13 +1154,13 @@ def check_cli_commands(
     (model / "kokoro-v1_0.pth").write_bytes(b"weights")
     (model / "voices/af_heart.pt").write_bytes(b"voice")
     repo = fake_repo(scratch / "cli", model)
-    # A lock unlike the repository's, so a command that checks against REPO_ROOT's is refused.
-    with (repo / tts.LOCK).open("a", encoding="utf-8") as lock:
-        lock.write("# the command-line tests' lock\n")
-    lock_sha256 = sha((repo / tts.LOCK).read_bytes())
+    # A g2p pin unlike the repository's, so a command that checks against REPO_ROOT's is refused.
+    relock(repo / tts.LOCK, "regex", rehash(lock_lines(LOCK_BYTES)["regex"]))
+    pins_digest = pins_sha((repo / tts.LOCK).read_bytes())
+    assert pins_digest != pins_sha(LOCK_BYTES)
     good, pinned = copy.deepcopy(good), copy.deepcopy(pinned)
     for relocked in (good, pinned):
-        relocked["tokenizer"]["lock_sha256"] = lock_sha256
+        relocked["tokenizer"]["g2p_pins_sha256"] = pins_digest
     config = model / "config.json"
     corpus = scratch / "cli-corpus.json"
     corpus.write_text(json.dumps(good, indent=4))
@@ -1110,7 +1177,7 @@ def check_cli_commands(
             assert code == 0 and out == "tts-corpus: counted: 330 sentences\n", (code, out)
             counted = json.loads(written.read_bytes())
             assert counted["tokenizer"]["espeak_ng"] == "9.9-cli"
-            assert counted["tokenizer"]["lock_sha256"] == lock_sha256
+            assert counted["tokenizer"]["g2p_pins_sha256"] == pins_digest
             assert counted["sentences"] == good["sentences"]
             sources = [f"--source={name}={path}" for name, path in files.items()]
             texts = scratch / "cli-pinned.json"
@@ -1127,7 +1194,7 @@ def check_cli_commands(
             assert code == 0, err
             recorded = json.loads((out_dir / tts.RECORD_NAME).read_bytes())
             assert recorded["corpus"]["sha256"] == sha(corpus.read_bytes())
-            assert recorded["engine"]["lock_sha256"] == lock_sha256
+            assert recorded["engine"]["g2p_pins_sha256"] == pins_digest
             assert recorded["engine"]["espeak_ng"] == "9.9-cli"
             assert len(recorded["clips"]) == 330
         finally:

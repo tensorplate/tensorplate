@@ -22,13 +22,13 @@
     "engine": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kokoro", "misaki", "spacy", "en_core_web_sm", "lock_sha256", "espeak_ng", "torch", "device", "dtype", "threads"],
+      "required": ["kokoro", "misaki", "spacy", "en_core_web_sm", "g2p_pins_sha256", "espeak_ng", "torch", "device", "dtype", "threads"],
       "properties": {
         "kokoro": { "type": "string", "minLength": 1 },
         "misaki": { "type": "string", "minLength": 1 },
         "spacy": { "type": "string", "minLength": 1 },
         "en_core_web_sm": { "type": "string", "minLength": 1 },
-        "lock_sha256": { "$ref": "#/definitions/Sha256", "description": "The digest of the speech runtime's lock file the versions above are held to." },
+        "g2p_pins_sha256": { "$ref": "#/definitions/Sha256", "description": "The digest of the speech runtime lock's phonemizer pins, as the corpus's tokenizer records it." },
         "espeak_ng": { "type": "string", "minLength": 1, "description": "The distribution's libespeak-ng1 version." },
         "torch": { "type": "string", "minLength": 1 },
         "device": { "type": "string", "const": "cpu" },

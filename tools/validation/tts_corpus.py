@@ -4,9 +4,10 @@
 
 The corpus's shape is `config/schemas/tts_text_corpus.json`. `check` needs only
 the standard library: it derives each sentence's stratum and critical classes
-from its count and text, holds the tokenizer record to the speech runtime's
-lock, and checks the listening set and the queued sequences. With the source
-files it also compares every sourced sentence with its source.
+from its count and text, holds the tokenizer record to the pins of the speech
+runtime's lock that the phonemizer runs on, and checks the listening set and
+the queued sequences. With the source files it also compares every sourced
+sentence with its source.
 
 `count` and `reference` import kokoro and run inside the speech runtime's
 locked environment. `count` re-phonemizes every sentence the way the Kokoro
@@ -60,6 +61,20 @@ SOURCES: dict[str, tuple[str, str | None]] = {
     "libritts-r": ("CC-BY-4.0", r"[0-9]+_[0-9]+_[0-9]+_[0-9]+"),
     "authored": ("CC0-1.0", None),
 }
+# The lock's pins the phonemizer runs on: kokoro's KPipeline, misaki's English G2P and
+# espeak fallback, the packages misaki.en, misaki.espeak and misaki.token import, and the
+# spaCy model. misaki.en also imports numpy, which only its trf=True alignment uses.
+G2P_PINS = (
+    "addict",
+    "en-core-web-sm",
+    "espeakng-loader",
+    "kokoro",
+    "misaki",
+    "num2words",
+    "phonemizer-fork",
+    "regex",
+    "spacy",
+)
 # The tokenizer fields that must equal the lock's pins.
 LOCKED = {
     "kokoro": "kokoro",
@@ -137,13 +152,27 @@ def distinct_key(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
-def lock_pins(repo_root: Path = REPO_ROOT) -> dict[str, str]:
+def _lock_lines(repo_root: Path) -> dict[str, tuple[str, str]]:
+    """Each pin's version and its lock line with the whitespace collapsed."""
     pins = {}
     for line in (repo_root / LOCK).read_text(encoding="utf-8").splitlines():
         match = re.match(r"([A-Za-z0-9_.-]+)==(\S+)", line)
         if match:
-            pins[match.group(1)] = match.group(2)
+            pins[match.group(1)] = (match.group(2), " ".join(line.split()))
     return pins
+
+
+def lock_pins(repo_root: Path = REPO_ROOT) -> dict[str, str]:
+    return {name: version for name, (version, _) in _lock_lines(repo_root).items()}
+
+
+def g2p_pins_sha256(repo_root: Path = REPO_ROOT) -> str:
+    """SHA-256 of the G2P_PINS lock lines, in that order, each ended by a newline."""
+    lines = _lock_lines(repo_root)
+    missing = [name for name in G2P_PINS if name not in lines]
+    if missing:
+        raise CorpusError(f"{LOCK} pins no {', '.join(missing)}")
+    return _sha256("".join(lines[name][1] + "\n" for name in G2P_PINS).encode("utf-8"))
 
 
 def _unique(items: Iterable[dict[str, Any]], key: str, what: str) -> dict[str, dict[str, Any]]:
@@ -156,12 +185,13 @@ def _unique(items: Iterable[dict[str, Any]], key: str, what: str) -> dict[str, d
 
 
 def _check_tokenizer(tokenizer: dict[str, Any], repo_root: Path) -> None:
-    actual = _sha256((repo_root / LOCK).read_bytes())
-    if tokenizer["lock_sha256"] != actual:
+    actual = g2p_pins_sha256(repo_root)
+    if tokenizer["g2p_pins_sha256"] != actual:
         raise CorpusError(
-            f"counted under lock {tokenizer['lock_sha256']}, {LOCK} is {actual}; re-record the"
-            " counts with `tts_corpus.py count CORPUS --model-config MODEL/config.json --write"
-            " CORPUS` in the locked environment (docs/validation/tts-text-corpus.md)"
+            f"counted under g2p pins {tokenizer['g2p_pins_sha256']}, {LOCK}'s"
+            f" {', '.join(G2P_PINS)} pins are {actual}; re-record the counts with"
+            " `tts_corpus.py count CORPUS --model-config MODEL/config.json --write CORPUS`"
+            " in the environment built from that lock (docs/validation/tts-text-corpus.md)"
         )
     pins = lock_pins(repo_root)
     for field, name in LOCKED.items():
@@ -452,7 +482,7 @@ def count_corpus(
     espeak_version: Callable[[], str] | None = None,
 ) -> list[str]:
     """Re-count every sentence and refuse a changed count, or write the counted corpus."""
-    _require_locked(repo_root, LOCKED.values())
+    _require_locked(repo_root, G2P_PINS)
     path, _ = _pinned(model_config.parent, model_config.name, _pinned_files(repo_root))
     vocab = json.loads(path.read_text(encoding="utf-8"))["vocab"]
     phonemes = phonemizer(corpus["language"])
@@ -476,7 +506,7 @@ def count_corpus(
         pins = lock_pins(repo_root)
         corpus["tokenizer"].update(
             {field: pins[name] for field, name in LOCKED.items()},
-            lock_sha256=_sha256((repo_root / LOCK).read_bytes()),
+            g2p_pins_sha256=g2p_pins_sha256(repo_root),
             espeak_ng=(espeak_version or _dpkg_espeak_version)(),
         )
         check_corpus(corpus, repo_root=repo_root)
@@ -538,10 +568,10 @@ def record_reference(
         raise CorpusError(f"{out}: reference audio is written outside the repository")
     if out.exists():
         raise CorpusError(f"{out}: the output directory already exists")
-    installed = _require_locked(repo_root, LOCKED.values())
+    installed = _require_locked(repo_root, G2P_PINS)
     tokenizer = {
         **{field: installed[name] for field, name in LOCKED.items()},
-        "lock_sha256": _sha256((repo_root / LOCK).read_bytes()),
+        "g2p_pins_sha256": g2p_pins_sha256(repo_root),
         "espeak_ng": (espeak_version or _dpkg_espeak_version)(),
     }
     pins = _pinned_files(repo_root)

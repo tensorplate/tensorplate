@@ -31,11 +31,22 @@ kokoro's `KPipeline(lang_code=<language>, trf=False).g2p` returns for its
 text. That is the string the Kokoro runner bounds at 200 and synthesizes, so
 the count is the runner's own. It depends on the phonemizer's whole stack:
 misaki's lexicon, spaCy's tagger, and espeak-ng for words outside the
-lexicon. The corpus records the speech runtime's lock file by digest and the
-kokoro, misaki, spaCy and `en_core_web_sm` versions, which the check holds to
-that lock, and the distribution's `libespeak-ng1` version the counts were
-made with. A change to the lock invalidates the counts until `count --write`
-re-records them.
+lexicon.
+
+The corpus records, as `g2p_pins_sha256`, the digest of the lock lines of the
+pins the phonemizer runs on: kokoro, misaki, `en-core-web-sm`, and the
+packages misaki's English G2P and its espeak fallback import (spaCy,
+num2words, regex, addict, `phonemizer-fork` and `espeakng-loader`); misaki
+also imports numpy, which only its `trf=True` alignment uses. The list is
+`G2P_PINS` in the tool. The digest is SHA-256 over those pins' lines of
+`packaging/speech-runtime/lock/kokoro.txt`, each
+`name==version --hash=sha256:<digest>` with its whitespace collapsed to
+single spaces and ended by a newline, in the list's order. The check refuses a corpus whose
+digest is not that of the lock's lines, so a change to one of those pins
+invalidates the counts until `count --write` re-records them in the
+environment built from the new lock; a change to any other pin does not. The
+corpus also records the kokoro, misaki, spaCy and `en_core_web_sm` versions,
+which the check holds to the lock.
 
 **Strata.** `t1to20`, `t21to100` and `t101to200` by phoneme tokens. The check
 derives each sentence's stratum from its count and requires:
@@ -84,8 +95,8 @@ with the source's, byte for byte; once one source is given, every fetched
 source must be.
 
 `count` and `reference` import kokoro, so they run in the speech runtime's
-locked environment, and refuse when the installed kokoro, misaki, spaCy or
-`en_core_web_sm` is not the lock's.
+locked environment, and refuse when the installed version of any of the
+pins above is not the lock's.
 
 ```sh
 tools/validation/tts_corpus.py count CORPUS --model-config MODEL/config.json [--write OUT]
@@ -108,7 +119,7 @@ tools/validation/tts_corpus.py reference CORPUS --model-dir MODEL --out DIR [--t
   directory outside the repository, with `reference-record.json`
   ([`config/schemas/tts_reference_record.json`](../../config/schemas/tts_reference_record.json)):
   the corpus file's digest; the engine, with the tokenizer versions under
-  the corpus's field names, the lock's digest and the `libespeak-ng1`
+  the corpus's field names, the g2p pins' digest and the `libespeak-ng1`
   version; the model digests; and per clip the
   seed, sample and clipped-sample counts, both digests, and whether the
   pipeline's phonemes equal the runner's. A clip whose pipeline returns more

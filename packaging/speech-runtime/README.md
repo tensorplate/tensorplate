@@ -71,9 +71,14 @@ digest of the wheel that build produces;
 `test/packaging/verify_speech_runtime_packages.sh` rebuilds both and fails
 when either stops matching.
 
-A change to `lock/kokoro.txt` invalidates the phoneme counts of the
-text-to-speech corpus, which `tools/validation/tts_corpus.py check` then
-refuses. Re-record them in the environment built from the new lock with
+A change to a pin the phonemizer runs on (`G2P_PINS` in
+`tools/validation/tts_corpus.py`: kokoro, misaki, spaCy, `en-core-web-sm`,
+num2words, regex, addict, `phonemizer-fork` and `espeakng-loader`)
+invalidates the phoneme counts of the text-to-speech corpus, which
+`tools/validation/tts_corpus.py check` then refuses; a change to any other pin
+does not. A lock change that touches one of those pins re-records the counts
+in the environment rebuilt from the new lock with
 `tools/validation/tts_corpus.py count CORPUS --model-config MODEL/config.json --write CORPUS`,
 as [`docs/validation/tts-text-corpus.md`](../../docs/validation/tts-text-corpus.md)
-describes, and commit the corpus with the lock.
+describes, shows that command's output in the pull request, and commits the
+corpus with the lock.
