@@ -201,6 +201,11 @@ TEST(SpeechJobDispatch, NegotiateRefusesWhatAJobRequestCouldNotCarry) {
   auto request = audio_request;
   request.input_format = {StreamAudioEncoding::Mulaw, 8'000, 1};
   EXPECT_EQ(refusal(dispatch, request), "unsupported_audio_format");
+  // PCM is internal audio only at 16 kHz.
+  request.input_format = {StreamAudioEncoding::PcmS16Le, 8'000, 1};
+  EXPECT_EQ(refusal(dispatch, request), "unsupported_audio_format");
+  request.input_format = {StreamAudioEncoding::PcmS16Le, 44'100, 1};
+  EXPECT_EQ(refusal(dispatch, request), "unsupported_audio_format");
   request = audio_request;
   request.language = "";
   EXPECT_EQ(refusal(dispatch, request), "unsupported_language");
