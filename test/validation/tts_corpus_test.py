@@ -824,6 +824,7 @@ class Fakes:
         self.tokens = {s["text"]: s["phoneme_tokens"] for s in good["sentences"]}
         # The texts with a word outside the lexicon: with the fallback off they lose phonemes.
         self.espeak = {s["text"] for s in good["sentences"] if s["espeak_fallback"]}
+        self.lexicon_only: Callable[[str], str] = lambda phonemes: phonemes[: len(phonemes) // 2]
         self.calls: list[tuple[Any, ...]] = []
         # NO_ATTRIBUTE leaves the g2p without a `fallback` attribute at all.
         self.fallback: object | None = object()
@@ -863,7 +864,7 @@ class Fakes:
             def __call__(self, text: str) -> tuple[str, list[object]]:
                 result = (fakes.g2p_phonemes or (lambda t: fake_phonemes(fakes.tokens[t])))(text)
                 if getattr(self, "fallback", NO_ATTRIBUTE) is None and text in fakes.espeak:
-                    return result[: len(result) // 2], []
+                    return fakes.lexicon_only(result), []
                 return result, []
 
         class Result:
@@ -1005,13 +1006,20 @@ def check_count(good: dict[str, Any], scratch: Path) -> None:
             "s-51: espeak fallback false, recorded true"
         ]
         assert json.loads((scratch / "reflagged.json").read_bytes()) == good
+        # Phonemes that differ without the fallback at the same length still flag the text.
+        fakes.lexicon_only = lambda phonemes: "a" + phonemes[1:]
+        assert count(copy.deepcopy(good)) == []
+        unflagged = copy.deepcopy(good)
+        sentence(unflagged, "s-50")["espeak_fallback"] = False
+        expect_error(lambda: count(unflagged), "s-50: espeak fallback true, recorded false")
+        fakes.lexicon_only = lambda phonemes: phonemes[: len(phonemes) // 2]
         espeak["installed"] = "9.9-test"
         expect_error(
             lambda: count(copy.deepcopy(good)),
             "installed libespeak-ng1 9.9-test is not the corpus's 1.51+dfsg-12build1; the"
             " counts hold only for the libespeak-ng1 they were made with",
         )
-        assert fakes.calls == [("pipeline", "en-US", False, False)] * 6
+        assert fakes.calls == [("pipeline", "en-US", False, False)] * 8
         espeak["installed"] = good["tokenizer"]["espeak_ng"]
         shifted = copy.deepcopy(good)
         shifted["language"] = "en-GB"
