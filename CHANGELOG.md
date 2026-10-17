@@ -348,6 +348,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `tools/validation/speech_corpus.py` checks a speech evaluation corpus
+  manifest (`config/schemas/speech_corpus_manifest.json`): per-file digests,
+  source and license, tuning or held-out pool, stratum, duration bin and
+  speech onset and end labels, with bins, inherited labels, seeds and pool
+  separation derived by the check rather than trusted, and optionally every
+  file hashed and every derived file rebuilt. It renders the noisy stratum by
+  mixing noise at 5 to 20 dB over the labelled speech and the 8 kHz telephony
+  stratum by levelling to -26 dBov before the qualification tool's telephony
+  recipe, both integer-exact. The audio stays outside the repository.
+  (V030-E05-F03-T02)
 - A telephony input resampler in the serving worker, not wired yet: it
   decodes 8 kHz G.711 mu-law as the Sun `g711.c` reference decoder (and
   CPython's `audioop`) does and resamples it
