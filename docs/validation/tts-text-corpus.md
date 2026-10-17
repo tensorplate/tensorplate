@@ -45,8 +45,8 @@ derives each sentence's stratum from its count and requires:
   short case, sent on its own and flushed;
 - a sentence at exactly 20, 21, 100, 101 and 200 tokens, the stratum edges
   and the segment bound;
-- at least 20 long or boundary sentences: at one of those counts, or within a
-  tenth of the bound (181 tokens or more);
+- at least 20 long or boundary sentences: at one of those counts, or at 181
+  tokens or more;
 - distinct texts, compared after NFC, case folding and whitespace collapse;
   each text stripped NFC with no control or format character (a newline
   would split it into two segments), no U+02BC modifier letter apostrophe
@@ -113,7 +113,10 @@ tools/validation/tts_corpus.py reference CORPUS --model-dir MODEL --out DIR [--t
   seed, sample and clipped-sample counts, both digests, and whether the
   pipeline's phonemes equal the runner's. A clip whose pipeline returns more
   than one chunk, or whose count here differs from the corpus's, is refused,
-  and the record is checked against its schema before it is written.
+  and the record is checked against its schema before it is written. The
+  directory is built under a temporary name beside `--out` and renamed into
+  place at the end, so a run that fails leaves nothing behind and can be
+  rerun.
   The same seed reproduces a clip on the same machine and build; CPU kernels
   differ across machines, so a record identifies the clips it describes and
   is not a target for other machines.

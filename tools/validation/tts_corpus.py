@@ -27,9 +27,11 @@ import io
 import json
 import math
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import unicodedata
 import wave
 from collections.abc import Callable, Iterable
@@ -70,7 +72,7 @@ STRATA = (("t1to20", 1, 20), ("t21to100", 21, 100), ("t101to200", 101, 200))
 MAX_TOKENS = 200
 MAX_TEXT_BYTES = 4096
 MIN_PER_STRATUM = 100
-# The stratum edges and the segment bound; a long sentence is within a tenth of the bound.
+# The stratum edges and the segment bound; a long sentence has 181 tokens or more.
 BOUNDARY_TOKENS = (20, 21, 100, 101, 200)
 LONG_TOKENS = 181
 MIN_LONG_OR_BOUNDARY = 20
@@ -554,66 +556,73 @@ def record_reference(
     pipeline = KPipeline(lang_code=corpus["language"], model=model, trf=False)
     if getattr(pipeline.g2p, "fallback", True) is None:
         raise CorpusError("the phonemizer's espeak fallback is unavailable")
-    out.mkdir(parents=True)
-    clips = []
-    for sentence in corpus["sentences"]:
-        name = sentence["id"]
-        runner_phonemes, _ = pipeline.g2p(sentence["text"])
-        if len(runner_phonemes) != sentence["phoneme_tokens"]:
-            raise CorpusError(
-                f"{name}: {len(runner_phonemes)} tokens here,"
-                f" the corpus counted {sentence['phoneme_tokens']}"
-            )
-        seed = reference_seed(corpus["corpus"]["version"], name)
-        torch.manual_seed(seed)
-        results = list(pipeline(sentence["text"], voice=str(voice_path), speed=1))
-        if len(results) != 1:
-            raise CorpusError(f"{name}: the pipeline returned {len(results)} chunks, not one")
-        audio = results[0].audio
-        if audio.dtype != torch.float32 or audio.ndim != 1 or audio.shape[0] == 0:
-            raise CorpusError(f"{name}: the pipeline returned no one-dimensional float32 audio")
-        pcm, clipped = pcm16(audio.detach().cpu().tolist())
-        data = wav_bytes(pcm, SAMPLE_RATE_HZ)
-        (out / f"{name}.wav").write_bytes(data)
-        clips.append(
-            {
-                "id": name,
-                "text_sha256": _sha256(sentence["text"].encode("utf-8")),
-                "phonemes_sha256": _sha256(results[0].phonemes.encode("utf-8")),
-                "runner_phonemes": results[0].phonemes == runner_phonemes,
-                "seed": seed,
-                "samples": len(pcm) // 2,
-                "clipped_samples": clipped,
-                "wav_sha256": _sha256(data),
-                "pcm_sha256": _sha256(pcm),
-            }
-        )
-    record = {
-        "schema_version": "0.1",
-        "corpus": {**corpus["corpus"], "sha256": corpus_sha256},
-        "arm": "upstream-reference",
-        "engine": {
-            **tokenizer,
-            "torch": str(torch.__version__),
-            "device": "cpu",
-            "dtype": "float32",
-            "threads": int(torch.get_num_threads()),
-        },
-        "model": {
-            "config_sha256": config_sha,
-            "weights_sha256": weights_sha,
-            "voice": corpus["voice"],
-            "voice_sha256": voice_sha,
-        },
-        "language": corpus["language"],
-        "sample_rate_hz": SAMPLE_RATE_HZ,
-        "clips": clips,
-    }
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # Built beside the output and renamed into place, so a failed run leaves no directory behind.
+    partial = Path(tempfile.mkdtemp(prefix=f".{out.name}.", suffix=".partial", dir=out.parent))
     try:
-        validate_record(record, load_schema(RECORD_SCHEMA_PATH))
-    except RecordError as exc:
-        raise CorpusError(f"the reference record does not match its schema: {exc}") from exc
-    (out / RECORD_NAME).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        clips = []
+        for sentence in corpus["sentences"]:
+            name = sentence["id"]
+            runner_phonemes, _ = pipeline.g2p(sentence["text"])
+            if len(runner_phonemes) != sentence["phoneme_tokens"]:
+                raise CorpusError(
+                    f"{name}: {len(runner_phonemes)} tokens here,"
+                    f" the corpus counted {sentence['phoneme_tokens']}"
+                )
+            seed = reference_seed(corpus["corpus"]["version"], name)
+            torch.manual_seed(seed)
+            results = list(pipeline(sentence["text"], voice=str(voice_path), speed=1))
+            if len(results) != 1:
+                raise CorpusError(f"{name}: the pipeline returned {len(results)} chunks, not one")
+            audio = results[0].audio
+            if audio.dtype != torch.float32 or audio.ndim != 1 or audio.shape[0] == 0:
+                raise CorpusError(f"{name}: the pipeline returned no one-dimensional float32 audio")
+            pcm, clipped = pcm16(audio.detach().cpu().tolist())
+            data = wav_bytes(pcm, SAMPLE_RATE_HZ)
+            (partial / f"{name}.wav").write_bytes(data)
+            clips.append(
+                {
+                    "id": name,
+                    "text_sha256": _sha256(sentence["text"].encode("utf-8")),
+                    "phonemes_sha256": _sha256(results[0].phonemes.encode("utf-8")),
+                    "runner_phonemes": results[0].phonemes == runner_phonemes,
+                    "seed": seed,
+                    "samples": len(pcm) // 2,
+                    "clipped_samples": clipped,
+                    "wav_sha256": _sha256(data),
+                    "pcm_sha256": _sha256(pcm),
+                }
+            )
+        record = {
+            "schema_version": "0.1",
+            "corpus": {**corpus["corpus"], "sha256": corpus_sha256},
+            "arm": "upstream-reference",
+            "engine": {
+                **tokenizer,
+                "torch": str(torch.__version__),
+                "device": "cpu",
+                "dtype": "float32",
+                "threads": int(torch.get_num_threads()),
+            },
+            "model": {
+                "config_sha256": config_sha,
+                "weights_sha256": weights_sha,
+                "voice": corpus["voice"],
+                "voice_sha256": voice_sha,
+            },
+            "language": corpus["language"],
+            "sample_rate_hz": SAMPLE_RATE_HZ,
+            "clips": clips,
+        }
+        try:
+            validate_record(record, load_schema(RECORD_SCHEMA_PATH))
+        except RecordError as exc:
+            raise CorpusError(f"the reference record does not match its schema: {exc}") from exc
+        (partial / RECORD_NAME).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    except BaseException:
+        shutil.rmtree(partial, ignore_errors=True)
+        raise
+    partial.rename(out)
     return record
 
 

@@ -604,6 +604,7 @@ class Fakes:
         self.gain = 1.0
         self.max_threads: int | None = None
         self.model: object = None
+        self.during: Callable[[], None] | None = None
         self.versions = {
             "kokoro": "0.9.4",
             "misaki": "0.9.4",
@@ -654,6 +655,8 @@ class Fakes:
 
             def __call__(self, text: str, voice: str, speed: float) -> Any:
                 fakes.calls.append(("synthesize", text, voice, speed))
+                if fakes.during is not None:
+                    fakes.during()
                 return iter([Result(text) for _ in range(fakes.chunks)])
 
         class KModel:
@@ -944,8 +947,29 @@ def check_reference(good: dict[str, Any], scratch: Path) -> None:
         fakes.empty = False
         miscounted = copy.deepcopy(small)
         sentence(miscounted, "s-1")["phoneme_tokens"] = 9
-        expect_error(
-            lambda: record(scratch / "out5", miscounted), "s-1: 2 tokens here, the corpus counted 9"
+        failed = scratch / "failed" / "out5"
+        before = len(fakes.calls)
+        expect_error(lambda: record(failed, miscounted), "s-1: 2 tokens here, the corpus counted 9")
+        # The first clip was made before the second sentence was refused.
+        assert [c[1] for c in fakes.calls[before:] if c[0] == "synthesize"] == [
+            sentence(small, "s-0")["text"]
+        ]
+        assert list(failed.parent.iterdir()) == [], list(failed.parent.iterdir())
+        # While a run synthesizes, only its temporary directory is beside the output.
+        seen: list[tuple[bool, list[str]]] = []
+        fakes.during = lambda: seen.append(
+            (failed.exists(), [p.name for p in failed.parent.iterdir()])
+        )
+        assert len(record(failed)["clips"]) == 3
+        fakes.during = None
+        assert len(seen) == 3 and not any(exists for exists, _ in seen), seen
+        assert all(
+            len(names) == 1 and names[0].startswith(".out5.") and names[0].endswith(".partial")
+            for _, names in seen
+        ), seen
+        assert sorted(p.name for p in failed.parent.iterdir()) == ["out5"]
+        assert sorted(p.name for p in failed.iterdir()) == sorted(
+            [tts.RECORD_NAME] + [f"{s['id']}.wav" for s in small["sentences"]]
         )
         fakes.fallback = None
         expect_error(lambda: record(scratch / "out6"), "espeak fallback is unavailable")
@@ -961,7 +985,8 @@ def check_reference(good: dict[str, Any], scratch: Path) -> None:
         fakes.max_threads = 0
         zero = scratch / "zero-threads"
         expect_error(lambda: record(zero), "the reference record does not match its schema")
-        assert not (zero / tts.RECORD_NAME).exists()
+        assert not zero.exists()
+        assert not [p for p in scratch.iterdir() if p.name.startswith(".zero-threads")]
         fakes.max_threads = None
         unpinned = copy.deepcopy(small)
         unpinned["voice"] = "af_sky"
