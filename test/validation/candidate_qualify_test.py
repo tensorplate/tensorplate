@@ -16,6 +16,7 @@ import base64
 import contextlib
 import errno
 import functools
+import hashlib
 import http.server
 import importlib.util
 import json
@@ -27,7 +28,6 @@ import sys
 import tempfile
 import threading
 import time
-import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -39,6 +39,9 @@ GOLDEN = ROOT / "test/validation/fixtures/candidate_qualification_record_synthet
 FAKES = ROOT / "test/validation/fixtures/candidate_qualify_fakes"
 BUNDLES = ROOT / "test/models/bundles/v0_1"
 EVIDENCE = ROOT / "docs/validation/evidence"
+STL_SWEEP_SRC_SHA256 = "697df5e3231fd569f25e5826e4aab08fe4526bb6730a7489aabeb4708e6efe5d"
+STL_SWEEP_R_U_SHA256 = "0523921b8957bccf95d0e0f2e43930359403d5ad4e31926b2272aa74a1f22c43"
+STL_SWEEP_R_U_U_SHA256 = "cf9f90195534a105f211b1fb5c511ab45ee76827ac0987d6cc804afb897ef0f6"
 sys.path.insert(0, str(ROOT / "tools/validation"))
 sys.path.insert(0, str(ROOT / "sdk/python/src"))
 import candidate_audio as audio  # noqa: E402
@@ -538,6 +541,39 @@ def check_schema(record: dict, schema: dict) -> None:
     record_mod.validate_record(record, schema)
     record_mod.validate_error_codes(record, record_mod.load_error_codes())
     record_mod.validate_ballast(record)
+
+
+def check_derivation_schema(schema: dict) -> None:
+    """A record's derivation is one the tool makes: the old telephony form without a recipe
+    still validates, an unknown kind, recipe or field does not."""
+    golden = json.loads(GOLDEN.read_text())
+    telephony = next(i for i, f in enumerate(golden["fixtures"]) if f["stratum"] == "telephony8k")
+    noisy = next(i for i, f in enumerate(golden["fixtures"]) if f["stratum"] == "noisy16k")
+    old_form = json.loads(json.dumps(golden))
+    del old_form["fixtures"][telephony]["derivation"]["recipe"]
+    check_schema(old_form, schema)
+    for index, field, value in (
+        (telephony, "recipe", "tp-fir63-blackman-q15-v1"),
+        (telephony, "kind", "resample_8k"),
+        (telephony, "gain_db", 6),
+        (noisy, "seed", None),
+        (noisy, "snr_db", "10"),
+    ):
+        broken = json.loads(json.dumps(golden))
+        derivation = broken["fixtures"][index]["derivation"]
+        if value is None:
+            del derivation[field]
+        else:
+            derivation[field] = value
+        for validate in (
+            lambda r: jsonschema.validate(r, schema),
+            lambda r: record_mod.validate_record(r, schema),
+        ):
+            try:
+                validate(broken)
+            except (jsonschema.ValidationError, record_mod.RecordError):
+                continue
+            raise AssertionError(f"a derivation with {field}={value!r} validates")
 
 
 def check_filed_records(schema: dict, evidence: Path = EVIDENCE) -> int:
@@ -1253,20 +1289,15 @@ def main() -> int:
     for sample in (-32768, -1000, -1, 0, 1, 1000, 32767):
         decoded = audio.ulaw_decode(audio.ulaw_encode(sample))
         assert abs(decoded - sample) <= max(8, abs(sample) // 16), (sample, decoded)
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", DeprecationWarning)
-            import audioop  # removed in Python 3.13; the sweep runs where it still exists
-    except ImportError:
-        audioop = None
-    if audioop is not None:
-        for value in range(-32768, 32768):
-            reference = audioop.lin2ulaw(struct.pack("<h", value), 2)[0]
-            assert audio.ulaw_encode(value) == reference, value
-            assert (
-                audio.ulaw_decode(reference)
-                == struct.unpack("<h", audioop.ulaw2lin(bytes([reference]), 2))[0]
-            ), reference
+    # ITU-T STL v2024's G.711 reference files: `sweep.src` is every 16-bit value in
+    # ascending order, `sweep-r.u` is it through `g711demo u lilo` and `sweep-r.u-u` that
+    # through `g711demo u loli`, as little-endian 16-bit words (src/g711/test_data).
+    sweep = range(-32768, 32768)
+    assert hashlib.sha256(struct.pack("<65536h", *sweep)).hexdigest() == STL_SWEEP_SRC_SHA256
+    encoded = [audio.ulaw_encode(value) for value in sweep]
+    assert hashlib.sha256(struct.pack("<65536h", *encoded)).hexdigest() == STL_SWEEP_R_U_SHA256
+    decoded = [audio.ulaw_decode(code) for code in encoded]
+    assert hashlib.sha256(struct.pack("<65536h", *decoded)).hexdigest() == STL_SWEEP_R_U_U_SHA256
     tone = square_wave(16000, 0.5, 40, 6000)
     assert audio.seeded_noise_mix(tone, seed=7, snr_db=10) == audio.seeded_noise_mix(
         tone, seed=7, snr_db=10
@@ -1282,6 +1313,7 @@ def main() -> int:
         check_ballast_rules(harness, schema)
         check_ballast_faults(harness, schema)
         check_ballast_record_rules(schema)
+        check_derivation_schema(schema)
         check_ballast_script(harness)
 
         completed, record, evidence = harness.run("stt")
@@ -1572,6 +1604,15 @@ def main() -> int:
         assert completed.returncode == 1 and record is None
         assert "en-telephony-8k-01 is unpinned" in completed.stderr
         assert derived_digests["en-telephony-8k-01"] in completed.stderr
+
+        for recipe in (None, audio.RESAMPLER_ID):
+            other = json.loads(harness.inventory.read_text())
+            other["suites"]["stt"]["clips"][-1]["derivation"]["recipe"] = recipe
+            other_path = harness.work / "inventory-other-recipe.json"
+            other_path.write_text(json.dumps(other))
+            completed, record, _ = harness.run("stt", "--inventory", str(other_path))
+            assert completed.returncode == 1 and record is None, recipe
+            assert f"names recipe {recipe!r}, not " in completed.stderr, completed.stderr
 
         completed, record, _ = harness.run("stt", env=harness.env(TP_FAKE_CLI_SKIP_VERIFY="1"))
         assert record["result"]["status"] == "fail"

@@ -348,6 +348,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `tools/validation/speech_corpus.py` checks a speech evaluation corpus
+  manifest (`config/schemas/speech_corpus_manifest.json`): per-file digests,
+  source and license, tuning or held-out pool, stratum, duration bin and
+  speech onset and end labels, with bins, inherited labels, seeds and pool
+  separation derived by the check rather than trusted, and optionally every
+  file hashed and every derived file rebuilt. It renders the noisy stratum by
+  mixing noise at 5 to 20 dB over the labelled speech and the 8 kHz telephony
+  stratum by levelling to -26 dBov before the qualification tool's telephony
+  recipe, both integer-exact. The audio stays outside the repository.
+  (V030-E05-F03-T02)
 - A telephony input resampler in the serving worker, not wired yet: it
   decodes 8 kHz G.711 mu-law as the Sun `g711.c` reference decoder (and
   CPython's `audioop`) does and resamples it
@@ -1355,6 +1365,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   audio before it left, as Silero is used on a stream. A Finalize that
   ends inside a 512-sample frame leaves that frame's samples before it
   unscored, and the state carries over them. (V030-E04-F03-T02)
+
+- The qualification tool's 8 kHz telephony derivation encodes G.711 mu-law as
+  the ITU-T STL encoder does, under the recipe id
+  `tp-telephony8k-fir63-g711stl-v1`, which a telephony clip in the inventory
+  must now name. The previous Sun-style encoder differed from the STL on 508
+  negative inputs; the encoder is pinned to the STL's reference vectors, and
+  the English telephony clip's derived digest is re-pinned. (V030-E05-F03-T02)
 
 - The `faster_whisper` runner profile decodes each `stt_decode` job in one
   pass over its window: one encoder pass over the window padded to the

@@ -78,10 +78,11 @@
           "stratum": "telephony8k",
           "language": "en",
           "sample_rate_hz": 8000,
-          "digest": "sha256:873f4ea1fa63a0c89ee4b9e4ea895da4beb841e635dd53ff8d38db885e7c2723",
+          "digest": "sha256:58e2a487bea3b6cbb355c0e116eaec1cc26317381e83cab00bc4473e3a04ce75",
           "derived_from": "en-clean-16k-01",
           "derivation": {
-            "kind": "telephony_8k_ulaw"
+            "kind": "telephony_8k_ulaw",
+            "recipe": "tp-telephony8k-fir63-g711stl-v1"
           },
           "duration_s": {
             "min": 1,

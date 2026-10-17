@@ -72,6 +72,11 @@ by digest in `test/models/speech/candidate_fixture_inventory.json`:
 | `en-noisy-16k-01`, `ar-noisy-16k-01` | as their source | seeded noise mixed into the clean clip |
 | `en-telephony-8k-01` | 5.72 s | the clean clip through 8 kHz G.711 mu-law, resampled back to 16 kHz for the request |
 
+The telephony clip of these runs was derived with the earlier Sun-style G.711
+encoder; its digest in the records (`sha256:873f4ea1…`) is that encoder's, and
+the inventory now pins the clip under the ITU-T STL recipe
+`tp-telephony8k-fir63-g711stl-v1`.
+
 The clips are not in this repository.
 [The recipes doc](../../speech-candidate-recipes.md#the-clips-of-the-2026-10-01-run)
 says where they come from and how they were converted.

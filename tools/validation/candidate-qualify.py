@@ -349,6 +349,11 @@ def prepare_stt_clips(
                 )
                 rate = source["rate"]
             elif kind == "telephony_8k_ulaw":
+                if derivation.get("recipe") != audio.TELEPHONY_RECIPE_ID:
+                    raise RecipeError(
+                        f"clip {clip_id}: the telephony derivation names recipe "
+                        f"{derivation.get('recipe')!r}, not {audio.TELEPHONY_RECIPE_ID!r}"
+                    )
                 if source["rate"] != 16000:
                     raise RecipeError(
                         f"clip {clip_id}: the telephony derivation needs a 16 kHz source"
