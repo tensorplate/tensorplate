@@ -81,6 +81,15 @@ derives each sentence's stratum from its count and requires:
   so a heading in capitals, a bare number or a clause cut off mid-sentence
   is refused.
 
+**Segments.** A run sends each text's bytes exactly as filed, one text per
+segment: a sentence's count, stratum and place against the 200-token bound
+are those of its whole text. Eight texts, all in `t101to200`, hold more than
+one sentence: an internal `.`, `!` or `?`, with any closing quote, followed
+by more text (the abbreviations Mr. and Mrs. are not counted). A benchmark
+that splits text on sentence ends would send each of those as two or more
+shorter segments, which changes their strata; the counts do not describe
+that run.
+
 **Critical classes.** Derived from the text, never declared: `negation` for a
 word among no, not, never, nothing, none, nobody, nowhere, neither, nor and
 cannot, or one ending in n't; `numeral` for a decimal digit written in the
