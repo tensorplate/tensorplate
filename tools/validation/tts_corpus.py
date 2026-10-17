@@ -101,6 +101,7 @@ NEGATIONS = frozenset(
     {"no", "not", "never", "nothing", "none", "nobody", "nowhere", "neither", "nor", "cannot"}
 )
 WORD = re.compile(r"[a-z]+(?:'[a-z]+)*")
+SENTENCE_END = re.compile(r"[.!?][\"'\u2019\u201d]?\Z")
 
 SAMPLE_RATE_HZ = 24000
 RECORD_NAME = "reference-record.json"
@@ -227,6 +228,11 @@ def _check_text(name: str, text: str) -> None:
         raise CorpusError(f"{name}: text holds U+02BC; write the apostrophe as U+0027 or U+2019")
     if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
         raise CorpusError(f"{name}: text is over {MAX_TEXT_BYTES} UTF-8 bytes")
+    # A heading, a bare number or a clause cut off mid-sentence is not a sentence.
+    if SENTENCE_END.search(text) is None:
+        raise CorpusError(f"{name}: text does not end in . ! or ?, with at most a closing quote")
+    if not any(ch.islower() for ch in text):
+        raise CorpusError(f"{name}: text has no lowercase letter")
 
 
 def _check_sentences(

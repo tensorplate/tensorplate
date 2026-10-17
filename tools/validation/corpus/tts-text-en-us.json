@@ -938,6 +938,16 @@
       "espeak_fallback": false
     },
     {
+      "id": "librittsr-1089-134686-000007-000003",
+      "text": "What music?",
+      "source": "libritts-r",
+      "source_id": "1089_134686_000007_000003",
+      "phoneme_tokens": 13,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
       "id": "librittsr-1089-134691-000022-000000",
       "text": "--Duck him!",
       "source": "libritts-r",
@@ -953,6 +963,16 @@
       "source": "libritts-r",
       "source_id": "1284_1180_000045_000001",
       "phoneme_tokens": 18,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-1580-141083-000045-000003",
+      "text": "Which chair?\"",
+      "source": "libritts-r",
+      "source_id": "1580_141083_000045_000003",
+      "phoneme_tokens": 11,
       "stratum": "t1to20",
       "critical": [],
       "espeak_fallback": false
@@ -1028,6 +1048,18 @@
       "espeak_fallback": false
     },
     {
+      "id": "librittsr-237-134500-000019-000001",
+      "text": "Don't you?\"",
+      "source": "libritts-r",
+      "source_id": "237_134500_000019_000001",
+      "phoneme_tokens": 10,
+      "stratum": "t1to20",
+      "critical": [
+        "negation"
+      ],
+      "espeak_fallback": false
+    },
+    {
       "id": "librittsr-260-123286-000048-000003",
       "text": "I prepare to fire.",
       "source": "libritts-r",
@@ -1078,21 +1110,21 @@
       "espeak_fallback": false
     },
     {
-      "id": "librittsr-672-122797-000000-000000",
-      "text": "THE FIR TREE",
+      "id": "librittsr-5142-36377-000004-000012",
+      "text": "I looked at my watch.",
       "source": "libritts-r",
-      "source_id": "672_122797_000000_000000",
-      "phoneme_tokens": 12,
+      "source_id": "5142_36377_000004_000012",
+      "phoneme_tokens": 20,
       "stratum": "t1to20",
       "critical": [],
       "espeak_fallback": false
     },
     {
-      "id": "librittsr-6829-68769-000001-000000",
-      "text": "THE FORGED CHECK",
+      "id": "librittsr-5683-32865-000044-000000",
+      "text": "'That?",
       "source": "libritts-r",
-      "source_id": "6829_68769_000001_000000",
-      "phoneme_tokens": 14,
+      "source_id": "5683_32865_000044_000000",
+      "phoneme_tokens": 6,
       "stratum": "t1to20",
       "critical": [],
       "espeak_fallback": false
@@ -1128,38 +1160,6 @@
       "espeak_fallback": false
     },
     {
-      "id": "librittsr-6930-76324-000006-000003",
-      "text": "Presently she spoke:",
-      "source": "libritts-r",
-      "source_id": "6930_76324_000006_000003",
-      "phoneme_tokens": 20,
-      "stratum": "t1to20",
-      "critical": [],
-      "espeak_fallback": false
-    },
-    {
-      "id": "librittsr-7021-79730-000046-000001",
-      "text": "They are,",
-      "source": "libritts-r",
-      "source_id": "7021_79730_000046_000001",
-      "phoneme_tokens": 7,
-      "stratum": "t1to20",
-      "critical": [],
-      "espeak_fallback": false
-    },
-    {
-      "id": "librittsr-7021-79730-000049-000000",
-      "text": "3.",
-      "source": "libritts-r",
-      "source_id": "7021_79730_000049_000000",
-      "phoneme_tokens": 5,
-      "stratum": "t1to20",
-      "critical": [
-        "numeral"
-      ],
-      "espeak_fallback": false
-    },
-    {
       "id": "librittsr-7021-79730-000049-000001",
       "text": "By Authority.",
       "source": "libritts-r",
@@ -1180,21 +1180,21 @@
       "espeak_fallback": false
     },
     {
-      "id": "librittsr-7127-75947-000029-000001",
-      "text": "Ah!",
+      "id": "librittsr-7127-75947-000013-000000",
+      "text": "\"Explain yourself?\"",
       "source": "libritts-r",
-      "source_id": "7127_75947_000029_000001",
-      "phoneme_tokens": 3,
+      "source_id": "7127_75947_000013_000000",
+      "phoneme_tokens": 20,
       "stratum": "t1to20",
       "critical": [],
       "espeak_fallback": false
     },
     {
-      "id": "librittsr-8555-292519-000028-000000",
-      "text": "TO WAR",
+      "id": "librittsr-7127-75947-000029-000001",
+      "text": "Ah!",
       "source": "libritts-r",
-      "source_id": "8555_292519_000028_000000",
-      "phoneme_tokens": 7,
+      "source_id": "7127_75947_000029_000001",
+      "phoneme_tokens": 3,
       "stratum": "t1to20",
       "critical": [],
       "espeak_fallback": false
@@ -2499,6 +2499,16 @@
       "espeak_fallback": false
     },
     {
+      "id": "librittsr-1580-141083-000066-000002",
+      "text": "What could he do? He caught up everything which would betray him, and he rushed into your bedroom to conceal himself.\"",
+      "source": "libritts-r",
+      "source_id": "1580_141083_000066_000002",
+      "phoneme_tokens": 116,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
       "id": "librittsr-1580-141084-000044-000000",
       "text": "The unfortunate tutor was certainly in a state of pitiable agitation when we found him in his chambers.",
       "source": "libritts-r",
@@ -3535,16 +3545,6 @@
         "negation"
       ],
       "espeak_fallback": false
-    },
-    {
-      "id": "librittsr-8555-292519-000010-000000",
-      "text": "The other day at someone's tea we met, Smiling gayly, bowed, and went our several ways, Complacent with successful coldness.--Yet",
-      "source": "libritts-r",
-      "source_id": "8555_292519_000010_000000",
-      "phoneme_tokens": 129,
-      "stratum": "t101to200",
-      "critical": [],
-      "espeak_fallback": false
     }
   ],
   "listening": [
@@ -3635,8 +3635,8 @@
     {
       "id": "q-008",
       "segments": [
-        "librittsr-8555-292519-000010-000000",
-        "librittsr-8555-292519-000028-000000",
+        "librittsr-1580-141083-000066-000002",
+        "librittsr-5142-36377-000004-000012",
         "librittsr-2830-3979-000011-000000"
       ]
     },
@@ -3757,7 +3757,7 @@
       "segments": [
         "librittsr-7127-75946-000058-000001",
         "authored-038",
-        "librittsr-672-122797-000000-000000"
+        "librittsr-1580-141083-000045-000003"
       ]
     },
     {
@@ -3816,7 +3816,7 @@
       "id": "q-032",
       "segments": [
         "librittsr-7176-92135-000085-000004",
-        "librittsr-6829-68769-000001-000000",
+        "librittsr-237-134500-000019-000001",
         "arctic-b0435"
       ]
     },
@@ -3921,8 +3921,8 @@
       "id": "q-046",
       "segments": [
         "librittsr-7127-75946-000039-000003",
-        "librittsr-6930-76324-000006-000003",
-        "librittsr-7021-79730-000046-000001"
+        "librittsr-7127-75947-000013-000000",
+        "librittsr-5683-32865-000044-000000"
       ]
     },
     {
@@ -4146,7 +4146,7 @@
       "id": "q-076",
       "segments": [
         "librittsr-121-127105-000042-000001",
-        "librittsr-7021-79730-000046-000001",
+        "librittsr-5683-32865-000044-000000",
         "authored-067"
       ]
     },
@@ -4237,7 +4237,7 @@
       "segments": [
         "librittsr-8455-210777-000025-000000",
         "authored-026",
-        "librittsr-8555-292519-000028-000000"
+        "librittsr-5142-36377-000004-000012"
       ]
     },
     {
@@ -4259,7 +4259,7 @@
       "id": "q-091",
       "segments": [
         "librittsr-5683-32866-000020-000001",
-        "librittsr-672-122797-000000-000000"
+        "librittsr-1580-141083-000045-000003"
       ]
     },
     {
@@ -4274,7 +4274,7 @@
       "id": "q-093",
       "segments": [
         "librittsr-7176-92135-000085-000002",
-        "librittsr-672-122797-000000-000000"
+        "librittsr-1580-141083-000045-000003"
       ]
     },
     {

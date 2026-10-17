@@ -361,7 +361,34 @@ def check_rules(good: dict[str, Any]) -> None:
     refused(good, retext("s-40", "Line\none."), "control or format")
     refused(good, retext("s-40", "\u00e9" * 2049), "over 4096 UTF-8 bytes")
     refused(good, retext("s-40", "\u00e9" * 2048 + "a"), "over 4096 UTF-8 bytes")
-    accepted(good, retext("s-40", "\u00e9" * 2048))
+    accepted(good, retext("s-40", "\u00e9" * 2047 + "a."))
+    for text in (
+        "TO WAR",
+        "They are,",
+        "Presently she spoke:",
+        "Complacent with successful coldness.--Yet",
+        "Done.)",
+        "Done.\"'",
+        "Done.\u201c",
+    ):
+        refused(
+            good,
+            retext("s-40", text),
+            "s-40: text does not end in . ! or ?, with at most a closing",
+        )
+    for text in ("THE FIR TREE.", "3.", "\u00c9T\u00c9!"):
+        refused(good, retext("s-40", text), "s-40: text has no lowercase letter")
+    for text in (
+        'Which chair?"',
+        "'That?",
+        "He said 'go.'",
+        "\u201cGo, then.\u201d",
+        "\u2018Go, then.\u2019",
+        "Yes!",
+        "--Duck him!",
+        "Gate 3.",
+    ):
+        accepted(good, retext("s-40", text))
     assert (
         tts.check_corpus(json.loads(json.dumps(good).replace("Synthetic an ", "Synthetic \u00e9 ")))
         == 330

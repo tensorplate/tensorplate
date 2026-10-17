@@ -75,7 +75,11 @@ derives each sentence's stratum from its count and requires:
   each text stripped NFC with no control or format character (a newline
   would split it into two segments), no U+02BC modifier letter apostrophe
   (a letter, so a contraction written with it would stay one word and hide
-  its negation; write U+0027 or U+2019) and at most 4 KiB of UTF-8.
+  its negation; write U+0027 or U+2019) and at most 4 KiB of UTF-8;
+- each text a sentence: ending in `.`, `!` or `?`, followed by at most one
+  closing quote (`"`, `'`, U+2019 or U+201D), and holding a lowercase letter,
+  so a heading in capitals, a bare number or a clause cut off mid-sentence
+  is refused.
 
 **Critical classes.** Derived from the text, never declared: `negation` for a
 word among no, not, never, nothing, none, nobody, nowhere, neither, nor and
