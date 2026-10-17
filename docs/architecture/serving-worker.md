@@ -1995,6 +1995,32 @@ recorded from the Whisper model of the speech provisioning, on a CPU, for
 exactly the windows the commitment asked for, with the utterances the voice
 activity policy found in the sidecar's own voice activity scores.
 
+### Telephony resampler
+
+`TelephonyResampler` (`runtime/src/serving/session/telephony_resampler.hpp`,
+internal) turns 8 kHz G.711 mu-law input into 16-bit samples on the 16 kHz
+internal timeline. It is pure (no clock, no thread) and is not wired yet:
+the speech dispatch still refuses any input format but 16 kHz PCM.
+
+- `mulaw_to_linear` decodes a byte as the Sun `g711.c` reference does (the
+  same table as CPython's `audioop.ulaw2lin`).
+- The resampler is `tp-fir63-blackman-q15-v1`, the filter of
+  `tools/validation/candidate_audio.py`: the input zero-stuffed by two, then
+  a 63-tap low-pass at 3,680 Hz in Q15 with gain two, the accumulator
+  rounded half away from zero and clamped to 16 bits. Its 31-sample group
+  delay is compensated, so output sample n is source time n / 16,000 s.
+- `push` emits each output once the inputs it reads have arrived and no
+  flush emitted it: after N inputs, 2N - 31 outputs (2F within 16 inputs
+  of a flush after F inputs); the last 31 wait for the next 16 inputs.
+  `flush` emits them as if the input ended there, so N inputs have given
+  exactly 2N outputs, and later input continues from the same history:
+  only the flushed samples differ from a resample of the whole input.
+- Over a whole input then a flush it is bit-exact with the reference's
+  `interpolate_2x`, however the input is split.
+  `test/unit/telephony_resampler_test.cpp` replays what
+  `test/unit/fixtures/telephony_resampler/record.py` recorded from the
+  reference.
+
 ### The speech dispatch in the worker
 
 In a feature-ON build, a worker with `streaming.enabled` whose

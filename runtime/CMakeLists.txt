@@ -71,6 +71,7 @@ set(_tp_runtime_sources
   src/serving/session/state_machine.cpp
   src/serving/session/limits.cpp
   src/serving/session/timers.cpp
+  src/serving/session/telephony_resampler.cpp
   src/serving/session/transcript_commitment.cpp
   src/serving/session/vad_policy.cpp
   src/serving/session/window_scheduler.cpp
