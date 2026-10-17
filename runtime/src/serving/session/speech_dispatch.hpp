@@ -243,6 +243,8 @@ class SpeechJobDispatch final : public SessionDispatch {
     std::uint64_t utterance_id = 0;
     std::uint64_t first_sample = 0;
     std::uint64_t end_sample = 0;
+    /// [first_sample, end_sample) as its endpoint and final carry it.
+    WireInterval wire;
     /// Until its job is submitted.
     std::vector<std::byte> audio;
     EndpointReason reason = EndpointReason::ClientFinalize;
@@ -338,13 +340,17 @@ class SpeechJobDispatch final : public SessionDispatch {
     bool past_bound = false;
     JobState job = JobState::None;
 
-    /// Audio input. `open_audio` is [open_start, samples_accepted): the open
-    /// utterance, or with voice detection the audio an utterance may take.
+    /// Audio input, on the internal timeline. `open_audio` is
+    /// [open_start, samples_accepted): the open utterance, or with voice
+    /// detection the audio an utterance may take.
     std::uint64_t samples_accepted = 0;
     std::uint64_t open_start = 0;
     /// Where the last utterance ended.
     std::uint64_t ended_at = 0;
     std::vector<std::byte> open_audio;
+    /// Samples of the input format accepted: the source the internal
+    /// timeline covers, which no utterance ends past.
+    std::uint64_t input_samples = 0;
     std::optional<Detection> detection;
     /// Utterances ended so far: the last one's id.
     std::uint64_t utterances = 0;
@@ -440,10 +446,16 @@ class SpeechJobDispatch final : public SessionDispatch {
   [[nodiscard]] static std::optional<SampleWindow> partial_window(Session& session);
   /// Holds the partial transcript a decode gave. False when there is none.
   [[nodiscard]] static bool hold_partial(Session& session);
+  /// A frame of the session's input format as internal audio; counts its
+  /// input samples.
+  static std::span<const std::byte> intake(Session& session, std::span<const std::byte> frame);
+  /// Takes internal audio.
   static void take_audio(SessionManager& manager, std::uint64_t key, Session& session,
-                         std::span<const std::byte> frame);
-  /// Keeps a frame of a session with voice detection, its credit held.
-  static void keep_audio(Session& session, std::span<const std::byte> frame);
+                         std::span<const std::byte> audio);
+  /// Keeps internal audio of a session with voice detection, the credit of
+  /// the `frame_bytes` it came from held.
+  static void keep_audio(Session& session, std::span<const std::byte> audio,
+                         std::uint64_t frame_bytes);
   void pump(SessionManager& manager, std::uint64_t key, Session& session);
   /// Offers the oldest held item. False while the queue has no room or once
   /// it stopped taking task output.
@@ -477,9 +489,11 @@ class SpeechJobDispatch final : public SessionDispatch {
   /// it already holds every ended utterance it may.
   [[nodiscard]] static bool may_end_utterance(SessionManager& manager, std::uint64_t key,
                                               Session& session);
-  /// Ends [first, end) of the open audio, numbering it.
-  static void end_utterance(Session& session, std::uint64_t first, std::uint64_t end,
-                            EndpointReason reason, std::uint64_t finalize_sequence);
+  /// Ends [first, end) of the open audio, numbering it. False, and the
+  /// session failed, when that interval has no place on the wire.
+  [[nodiscard]] static bool end_utterance(SessionManager& manager, std::uint64_t key,
+                                          Session& session, std::uint64_t first, std::uint64_t end,
+                                          EndpointReason reason, std::uint64_t finalize_sequence);
   /// Applies `automatic_endpoint`, then ends [first, end). False, and the
   /// session ended, when it may not.
   [[nodiscard]] static bool end_automatically(SessionManager& manager, std::uint64_t key,

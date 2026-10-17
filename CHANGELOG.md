@@ -1343,6 +1343,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The serving worker's speech dispatch keeps its audio on the 16 kHz
+  internal timeline that voice detection and its jobs read, counts the
+  input format's samples apart, and puts each utterance on the wire once,
+  as it ends: its endpoint's and final's `end_sample_offset` at the input
+  rate and its segment in microseconds, by the rounding the voice
+  detection policy defines. An utterance that would end past the accepted
+  input fails the session with `internal` (`interval_out_of_range`), and
+  an input job's deadline counts its audio at the internal rate. With 16
+  kHz PCM input, the one format served, every offset, time and deadline is
+  unchanged. (V030-E05-F01-T03)
 - The serving worker's speech dispatch starts no partial decode while an
   utterance is in a silence run that could still end it, so the
   utterance's final no longer waits on the one decode lane behind a

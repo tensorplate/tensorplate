@@ -215,4 +215,22 @@ Result<MicrosecondInterval> to_microseconds(std::uint64_t internal_start,
   // The start is not past the end, so its product fits too.
   return MicrosecondInterval{internal_start * kMicrosecondsPerSecond / kJobInputSampleRateHz, *end};
 }
+
+Result<WireInterval> to_wire(std::uint64_t internal_start, std::uint64_t internal_end,
+                             std::uint64_t input_samples, std::uint32_t input_rate_hz) {
+  const auto end = to_input_samples(internal_end, input_rate_hz);
+  if (!end) {
+    return unexpected(end.error());
+  }
+  // ceil(b * R / 16,000) <= N exactly when b <= N * 16,000 / R.
+  if (*end > input_samples) {
+    return unexpected(
+        caller_defect("interval ends past the accepted input", "interval_out_of_range"));
+  }
+  const auto time = to_microseconds(internal_start, internal_end);
+  if (!time) {
+    return unexpected(time.error());
+  }
+  return WireInterval{*end, *time};
+}
 }  // namespace tensorplate::serving

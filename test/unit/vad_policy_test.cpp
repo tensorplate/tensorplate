@@ -384,5 +384,32 @@ TEST(VadPolicy, ConvertsAnInternalIntervalToMicrosecondsOutward) {
   ASSERT_FALSE(reversed);
   EXPECT_EQ(reversed.error().context, "interval_out_of_order");
 }
+
+TEST(VadPolicy, PutsAnInternalIntervalOnTheWireAtTheInputRate) {
+  // At 16 kHz the two timelines are one.
+  EXPECT_EQ(to_wire(16'000, 32'001, 32'001, 16'000),
+            (WireInterval{32'001, {1'000'000, 2'000'063}}));
+  // One second at 8 kHz ends at offset 8,000 and 1,000,000 us; an odd
+  // internal end takes the input sample it starts.
+  EXPECT_EQ(to_wire(0, 16'000, 8'000, 8'000), (WireInterval{8'000, {0, 1'000'000}}));
+  EXPECT_EQ(to_wire(3, 16'001, 8'001, 8'000), (WireInterval{8'001, {187, 1'000'063}}));
+}
+
+TEST(VadPolicy, RefusesAnIntervalEndingPastTheAcceptedInput) {
+  const auto past = to_wire(0, 16'001, 16'000, 16'000);
+  ASSERT_FALSE(past);
+  EXPECT_EQ(past.error().code, Error::Code::Internal);
+  EXPECT_EQ(past.error().context, "interval_out_of_range");
+  // Half an input sample past the accepted input is past it.
+  const auto half = to_wire(16'000, 16'001, 8'000, 8'000);
+  ASSERT_FALSE(half);
+  EXPECT_EQ(half.error().context, "interval_out_of_range");
+  const auto rate = to_wire(0, 1, 1, 44'100);
+  ASSERT_FALSE(rate);
+  EXPECT_EQ(rate.error().context, "unsupported_input_rate");
+  const auto reversed = to_wire(5, 4, 4, 16'000);
+  ASSERT_FALSE(reversed);
+  EXPECT_EQ(reversed.error().context, "interval_out_of_order");
+}
 }  // namespace
 }  // namespace tensorplate::serving

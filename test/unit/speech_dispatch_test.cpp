@@ -1847,5 +1847,73 @@ TEST(SpeechJobDispatch, AReleaseTheBridgeRefusedIsReportedOnceItsBoundPasses) {
   EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 0U);
   EXPECT_EQ(binding.manager->held_slots(), 3U);
 }
+
+// Sessions opened at input rates the dispatch does not negotiate, so only its
+// edges see the rate: a frame of 16-bit PCM is taken as internal audio as it
+// is, 2N bytes being N internal samples.
+constexpr StreamAudioFormat kPcm8k{StreamAudioEncoding::PcmS16Le, 8'000, 1};
+constexpr StreamAudioFormat kPcm44k{StreamAudioEncoding::PcmS16Le, 44'100, 1};
+
+TEST(SpeechJobDispatch, AnUtteranceLeavesAtTheInputRate) {
+  Binding binding(&speech_dispatch);
+  const auto key = binding.open_as(binding.under_test->audio_request(), kPcm8k);
+  // 480 internal samples: 30 ms, which end at input offset 240.
+  binding.audio(key, patterned_bytes(960, 1));
+  binding.finalize(key, 1);
+  const auto endpoint = binding.read_as<EndpointDetectedOutput>(key);
+  ASSERT_TRUE(endpoint.has_value());
+  EXPECT_EQ(endpoint->end_sample_offset, 240U);
+  const auto transcript = binding.read_as<FinalTranscriptOutput>(key);
+  ASSERT_TRUE(transcript.has_value());
+  EXPECT_EQ(transcript->end_sample_offset, 240U);
+  ASSERT_EQ(transcript->segments.size(), 1U);
+  EXPECT_EQ(transcript->segments.front().start_us, 0U);
+  EXPECT_EQ(transcript->segments.front().end_us, 30'000U);
+}
+
+TEST(SpeechJobDispatch, TheLongestUtteranceIsCountedInInternalSamples) {
+  Binding binding(&speech_dispatch);
+  const auto key = binding.open_as(binding.under_test->audio_request(), kPcm8k);
+  // 15 s of internal audio, short of the 30 s limit: the Finalize ends it.
+  ASSERT_TRUE(binding.audio_in_long_frames(key, patterned_bytes(480'000, 2)));
+  binding.finalize(key, 1);
+  const auto endpoint = binding.read_as<EndpointDetectedOutput>(key);
+  ASSERT_TRUE(endpoint.has_value());
+  EXPECT_EQ(endpoint->reason, EndpointReason::ClientFinalize);
+  EXPECT_EQ(endpoint->end_sample_offset, 120'000U);
+}
+
+TEST(SpeechJobDispatch, AnInputJobsDeadlineCountsItsAudioAtTheInternalRate) {
+  Binding binding(&speech_dispatch_with_short_bounds);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_as(binding.under_test->audio_request(), kPcm8k);
+  speech.hold_jobs();
+  // 160 internal samples, 10 ms: the decode's deadline is 1 s and 5 ms.
+  binding.audio(key, patterned_bytes(320, 1));
+  binding.finalize(key, 1);
+  ASSERT_TRUE(binding.settle());
+  ASSERT_EQ(speech.bridge->submitted().size(), 1U);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1005ms - 1ns));
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 0U);
+  ASSERT_NO_FATAL_FAILURE(move_clock(binding, 1ns));
+  EXPECT_EQ(speech.strategy->stats().jobs_past_deadline, 1U);
+}
+
+// No internal end has an offset at 44.1 kHz: the utterance is not ended.
+TEST(SpeechJobDispatch, AnUtteranceTheWireCannotCarryFailsItsSession) {
+  Binding binding(&speech_dispatch);
+  const auto finalized = binding.open_as(binding.under_test->audio_request(), kPcm44k);
+  binding.audio(finalized, patterned_bytes(1'764, 1));
+  binding.finalize(finalized, 1);
+  const auto closed = binding.open_as(binding.under_test->audio_request(), kPcm44k);
+  binding.audio(closed, patterned_bytes(1'764, 2));
+  ASSERT_TRUE(binding.half_close(closed));
+  for (const auto key : {finalized, closed}) {
+    ASSERT_TRUE(binding.ends_as(key, State::Failed));
+    EXPECT_EQ(binding.manager->tombstone(key)->reason, "unsupported_input_rate");
+  }
+  ASSERT_TRUE(binding.settle());
+  EXPECT_TRUE(speech_of(binding).bridge->submitted().empty());
+}
 }  // namespace
 }  // namespace tensorplate::testing

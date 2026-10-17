@@ -1843,5 +1843,26 @@ TEST(SpeechPartialTranscripts, ADrainCompletesAfterAFinalDroppedOneUnsent) {
   EXPECT_TRUE(std::holds_alternative<FinalTranscriptOutput>(*transcript));
   EXPECT_TRUE(binding.ends_as(key, State::Closed));
 }
+
+// At an input rate the dispatch does not negotiate only its edges see the
+// rate: 16-bit PCM at 8 kHz is taken as internal audio as it is.
+TEST(SpeechVoiceDetection, AnEndpointLeavesAtTheInputRate) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  const auto key = binding.open_as(binding.under_test->audio_request(),
+                                   {StreamAudioEncoding::PcmS16Le, 8'000, 1});
+  // 4,800 internal samples of speech: 300 ms, which end at input offset 2,400.
+  ASSERT_TRUE(binding.audio_in_long_frames(key, voiced(4'800, 3)));
+  binding.finalize(key, 4);
+  const auto endpoint = binding.read_as<EndpointDetectedOutput>(key);
+  ASSERT_TRUE(endpoint.has_value());
+  EXPECT_EQ(endpoint->reason, EndpointReason::ClientFinalize);
+  EXPECT_EQ(endpoint->end_sample_offset, 2'400U);
+  const auto transcript = binding.read_as<FinalTranscriptOutput>(key);
+  ASSERT_TRUE(transcript.has_value());
+  EXPECT_EQ(transcript->end_sample_offset, 2'400U);
+  ASSERT_EQ(transcript->segments.size(), 1U);
+  EXPECT_EQ(transcript->segments.front().start_us, 0U);
+  EXPECT_EQ(transcript->segments.front().end_us, 300'000U);
+}
 }  // namespace
 }  // namespace tensorplate::testing
