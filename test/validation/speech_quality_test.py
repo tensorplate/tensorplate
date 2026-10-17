@@ -189,6 +189,8 @@ def check_critical_words() -> None:
     assert critical("cannot nor neither nothing none nowhere not", "negation", "en") == (
         "cannot nor neither nothing none nowhere not".split()
     )
+    # Only the listed conjunctions join: a beh in front is another word.
+    assert critical("بما بلا", "negation", "ar") == []
     assert critical("ولا فلم لن ليست وما ماذا لاعب وليس", "negation", "ar") == [
         "ولا",
         "فلم",
@@ -239,6 +241,8 @@ def check_lexical_regressions() -> None:
         {"class": "negation", "kind": "added", "position": None, "words": ["not"]}
     ]
     assert regress("i did go", "i did not go", "i did not go", "negation", "en") == []
+    # An unmatched word outside the class is no regression of it.
+    assert regress("i did go", "i did run", "i did go", "negation", "en") == []
     assert regress("i did go", "i not go", "i did go", "negation", "en") == [
         {"class": "negation", "kind": "added", "position": None, "words": ["not"]}
     ]
@@ -273,6 +277,8 @@ def check_seam_regressions() -> None:
     assert regress(ref, "a c e f g h", ref, "window_seam", "en") == []
     assert regress(ref, "a b e f g h", "a b d e f g h", "window_seam", "en") == []
     assert regress(ref, "a b x y e f g h", ref, "window_seam", "en") == []
+    # A deleted word still counts toward the place of a run inserted after it.
+    assert regress(ref, "a c d x y e f g h", "a b c d x y e f g h", "window_seam", "en") == []
     # On a tie the duplicate is the earlier copy, inserted after the two words before it.
     assert regress(ref, "a b c d c d e f g h", ref, "window_seam", "en") == [
         {"class": "window_seam", "kind": "added", "position": 2, "words": ["c", "d"]}
@@ -834,6 +840,18 @@ def check_silence(scorer: Scorer) -> None:
     assert (record["silence"]["recordings"], record["silence"]["scored_recordings"]) == (100, 99)
     assert record["silence"]["verdict"] == "insufficient"
     assert scorer.score(batch=built.arm("batch", failed))["silence"]["verdict"] == "pass"
+    # A recording is scored only when each of its renderings completed.
+    phone = {
+        "sil-002.telephony8k": {
+            "id": "sil-002.telephony8k",
+            "outcome": "failed",
+            "error": "timeout",
+        }
+    }
+    silence = scorer.score(built.arm("streaming", phone))["silence"]
+    assert (silence["scored_recordings"], silence["verdict"]) == (99, "insufficient")
+    record = scorer.score(built.arm("streaming", failed | phone))
+    assert record["silence"]["scored_recordings"] == 98
     record = scorer.score(built.arm("streaming", loud | failed), cross_check=True)
     assert record["silence"]["verdict"] == "fail"
 
