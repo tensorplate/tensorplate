@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/speech_quality_record.json",
+  "title": "Speech evaluation quality record",
+  "description": "What tools/validation/speech_quality.py scored for one run of a corpus pool: per language and codec, each arm's micro word error rate after the frozen normalizers and as written, and the streaming arm's distance above the batch arm; the corpus size per language; the words decoded on silence; and the semantic fixtures' critical regressions against the batch arm. Each gate reads pass, fail, or insufficient when it has fewer samples than its minimum; the record's verdict is fail if any gate failed, insufficient if any other was insufficient, and pass otherwise.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "scorer", "normalizers", "corpus", "pool", "inputs", "verdict", "strata", "breakdowns", "languages", "silence", "semantic", "hypothesis_text"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "0.1" },
+    "scorer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "unicode_version"],
+      "properties": {
+        "path": { "type": "string", "const": "tools/validation/speech_quality.py" },
+        "sha256": { "$ref": "#/definitions/Sha256" },
+        "unicode_version": { "type": "string", "minLength": 1, "description": "The Unicode database the normalizers read character properties and NFC from." }
+      }
+    },
+    "normalizers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["en", "ar"],
+      "properties": {
+        "en": { "type": "string", "const": "tp-wer-en-nfc-casefold-v1" },
+        "ar": { "type": "string", "const": "tp-wer-ar-nfc-dediacritized-v1" }
+      }
+    },
+    "corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "manifest_sha256"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "manifest_sha256": { "$ref": "#/definitions/Sha256" }
+      }
+    },
+    "pool": { "type": "string", "enum": ["tuning", "held_out"] },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["streaming_sha256", "batch_sha256", "references_sha256"],
+      "properties": {
+        "streaming_sha256": { "$ref": "#/definitions/Sha256" },
+        "batch_sha256": { "$ref": "#/definitions/Sha256" },
+        "references_sha256": { "oneOf": [{ "$ref": "#/definitions/Sha256" }, { "type": "null" }] }
+      }
+    },
+    "verdict": { "$ref": "#/definitions/Verdict" },
+    "strata": {
+      "type": "array",
+      "description": "Every language and codec, whether or not the pool has files in it.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["language", "codec", "utterances", "minimum_utterances", "reference_words", "raw_reference_words", "ceiling_percent", "batch_delta_limit_pp", "streaming", "batch", "delta_pp", "verdict"],
+        "properties": {
+          "language": { "$ref": "#/definitions/Language" },
+          "codec": { "$ref": "#/definitions/Codec" },
+          "utterances": { "type": "integer", "minimum": 0 },
+          "minimum_utterances": { "type": "integer", "minimum": 1 },
+          "reference_words": { "type": "integer", "minimum": 0 },
+          "raw_reference_words": { "type": "integer", "minimum": 0 },
+          "ceiling_percent": { "type": "integer", "minimum": 0 },
+          "batch_delta_limit_pp": { "type": "integer", "minimum": 0 },
+          "streaming": { "$ref": "#/definitions/Arm" },
+          "batch": { "$ref": "#/definitions/Arm" },
+          "delta_pp": { "type": ["number", "null"], "description": "Streaming minus batch word error rate, in percentage points." },
+          "verdict": { "$ref": "#/definitions/Verdict", "description": "Insufficient while the batch arm failed any file of the stratum, unless a limit already fails." }
+        }
+      }
+    },
+    "breakdowns": {
+      "type": "array",
+      "description": "Reported, not gated: each stratum by source, by duration bin and, for noisy16k, by signal-to-noise ratio.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["language", "codec", "by", "value", "utterances", "reference_words", "streaming_wer_percent", "batch_wer_percent"],
+        "properties": {
+          "language": { "$ref": "#/definitions/Language" },
+          "codec": { "$ref": "#/definitions/Codec" },
+          "by": { "type": "string", "enum": ["source", "duration_bin", "snr_db"] },
+          "value": { "type": "string", "minLength": 1 },
+          "utterances": { "type": "integer", "minimum": 1 },
+          "reference_words": { "type": "integer", "minimum": 1 },
+          "streaming_wer_percent": { "type": "number" },
+          "batch_wer_percent": { "type": "number" }
+        }
+      }
+    },
+    "languages": {
+      "type": "array",
+      "description": "The distinct clean recordings and their normalized reference words per language.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["language", "recordings", "distinct_references", "reference_words", "minimum_recordings", "minimum_words", "verdict"],
+        "properties": {
+          "language": { "$ref": "#/definitions/Language" },
+          "recordings": { "type": "integer", "minimum": 0 },
+          "distinct_references": { "type": "integer", "minimum": 0 },
+          "reference_words": { "type": "integer", "minimum": 0 },
+          "minimum_recordings": { "type": "integer", "minimum": 1 },
+          "minimum_words": { "type": "integer", "minimum": 1 },
+          "verdict": { "type": "string", "enum": ["pass", "insufficient"] }
+        }
+      }
+    },
+    "silence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recordings", "scored_recordings", "files", "minimum_recordings", "streaming", "batch", "by_codec", "verdict"],
+      "description": "Words in the finals of silence files; the gate is zero in the streaming arm.",
+      "properties": {
+        "recordings": { "type": "integer", "minimum": 0 },
+        "scored_recordings": { "type": "integer", "minimum": 0, "description": "Silence recordings none of whose files failed in the streaming arm; the minimum applies to these." },
+        "files": { "type": "integer", "minimum": 0 },
+        "minimum_recordings": { "type": "integer", "minimum": 1 },
+        "streaming": { "$ref": "#/definitions/SilenceArm" },
+        "batch": { "$ref": "#/definitions/SilenceArm" },
+        "by_codec": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["codec", "streaming", "batch"],
+            "properties": {
+              "codec": { "$ref": "#/definitions/Codec" },
+              "streaming": { "$ref": "#/definitions/SilenceCodecArm" },
+              "batch": { "$ref": "#/definitions/SilenceCodecArm" }
+            }
+          }
+        },
+        "verdict": { "$ref": "#/definitions/Verdict" }
+      }
+    },
+    "semantic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["languages", "regressions"],
+      "properties": {
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["language", "fixtures", "minimum_fixtures", "minimum_class_fixtures", "by_class", "batch_failed_files", "regressions", "verdict"],
+            "properties": {
+              "language": { "$ref": "#/definitions/Language" },
+              "fixtures": { "type": "integer", "minimum": 0, "description": "Distinct clean recordings carrying a semantic class." },
+              "minimum_fixtures": { "type": "integer", "minimum": 1 },
+              "minimum_class_fixtures": { "type": "integer", "minimum": 1, "description": "The fixtures each class needs; a class with fewer, or none, is insufficient and so is the language." },
+              "by_class": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["negation", "numerals", "repetition", "window_seam"],
+                "properties": {
+                  "negation": { "$ref": "#/definitions/SemanticClass" },
+                  "numerals": { "$ref": "#/definitions/SemanticClass" },
+                  "repetition": { "$ref": "#/definitions/SemanticClass" },
+                  "window_seam": { "$ref": "#/definitions/SemanticClass" }
+                }
+              },
+              "batch_failed_files": { "type": "integer", "minimum": 0, "description": "Fixture files the batch arm failed. They are not judged, and the gate cannot pass while any did." },
+              "regressions": { "type": "integer", "minimum": 0 },
+              "verdict": { "$ref": "#/definitions/Verdict" }
+            }
+          }
+        },
+        "regressions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["file", "language", "codec", "class", "kind", "position", "count", "words"],
+            "properties": {
+              "file": { "type": "string", "minLength": 1 },
+              "language": { "$ref": "#/definitions/Language" },
+              "codec": { "$ref": "#/definitions/Codec" },
+              "class": { "type": "string", "enum": ["negation", "numerals", "repetition", "window_seam"] },
+              "kind": { "type": "string", "enum": ["lost", "added"] },
+              "position": { "type": ["integer", "null"], "minimum": 0, "description": "The first reference word lost, or the number of reference words before a seam's inserted run; null for an added critical word." },
+              "count": { "type": "integer", "minimum": 1 },
+              "words": {
+                "oneOf": [{ "type": "array", "minItems": 1, "items": { "type": "string" } }, { "type": "null" }],
+                "description": "Null where the file's reference is held by digest only, so the record republishes none of its words."
+              }
+            }
+          }
+        }
+      }
+    },
+    "hypothesis_text": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["streaming", "batch"],
+      "description": "Files whose finals carry characters NFC keeps that the normalizers do not fold; they are scored as written.",
+      "properties": {
+        "streaming": { "$ref": "#/definitions/TextCounts" },
+        "batch": { "$ref": "#/definitions/TextCounts" }
+      }
+    }
+  },
+  "definitions": {
+    "Sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "Language": { "type": "string", "enum": ["en", "ar"] },
+    "Codec": { "type": "string", "enum": ["clean16k", "noisy16k", "telephony8k"] },
+    "Verdict": { "type": "string", "enum": ["pass", "fail", "insufficient"] },
+    "Failures": {
+      "type": "object",
+      "description": "Failed files by error code.",
+      "additionalProperties": { "type": "integer", "minimum": 1 }
+    },
+    "Arm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["errors", "substitutions", "deletions", "insertions", "raw_errors", "failed_files", "failures", "empty_files", "wer_percent", "raw_wer_percent"],
+      "properties": {
+        "errors": { "type": "integer", "minimum": 0 },
+        "substitutions": { "type": "integer", "minimum": 0 },
+        "deletions": { "type": "integer", "minimum": 0 },
+        "insertions": { "type": "integer", "minimum": 0 },
+        "raw_errors": { "type": "integer", "minimum": 0 },
+        "failed_files": { "type": "integer", "minimum": 0 },
+        "failures": { "$ref": "#/definitions/Failures" },
+        "empty_files": { "type": "integer", "minimum": 0, "description": "Speech files the arm completed with no word once normalized, with no finals or only punctuation; each is scored as all deletions and is not a failure." },
+        "wer_percent": { "type": ["number", "null"] },
+        "raw_wer_percent": { "type": ["number", "null"] }
+      }
+    },
+    "SilenceArm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hallucinated_words", "files_with_words", "failed_files", "failures"],
+      "properties": {
+        "hallucinated_words": { "type": "integer", "minimum": 0 },
+        "files_with_words": { "type": "integer", "minimum": 0 },
+        "failed_files": { "type": "integer", "minimum": 0 },
+        "failures": { "$ref": "#/definitions/Failures" }
+      }
+    },
+    "SilenceCodecArm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files", "hallucinated_words"],
+      "properties": {
+        "files": { "type": "integer", "minimum": 0 },
+        "hallucinated_words": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "SemanticClass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixtures", "batch_failed_files", "regressions", "verdict"],
+      "description": "One semantic class of one language, gated on its own.",
+      "properties": {
+        "fixtures": { "type": "integer", "minimum": 0, "description": "Distinct clean recordings carrying the class." },
+        "batch_failed_files": { "type": "integer", "minimum": 0, "description": "Files of the class the batch arm failed, which are not judged." },
+        "regressions": { "type": "integer", "minimum": 0 },
+        "verdict": { "$ref": "#/definitions/Verdict" }
+      }
+    },
+    "TextCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["presentation_forms", "format_characters"],
+      "properties": {
+        "presentation_forms": { "type": "integer", "minimum": 0 },
+        "format_characters": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

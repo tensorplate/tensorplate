@@ -348,6 +348,22 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- `tools/validation/speech_quality.py` scores a speech evaluation run's final
+  transcripts (`config/schemas/speech_transcripts.json`) against a corpus
+  manifest's references and writes a quality record
+  (`config/schemas/speech_quality_record.json`). Per language and codec it
+  reports the streaming and batch arms' micro word error rates, normalized and
+  raw, and gates the streaming rate against its ceiling and within 2
+  percentage points of batch. English is normalized by NFC, casefold and
+  punctuation to space; Arabic by NFC with tatweel and harakat removed and
+  punctuation to space, keeping letter variants and digits as written. Both
+  end with a second NFC pass, so normalizing twice changes nothing. Failed
+  files score as empty predictions. The record also gates words decoded on
+  silence and critical regressions of negation, numeral, repetition and
+  window-seam fixtures against the batch arm. A gate below its sample minimum
+  reads insufficient, never pass. The corpus manifest check now also refuses a
+  semantic class listed twice on one file. (V030-E05-F03-T02)
+
 - `tools/validation/speech_corpus.py` checks a speech evaluation corpus
   manifest (`config/schemas/speech_corpus_manifest.json`): per-file digests,
   source and license, tuning or held-out pool, stratum, duration bin and

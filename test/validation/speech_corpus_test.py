@@ -562,6 +562,10 @@ def check_rules(good: dict[str, Any], root: Path) -> None:
         (set_field("en-a.clean16k", "labels", None), "labels is required for speech"),
         (set_field("sil-d.clean16k", "language", "en"), "language is required for speech"),
         (set_field("sil-d.clean16k", "semantic", ["negation"]), "silence carries no semantic"),
+        (
+            set_field("en-a.clean16k", "semantic", ["numerals", "negation", "numerals"]),
+            "a semantic class is listed twice",
+        ),
         (set_field("en-a.clean16k", "labels", "speech_end_sample", 48001), "is outside"),
         (set_field("en-a.clean16k", "labels", "speech_end_sample", 8000), "is outside"),
         (set_field("en-a.telephony8k", "size", 24001), "one byte per sample"),
