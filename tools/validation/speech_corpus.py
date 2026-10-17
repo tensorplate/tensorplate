@@ -26,6 +26,7 @@ import hashlib
 import json
 import math
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -460,7 +461,7 @@ def _rebuild(
     entry: dict[str, Any],
     clean: dict[str, Any],
     clean_samples: list[int],
-    noise_samples: dict[str, list[int]],
+    noise_samples: Callable[[str], list[int]],
 ) -> None:
     labels = clean["labels"]
     span = None if labels is None else (labels["speech_onset_sample"], labels["speech_end_sample"])
@@ -470,7 +471,7 @@ def _rebuild(
         samples, made = render_noisy(
             clean_samples,
             *span,
-            noise_samples[recipe["noise"]],
+            noise_samples(recipe["noise"]),
             snr_db=recipe["snr_db"],
             seed=recipe["seed"],
         )
@@ -542,14 +543,30 @@ def check_manifest(
         if rebuild:
             raise ManifestError("a rebuild needs the corpus root")
         return len(files)
-    samples = {entry["id"]: _check_file_audio(root, entry) for entry in files}
-    noise_samples = {item["id"]: _check_noise_audio(root, item) for item in noise.values()}
-    if rebuild:
-        for entry in files:
-            if entry["derived_from"] is not None:
-                clean_samples = samples[entry["derived_from"]]
-                assert clean_samples is not None
-                _rebuild(entry, by_id[entry["derived_from"]], clean_samples, noise_samples)
+    for item in noise.values():
+        _check_noise_audio(root, item)
+    derived: dict[str, list[dict[str, Any]]] = {}
+    for entry in files:
+        if entry["derived_from"] is not None:
+            derived.setdefault(entry["derived_from"], []).append(entry)
+    # A real corpus does not fit in memory as samples: hold one clean file and one noise file.
+    loaded: dict[str, list[int]] = {}
+
+    def noise_samples(noise_id: str) -> list[int]:
+        if noise_id not in loaded:
+            loaded.clear()
+            loaded[noise_id] = _check_noise_audio(root, noise[noise_id])
+        return loaded[noise_id]
+
+    for entry in files:
+        if entry["derived_from"] is not None:
+            continue
+        clean_samples = _check_file_audio(root, entry)
+        assert clean_samples is not None
+        for child in derived.get(entry["id"], []):
+            _check_file_audio(root, child)
+            if rebuild:
+                _rebuild(child, entry, clean_samples, noise_samples)
     return len(files)
 
 

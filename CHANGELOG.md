@@ -374,6 +374,23 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   stratum by levelling to -26 dBov before the qualification tool's telephony
   recipe, both integer-exact. The audio stays outside the repository.
   (V030-E05-F03-T02)
+- The speech evaluation corpus `2026.10`, English part
+  (`docs/validation/evidence/speech-corpus-2026.10/`).
+  - Contents: 1,050 held-out and 250 tuning clips from LibriSpeech, FLEURS
+    en_us and Speech Commands, each rendered clean, noisy and telephony, with
+    MUSAN noise.
+  - Every file is named by digest, with the labels its selection read and
+    the plan it was built from. The audio is held privately.
+  - `tools/validation/speech_corpus_build.py` builds a corpus from downloaded
+    sources and a plan. It applies stated selection rules and counts what
+    each rule withheld per source.
+  - `tools/validation/speech_corpus_align.py` labels speech onset and end by
+    CTC forced alignment. It is an operator step that needs torch.
+  - `speech_corpus.py check --root` now reads one clean file and one noise
+    file at a time.
+  - A manifest source may record where its license is stated and its
+    selection counts. CI checks the filed manifest.
+  (V030-E05-F03-T02)
 - A telephony input resampler in the serving worker, not wired yet: it
   decodes 8 kHz G.711 mu-law as the Sun `g711.c` reference decoder (and
   CPython's `audioop`) does and resamples it

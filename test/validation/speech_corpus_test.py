@@ -663,6 +663,11 @@ def check_rules(good: dict[str, Any], root: Path) -> None:
     refused(good, set_field("en-a.clean16k", "path", "escape.wav"), "outside", root=root)
     (root / "eight-k.wav").write_bytes(audio.wav_pcm16_mono_bytes(8000, [0] * 48000))
     refused(good, set_field("en-a.clean16k", "path", "eight-k.wav"), "8000 Hz", root=root)
+    # A derived file is read and hashed like a clean one, without a rebuild too.
+    changed = bytearray((root / file_entry(good, "en-a.telephony8k")["path"]).read_bytes())
+    changed[0] ^= 1
+    (root / "changed.ul").write_bytes(bytes(changed))
+    refused(good, set_field("en-a.telephony8k", "path", "changed.ul"), "sha256 is", root=root)
 
     # A rendering replaced consistently, digests and all, is caught only by rebuilding it.
     tampered_data = audio.telephony_8k_ulaw_bytes(sine_burst(48000, 8000, 40000, 5000, 300))
@@ -706,6 +711,9 @@ def check_schema(good: dict[str, Any]) -> None:
         (set_field("en-a.noisy16k", "recipe", "kind", "telephony8k"), "recipe"),
         (lambda m: m["recipes"]["telephony8k"].update(recipe="tp-fir63-blackman-q15-v1"), "id"),
         (lambda m: m["recipes"]["noisy16k"].update(snr_db=[10, 20]), "snr set"),
+        (lambda m: m["sources"][0].update(license_statement=""), "license statement"),
+        (lambda m: m["sources"][0].update(selection=[{"rule": "r"}]), "selection count"),
+        (lambda m: m["sources"][0].update(selection=[{"rule": "r", "excluded": -1}]), "count"),
     ):
         broken = copy.deepcopy(good)
         mutate(broken)

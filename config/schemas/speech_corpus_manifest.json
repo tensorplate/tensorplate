@@ -73,7 +73,21 @@
           "license": { "type": "string", "minLength": 1, "description": "An SPDX license identifier, or the dataset's own terms by name." },
           "attribution": { "type": "string", "minLength": 1 },
           "condition": { "type": "string", "minLength": 1, "description": "How the source was recorded, such as read speech on close microphones or crowd-sourced lossy recordings; results are reported per source." },
-          "transcripts_public": { "type": "boolean", "description": "Whether the source's license allows republishing its transcripts in this manifest." }
+          "transcripts_public": { "type": "boolean", "description": "Whether the source's license allows republishing its transcripts in this manifest." },
+          "license_statement": { "type": "string", "minLength": 1, "description": "Where the license is stated: a file in the archive, or a page with the date it was read." },
+          "selection": {
+            "type": "array",
+            "description": "The rules that withheld source files from selection, with how many files each withheld. A file is counted under the first rule it meets; a rule that needs a file's labels counts only the files up to the last one a quota examined.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["rule", "excluded"],
+              "properties": {
+                "rule": { "type": "string", "minLength": 1 },
+                "excluded": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
         }
       }
     },
