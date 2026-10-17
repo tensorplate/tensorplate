@@ -117,8 +117,10 @@ tools/validation/tts_corpus.py reference CORPUS --model-dir MODEL --out DIR [--t
   directory is built under a temporary name beside `--out` and renamed into
   place at the end, so a run that fails leaves nothing behind and can be
   rerun.
-  The same seed reproduces a clip on the same machine and build; CPU kernels
-  differ across machines, so a record identifies the clips it describes and
-  is not a target for other machines.
+  The same seed reproduces a clip only with the same `--threads` on the same
+  machine and build: the thread count decides how the CPU kernels split
+  their sums, and the kernels differ across machines. The record carries the
+  thread count torch used; a record identifies the clips it describes and is
+  not a target for other machines.
 
 Exit status: 0 valid, 1 refused, 2 unreadable.
