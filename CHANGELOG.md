@@ -348,6 +348,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A telephony input resampler in the serving worker, not wired yet: it
+  decodes 8 kHz G.711 mu-law as the Sun `g711.c` reference decoder (and
+  CPython's `audioop`) does and resamples it
+  onto the 16 kHz internal timeline with `tp-fir63-blackman-q15-v1`, the
+  filter the candidate qualification tool already uses, bit-exact with that
+  tool's `interpolate_2x` however the input is split. Output sample n is
+  source time n / 16,000 s; the last 31 outputs wait for the next 16
+  inputs, and a flush emits them as if the input ended there, so N inputs
+  give exactly 2N outputs. (V030-E05-F01-T03)
+
 - The streaming slice measurement tool supports concurrent batches of up to
   64 STT or TTS sessions on independent connections, staggered starts,
   isolated failure records and pooled session/utterance latency distributions.
