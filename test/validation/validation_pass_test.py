@@ -1040,6 +1040,14 @@ def check_streaming_line() -> None:
         assert statuses(findings)[f"settings.{key}"] == "note"
     assert index_mod.verdict(findings) == index_mod.EXIT_UNCHANGED
 
+    annotated = copy.deepcopy(concurrent)
+    annotated["schema_version"] = "0.4"
+    annotated["stt"]["input"]["speech_annotations"] = [{"onset_sample_offset": 0}]
+    annotated_line = index_mod.streaming_line(
+        index_mod.slice_record.finalize(annotated), envelope()
+    )
+    assert annotated_line == concurrent_line
+
     refusals = index_mod.streaming_line(stream_mod.build_refusal_record(commit), envelope())
     assert refusals["result"] == "completed_with_refusals"
     assert refusals["metrics"]["tts.segment_to_first_audio.count"] == 2

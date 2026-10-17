@@ -33,7 +33,7 @@ from candidate_record import RecordError, validate_record  # noqa: E402
 
 TOOL_NAME = "slice-measure"
 RECORD_KIND = "slice_measurement"
-SCHEMA_VERSION = "0.3"
+SCHEMA_VERSION = "0.4"
 MODES = ("stt", "tts")
 
 # The registered values of the `stage` metric label, in pipeline order.
@@ -208,6 +208,104 @@ def new_session(mode: str, index: int, call_start_ns: int) -> dict[str, Any]:
     return session
 
 
+def check_speech_annotations(annotations: Any, samples: int) -> None:
+    """Clip-relative integer sample offsets; end offsets are exclusive."""
+    schema = load_schema()
+    validate_record(
+        annotations,
+        {
+            "definitions": schema["definitions"],
+            **schema["definitions"]["SttSection"]["properties"]["input"]["properties"][
+                "speech_annotations"
+            ],
+        },
+    )
+    previous_end = 0
+    for annotation in annotations or []:
+        onset = annotation["onset_sample_offset"]
+        end = annotation.get("end_sample_offset", onset + 1)
+        if not onset < end <= samples or onset < previous_end:
+            raise RecordError(
+                "speech annotations must be ordered, nonoverlapping and inside the clip"
+            )
+        previous_end = end
+
+
+def speech_sample_time(session: dict[str, Any], sample: int) -> int | None:
+    return next(
+        (
+            f["sent_ns"]
+            for f in session["client"]["audio_frames"]
+            if f["start_sample_offset"] <= sample < f["end_sample_offset"]
+        ),
+        None,
+    )
+
+
+def derive_speech_alignment(section: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
+    """Match annotated speech to nonblank server utterances in observation order."""
+    annotations = section["input"]["speech_annotations"]
+    status, ids = "not_provided", []
+    if annotations is not None:
+        spoken = [
+            u
+            for u in session["utterances"]
+            if any(p["text_bytes"] for p in u["partials"])
+            or (u["final"] is not None and u["final"]["text_bytes"])
+        ]
+        if session["outcome"] != "completed":
+            status = "incomplete"
+        elif len(spoken) != len(annotations):
+            status = "count_mismatch"
+        elif any(
+            u["endpoint"] is None
+            or not u["start_sample_offset"]
+            <= a["onset_sample_offset"]
+            < a.get("end_sample_offset", a["onset_sample_offset"] + 1)
+            <= u["endpoint"]["end_sample_offset"]
+            for u, a in zip(spoken, annotations)
+        ):
+            status = "interval_mismatch"
+        elif any(
+            observed is not None and (sent is None or observed < sent)
+            for u, a in zip(spoken, annotations)
+            for observed, sent in (
+                (
+                    next((p["at_ns"] for p in u["partials"] if p["text_bytes"]), None),
+                    speech_sample_time(session, a["onset_sample_offset"]),
+                ),
+                (
+                    u["boundaries"]["final_transcript"],
+                    speech_sample_time(
+                        session, a.get("end_sample_offset", a["onset_sample_offset"] + 1) - 1
+                    ),
+                ),
+            )
+        ):
+            status = "timing_mismatch"
+        else:
+            status, ids = "matched", [u["utterance_id"] for u in spoken]
+    return {"status": status, "utterance_ids": ids}
+
+
+def derive_speech_boundaries(
+    section: dict[str, Any], session: dict[str, Any], utterance: dict[str, Any]
+) -> dict[str, Any]:
+    result = dict.fromkeys(("speech_onset", "speech_end", "first_nonempty_partial"))
+    result["first_nonempty_partial"] = next(
+        (p["at_ns"] for p in utterance["partials"] if p["text_bytes"]), None
+    )
+    ids = derive_speech_alignment(section, session)["utterance_ids"]
+    if utterance["utterance_id"] in ids:
+        annotation = section["input"]["speech_annotations"][ids.index(utterance["utterance_id"])]
+        for boundary, sample in (
+            ("speech_onset", annotation["onset_sample_offset"]),
+            ("speech_end", annotation.get("end_sample_offset", 0) - 1),
+        ):
+            result[boundary] = speech_sample_time(session, sample)
+    return result
+
+
 def new_utterance(utterance_id: int, start: int) -> dict[str, Any]:
     return {
         "utterance_id": utterance_id,
@@ -256,7 +354,7 @@ def derive_utterance_boundaries(
 def derive_utterance_measurements(utterance: dict[str, Any]) -> dict[str, Any]:
     boundaries = utterance["boundaries"]
     result = {}
-    for name, start, end, event in (
+    timings = (
         ("endpoint_to_final", "endpoint", "final_transcript", "final_transcript"),
         ("last_audio_to_endpoint", "last_audio_sent", "endpoint", "endpoint_detected"),
         (
@@ -271,7 +369,18 @@ def derive_utterance_measurements(utterance: dict[str, Any]) -> dict[str, Any]:
             "first_partial",
             "partial_transcript",
         ),
-    ):
+    )
+    if "speech_onset" in boundaries:
+        timings += (
+            (
+                "onset_to_first_partial",
+                "speech_onset",
+                "first_nonempty_partial",
+                "partial_transcript",
+            ),
+            ("speech_end_to_final", "speech_end", "final_transcript", "final_transcript"),
+        )
+    for name, start, end, event in timings:
         a, b = boundaries[start], boundaries[end]
         result[name] = {
             "from": start,
@@ -412,6 +521,8 @@ def derive_aggregate(record: dict[str, Any]) -> dict[str, Any]:
             samples.update(
                 {name: [] for name in derive_utterance_measurements(new_utterance(1, 0))}
             )
+            if record["schema_version"] == "0.4":
+                samples.update(onset_to_first_partial=[], speech_end_to_final=[])
             samples["partial_interval"] = []
         for session in section["sessions"]:
             recorded += 1
@@ -596,7 +707,13 @@ def derive_result(record: dict[str, Any]) -> dict[str, Any]:
             if session["outcome"] != "completed":
                 reasons = (
                     refusals
-                    if record["schema_version"] == "0.3" and refused_at_open(session)
+                    if (
+                        record["schema_version"] == "0.3"
+                        or (
+                            record["schema_version"] == "0.4" and record["settings"]["sessions"] > 1
+                        )
+                    )
+                    and refused_at_open(session)
                     else failed
                 )
                 reasons.append(f"{label}: {_describe(session)}")
@@ -626,6 +743,12 @@ def finalize(record: dict[str, Any]) -> dict[str, Any]:
         if section is None:
             continue
         for session in section["sessions"]:
+            if mode == "stt" and record["schema_version"] == "0.4":
+                session["speech_alignment"] = derive_speech_alignment(section, session)
+                for utterance in session["utterances"]:
+                    utterance["boundaries"].update(
+                        derive_speech_boundaries(section, session, utterance)
+                    )
             for utterance in session.get("utterances", []):
                 utterance["boundaries"] = derive_utterance_boundaries(session, utterance)
                 utterance["measurements"] = derive_utterance_measurements(utterance)
@@ -633,7 +756,7 @@ def finalize(record: dict[str, Any]) -> dict[str, Any]:
             session["measurements"] = derive_measurements(mode, session)
         section["summary"] = derive_summary(mode, section)
     record["gpu"]["summary"] = derive_gpu_summary(record["gpu"]["samples"])
-    if record["schema_version"] == "0.3":
+    if record["schema_version"] in ("0.3", "0.4"):
         record["aggregate"] = derive_aggregate(record)
     record["result"] = derive_result(record)
     return record
@@ -951,7 +1074,7 @@ def _check_claims(record: dict[str, Any]) -> None:
         raise RecordError("provenance: recorded needs the worker's release or build")
     if (run["error"] is None) != (run["ended_by"] != "error"):
         raise RecordError("run: error does not agree with ended_by")
-    if record["schema_version"] == "0.3":
+    if record["schema_version"] in ("0.3", "0.4"):
         settings = record["settings"]
         if not 1 <= settings["sessions"] <= 64:
             raise RecordError("settings.sessions must be 1 to 64")
@@ -1030,7 +1153,22 @@ def check_record(record: Any) -> tuple[str, str]:
             loopback = loopback and target["loopback"]
             if (target["generation"] is None) != (target["descriptor_digest"] is None):
                 raise RecordError(f"{mode} target: a generation without a digest, or the reverse")
+            if mode == "stt" and record["schema_version"] != "0.4":
+                if "speech_annotations" in section["input"] or any(
+                    "speech_alignment" in session
+                    or any(
+                        key in u["boundaries"]
+                        for u in session.get("utterances", [])
+                        for key in ("speech_onset", "speech_end", "first_nonempty_partial")
+                    )
+                    for session in section["sessions"]
+                ):
+                    raise RecordError("speech timing requires schema version 0.4")
             frame = _check_stt_input(section) if mode == "stt" else 0
+            if mode == "stt" and record["schema_version"] == "0.4":
+                check_speech_annotations(
+                    section["input"]["speech_annotations"], section["input"]["samples"]
+                )
             sessions = section["sessions"]
             expected = record["settings"]["iterations"] * count
             if count == 1 and target["connect_ns"] is None:
@@ -1059,13 +1197,26 @@ def check_record(record: Any) -> tuple[str, str]:
                     has_utterances = "utterances" in session
                     has_frames = "audio_frames" in session["client"]
                     if has_utterances != has_frames or (
-                        record["schema_version"] in ("0.2", "0.3") and not has_frames
+                        record["schema_version"] in ("0.2", "0.3", "0.4") and not has_frames
                     ):
                         raise RecordError(
                             f"{label}: per-utterance records need utterances and audio_frames"
                         )
                     if has_utterances:
                         _check_utterances(label, section, session)
+                    if record["schema_version"] == "0.4":
+                        _require_derived(
+                            "speech alignment",
+                            session["speech_alignment"],
+                            derive_speech_alignment(section, session),
+                        )
+                        for utterance in session["utterances"]:
+                            expected_speech = derive_speech_boundaries(section, session, utterance)
+                            _require_derived(
+                                "speech boundaries",
+                                {k: utterance["boundaries"][k] for k in expected_speech},
+                                expected_speech,
+                            )
                 if (
                     finished is not None
                     and max(latest, session.get("connection", {}).get("ended_ns", 0)) > finished
@@ -1078,7 +1229,7 @@ def check_record(record: Any) -> tuple[str, str]:
                 )
             _require_derived(f"{mode} summary", section["summary"], derive_summary(mode, section))
         _check_gpu(record["gpu"], loopback)
-        if record["schema_version"] == "0.3":
+        if record["schema_version"] in ("0.3", "0.4"):
             _require_derived("aggregate", record["aggregate"], derive_aggregate(record))
         _require_derived("result", record["result"], derive_result(record))
     except RecordError as exc:
