@@ -158,6 +158,7 @@ expect_finding() {
 }
 
 printf 'public hygiene scanner\n'
+python3 "${repo_root}/test/validation/test_public_hygiene_labels.py" || exit 1
 
 # --- The repository as committed: clean, every allowlist count exact.
 out="${work}/tree.out"

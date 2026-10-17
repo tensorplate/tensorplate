@@ -118,7 +118,11 @@ not style.
       metadata address and macOS's `fe80::1` also pass), judged by value:
       an IPv4-mapped address is its IPv4 address however it is written,
       and any other address with a dotted quad is IPv6. Last come private
-      planning references, as shapes only, among them a planning
+      planning references, as shapes only. Extension-row identifiers are
+      rejected, including letter suffixes. Short step identifiers are
+      rejected when parenthesized or following the word "row" (also in
+      inline code); ordinary words and hexadecimal digests remain valid.
+      These shapes have no allowlist entries. The policy also rejects a planning
       identifier written without its release prefix anywhere but
       `CHANGELOG.md`. A four-part version reads as an address unless a pip
       pin, Debian revision or wheel name makes it a version. The evidence
