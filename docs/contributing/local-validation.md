@@ -203,10 +203,8 @@ index and checks package hashes as it downloads them into a fresh temporary
 archive directory. No SDK archive cache is restored or saved; the temporary
 directory is removed on exit. It installs neither a GPU
 driver nor the full CUDA toolkit. `cuda-driver-dev` supplies link stubs, not
-a kernel driver. On x86, CMake discovers CUDA headers and the runtime library
-directly: neither nvcc/nvvm nor TensorRT's static development archive is needed.
-The private loader target needs only headers; the adapter and worker still link
-nvinfer and cudart directly. Jetson keeps its existing SDK discovery and linkage.
+a kernel driver. On x86, CMake discovers headers only: neither nvcc/nvvm nor NVIDIA libraries
+are link inputs. The adapter loads nvinfer and cudart at session load. Jetson keeps its existing SDK discovery and linkage.
 
 The x86 SDK now follows the managed speech runtime's CUDA family, as recorded
 in `packaging/speech-runtime/lock/cuda.txt`. It uses a newer TensorRT 10 API
@@ -220,8 +218,12 @@ in a separate executable with no NVIDIA link dependencies. Synthetic tests
 exercise missing libraries/exports, version mismatches and handle lifetime;
 `TP_TEST_TENSORRT_SDK=1` additionally requires loading the installed SDK and
 querying its versions, without creating a runtime or probing a device. This
-loader is not yet used by the adapter: **the SDK-built worker still requires
-NVIDIA libraries to start**. The release profile still disables TensorRT.
+loader is used by the adapter with process-lifetime cached ownership. A required
+real driverless test rejects before runtime creation. Clean Ubuntu 22.04 and
+24.04 container jobs require a real Python worker response and TensorRT
+`Unsupported` without NVIDIA libraries, plus negative ELF assertions. The
+sanitizer job uses vendor-module-only LeakSanitizer suppressions and retains
+leak detection. The release profile still disables TensorRT.
 
 To reproduce the job, use a disposable Ubuntu 22.04 amd64 container with
 CMake 3.25+, Clang 14, Ninja, curl, CA certificates, Python and vcpkg at the

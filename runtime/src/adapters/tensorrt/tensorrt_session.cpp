@@ -52,7 +52,8 @@
 
 #if TP_HAS_TENSORRT_SDK
 #include <NvInfer.h>
-#include <cuda_runtime_api.h>
+
+#include "sdk_loader.hpp"
 #endif
 
 namespace tensorplate::adapters::tensorrt {
@@ -133,23 +134,26 @@ template <typename T>
 using TrtUniquePtr = std::unique_ptr<T, TrtDeleter<T>>;
 
 struct CudaStreamHandle {
+  const SdkFunctions* functions = nullptr;
   cudaStream_t stream = nullptr;
   CudaStreamHandle() = default;
   ~CudaStreamHandle() {
     if (stream != nullptr) {
-      cudaStreamDestroy(stream);
+      functions->stream_destroy(stream);
     }
   }
   CudaStreamHandle(const CudaStreamHandle&) = delete;
   CudaStreamHandle& operator=(const CudaStreamHandle&) = delete;
-  CudaStreamHandle(CudaStreamHandle&& other) noexcept : stream(other.stream) {
+  CudaStreamHandle(CudaStreamHandle&& other) noexcept
+      : functions(other.functions), stream(other.stream) {
     other.stream = nullptr;
   }
   CudaStreamHandle& operator=(CudaStreamHandle&& other) noexcept {
     if (this != &other) {
       if (stream != nullptr) {
-        cudaStreamDestroy(stream);
+        functions->stream_destroy(stream);
       }
+      functions = other.functions;
       stream = other.stream;
       other.stream = nullptr;
     }
@@ -158,26 +162,28 @@ struct CudaStreamHandle {
 };
 
 struct CudaDeviceBuffer {
+  const SdkFunctions* functions = nullptr;
   void* device_ptr = nullptr;
   std::size_t size_bytes = 0;
   CudaDeviceBuffer() = default;
   ~CudaDeviceBuffer() {
     if (device_ptr != nullptr) {
-      cudaFree(device_ptr);
+      functions->free(device_ptr);
     }
   }
   CudaDeviceBuffer(const CudaDeviceBuffer&) = delete;
   CudaDeviceBuffer& operator=(const CudaDeviceBuffer&) = delete;
   CudaDeviceBuffer(CudaDeviceBuffer&& other) noexcept
-      : device_ptr(other.device_ptr), size_bytes(other.size_bytes) {
+      : functions(other.functions), device_ptr(other.device_ptr), size_bytes(other.size_bytes) {
     other.device_ptr = nullptr;
     other.size_bytes = 0;
   }
   CudaDeviceBuffer& operator=(CudaDeviceBuffer&& other) noexcept {
     if (this != &other) {
       if (device_ptr != nullptr) {
-        cudaFree(device_ptr);
+        functions->free(device_ptr);
       }
+      functions = other.functions;
       device_ptr = other.device_ptr;
       size_bytes = other.size_bytes;
       other.device_ptr = nullptr;
@@ -188,6 +194,8 @@ struct CudaDeviceBuffer {
 };
 
 struct TensorRTState {
+  // Declared first: the table outlives all vendor objects and CUDA resources.
+  std::shared_ptr<const SdkLibraries> sdk;
   TrtUniquePtr<nvinfer1::IRuntime> runtime;
   TrtUniquePtr<nvinfer1::ICudaEngine> engine;
   TrtUniquePtr<nvinfer1::IExecutionContext> context;
@@ -211,19 +219,23 @@ struct TensorRTState {
   return buf;
 }
 
-[[nodiscard]] std::string cuda_error_message(cudaError_t status, std::string_view op) {
-  return std::string(op) + " failed: " + cudaGetErrorString(status);
+[[nodiscard]] std::string cuda_error_message(const SdkFunctions& functions, cudaError_t status,
+                                             std::string_view op) {
+  const char* detail = functions.error_string(status);
+  return std::string(op) + " failed: " + (detail != nullptr ? detail : "unknown CUDA error");
 }
 
-[[nodiscard]] Result<CudaDeviceBuffer> make_device_buffer(std::size_t bytes) {
+[[nodiscard]] Result<CudaDeviceBuffer> make_device_buffer(const SdkFunctions& functions,
+                                                          std::size_t bytes) {
   if (bytes == 0) {
     return unexpected(Error::Code::ShapeMismatch, "TensorRT tensor byte size is zero");
   }
   CudaDeviceBuffer out;
+  out.functions = &functions;
   out.size_bytes = bytes;
-  const cudaError_t status = cudaMalloc(&out.device_ptr, bytes);
+  const cudaError_t status = functions.malloc(&out.device_ptr, bytes);
   if (status != cudaSuccess) {
-    return unexpected(Error::Code::OOMError, cuda_error_message(status, "cudaMalloc"));
+    return unexpected(Error::Code::OOMError, cuda_error_message(functions, status, "cudaMalloc"));
   }
   return out;
 }
@@ -363,12 +375,19 @@ class TensorRTSession final : public ExecutionSession {
       return unexpected(bytes_r.error());
     }
 
-    state_ = std::make_unique<TensorRTState>();
-    state_->runtime.reset(nvinfer1::createInferRuntime(trt_logger()));
-    if (!state_->runtime) {
-      state_.reset();
-      return unexpected(Error::Code::LoadFailed, "createInferRuntime returned null");
+    auto sdk = SdkLibraries::acquire();
+    if (!sdk) {
+      return unexpected(sdk.error());
     }
+    state_ = std::make_unique<TensorRTState>();
+    auto runtime = create_runtime(sdk.value()->functions(), trt_logger());
+    if (!runtime) {
+      state_.reset();
+      return unexpected(runtime.error());
+    }
+    state_->sdk = std::move(sdk).value();
+    state_->stream.functions = &state_->sdk->functions();
+    state_->runtime.reset(runtime.value());
     state_->engine.reset(
         state_->runtime->deserializeCudaEngine(bytes_r.value().data(), bytes_r.value().size()));
     if (!state_->engine) {
@@ -394,7 +413,7 @@ class TensorRTSession final : public ExecutionSession {
     if (!state_->context) {
       return unexpected(Error::Code::LoadFailed, "createExecutionContext returned null");
     }
-    if (cudaStreamCreate(&state_->stream.stream) != cudaSuccess) {
+    if (state_->sdk->functions().stream_create(&state_->stream.stream) != cudaSuccess) {
       return unexpected(Error::Code::OOMError, "cudaStreamCreate failed");
     }
     // V01-E05-F02-T03 lands the actual warmup pass + device-buffer
@@ -422,6 +441,7 @@ class TensorRTSession final : public ExecutionSession {
     return unexpected(Error::Code::Unsupported,
                       "TensorRT inference requires TensorRT 10 explicit-IO APIs");
 #else
+    const auto& functions = state_->sdk->functions();
     std::unordered_map<std::string_view, const NamedInput*> inputs_by_name;
     inputs_by_name.reserve(request.inputs().size());
     for (const auto& input : request.inputs()) {
@@ -477,16 +497,16 @@ class TensorRTSession final : public ExecutionSession {
       if (!host.has_value()) {
         return fail(host.error());
       }
-      auto device = make_device_buffer(host.value().size());
+      auto device = make_device_buffer(functions, host.value().size());
       if (!device.has_value()) {
         return fail(device.error());
       }
-      const cudaError_t copy_status =
-          cudaMemcpyAsync(device.value().device_ptr, host.value().data(), host.value().size(),
-                          cudaMemcpyHostToDevice, state_->stream.stream);
+      const cudaError_t copy_status = functions.memcpy_async(
+          device.value().device_ptr, host.value().data(), host.value().size(),
+          cudaMemcpyHostToDevice, state_->stream.stream);
       if (copy_status != cudaSuccess) {
         return fail(Error::make(Error::Code::InferenceFailed,
-                                cuda_error_message(copy_status, "cudaMemcpyAsync H2D")));
+                                cuda_error_message(functions, copy_status, "cudaMemcpyAsync H2D")));
       }
       if (!state_->context->setTensorAddress(tensor_name_c, device.value().device_ptr)) {
         return fail(Error::make(
@@ -525,7 +545,7 @@ class TensorRTSession final : public ExecutionSession {
       if (!tv.has_value()) {
         return fail(tv.error());
       }
-      auto device = make_device_buffer(tv.value().byte_size());
+      auto device = make_device_buffer(functions, tv.value().byte_size());
       if (!device.has_value()) {
         return fail(device.error());
       }
@@ -564,18 +584,18 @@ class TensorRTSession final : public ExecutionSession {
       if (!dst.has_value()) {
         return fail(dst.error());
       }
-      const cudaError_t copy_status =
-          cudaMemcpyAsync(dst.value().data(), pending.device.device_ptr, pending.tensor.byte_size(),
-                          cudaMemcpyDeviceToHost, state_->stream.stream);
+      const cudaError_t copy_status = functions.memcpy_async(
+          dst.value().data(), pending.device.device_ptr, pending.tensor.byte_size(),
+          cudaMemcpyDeviceToHost, state_->stream.stream);
       if (copy_status != cudaSuccess) {
         return fail(Error::make(Error::Code::InferenceFailed,
-                                cuda_error_message(copy_status, "cudaMemcpyAsync D2H")));
+                                cuda_error_message(functions, copy_status, "cudaMemcpyAsync D2H")));
       }
     }
-    const cudaError_t sync_status = cudaStreamSynchronize(state_->stream.stream);
+    const cudaError_t sync_status = functions.stream_synchronize(state_->stream.stream);
     if (sync_status != cudaSuccess) {
       return fail(Error::make(Error::Code::InferenceFailed,
-                              cuda_error_message(sync_status, "cudaStreamSynchronize")));
+                              cuda_error_message(functions, sync_status, "cudaStreamSynchronize")));
     }
     return outputs;
 #endif

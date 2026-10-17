@@ -78,11 +78,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           worker=build-tensorrt/serving_worker/tensorplate-serving
-          readelf -d "$worker" > build-tensorrt/worker-dynamic.txt
-          grep -E 'NEEDED.*\[libnvinfer\.so\.' build-tensorrt/worker-dynamic.txt
-          grep -E 'NEEDED.*\[libcudart\.so\.' build-tensorrt/worker-dynamic.txt
-          ldd "$worker" | tee build-tensorrt/worker-ldd.txt
-          if grep -q 'not found' build-tensorrt/worker-ldd.txt; then exit 1; fi
+          tools/ci/check-tensorrt-linkage.sh "$worker" build-tensorrt/test/unit/tp_test_unit
           "$worker" --version
 
       - name: Inspect TensorRT runtime dependencies
@@ -94,11 +90,65 @@ jobs:
       - name: Exercise the private loader with the installed SDK
         env:
           TP_TEST_TENSORRT_SDK: '1'
+          TP_TEST_TENSORRT_DRIVERLESS: '1'
         run: |
           ctest --test-dir build-tensorrt --output-on-failure --no-tests=error \
-            -R '^TensorRTLoader\.'
+            -R '^TensorRT(Loader|LoaderCache|Preflight|Adapter\.Driverless)'
+          build-tensorrt/test/unit/tp_test_unit \
+            --gtest_filter=TensorRTAdapter.DriverlessSdkReportsLoadFailed --gtest_output=json:driverless.json
+          python -c 'import json; r=json.load(open("driverless.json")); assert r["tests"] == 1 and r["testsuites"][0]["testsuite"][0]["result"] == "COMPLETED" and r["failures"] == 0'
 
       - name: Device-free T1, T2 and T3 tests
         env:
           TP_TEST_PYTHON: python
         run: ctest --test-dir build-tensorrt --output-on-failure --no-tests=error -L 'T[123]'
+
+      - name: Sanitized SDK preflight and ownership
+        env:
+          TP_TEST_TENSORRT_SDK: '1'
+          TP_TEST_TENSORRT_DRIVERLESS: '1'
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/tools/ci/tensorrt-lsan.supp
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          cmake -S . -B build-tensorrt-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DTP_ENABLE_SANITIZERS=ON -DTP_ENABLE_TENSORRT=ON -DTP_REQUIRE_TENSORRT_SDK=ON \
+            -DTP_ENABLE_STREAMING_GRPC=OFF -DCUDAToolkit_ROOT="$CUDAToolkit_ROOT" \
+            -DCMAKE_PREFIX_PATH="$PWD/build-tensorrt/vcpkg_installed/x64-linux"
+          cmake --build build-tensorrt-asan --parallel 4 --target tp_test_unit tp_test_tensorrt_loader
+          ctest --test-dir build-tensorrt-asan --output-on-failure --no-tests=error \
+            -R '^TensorRT' -E 'InstalledSdkLoadsWithoutCreatingRuntime'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tensorrt-worker
+          path: build-tensorrt/serving_worker/tensorplate-serving
+
+  no-libraries:
+    name: No NVIDIA libraries (Ubuntu ${{ matrix.ubuntu }})
+    needs: tensorrt-sdk
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ['22.04', '24.04']
+    container: ubuntu:${{ matrix.ubuntu }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: tensorrt-worker
+          path: worker
+      - name: Install ordinary runtime and Python backend without CUDA wheels
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3-venv binutils libstdc++6 ca-certificates
+          python3 -m venv /tmp/backend
+          /tmp/backend/bin/pip install --no-deps ./backends/python_pytorch
+          /tmp/backend/bin/python -c 'import tensorplate_pytorch_backend'
+      - name: Start SDK-built worker and require real Python response and TensorRT refusal
+        run: |
+          chmod +x worker/tensorplate-serving
+          tools/ci/check-tensorrt-linkage.sh worker/tensorplate-serving
+          timeout 90 /tmp/backend/bin/python tools/ci/tensorrt-no-library-smoke.py worker/tensorplate-serving

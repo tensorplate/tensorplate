@@ -149,72 +149,66 @@ if(TP_ENABLE_TENSORRT)
   # but no SDK installed register the adapter and surface typed
   # Unsupported from `load` instead of failing the build.
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
-    # Host C++ needs headers, not nvcc. The adapter still links the runtime DSOs.
+    set(TP_TENSORRT_DYNAMIC TRUE)
+    # Host C++ needs only headers; NVIDIA libraries are loaded at session load.
     find_path(TP_CUDA_INCLUDE_DIR cuda_runtime_api.h
       HINTS ${CUDAToolkit_ROOT} ENV CUDAToolkit_ROOT
       PATH_SUFFIXES include targets/x86_64-linux/include)
-    find_library(TP_CUDART_LIB cudart
-      HINTS ${CUDAToolkit_ROOT} ENV CUDAToolkit_ROOT
-      PATH_SUFFIXES lib64 targets/x86_64-linux/lib)
-    set(CUDAToolkit_FOUND FALSE)
-    if(TP_CUDA_INCLUDE_DIR AND TP_CUDART_LIB)
-      add_library(CUDA::cudart UNKNOWN IMPORTED)
-      set_target_properties(CUDA::cudart PROPERTIES
-        IMPORTED_LOCATION "${TP_CUDART_LIB}"
-        INTERFACE_INCLUDE_DIRECTORIES "${TP_CUDA_INCLUDE_DIR}")
-      set(CUDAToolkit_FOUND TRUE)
-    endif()
   else()
     find_package(CUDAToolkit QUIET)
   endif()
   find_path(TP_TENSORRT_INCLUDE_DIR NvInfer.h
     HINTS ENV TENSORRT_ROOT ENV TENSORRT_INSTALL_DIR
     PATH_SUFFIXES include)
-  # The runtime package supplies the versioned DSO; no static development archive.
-  set(tp_tensorrt_library_names nvinfer)
-  if(EXISTS "${TP_TENSORRT_INCLUDE_DIR}/NvInferVersion.h")
-    file(STRINGS "${TP_TENSORRT_INCLUDE_DIR}/NvInferVersion.h" tp_tensorrt_major_line
-      REGEX "^#define NV_TENSORRT_MAJOR +[A-Za-z0-9_]+")
-    string(REGEX REPLACE "^#define NV_TENSORRT_MAJOR +([A-Za-z0-9_]+).*" "\\1"
-      tp_tensorrt_major "${tp_tensorrt_major_line}")
-    # Newer headers alias the public major to TRT_MAJOR_ENTERPRISE.
-    if(tp_tensorrt_major MATCHES "^[A-Za-z_][A-Za-z0-9_]*$")
+  if(NOT TP_TENSORRT_DYNAMIC)
+    # The runtime package supplies the versioned DSO; no static development archive.
+    set(tp_tensorrt_library_names nvinfer)
+    if(EXISTS "${TP_TENSORRT_INCLUDE_DIR}/NvInferVersion.h")
       file(STRINGS "${TP_TENSORRT_INCLUDE_DIR}/NvInferVersion.h" tp_tensorrt_major_line
-        REGEX "^#define ${tp_tensorrt_major} +[0-9]+")
-      string(REGEX REPLACE "^#define [A-Za-z0-9_]+ +([0-9]+).*" "\\1"
+        REGEX "^#define NV_TENSORRT_MAJOR +[A-Za-z0-9_]+")
+      string(REGEX REPLACE "^#define NV_TENSORRT_MAJOR +([A-Za-z0-9_]+).*" "\\1"
         tp_tensorrt_major "${tp_tensorrt_major_line}")
+      # Newer headers alias the public major to TRT_MAJOR_ENTERPRISE.
+      if(tp_tensorrt_major MATCHES "^[A-Za-z_][A-Za-z0-9_]*$")
+        file(STRINGS "${TP_TENSORRT_INCLUDE_DIR}/NvInferVersion.h" tp_tensorrt_major_line
+          REGEX "^#define ${tp_tensorrt_major} +[0-9]+")
+        string(REGEX REPLACE "^#define [A-Za-z0-9_]+ +([0-9]+).*" "\\1"
+          tp_tensorrt_major "${tp_tensorrt_major_line}")
+      endif()
+      if(tp_tensorrt_major MATCHES "^[0-9]+$")
+        list(APPEND tp_tensorrt_library_names "libnvinfer.so.${tp_tensorrt_major}")
+      endif()
     endif()
-    if(tp_tensorrt_major MATCHES "^[0-9]+$")
-      list(APPEND tp_tensorrt_library_names "libnvinfer.so.${tp_tensorrt_major}")
-    endif()
+    find_library(TP_TENSORRT_NVINFER_LIB NAMES ${tp_tensorrt_library_names}
+      HINTS ENV TENSORRT_ROOT ENV TENSORRT_INSTALL_DIR
+      PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu lib/aarch64-linux-gnu)
   endif()
-  find_library(TP_TENSORRT_NVINFER_LIB NAMES ${tp_tensorrt_library_names}
-    HINTS ENV TENSORRT_ROOT ENV TENSORRT_INSTALL_DIR
-    PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu lib/aarch64-linux-gnu)
-  if(TP_TENSORRT_INCLUDE_DIR AND TP_CUDA_INCLUDE_DIR AND
-     CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
-    # Separate from tp_runtime until the adapter adopts optional runtime loading.
+  if(TP_TENSORRT_INCLUDE_DIR AND ((TP_TENSORRT_DYNAMIC AND TP_CUDA_INCLUDE_DIR) OR
+     (NOT TP_TENSORRT_DYNAMIC AND TP_TENSORRT_NVINFER_LIB AND CUDAToolkit_FOUND)))
     add_library(tp_tensorrt_loader STATIC src/adapters/tensorrt/sdk_loader.cpp)
     target_compile_features(tp_tensorrt_loader PUBLIC cxx_std_20)
-    target_compile_definitions(tp_tensorrt_loader PUBLIC TP_HAS_TENSORRT_LOADER=1)
+    target_compile_definitions(tp_tensorrt_loader PUBLIC
+      TP_HAS_TENSORRT_SDK=1 TP_HAS_TENSORRT_LOADER=$<BOOL:${TP_TENSORRT_DYNAMIC}>)
     target_include_directories(tp_tensorrt_loader PUBLIC
       ${CMAKE_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_include_directories(tp_tensorrt_loader SYSTEM PUBLIC
       ${TP_TENSORRT_INCLUDE_DIR} ${TP_CUDA_INCLUDE_DIR})
-    target_link_libraries(tp_tensorrt_loader PRIVATE ${CMAKE_DL_LIBS})
+    if(TP_TENSORRT_DYNAMIC)
+      target_link_libraries(tp_tensorrt_loader PRIVATE ${CMAKE_DL_LIBS})
+    else()
+      target_link_libraries(tp_tensorrt_loader PUBLIC ${TP_TENSORRT_NVINFER_LIB} CUDA::cudart)
+    endif()
     tp_apply_warnings(tp_tensorrt_loader)
     tp_apply_sanitizers(tp_tensorrt_loader)
-  endif()
-  if(TP_TENSORRT_INCLUDE_DIR AND TP_TENSORRT_NVINFER_LIB AND CUDAToolkit_FOUND)
     message(STATUS "TensorRT SDK detected; building real TensorRT adapter execution path")
     target_compile_definitions(tp_runtime PUBLIC TP_HAS_TENSORRT_SDK=1)
     target_include_directories(tp_runtime PRIVATE ${TP_TENSORRT_INCLUDE_DIR})
-    target_link_libraries(tp_runtime PUBLIC ${TP_TENSORRT_NVINFER_LIB} CUDA::cudart)
+    target_link_libraries(tp_runtime PRIVATE tp_tensorrt_loader)
   else()
     if(TP_REQUIRE_TENSORRT_SDK)
       message(FATAL_ERROR
         "TP_REQUIRE_TENSORRT_SDK=ON but the TensorRT/CUDA SDK was not found. "
-        "Install JetPack/CUDA/TensorRT development headers and libraries, or "
+        "Install CUDA/TensorRT headers (plus libraries on Jetson), or "
         "disable the TensorRT adapter for non-release builds.")
     else()
       message(STATUS
