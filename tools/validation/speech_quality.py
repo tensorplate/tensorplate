@@ -9,15 +9,16 @@ decoding each whole file. Each arm's finals are read from a transcripts file
 manifest, or by digest from a private references file.
 
 Both sides are normalized per language before scoring: English by Unicode NFC,
-casefold, punctuation to space and whitespace collapse; Arabic by NFC, tatweel
-and harakat removed, punctuation to space and whitespace collapse, every other
-letter and every numeral kept as written. The record holds, per language and
-codec, each arm's micro word error rate, normalized and raw, and the streaming
-arm's distance from the batch arm; the words decoded on silence; and the
-semantic fixtures' critical regressions against the batch arm. A failed file is
-scored as an empty prediction and counted as a failure; a completed speech file
-with no words is counted too. Each gate reads pass, fail, or insufficient when
-it has fewer samples than its minimum.
+casefold, punctuation to space, NFC again and whitespace collapse; Arabic by
+NFC, tatweel and harakat removed, punctuation to space, NFC again and
+whitespace collapse, every other letter and every numeral kept as written. The
+record holds, per language and codec, each arm's micro word error rate,
+normalized and raw, and the streaming arm's distance from the batch arm; the
+words decoded on silence; and the semantic fixtures' critical regressions
+against the batch arm. A failed file is scored as an empty prediction and
+counted as a failure; a completed speech file with no words is counted too.
+Each gate reads pass, fail, or insufficient when it has fewer samples than its
+minimum.
 
 Exit status: 0 every gate passed, 1 refused, 2 unreadable, 3 a gate failed or
 had too few samples.
@@ -135,7 +136,11 @@ DEDIACRITIZE = {ord(ch): None for ch in HARAKAT | {TATWEEL}}
 
 
 def normalize(text: str, language: str) -> list[str]:
-    """The words the frozen normalizer of `language` leaves in `text`."""
+    """The words the frozen normalizer of `language` leaves in `text`.
+
+    The last NFC pass composes what the case fold or a removal left decomposed, so the
+    words are NFC and normalizing them again changes nothing.
+    """
     text = unicodedata.normalize("NFC", text)
     if language == "en":
         text = text.casefold()
@@ -143,7 +148,7 @@ def normalize(text: str, language: str) -> list[str]:
         text = text.translate(DEDIACRITIZE)
     else:
         raise QualityError(f"no normalizer for language {language!r}")
-    return text.translate(PUNCTUATION_TO_SPACE).split()
+    return unicodedata.normalize("NFC", text.translate(PUNCTUATION_TO_SPACE)).split()
 
 
 def text_findings(text: str) -> set[str]:

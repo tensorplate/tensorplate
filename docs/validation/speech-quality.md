@@ -55,15 +55,19 @@ stay in their word.
 
 | Language | Steps, in order | Identity |
 | --- | --- | --- |
-| `en` | NFC; full Unicode casefold; punctuation to a space; split on whitespace | `tp-wer-en-nfc-casefold-v1` |
-| `ar` | NFC; remove tatweel (U+0640) and harakat (U+064B to U+0652 and U+0670); punctuation to a space; split on whitespace | `tp-wer-ar-nfc-dediacritized-v1` |
+| `en` | NFC; full Unicode casefold; punctuation to a space; NFC; split on whitespace | `tp-wer-en-nfc-casefold-v1` |
+| `ar` | NFC; remove tatweel (U+0640) and harakat (U+064B to U+0652 and U+0670); punctuation to a space; NFC; split on whitespace | `tp-wer-ar-nfc-dediacritized-v1` |
+
+The last NFC pass composes what the case fold or a removal left decomposed:
+full casefold writes ǰ as `j` and a combining caron, and removing a tatweel
+written between a carrier and its hamza leaves the two side by side. So a
+normalizer's words are always NFC, and normalizing them again changes nothing.
 
 What the normalizers keep, on purpose:
 
 - **Hamza and madda.** NFC composes them with their carrier into the letters
-  أ إ آ ؤ ئ, whatever order a decomposed input had them in. NFC runs before
-  tatweel is removed, so a tatweel written between a carrier and its hamza
-  keeps them apart.
+  أ إ آ ؤ ئ, whatever order a decomposed input had them in, and also when a
+  tatweel or a haraka written between them is removed.
 - **Letter variants.** Alef forms, ta marbuta and alef maksura are not folded:
   أ and ا, ة and ه, ى and ي stay different words.
 - **Digits as written.** Western, Arabic-Indic and Extended Arabic-Indic digits

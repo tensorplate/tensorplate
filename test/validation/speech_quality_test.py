@@ -74,6 +74,8 @@ def check_english_normalizer() -> None:
     assert norm("\ta\u00a0b\u2009c\u3000d\n", "en") == ["a", "b", "c", "d"]
     assert norm(" ,.;: ", "en") == []
     assert norm("a\u200bb", "en") == ["a\u200bb"]
+    # Full casefold decomposes j with caron; the last NFC pass composes it again.
+    assert norm("\u01f0", "en") == norm("J\u030c", "en") == ["\u01f0"]
     try:
         norm("a", "fr")
     except quality.QualityError:
@@ -91,6 +93,8 @@ def check_arabic_normalizer() -> None:
     assert norm("ؤ", "ar") == norm("و\u0654", "ar") == ["ؤ"]
     assert norm("ئ", "ar") == norm("ي\u0654", "ar") == ["ئ"]
     assert norm("ك\u0640ت\u0640اب", "ar") == ["كتاب"]
+    # A tatweel between a carrier and its hamza is removed, and the two compose.
+    assert norm("ا\u0640\u0654", "ar") == ["أ"] and norm("و\u0640\u0654", "ar") == ["ؤ"]
     assert norm(
         "ك\u0650ت\u064eاب\u064c م\u064fد\u064e\u0651ة\u064c ق\u064fل\u0652 ك\u0650ت\u064eاب\u064bا ك\u0650ت\u064eاب\u064d",
         "ar",
@@ -121,6 +125,23 @@ def check_arabic_normalizer() -> None:
     assert quality.text_findings("a\tb\nc\u00a0d\u000be\u000cf\r") == set()
     assert quality.text_findings("a\u001fb") == {"format_character"}
     assert quality.text_findings("لا 3 ٣") == set()
+
+
+def check_idempotence() -> None:
+    """Every assigned code point, alone and between two letters, normalizes to NFC words
+    that normalize to themselves. Surrogates are refused before any normalizer runs."""
+    for code in range(0x110000):
+        char = chr(code)
+        if unicodedata.category(char) in ("Cn", "Cs"):
+            continue
+        for language, (left, right) in (("en", ("a", "b")), ("ar", ("\u0628", "\u062a"))):
+            for text in (char, left + char + right):
+                words = norm(text, language)
+                assert all(unicodedata.is_normalized("NFC", word) for word in words), (
+                    language,
+                    hex(code),
+                )
+                assert norm(" ".join(words), language) == words, (language, hex(code))
 
 
 def check_lexicons() -> None:
@@ -1259,6 +1280,7 @@ def check_cli(scorer: Scorer) -> None:
 def main() -> int:
     check_english_normalizer()
     check_arabic_normalizer()
+    check_idempotence()
     check_lexicons()
     check_alignment()
     check_critical_words()
