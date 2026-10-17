@@ -94,6 +94,12 @@ Running them with address-space randomization off,
 
 ## Rust
 
+The packaging and release-driver CI job installs the pinned toolchain,
+including clippy and rustfmt, with `tools/ci/install-pinned-toolchain.sh`
+before any test suite runs. Use the same setup before running
+`test/release/run.sh` locally so its Cargo invocations do not install Rust
+in the middle of a test.
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

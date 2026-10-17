@@ -18,6 +18,8 @@ import subprocess
 import tempfile
 import unittest
 
+import yaml
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "tools/ci/install-pinned-toolchain.sh"
 WORKFLOWS = REPO_ROOT / ".github/workflows"
@@ -207,6 +209,21 @@ class InstallPinnedToolchain(unittest.TestCase):
 
 
 class WorkflowCallSites(unittest.TestCase):
+    def test_packaging_job_installs_before_any_test(self) -> None:
+        workflow = yaml.safe_load((WORKFLOWS / "apt-lifecycle.yml").read_text())
+        steps = workflow["jobs"]["script-checks"]["steps"]
+        installs = [
+            i for i, step in enumerate(steps)
+            if step.get("run", "").strip() == "tools/ci/install-pinned-toolchain.sh"
+        ]
+        self.assertEqual(len(installs), 1, "packaging checks need one explicit install")
+        install = installs[0]
+        self.assertNotIn("if", steps[install], "toolchain setup must not be conditional")
+        self.assertNotIn("continue-on-error", steps[install], "setup failure must stop the job")
+        tests = [i for i, step in enumerate(steps) if "test/" in step.get("run", "")]
+        self.assertTrue(tests, "packaging job must run its suites")
+        self.assertLess(install, min(tests), "install before any suite can invoke cargo")
+
     def test_hosted_jobs_use_the_script_and_only_the_self_hosted_job_keeps_the_old_line(self) -> None:
         old = []
         for wf in sorted(WORKFLOWS.glob("*.yml")):
@@ -219,7 +236,7 @@ class WorkflowCallSites(unittest.TestCase):
         self.assertEqual(job.strip(), "build_packages:")
         for name in ("supply-chain.yml", "rust.yml", "apt-lifecycle.yml", "release.yml"):
             self.assertIn("tools/ci/install-pinned-toolchain.sh", (WORKFLOWS / name).read_text())
-        self.assertEqual((WORKFLOWS / "apt-lifecycle.yml").read_text().count("install-pinned-toolchain.sh"), 2)
+        self.assertEqual((WORKFLOWS / "apt-lifecycle.yml").read_text().count("install-pinned-toolchain.sh"), 3)
 
 
 if __name__ == "__main__":
