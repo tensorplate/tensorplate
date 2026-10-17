@@ -356,7 +356,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   raw, and gates the streaming rate against its ceiling and within 2
   percentage points of batch. English is normalized by NFC, casefold and
   punctuation to space; Arabic by NFC with tatweel and harakat removed and
-  punctuation to space, keeping letter variants and digits as written. Failed
+  punctuation to space, keeping letter variants and digits as written. Both
+  end with a second NFC pass, so normalizing twice changes nothing. Failed
   files score as empty predictions. The record also gates words decoded on
   silence and critical regressions of negation, numeral, repetition and
   window-seam fixtures against the batch arm. A gate below its sample minimum
