@@ -93,9 +93,15 @@ derives each sentence's stratum from its count and requires:
 
 **Segments.** A run sends each text's bytes exactly as filed, one text per
 segment: a sentence's count, stratum and place against the 200-token bound
-are those of its whole text. Eight texts, all in `t101to200`, hold more than
-one sentence: an internal `.`, `!` or `?`, with any closing quote, followed
-by more text (the abbreviations Mr. and Mrs. are not counted). A benchmark
+are those of its whole text. Eight texts, all from LibriTTS-R and all in
+`t101to200`, hold more than one sentence: an internal `.`, `!` or `?`, with
+any closing quote, followed by more text (the abbreviations Mr. and Mrs. are
+not counted). They are `librittsr-1580-141083-000066-000002`,
+`librittsr-260-123440-000021-000001`, `librittsr-4446-2273-000022-000001`,
+`librittsr-6829-68769-000074-000000`, `librittsr-7021-85628-000027-000000`,
+`librittsr-7176-92135-000003-000002`, `librittsr-8455-210777-000025-000000`
+and `librittsr-8463-294828-000064-000000`; `summary` derives the list as
+`multi_sentence`, and the corpus test holds this paragraph to it. A benchmark
 that splits text on sentence ends would send each of those as two or more
 shorter segments, which changes their strata; the counts do not describe
 that run.

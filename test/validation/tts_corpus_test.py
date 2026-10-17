@@ -33,6 +33,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 TOOL = ROOT / "tools/validation/tts_corpus.py"
 FILED = ROOT / "tools/validation/corpus/tts-text-en-us.json"
+DOC = ROOT / "docs/validation/tts-text-corpus.md"
 sys.path.insert(0, str(ROOT / "tools/validation"))
 
 import jsonschema  # noqa: E402
@@ -340,6 +341,11 @@ def check_filed() -> None:
     summary = tts.summarize(filed)
     assert all(count >= 100 for count in summary["per_stratum"].values()), summary
     assert set(summary["per_stratum"]) == {"t1to20", "t21to100", "t101to200"}
+    # The docs name the multi-sentence texts; the list must be the one the tool derives.
+    segments = DOC.read_text(encoding="utf-8").split("**Segments.**", 1)[1].split("\n\n", 1)[0]
+    ids = {s["id"] for s in filed["sentences"]}
+    named = [word for word in re.findall(r"`([^`]+)`", segments) if word in ids]
+    assert named == summary["multi_sentence"] and len(named) == 8, (named, summary)
 
 
 def check_derivations() -> None:
@@ -358,6 +364,15 @@ def check_derivations() -> None:
             continue
         raise AssertionError(f"{tokens} tokens has a stratum")
     assert tts.critical_classes("I can\u2019t go.") == ["negation"]
+    for text, multi in (
+        ("Stop. Go on.", True),
+        ('"Now?" said he.', True),
+        ("Wait! \u201cGo.\u201d", True),
+        ("Mr. Smith met Mrs. Hale.", False),
+        ('He said "go."', False),
+        ("A 3.5 mile walk.", False),
+    ):
+        assert tts.multi_sentence(text) == multi, text
     assert tts.critical_classes("Nothing, at 9.") == ["negation", "numeral"]
     assert tts.critical_classes("Notice the knot, at nine.") == []
     assert tts.critical_classes("Gate \u0662.") == ["numeral"]
@@ -1507,6 +1522,7 @@ def check_cli(good: dict[str, Any], scratch: Path) -> None:
         "per_source": {"authored": 110, "cmu-arctic": 110, "libritts-r": 110},
         "per_critical": {"negation": 36, "numeral": 36},
         "long_or_boundary": 30,
+        "multi_sentence": [],
         "listening": 30,
         "queued_sequences": 100,
     }

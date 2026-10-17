@@ -192,6 +192,8 @@ NEGATIONS = frozenset(
 )
 WORD = re.compile(r"[a-z]+(?:'[a-z]+)*")
 SENTENCE_END = re.compile(r"[.!?][\"'\u2019\u201d]?\Z")
+# A sentence end, with any closing quote, followed by more text; Mr. and Mrs. end no sentence.
+INNER_SENTENCE_END = re.compile(r"(?<!\bMr)(?<!\bMrs)[.!?][\"'\u2019\u201d]?\s+\S")
 
 SAMPLE_RATE_HZ = 24000
 RECORD_NAME = "reference-record.json"
@@ -226,6 +228,11 @@ def stratum(tokens: int) -> str:
         if low <= tokens <= high:
             return name
     raise CorpusError(f"{tokens} phoneme tokens is outside every stratum (1 to {MAX_TOKENS})")
+
+
+def multi_sentence(text: str) -> bool:
+    """Whether the text holds more than one sentence, which a splitting benchmark would split."""
+    return INNER_SENTENCE_END.search(text) is not None
 
 
 def critical_classes(text: str) -> list[str]:
@@ -563,6 +570,7 @@ def summarize(corpus: dict[str, Any]) -> dict[str, Any]:
             for s in sentences
             if s["phoneme_tokens"] >= LONG_TOKENS or s["phoneme_tokens"] in BOUNDARY_TOKENS
         ),
+        "multi_sentence": [s["id"] for s in sentences if multi_sentence(s["text"])],
         "listening": len(corpus["listening"]),
         "queued_sequences": len(corpus["queued_sequences"]),
     }
