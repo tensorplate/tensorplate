@@ -1421,6 +1421,162 @@ TEST(SpeechPartialTranscripts, ASessionDueAgainWhileWaitingKeepsOnePlace) {
                                                      {second, 0, 20 * kVadFrame}}));
 }
 
+/// Frames of speech, but silence in each frame `silent` picks.
+Bytes frames_of(std::uint64_t frames, const std::function<bool(std::uint64_t)>& silent) {
+  Bytes pcm;
+  for (std::uint64_t frame = 0; frame < frames; ++frame) {
+    const auto seed = static_cast<unsigned>(frame);
+    pcm = join(std::move(pcm), silent(frame) ? quiet(kVadFrame, seed) : voiced(kVadFrame, seed));
+  }
+  return pcm;
+}
+
+/// Sends frames [from, to) of `audio` in messages of `frames` frames, each
+/// scored before the next is sent: one voice-activity job a message.
+void in_messages(Binding& binding, std::uint64_t key, const Bytes& audio, std::uint64_t from,
+                 std::uint64_t to, std::uint64_t frames) {
+  for (std::uint64_t frame = from; frame < to; frame += frames) {
+    binding.audio(key, samples_of(audio, frame * kVadFrame, (frame + frames) * kVadFrame));
+    ASSERT_TRUE(binding.settle());
+  }
+}
+
+TEST(SpeechPartialTranscripts, NoneStartsInASilenceRunThatCouldEndTheUtterance) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes audio = join(voiced(14 * kVadFrame, 120), quiet(10 * kVadFrame, 121));
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, key, audio, 0, 10, 10));
+  // The next is due with the first silence frame scored, and the run ends
+  // the utterance.
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, key, audio, 10, 24, 1));
+  EXPECT_EQ(decodes_of(speech),
+            (std::vector<Decode>{{key, 0, 10 * kVadFrame}, {key, 0, 24 * kVadFrame}}));
+}
+
+TEST(SpeechPartialTranscripts, OneWaitingForTheLaneWhenSilenceBeginsWaitsForSpeech) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto first = binding.open_audio();
+  const auto second = binding.open_audio();
+  const Bytes audio =
+      join(voiced(10 * kVadFrame, 122), frames_of(2, [](auto frame) { return frame == 0; }));
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(first, voiced(10 * kVadFrame, 123));
+  ASSERT_TRUE(binding.settle());
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, second, audio, 0, 10, 10));
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, second, audio, 10, 11, 1));
+  speech.release_jobs();
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{first, 0, 10 * kVadFrame}}));
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, second, audio, 11, 12, 1));
+  EXPECT_EQ(decodes_of(speech),
+            (std::vector<Decode>{{first, 0, 10 * kVadFrame}, {second, 0, 12 * kVadFrame}}));
+}
+
+TEST(SpeechPartialTranscripts, OneQueuedOnSpeechWaitsAgainIfSilenceFollowsInTheQueue) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto first = binding.open_audio();
+  const auto second = binding.open_audio();
+  const Bytes audio =
+      frames_of(16, [](auto frame) { return frame == 9 || (frame >= 11 && frame < 15); });
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(first, voiced(10 * kVadFrame, 124));
+  ASSERT_TRUE(binding.settle());
+  // Due on a dip, then queued on the speech frame after it, then the talker stops.
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, second, audio, 0, 9, 9));
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, second, audio, 9, 15, 1));
+  speech.release_jobs();
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{first, 0, 10 * kVadFrame}}));
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, second, audio, 15, 16, 1));
+  EXPECT_EQ(decodes_of(speech),
+            (std::vector<Decode>{{first, 0, 10 * kVadFrame}, {second, 0, 16 * kVadFrame}}));
+}
+
+TEST(SpeechPartialTranscripts, OneQueuedWhileSpeakingWaitsIfSilenceFollowsInTheQueue) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto first = binding.open_audio();
+  const auto second = binding.open_audio();
+  const Bytes audio = frames_of(15, [](auto frame) { return frame >= 11; });
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(first, voiced(10 * kVadFrame, 126));
+  ASSERT_TRUE(binding.settle());
+  // Queued on speech, a frame more of it in the queue, then silence.
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, second, audio, 0, 10, 10));
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, second, audio, 10, 15, 1));
+  speech.release_jobs();
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{first, 0, 10 * kVadFrame}}));
+}
+
+TEST(SpeechPartialTranscripts, OneDueOnADipQueuesOnceAJobScoresSpeech) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto first = binding.open_audio();
+  const auto second = binding.open_audio();
+  const Bytes audio = frames_of(12, [](auto frame) { return frame == 9 || frame == 11; });
+  speech.fixture->hold_jobs(JobClass::SttDecode);
+  binding.audio(first, voiced(10 * kVadFrame, 125));
+  ASSERT_TRUE(binding.settle());
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, second, audio, 0, 9, 9));
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, second, audio, 9, 10, 1));
+  // One job scores speech, then a dip: the partial queues behind the lane.
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, second, audio, 10, 12, 2));
+  speech.release_jobs();
+  ASSERT_TRUE(binding.settle());
+  EXPECT_EQ(decodes_of(speech),
+            (std::vector<Decode>{{first, 0, 10 * kVadFrame}, {second, 0, 12 * kVadFrame}}));
+}
+
+TEST(SpeechPartialTranscripts, AOneFrameDipDelaysOneToTheNextSpeechFrame) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes audio = frames_of(40, [](auto frame) { return frame >= 10 && frame % 2 == 1; });
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, key, audio, 0, 10, 10));
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, key, audio, 10, 40, 1));
+  // Due at 15, 20, 26, 32 and 38 frames; all but the first land on a dip.
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{key, 0, 10 * kVadFrame},
+                                                     {key, 0, 15 * kVadFrame},
+                                                     {key, 0, 21 * kVadFrame},
+                                                     {key, 0, 27 * kVadFrame},
+                                                     {key, 0, 33 * kVadFrame},
+                                                     {key, 0, 39 * kVadFrame}}));
+}
+
+TEST(SpeechPartialTranscripts, DipsEndingEachVoiceActivityJobDoNotStarveThem) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes audio = frames_of(34, [](auto frame) { return frame >= 10 && frame % 2 == 1; });
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, key, audio, 0, 10, 10));
+  // Each job scores speech, then a dip: one due waits a job.
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, key, audio, 10, 34, 2));
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{key, 0, 10 * kVadFrame},
+                                                     {key, 0, 18 * kVadFrame},
+                                                     {key, 0, 26 * kVadFrame},
+                                                     {key, 0, 34 * kVadFrame}}));
+}
+
+TEST(SpeechPartialTranscripts, TheNextUtterancesFirstWaitsThroughAPauseWhereItIsDue) {
+  Binding binding(&speech_dispatch_detecting_voice);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = binding.open_audio();
+  const Bytes audio =
+      frames_of(31, [](auto frame) { return (frame >= 10 && frame < 20) || frame == 29; });
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, key, audio, 0, 10, 10));
+  // Waiting from 15 frames to the endpoint at 20.
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, key, audio, 10, 20, 1));
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, key, audio, 20, 29, 9));
+  ASSERT_NO_FATAL_FAILURE(in_messages(binding, key, audio, 29, 31, 1));
+  EXPECT_EQ(decodes_of(speech), (std::vector<Decode>{{key, 0, 10 * kVadFrame},
+                                                     {key, 0, 20 * kVadFrame},
+                                                     {key, 20 * kVadFrame, 31 * kVadFrame}}));
+}
+
 TEST(SpeechPartialTranscripts, NoneStartsOnceAFinalizeWaitsForItsFrames) {
   Binding binding(&speech_dispatch_detecting_voice);
   SpeechUnderTest& speech = speech_of(binding);

@@ -1673,7 +1673,31 @@ that will own them.
   split), each later one once another 160 ms was, counted in source
   audio, never wall time. A session has one decode on the lane at a
   time, so the strides that pass while one runs give one decode of the
-  latest audio, never a backlog. Its text is offered as
+  latest audio, never a backlog. A partial due while the utterance is in a
+  silence run that could still end it waits, so that the utterance's final
+  does not queue behind a decode started on its trailing silence. The
+  dispatch asks each time a voice-activity job's scores come in, also
+  while the partial waits on the lane, and again when its turn comes; the
+  partial starts, over the latest audio, only if the last frame scored is
+  speech or a frame scored since the dispatch last asked was, even if
+  silence followed that frame. A decode already running is not cancelled.
+  When each job scores one frame, a partial is late by at most the pause
+  it waited through: 288 ms, a frame short of the 320 ms that ends the
+  utterance. When a job scores more frames (a message of up to 320 ms, or
+  frames that arrived while the session's last job ran), it can be late by
+  up to the rest of the pause and the job that scores speech again, at
+  most 40 frames (1,280 ms): the eight frames a pause can still run and
+  the 32 one job scores. The next stride counts from the late start. One
+  that waits at its turn on the lane loses its place, so under load it is
+  also late by the decodes queued meanwhile. The first partial waits the
+  same way when a pause falls where it is due. Scoring each clip in one
+  voice-activity state, as the dispatch does, the real voice-activity
+  model paused inside utterances for at most 160 ms on the jfk clip and
+  96 ms on the FLEURS Arabic clip of
+  `test/unit/fixtures/transcript_commitment/`. One job that scores an
+  utterance's last speech and up to nine frames of silence after it can
+  still start a partial, and the final may then wait for it. Its text is
+  offered as
   `PartialTranscript` with the utterance's id and the next revision, from
   1 in each utterance, unless it is blank or the same as the last one
   offered; a revision is counted only when offered. Every partial is the

@@ -176,6 +176,13 @@ std::optional<std::uint64_t> VadPolicy::speech_start() const noexcept {
   return std::nullopt;
 }
 
+std::optional<std::uint64_t> VadPolicy::speech_end() const noexcept {
+  if (utterance_start_) {
+    return next_frame_ - std::uint64_t{run_frames_} * profile_.frame_samples;
+  }
+  return std::nullopt;
+}
+
 std::uint64_t VadPolicy::earliest_utterance_start() const noexcept {
   if (utterance_start_) {
     return *utterance_start_;

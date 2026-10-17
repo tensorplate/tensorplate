@@ -230,6 +230,23 @@ TEST(VadPolicy, ResetEndsTheUtteranceWhereTheDispatchEndedIt) {
   EXPECT_EQ(feed(policy, kSilence, 10), Outcomes{endpoint(end + 12 * kFrame)});
 }
 
+TEST(VadPolicy, SpeechEndIsTheLastSpeechFrameOfTheOpenUtterance) {
+  auto policy = make_policy();
+  EXPECT_TRUE(feed(policy, kSpeech, 1).empty());
+  EXPECT_FALSE(policy.speech_end());
+  EXPECT_EQ(feed(policy, kSpeech, 1), Outcomes{onset(0)});
+  EXPECT_EQ(policy.speech_end(), 2 * kFrame);
+  EXPECT_TRUE(feed(policy, kSilence, 3).empty());
+  EXPECT_EQ(policy.speech_end(), 2 * kFrame);
+  EXPECT_TRUE(feed(policy, kSpeech, 1).empty());
+  EXPECT_EQ(policy.speech_end(), 6 * kFrame);
+  EXPECT_EQ(feed(policy, kSilence, 10), Outcomes{endpoint(16 * kFrame)});
+  EXPECT_FALSE(policy.speech_end());
+  EXPECT_EQ(feed(policy, kSpeech, 2), Outcomes{onset(16 * kFrame)});
+  ASSERT_TRUE(policy.reset(policy.next_frame_start()));
+  EXPECT_FALSE(policy.speech_end());
+}
+
 TEST(VadPolicy, ResetDropsAnUnfinishedSpeechRun) {
   auto policy = make_policy();
   EXPECT_TRUE(feed(policy, kSpeech, 1).empty());

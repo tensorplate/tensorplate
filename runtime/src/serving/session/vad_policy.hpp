@@ -87,6 +87,10 @@ class VadPolicy {
   /// The open utterance's first speech sample, while in speech: its onset
   /// run's first frame, or the split that started it.
   [[nodiscard]] std::optional<std::uint64_t> speech_start() const noexcept;
+  /// The end of the last frame scored as speech, while in speech: the frames
+  /// after it, up to next_frame_start(), are a silence run too short to end
+  /// the utterance yet.
+  [[nodiscard]] std::optional<std::uint64_t> speech_end() const noexcept;
   /// The open utterance's first sample, or in silence the earliest the next
   /// onset can name: no utterance takes audio before it.
   [[nodiscard]] std::uint64_t earliest_utterance_start() const noexcept;

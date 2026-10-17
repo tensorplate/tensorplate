@@ -23,6 +23,8 @@ void WindowScheduler::open(std::uint64_t first, std::uint64_t speech_start) noex
   first_ = first;
   speech_start_ = speech_start;
   last_end_.reset();
+  asked_at_.reset();
+  asked_before_.reset();
 }
 
 void WindowScheduler::close() noexcept {
@@ -39,5 +41,15 @@ std::optional<SampleWindow> WindowScheduler::due(std::uint64_t scored_end) const
 
 void WindowScheduler::started(std::uint64_t end) noexcept {
   last_end_ = end;
+  asked_at_.reset();
+  asked_before_.reset();
+}
+
+bool WindowScheduler::waits(std::uint64_t scored_end, std::uint64_t speech_end) noexcept {
+  if (asked_at_ != scored_end) {
+    asked_before_ = asked_at_;
+    asked_at_ = scored_end;
+  }
+  return speech_end < scored_end && !(asked_before_ && speech_end > *asked_before_);
 }
 }  // namespace tensorplate::serving
