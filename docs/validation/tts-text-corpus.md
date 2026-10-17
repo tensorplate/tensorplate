@@ -35,21 +35,22 @@ misaki's lexicon, spaCy's tagger, and espeak-ng for words outside the
 lexicon.
 
 The corpus records, as `g2p_pins_sha256`, the digest of the lock lines of the
-pins the phonemizer runs on, `G2P_PINS` in the tool. They are kokoro and
-misaki, the packages misaki's English G2P and its espeak fallback import
-(num2words, regex, addict, `phonemizer-fork` and `espeakng-loader`), and the
-runtime-requirement closure of spaCy and `en-core-web-sm` in the locked
-environment, markers evaluated there, as the lock pins it: 52 pins in all,
-among them thinc, blis, numpy, cymem, preshed, murmurhash and srsly. torch is
-not among them: kokoro's pipeline module imports it, but the `en_core_web_sm`
-tagger runs on thinc's NumPy operations and the phonemizer computes nothing
-with torch. `tts_corpus.py g2p-pins`, run in the locked environment, derives
-the list from the installed packages' metadata and fails when `G2P_PINS`
-differs. The pins live in two lock files,
-`packaging/speech-runtime/lock/kokoro.txt` and
-`packaging/speech-runtime/lock/base.txt` (numpy, setuptools and the HTTP
-stack); the tool reads both and refuses a pin neither holds or one held
-twice. The digest is SHA-256 over those pins' lines, each
+pins the phonemizer runs on, `G2P_PINS` in the tool: the requirement closure
+of the g2p path's direct imports (`G2P_DIRECT`: kokoro, misaki, the packages
+misaki's English G2P and its espeak fallback import, num2words, regex,
+addict, `phonemizer-fork` and `espeakng-loader`, and spaCy with
+`en-core-web-sm`). The closure follows each installed package's runtime
+requirements in the locked environment, markers evaluated there, and keeps
+what `kokoro.txt` and `base.txt` pin: 82 pins in all, among them thinc,
+blis, numpy, segments, joblib, docopt and transformers. torch is not among
+them: its pin lives in `lock/torch.txt` with sympy and networkx, which only
+torch requires, and the phonemizer computes nothing with it.
+`tts_corpus.py g2p-pins`, run in the locked environment, derives the list
+from the installed packages' metadata and fails when `G2P_PINS` differs. The
+pins live in two lock files, `packaging/speech-runtime/lock/kokoro.txt` and
+`packaging/speech-runtime/lock/base.txt` (numpy, setuptools,
+huggingface-hub, tokenizers, PyYAML and the HTTP stack); the tool reads both
+and refuses a pin neither holds or one held twice. The digest is SHA-256 over those pins' lines, each
 `name==version --hash=sha256:<digest>` with its whitespace collapsed to
 single spaces and ended by a newline, in the list's order. The check refuses
 a corpus whose digest is not that of the lock's lines, so a change to one of

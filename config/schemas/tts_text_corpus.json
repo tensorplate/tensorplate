@@ -26,7 +26,7 @@
       "properties": {
         "rule": { "type": "string", "const": "kokoro-kpipeline-g2p-length-v1", "description": "A sentence's count is the length of the phoneme string that kokoro's KPipeline(lang_code=<language>, trf=False).g2p returns for it, the string the Kokoro runner bounds and synthesizes." },
         "lock": { "type": "string", "const": "packaging/speech-runtime/lock/kokoro.txt" },
-        "g2p_pins_sha256": { "$ref": "#/definitions/Sha256", "description": "The SHA-256 of the lock lines of the pins the phonemizer runs on, the G2P_PINS of tools/validation/tts_corpus.py in their order, read from the G2P_LOCKS files (lock/kokoro.txt and lock/base.txt): each line with its whitespace collapsed to single spaces and ended by a newline. A change to any other pin leaves it unchanged." },
+        "g2p_pins_sha256": { "$ref": "#/definitions/Sha256", "description": "The SHA-256 of the lock lines of the pins the phonemizer runs on, the G2P_PINS of tools/validation/tts_corpus.py (the requirement closure of the g2p path's direct imports) in their order, read from the G2P_LOCKS files (lock/kokoro.txt and lock/base.txt): each line with its whitespace collapsed to single spaces and ended by a newline. A change to any other pin leaves it unchanged." },
         "kokoro": { "type": "string", "minLength": 1 },
         "misaki": { "type": "string", "minLength": 1 },
         "spacy": { "type": "string", "minLength": 1 },

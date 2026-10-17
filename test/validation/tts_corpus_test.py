@@ -40,36 +40,54 @@ import tts_corpus as tts  # noqa: E402
 
 LOCK_BYTES = (ROOT / "packaging/speech-runtime/lock/kokoro.txt").read_bytes()
 LOCK_FILES = ("packaging/speech-runtime/lock/kokoro.txt", "packaging/speech-runtime/lock/base.txt")
-G2P_IMPORTS = (
+G2P_DIRECT = (
     "addict",
+    "en-core-web-sm",
     "espeakng-loader",
     "kokoro",
     "misaki",
     "num2words",
     "phonemizer-fork",
     "regex",
+    "spacy",
 )
 G2P_PINS = (
     "addict",
     "annotated-doc",
     "annotated-types",
     "anyio",
+    "attrs",
+    "babel",
     "blis",
     "catalogue",
     "certifi",
     "charset-normalizer",
     "click",
     "cloudpathlib",
+    "cloudpickle",
     "confection",
+    "csvw",
     "cymem",
+    "dlinfo",
+    "docopt",
     "en-core-web-sm",
     "espeakng-loader",
+    "filelock",
+    "fsspec",
     "h11",
+    "hf-xet",
     "httpcore",
     "httpx",
+    "huggingface-hub",
     "idna",
+    "isodate",
     "jinja2",
+    "joblib",
+    "jsonschema",
+    "jsonschema-specifications",
     "kokoro",
+    "language-tags",
+    "loguru",
     "markdown-it-py",
     "markupsafe",
     "mdurl",
@@ -83,21 +101,35 @@ G2P_PINS = (
     "pydantic",
     "pydantic-core",
     "pygments",
+    "pyparsing",
+    "python-dateutil",
+    "pyyaml",
+    "rdflib",
+    "referencing",
     "regex",
     "requests",
+    "rfc3986",
     "rich",
+    "rpds-py",
+    "safetensors",
+    "segments",
     "setuptools",
     "shellingham",
+    "six",
     "smart-open",
     "spacy",
     "spacy-legacy",
     "spacy-loggers",
     "srsly",
+    "termcolor",
     "thinc",
+    "tokenizers",
     "tqdm",
+    "transformers",
     "typer",
     "typing-extensions",
     "typing-inspection",
+    "uritemplate",
     "urllib3",
     "wasabi",
     "weasel",
@@ -364,7 +396,7 @@ def check_rules(good: dict[str, Any]) -> None:
     assert tts.check_corpus(good) == 330
     refused(good, lambda c: c.update(extra=1), "does not match its schema")
     assert tts.G2P_PINS == G2P_PINS and tts.G2P_LOCKS == LOCK_FILES
-    assert tts.G2P_IMPORTS == G2P_IMPORTS and tts.G2P_MODEL == ("en-core-web-sm", "spacy")
+    assert tts.G2P_DIRECT == G2P_DIRECT
     assert tts._canonical("Spacy_Legacy.x--Y") == "spacy-legacy-x-y"
     refused(
         good, lambda c: c["tokenizer"].update(g2p_pins_sha256="0" * 64), "counted under g2p pins"
@@ -1142,6 +1174,20 @@ class FakeMetadata:
 # The locked environment's metadata in miniature: a cycle, a platform marker, an extra,
 # names spelled as distributions spell them, and an installed requirement the lock lacks.
 MINI_REQUIRES: dict[str, list[str] | None] = {
+    "kokoro": ["misaki[en]>=0.9.4", "torch", "loguru"],
+    "torch": ["sympy>=1.13"],
+    "sympy": [],
+    "loguru": [],
+    "misaki": ["addict", "regex", "spacy; extra == 'en'"],
+    "addict": [],
+    "regex": [],
+    "espeakng-loader": [],
+    "num2words": ["docopt>=0.6.2"],
+    "docopt": None,
+    "phonemizer-fork": ["Segments", "dlinfo", "pywin32; sys_platform == 'win32'"],
+    "segments": ["csvw>=1.5.6"],
+    "csvw": [],
+    "dlinfo": [],
     "spacy": [
         "thinc<8.4.0,>=8.3.4",
         "Spacy_Legacy<3.1.0,>=3.0.11",
@@ -1157,6 +1203,19 @@ MINI_REQUIRES: dict[str, list[str] | None] = {
     "unlocked-helper": [],
 }
 MINI_LOCKED = (
+    "kokoro",
+    "loguru",
+    "misaki",
+    "addict",
+    "regex",
+    "espeakng-loader",
+    "num2words",
+    "docopt",
+    "phonemizer-fork",
+    "segments",
+    "csvw",
+    "dlinfo",
+    "pywin32",
     "spacy",
     "en-core-web-sm",
     "thinc",
@@ -1172,19 +1231,13 @@ MINI_LOCKED = (
 def check_g2p_derivation(scratch: Path) -> None:
     with FakeMetadata(MINI_REQUIRES) as fake:
         derived = tts.derive_g2p_pins(MINI_LOCKED)
-        assert derived == tuple(
-            sorted(
-                {"blis", "en-core-web-sm", "numpy", "spacy", "spacy-legacy", "thinc"}
-                | set(G2P_IMPORTS)
-            )
-        ), derived
-        assert sorted(fake.asked) == sorted(
-            ["blis", "en-core-web-sm", "numpy", "spacy", "spacy-legacy", "thinc", "unlocked-helper"]
-        ), fake.asked
+        reached = {"blis", "numpy", "spacy-legacy", "thinc", "loguru", "docopt", "csvw"}
+        reached |= {"segments", "dlinfo"}
+        assert derived == tuple(sorted(reached | set(G2P_DIRECT))), derived
+        unlocked = {"torch", "sympy", "unlocked-helper"}
+        assert sorted(fake.asked) == sorted(reached | set(G2P_DIRECT) | unlocked), fake.asked
         assert fake.seen and all(env == {"extra": ""} for env in fake.seen), fake.seen
-        assert tts.derive_g2p_pins(["SPACY", "En_Core_Web_Sm"]) == tuple(
-            sorted({"spacy", "en-core-web-sm"} | set(G2P_IMPORTS))
-        )
+        assert tts.derive_g2p_pins(["SPACY", "En_Core_Web_Sm"]) == ("en-core-web-sm", "spacy")
     missing = {**MINI_REQUIRES, "spacy-legacy": ["absent"]}
     with FakeMetadata(missing):
         try:
@@ -1194,7 +1247,7 @@ def check_g2p_derivation(scratch: Path) -> None:
         else:
             raise AssertionError("an absent requirement was skipped")
     # The locked environment's closure, flattened onto spaCy, gives the filed list.
-    closure = [n for n in G2P_PINS if n not in G2P_IMPORTS and n != "spacy"]
+    closure = [n for n in G2P_PINS if n not in G2P_DIRECT]
     flat: dict[str, list[str] | None] = {name: [] for name in G2P_PINS}
     flat["spacy"] = closure
     saved = tts.REPO_ROOT
@@ -1203,11 +1256,14 @@ def check_g2p_derivation(scratch: Path) -> None:
         with FakeMetadata(flat):
             code, out, err = tool("g2p-pins")
             assert code == 0 and out == "".join(f"{n}\n" for n in G2P_PINS), (code, out, err)
-        dropped = [n for n in closure if n != "thinc"] + ["rdflib"]
-        with FakeMetadata({**flat, "rdflib": [], "spacy": dropped}):
+        dropped = [n for n in closure if n != "thinc"] + ["curated-tokenizers"]
+        with FakeMetadata({**flat, "curated-tokenizers": [], "spacy": dropped}):
             code, out, err = tool("g2p-pins")
             assert code == 1 and "thinc" not in out.split(), out
-            assert "G2P_PINS is not the derived list; add ['rdflib'], drop ['thinc']" in err, err
+            assert (
+                "G2P_PINS is not the derived list; add ['curated-tokenizers'], drop ['thinc']"
+                in err
+            ), err
         with FakeMetadata({**flat, "spacy": closure + ["absent"]}):
             code, _, err = tool("g2p-pins")
             assert code == 1 and err.startswith("tts-corpus: refused: ") and "absent" in err, err

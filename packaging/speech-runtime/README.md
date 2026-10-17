@@ -75,9 +75,9 @@ A change to a pin the phonemizer runs on, in `lock/kokoro.txt` or
 `lock/base.txt`, invalidates the phoneme counts of the text-to-speech corpus,
 which `tools/validation/tts_corpus.py check` then refuses; a change to any
 other pin does not. Those pins are `G2P_PINS` in
-`tools/validation/tts_corpus.py`: kokoro, misaki, the packages misaki's
-English G2P imports, and the runtime-requirement closure of spaCy and
-`en-core-web-sm` as the lock resolves it. In the environment rebuilt from the
+`tools/validation/tts_corpus.py`: the requirement closure of the g2p path's
+direct imports (kokoro, misaki, the packages misaki's English G2P imports,
+spaCy and `en-core-web-sm`) as the lock resolves it. In the environment rebuilt from the
 new lock, re-derive the list with
 
 ```bash

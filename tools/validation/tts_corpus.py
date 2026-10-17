@@ -65,44 +65,59 @@ SOURCES: dict[str, tuple[str, str | None]] = {
     "libritts-r": ("CC-BY-4.0", r"[0-9]+_[0-9]+_[0-9]+_[0-9]+"),
     "authored": ("CC0-1.0", None),
 }
-# kokoro, misaki, and the packages misaki.en, misaki.espeak and misaki.token import.
-# torch, which kokoro's pipeline module imports, computes no part of the phonemes.
-G2P_IMPORTS = (
+# The g2p path's direct imports: kokoro, misaki, the packages misaki.en, misaki.espeak and
+# misaki.token import, and the spaCy model.
+G2P_DIRECT = (
     "addict",
+    "en-core-web-sm",
     "espeakng-loader",
     "kokoro",
     "misaki",
     "num2words",
     "phonemizer-fork",
     "regex",
+    "spacy",
 )
-# spaCy tags the words and the model carries its weights; their runtime requirements, run
-# to closure, decide the tags too.
-G2P_MODEL = ("en-core-web-sm", "spacy")
-# G2P_IMPORTS and the closure of G2P_MODEL's runtime requirements in the locked
-# environment, as `tts_corpus.py g2p-pins` derives them there; the lock pins each in
-# one of G2P_LOCKS.
+# The runtime-requirement closure of G2P_DIRECT in the locked environment, as
+# `tts_corpus.py g2p-pins` derives it there, kept to what G2P_LOCKS pin. torch, which
+# kokoro requires, is pinned in lock/torch.txt and computes no part of the phonemes.
 G2P_PINS = (
     "addict",
     "annotated-doc",
     "annotated-types",
     "anyio",
+    "attrs",
+    "babel",
     "blis",
     "catalogue",
     "certifi",
     "charset-normalizer",
     "click",
     "cloudpathlib",
+    "cloudpickle",
     "confection",
+    "csvw",
     "cymem",
+    "dlinfo",
+    "docopt",
     "en-core-web-sm",
     "espeakng-loader",
+    "filelock",
+    "fsspec",
     "h11",
+    "hf-xet",
     "httpcore",
     "httpx",
+    "huggingface-hub",
     "idna",
+    "isodate",
     "jinja2",
+    "joblib",
+    "jsonschema",
+    "jsonschema-specifications",
     "kokoro",
+    "language-tags",
+    "loguru",
     "markdown-it-py",
     "markupsafe",
     "mdurl",
@@ -116,21 +131,35 @@ G2P_PINS = (
     "pydantic",
     "pydantic-core",
     "pygments",
+    "pyparsing",
+    "python-dateutil",
+    "pyyaml",
+    "rdflib",
+    "referencing",
     "regex",
     "requests",
+    "rfc3986",
     "rich",
+    "rpds-py",
+    "safetensors",
+    "segments",
     "setuptools",
     "shellingham",
+    "six",
     "smart-open",
     "spacy",
     "spacy-legacy",
     "spacy-loggers",
     "srsly",
+    "termcolor",
     "thinc",
+    "tokenizers",
     "tqdm",
+    "transformers",
     "typer",
     "typing-extensions",
     "typing-inspection",
+    "uritemplate",
     "urllib3",
     "wasabi",
     "weasel",
@@ -255,9 +284,9 @@ def _requirement(line: str) -> tuple[str, bool]:
 
 
 def derive_g2p_pins(locked: Iterable[str]) -> tuple[str, ...]:
-    """G2P_IMPORTS and the installed runtime-requirement closure of G2P_MODEL, as locked."""
+    """The installed runtime-requirement closure of G2P_DIRECT, as the lock pins it."""
     closure: set[str] = set()
-    todo = list(G2P_MODEL)
+    todo = list(G2P_DIRECT)
     while todo:
         name = _canonical(todo.pop())
         if name in closure:
@@ -268,7 +297,7 @@ def derive_g2p_pins(locked: Iterable[str]) -> tuple[str, ...]:
             if applies:
                 todo.append(dependency)
     pinned = {_canonical(name) for name in locked}
-    return tuple(sorted((closure & pinned) | set(G2P_IMPORTS)))
+    return tuple(sorted(closure & pinned))
 
 
 def _unique(items: Iterable[dict[str, Any]], key: str, what: str) -> dict[str, dict[str, Any]]:
