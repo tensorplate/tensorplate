@@ -36,7 +36,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import unicodedata
 import wave
 from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
@@ -49,6 +48,7 @@ sys.path.insert(0, str(HERE))
 
 import candidate_audio as audio  # noqa: E402
 import speech_corpus as corpus  # noqa: E402
+import speech_quality as quality  # noqa: E402
 
 FULL_SCALE_LIMIT = 10
 MAX_FILE_SAMPLES = corpus.THIRTY_SECONDS
@@ -113,35 +113,6 @@ LABEL_FIELDS = (
     "stride",
 )
 
-NEGATION = {
-    "en": {
-        "no",
-        "not",
-        "never",
-        "nothing",
-        "none",
-        "nobody",
-        "nowhere",
-        "neither",
-        "nor",
-        "cannot",
-    },
-    "ar": {"لا", "لم", "لن", "ليس", "ليست", "ما"},
-}
-NUMBER_WORDS = {
-    "en": set(
-        "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
-        "fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy "
-        "eighty ninety hundred thousand million billion".split()
-    ),
-    "ar": set(
-        "صفر واحد واحدة اثنان اثنين اثنتان ثلاث ثلاثة أربع أربعة خمس خمسة ست ستة سبع سبعة "
-        "ثمان ثماني ثمانية تسع تسعة عشر عشرة عشرون عشرين ثلاثون ثلاثين أربعون أربعين خمسون "
-        "خمسين ستون ستين سبعون سبعين ثمانون ثمانين تسعون تسعين مئة مائة مئتان مئتين ألف ألفان "
-        "آلاف مليون ملايين".split()
-    ),
-}
-
 
 class BuildError(Exception):
     """A plan or source that cannot be built."""
@@ -168,36 +139,16 @@ def full_scale_count(samples: list[int]) -> int:
     return sum(1 for s in samples if s >= audio.INT16_MAX or s <= -audio.INT16_MAX)
 
 
-def words(text: str) -> list[str]:
-    """Casefolded words with punctuation removed, as the semantic rules read them."""
-    text = unicodedata.normalize("NFC", text).casefold().replace("-", " ")
-    return [w for w in (re.sub(r"[^\w']", "", t) for t in text.split()) if w]
-
-
-def _forms(word: str, language: str) -> set[str]:
-    """A word as written and, in Arabic, without a leading conjunction wa or fa."""
-    if language == "ar" and word[:1] in ("و", "ف"):
-        return {word, word[1:]}
-    return {word}
-
-
 def semantic_classes(text: str, language: str, speech_samples: int) -> list[str]:
-    """The fixture classes a reference qualifies for: negation, numerals, repetition, seams."""
+    """The fixture classes a reference qualifies for, read as the quality scorer reads them:
+    its normalizer, its negation view and its critical words; and seams by length."""
+    words = quality.normalize(text, language)
     found = []
-    tokens = words(text)
-    forms = [_forms(w, language) for w in tokens]
-    if any(
-        f & NEGATION[language] or (language == "en" and w.endswith("n't"))
-        for w, f in zip(tokens, forms, strict=True)
-    ):
+    if quality.critical_positions(quality.negation_words(words, language), "negation", language):
         found.append("negation")
-    if any(
-        any(ch.isdigit() for ch in w) or f & NUMBER_WORDS[language]
-        for w, f in zip(tokens, forms, strict=True)
-    ):
-        found.append("numerals")
-    if any(w in tokens[max(0, i - 3) : i] for i, w in enumerate(tokens)):
-        found.append("repetition")
+    for name in ("numerals", "repetition"):
+        if quality.critical_positions(words, name, language):
+            found.append(name)
     if speech_samples > WINDOW_SEAM_SAMPLES:
         found.append("window_seam")
     return found

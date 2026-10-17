@@ -62,6 +62,9 @@ def check_semantic_classes() -> None:
     assert classes("It was a fine day") == []
     assert classes("He did NOT come") == ["negation"]
     assert classes("They don't know") == ["negation"]
+    assert classes(f"It isn{chr(0x2019)}t here") == ["negation"], "as the scorer reads it"
+    assert classes("He cannot stay") == ["negation"]
+    assert classes("a trillion stars") == ["numerals"]
     assert classes("one-hundred percent") == ["numerals"]
     assert classes("In 1886 it rained") == ["numerals"]
     assert classes("very, very far") == ["repetition"]

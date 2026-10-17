@@ -251,9 +251,13 @@ speech_corpus.py check CORPUS/manifest.json --root CORPUS --rebuild --frozen
 - The semantic fixtures are held-out files. Per language, each class takes
   its first `per_class` qualifying files, in a seeded order, that no class
   took before it, so a language has four times `per_class` fixtures. The build
-  refuses a class with too few. A fixture lists every class it meets:
-  - `negation`: a negation word, an English n't, or an Arabic negation
-    particle after an optional wa or fa;
+  refuses a class with too few. A fixture lists every class it meets.
+  The reference is read exactly as `tools/validation/speech_quality.py`
+  scores it, with its normalizer and its critical words, so a fixture is one
+  the scorer judges:
+  - `negation`: a negation word in the scorer's negation view, where
+    English "cannot" reads as "can not" and the t of an n't contraction,
+    with either apostrophe, as "not";
   - `numerals`: a digit or a number word;
   - `repetition`: a word equal to one of the three before it;
   - `window_seam`: more than 8 s of labelled speech.
