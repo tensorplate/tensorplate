@@ -275,6 +275,14 @@ PRIVATE_REPOSITORY = re.compile(r"[A-Za-z0-9]+-internals", re.IGNORECASE)
 PRIVATE_LABEL = re.compile(
     r"(?<![A-Za-z0-9])(?:PR-[0-9]{1,3}[a-z]?|HW-[A-Z][0-9]{1,2}|XM[0-9]{2}|[CD][0-9]{2})"
     r"(?![A-Za-z0-9])")
+# Extension rows have a distinctive prefix; short step names need context
+# so ordinary words, hexadecimal digests and machine-family names pass.
+PRIVATE_EXTENSION_LABEL = re.compile(
+    r"(?<![A-Za-z0-9])X[EO]-[0-9]{2}[a-z]?(?![A-Za-z0-9])")
+PRIVATE_STEP_ID = r"(?:A[1-3]|B(?:1|2[ab]?)|C[1-3][ab]?|D[1]|F[1])"
+PRIVATE_STEP_LABEL = re.compile(
+    r"\(\s*`?" + PRIVATE_STEP_ID + r"`?\s*\)"
+    r"|(?<![A-Za-z0-9])(?i:row)\s+`?" + PRIVATE_STEP_ID + r"(?![A-Za-z0-9])")
 # A planning identifier without its release prefix. The prefixed form is
 # how pull request text cites work, and older source comments carry it, so
 # it is not reported, whatever precedes the prefix (an escape can).
@@ -450,8 +458,9 @@ def scan_variant(line, literals):
             add("ipv4", value)
     for m in PRIVATE_REPOSITORY.finditer(line):
         add("private-repository", m.group(0))
-    for m in PRIVATE_LABEL.finditer(line):
-        add("private-label", m.group(0))
+    for pattern in (PRIVATE_LABEL, PRIVATE_EXTENSION_LABEL, PRIVATE_STEP_LABEL):
+        for m in pattern.finditer(line):
+            add("private-label", m.group(0))
     for m in PLANNING_ID.finditer(line):
         add("planning-id", m.group(0))
     for cls, pattern, length in literals:

@@ -8,6 +8,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The public-hygiene scanner rejects extension-row identifiers and contextual
+  planning step identifiers, with coverage for near misses in ordinary text.
+
 - Packaging and release-driver CI installs the pinned Rust toolchain before
   any test suite runs, avoiding partial toolchain recovery during Cargo tests.
 
