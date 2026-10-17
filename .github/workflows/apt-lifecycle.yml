@@ -24,6 +24,8 @@ on:
       # This workflow is the only runner of the lifecycle and evidence
       # suites, so a PR editing only one of them would skip it entirely.
       - 'test/validation/**'
+      # The filed speech corpus is checked here, and a change to it alone must be.
+      - 'docs/validation/evidence/speech-corpus-*/**'
       - 'cli/src/commands/doctor/**'
       # The drift guard in test/release/run.sh reads the amd64 copy list
       # out of release.yml, so a change to release.yml alone must trigger
@@ -184,6 +186,13 @@ jobs:
       - name: Speech corpus build
         shell: bash
         run: test/validation/speech_corpus_build_test.py
+
+      # The filed corpus manifest must pass the check against the recipe sources
+      # in this tree: a recipe change needs the corpus rebuilt and the manifest
+      # filed again.
+      - name: Filed speech corpus manifest
+        shell: bash
+        run: tools/validation/speech_corpus.py check --frozen docs/validation/evidence/speech-corpus-2026.10/manifest.json
 
       # Renders a synthetic corpus with the corpus tool and breaks each rule of
       # the manifest check once; the schema cross-check needs the same jsonschema.

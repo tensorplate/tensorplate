@@ -1,0 +1,321 @@
+{
+ "aligners": {
+  "ar": "transformers-4.46.3/jonatasgrosman/wav2vec2-large-xlsr-53-arabic@af46c2d8531b8dcbb5e23b952f739b372c2e5d2d",
+  "en": "torchaudio-2.5.1/WAV2VEC2_ASR_BASE_960H"
+ },
+ "corpus": {
+  "name": "TensorPlate speech evaluation corpus",
+  "version": "2026.10"
+ },
+ "noise": {
+  "count": 90,
+  "dir": "musan/extract/musan/noise",
+  "excluded": {
+   "free-sound/noise-free-sound-0142": "screen: the English aligner's greedy decode gives 154 letters (10 or more excludes)",
+   "free-sound/noise-free-sound-0256": "screen: the English aligner's greedy decode gives 17 letters (10 or more excludes)",
+   "free-sound/noise-free-sound-0266": "screen: the English aligner's greedy decode gives 109 letters (10 or more excludes)",
+   "free-sound/noise-free-sound-0384": "screen: the English aligner's greedy decode gives 61 letters (10 or more excludes)",
+   "free-sound/noise-free-sound-0459": "screen: the English aligner's greedy decode gives 37 letters (10 or more excludes)",
+   "free-sound/noise-free-sound-0600": "screen: the English aligner's greedy decode gives 16 letters (10 or more excludes)",
+   "free-sound/noise-free-sound-0640": "screen: the English aligner's greedy decode gives 96 letters (10 or more excludes)",
+   "free-sound/noise-free-sound-0740": "screen: the English aligner's greedy decode gives 153 letters (10 or more excludes)"
+  },
+  "glob": "free-sound/*.wav",
+  "seconds": 32,
+  "source": "musan-noise",
+  "tuning_one_in": 3
+ },
+ "quotas": [
+  {
+   "bin": "lt1s",
+   "count": 150,
+   "pool": "held_out",
+   "source": "gsc-v2",
+   "speaker_cap": 1,
+   "text_cap": 8
+  },
+  {
+   "bin": "1to5s",
+   "count": 150,
+   "pool": "held_out",
+   "source": "ls-test-clean",
+   "speaker_cap": 5,
+   "text_cap": null
+  },
+  {
+   "bin": "1to5s",
+   "count": 150,
+   "pool": "held_out",
+   "source": "ls-test-other",
+   "speaker_cap": 5,
+   "text_cap": null
+  },
+  {
+   "bin": "gt5to30s",
+   "count": 160,
+   "pool": "held_out",
+   "source": "ls-test-clean",
+   "speaker_cap": 5,
+   "text_cap": null
+  },
+  {
+   "bin": "gt5to30s",
+   "count": 160,
+   "pool": "held_out",
+   "source": "ls-test-other",
+   "speaker_cap": 5,
+   "text_cap": null
+  },
+  {
+   "bin": "gt5to30s",
+   "count": 280,
+   "pool": "held_out",
+   "source": "fleurs-en-us-test",
+   "speaker_cap": 0,
+   "text_cap": 1
+  },
+  {
+   "bin": "lt1s",
+   "count": 50,
+   "pool": "tuning",
+   "source": "gsc-v2",
+   "speaker_cap": 1,
+   "text_cap": 6
+  },
+  {
+   "bin": "1to5s",
+   "count": 100,
+   "pool": "tuning",
+   "source": "ls-dev-clean",
+   "speaker_cap": 3,
+   "text_cap": null
+  },
+  {
+   "bin": "gt5to30s",
+   "count": 50,
+   "pool": "tuning",
+   "source": "ls-dev-clean",
+   "speaker_cap": 2,
+   "text_cap": null
+  },
+  {
+   "bin": "gt5to30s",
+   "count": 50,
+   "pool": "tuning",
+   "source": "fleurs-en-us-dev",
+   "speaker_cap": 0,
+   "text_cap": 1
+  }
+ ],
+ "recipes": {
+  "noisy16k": {
+   "seed_rule": "sha256-version-noisy16k-clip-v1",
+   "snr_db": [
+    5,
+    10,
+    15,
+    20
+   ],
+   "snr_rule": "round-robin-sorted-clean-id-v1"
+  },
+  "telephony8k": {
+   "level_dbov": -26,
+   "level_method": "span_rms",
+   "recipe": "tp-telephony8k-fir63-g711stl-v1"
+  }
+ },
+ "semantic": {
+  "per_class": 25
+ },
+ "source_fields": [
+  "id",
+  "dataset",
+  "revision",
+  "url",
+  "license",
+  "license_statement",
+  "attribution",
+  "condition",
+  "transcripts_public"
+ ],
+ "sources": [
+  {
+   "attribution": "LibriSpeech ASR corpus, V. Panayotov, G. Chen, D. Povey and S. Khudanpur (OpenSLR 12)",
+   "condition": "read audiobook speech (LibriVox), the corpus's lower-WER speakers",
+   "dataset": "LibriSpeech test-clean",
+   "id": "ls-test-clean",
+   "language": "en",
+   "license": "CC-BY-4.0",
+   "license_statement": "LICENSE.TXT in the archive",
+   "reader": "librispeech",
+   "revision": "test-clean.tar.gz sha256:39fde525e59672dc6d1551919b1478f724438a95aa55f874b576be21967e6c23",
+   "speaker_namespace": "librispeech",
+   "splits": [
+    {
+     "dir": "librispeech/extract/LibriSpeech/test-clean",
+     "pool": "held_out"
+    }
+   ],
+   "transcripts_public": true,
+   "url": "https://www.openslr.org/12/"
+  },
+  {
+   "attribution": "LibriSpeech ASR corpus, V. Panayotov, G. Chen, D. Povey and S. Khudanpur (OpenSLR 12)",
+   "condition": "read audiobook speech (LibriVox), the corpus's higher-WER speakers",
+   "dataset": "LibriSpeech test-other",
+   "id": "ls-test-other",
+   "language": "en",
+   "license": "CC-BY-4.0",
+   "license_statement": "LICENSE.TXT in the archive",
+   "reader": "librispeech",
+   "revision": "test-other.tar.gz sha256:d09c181bba5cf717b3dee7d4d592af11a3ee3a09e08ae025c5506f6ebe961c29",
+   "speaker_namespace": "librispeech",
+   "splits": [
+    {
+     "dir": "librispeech/extract/LibriSpeech/test-other",
+     "pool": "held_out"
+    }
+   ],
+   "transcripts_public": true,
+   "url": "https://www.openslr.org/12/"
+  },
+  {
+   "attribution": "LibriSpeech ASR corpus, V. Panayotov, G. Chen, D. Povey and S. Khudanpur (OpenSLR 12)",
+   "condition": "read audiobook speech (LibriVox), the corpus's lower-WER speakers",
+   "dataset": "LibriSpeech dev-clean",
+   "id": "ls-dev-clean",
+   "language": "en",
+   "license": "CC-BY-4.0",
+   "license_statement": "LICENSE.TXT in the archive",
+   "reader": "librispeech",
+   "revision": "dev-clean.tar.gz sha256:76f87d090650617fca0cac8f88b9416e0ebf80350acb97b343a85fa903728ab3",
+   "speaker_namespace": "librispeech",
+   "splits": [
+    {
+     "dir": "librispeech/extract/LibriSpeech/dev-clean",
+     "pool": "tuning"
+    }
+   ],
+   "transcripts_public": true,
+   "url": "https://www.openslr.org/12/"
+  },
+  {
+   "attribution": "FLEURS, A. Conneau et al. (2022), Google",
+   "condition": "read FLoRes sentences, crowd-recorded; float WAV converted to 16 bits by round-half-even(x * 32767); no speaker identifiers",
+   "dataset": "FLEURS en_us test",
+   "id": "fleurs-en-us-test",
+   "language": "en",
+   "license": "CC-BY-4.0",
+   "license_statement": "the dataset card (README.md) at the pinned revision",
+   "reader": "fleurs",
+   "revision": "huggingface.co/datasets/google/fleurs@70bb2e84b976b7e960aa89f1c648e09c59f894dd data/en_us/audio/test.tar.gz sha256:d9c2e37b41aacd41bc283554a0a82b5476b36887049774ecb2819dcaaa55a356",
+   "speaker_namespace": "fleurs",
+   "splits": [
+    {
+     "dir": "fleurs/extract/en_us/test",
+     "list": "fleurs/archive/en_us/test.tsv",
+     "pool": "held_out"
+    }
+   ],
+   "transcripts_public": true,
+   "url": "https://huggingface.co/datasets/google/fleurs"
+  },
+  {
+   "attribution": "FLEURS, A. Conneau et al. (2022), Google",
+   "condition": "read FLoRes sentences, crowd-recorded; float WAV converted to 16 bits by round-half-even(x * 32767); no speaker identifiers",
+   "dataset": "FLEURS en_us dev",
+   "id": "fleurs-en-us-dev",
+   "language": "en",
+   "license": "CC-BY-4.0",
+   "license_statement": "the dataset card (README.md) at the pinned revision",
+   "reader": "fleurs",
+   "revision": "huggingface.co/datasets/google/fleurs@70bb2e84b976b7e960aa89f1c648e09c59f894dd data/en_us/audio/dev.tar.gz sha256:2658fda72f199e12676ecac9415094667a4e14e149b146e568ea00b2a2f0954c",
+   "speaker_namespace": "fleurs",
+   "splits": [
+    {
+     "dir": "fleurs/extract/en_us/dev",
+     "list": "fleurs/archive/en_us/dev.tsv",
+     "pool": "tuning"
+    }
+   ],
+   "transcripts_public": true,
+   "url": "https://huggingface.co/datasets/google/fleurs"
+  },
+  {
+   "attribution": "Speech Commands, P. Warden (2018), Google",
+   "condition": "isolated words in 1 s clips, crowd-sourced browser microphones; the test list is held out and the validation list tunes, each with its own words",
+   "dataset": "Speech Commands v0.02",
+   "id": "gsc-v2",
+   "language": "en",
+   "license": "CC-BY-4.0",
+   "license_statement": "LICENSE in the archive",
+   "reader": "speech_commands",
+   "revision": "speech_commands_v0.02.tar.gz sha256:af14739ee7dc311471de98f5f9d2c9191b18aedfe957f4a6ff791c709868ff58",
+   "speaker_namespace": "speech-commands",
+   "splits": [
+    {
+     "dir": "gsc/extract",
+     "list": "gsc/extract/testing_list.txt",
+     "pool": "held_out",
+     "texts": {
+      "backward": "backward",
+      "bed": "bed",
+      "bird": "bird",
+      "cat": "cat",
+      "dog": "dog",
+      "down": "down",
+      "eight": "eight",
+      "five": "five",
+      "go": "go",
+      "happy": "happy",
+      "house": "house",
+      "nine": "nine",
+      "no": "no",
+      "off": "off",
+      "on": "on",
+      "one": "one",
+      "right": "right",
+      "seven": "seven",
+      "sheila": "sheila",
+      "six": "six",
+      "stop": "stop",
+      "tree": "tree",
+      "two": "two",
+      "wow": "wow",
+      "yes": "yes"
+     }
+    },
+    {
+     "dir": "gsc/extract",
+     "list": "gsc/extract/validation_list.txt",
+     "pool": "tuning",
+     "texts": {
+      "follow": "follow",
+      "forward": "forward",
+      "four": "four",
+      "learn": "learn",
+      "left": "left",
+      "marvin": "marvin",
+      "three": "three",
+      "up": "up",
+      "visual": "visual",
+      "zero": "zero"
+     }
+    }
+   ],
+   "transcripts_public": true,
+   "url": "https://storage.googleapis.com/download.tensorflow.org/data/speech_commands_v0.02.tar.gz"
+  },
+  {
+   "attribution": "MUSAN, D. Snyder, G. Chen and D. Povey (2015)",
+   "condition": "environmental and technical noise recordings",
+   "dataset": "MUSAN noise, free-sound part",
+   "id": "musan-noise",
+   "license": "public domain",
+   "license_statement": "noise/free-sound/LICENSE in the archive",
+   "revision": "musan.tar.gz sha256:86d1061c7e15b5c9e906777685c519701df51bfde3001e1070dcc9ffac955ee1",
+   "transcripts_public": false,
+   "url": "https://www.openslr.org/17/"
+  }
+ ]
+}
