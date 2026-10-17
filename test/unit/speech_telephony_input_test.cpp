@@ -353,6 +353,27 @@ TEST(SpeechTelephonyInput, ASplitAtTheLimitInsideAHalfClosesFlush) {
   EXPECT_TRUE(binding.ends_as(key, State::Closed));
 }
 
+// Exactly 30 s: the half-close's flush reaches the limit and leaves nothing
+// open, so the session drains once that utterance is delivered. Settled
+// first, so only the limit's own transition pumps the session after the flush.
+TEST(SpeechTelephonyInput, AHalfClosesFlushEndingAtTheLimitDeliversThatUtterance) {
+  Binding binding(&mulaw_dispatch);
+  SpeechUnderTest& speech = speech_of(binding);
+  const auto key = open_mulaw(binding);
+  const Bytes clip = patterned_bytes(240'000, 7);
+  ASSERT_TRUE(binding.audio_in_long_frames(key, clip));
+  ASSERT_TRUE(binding.settle());
+  ASSERT_TRUE(binding.half_close(key));
+  Resampled input;
+  input.push(clip);
+  input.flush();
+  ASSERT_NO_FATAL_FAILURE(expect_utterance(binding, key, EndpointReason::DurationLimit, 1, input, 0,
+                                           480'000, 240'000, 0));
+  EXPECT_TRUE(binding.ends_as(key, State::Closed));
+  EXPECT_FALSE(binding.output(key)->take().has_value());
+  EXPECT_EQ(speech.bridge->submitted().size(), 1U);
+}
+
 // The onset is the voice-activity frame of 512 internal samples holding
 // internal sample 16,000; the utterance starts 2,560 samples (160 ms) before
 // it.

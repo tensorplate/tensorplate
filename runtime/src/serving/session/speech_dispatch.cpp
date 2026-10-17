@@ -1275,8 +1275,9 @@ bool SpeechJobDispatch::end_automatically(SessionManager& manager, std::uint64_t
 
 void SpeechJobDispatch::complete_drain(SessionManager& manager, std::uint64_t key,
                                        Session& session) {
-  // A Finalize whose frames are still to be scored is owed too.
-  if (session.owed_finalize != 0 || session.undelivered != 0 ||
+  // A Finalize whose frames are still to be scored is owed too, and so is an
+  // ended utterance: a half-close's flush can end one at the limit.
+  if (session.owed_finalize != 0 || session.undelivered != 0 || !session.ended_utterances.empty() ||
       (session.detection && !session.detection->pending.empty())) {
     return;
   }
