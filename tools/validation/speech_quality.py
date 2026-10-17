@@ -85,7 +85,7 @@ SEAM_RUN = 2
 # The conjunctions Arabic writes joined to the next word.
 ARABIC_PREFIXES = ("و", "ف")
 NEGATION = {
-    "en": frozenset("no not never nothing none nobody nowhere neither nor cannot".split()),
+    "en": frozenset("no not never nothing none nobody nowhere neither nor".split()),
     "ar": frozenset("لا لم لن ليس ليست ما".split()),
 }
 NUMBER_WORDS = {
@@ -224,11 +224,24 @@ def _contracted_not(words: list[str], i: int) -> bool:
     return words[i] == "t" and i > 0 and words[i - 1].endswith("n")
 
 
-def negation_words(words: list[str], language: str) -> list[str]:
-    """The words a negation fixture is judged on: in English, the t of n't reads as not."""
+def _negation_view(words: list[str], language: str) -> tuple[list[str], list[int]]:
+    """The words a negation fixture is judged on, each with the position it came from."""
     if language != "en":
-        return words
-    return ["not" if _contracted_not(words, i) else word for i, word in enumerate(words)]
+        return words, list(range(len(words)))
+    view: list[str] = []
+    origins: list[int] = []
+    for i, word in enumerate(words):
+        parts = (
+            ["can", "not"] if word == "cannot" else ["not"] if _contracted_not(words, i) else [word]
+        )
+        view += parts
+        origins += [i] * len(parts)
+    return view, origins
+
+
+def negation_words(words: list[str], language: str) -> list[str]:
+    """In English, cannot reads as can not and the t of n't as not."""
+    return _negation_view(words, language)[0]
 
 
 def critical_positions(words: list[str], semantic_class: str, language: str) -> set[int]:
@@ -270,13 +283,14 @@ def lexical_regressions(
     language: str,
 ) -> list[dict[str, Any]]:
     """Critical words the streaming arm lost or added beyond what the batch arm did."""
+    origins = list(range(len(ref)))
     if semantic_class == "negation":
-        ref = negation_words(ref, language)
+        ref, origins = _negation_view(ref, language)
         hyps = [negation_words(arm[0], language) for arm in (streaming, batch)]
         streaming, batch = ((hyp, align(ref, hyp)) for hyp in hyps)
     kept_streaming, kept_batch = _matched_ref(streaming[1]), _matched_ref(batch[1])
     found: list[dict[str, Any]] = [
-        {"class": semantic_class, "kind": "lost", "position": i, "words": [ref[i]]}
+        {"class": semantic_class, "kind": "lost", "position": origins[i], "words": [ref[i]]}
         for i in sorted(critical_positions(ref, semantic_class, language))
         if i in kept_batch and i not in kept_streaming
     ]

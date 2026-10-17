@@ -215,7 +215,10 @@ def check_critical_words() -> None:
     # The joined conjunctions are Arabic's only.
     assert critical("\u0648not \u0641no", "negation", "en") == []
     assert critical("cannot nor neither nothing none nowhere not", "negation", "en") == (
-        "cannot nor neither nothing none nowhere not".split()
+        "not nor neither nothing none nowhere not".split()
+    )
+    assert quality.negation_words(norm("I cannot, can't; can not", "en"), "en") == (
+        "i can not can not can not".split()
     )
     # Only the listed conjunctions join: a beh in front is another word.
     assert critical("بما بلا", "negation", "ar") == []
@@ -288,6 +291,24 @@ def check_lexical_regressions() -> None:
     ]
     assert regress("i did go", "i didn't go", "i did go", "negation", "en") == [
         {"class": "negation", "kind": "added", "position": None, "words": ["not"]}
+    ]
+    # cannot reads as can not, so can't, cannot and can not are one negation.
+    for one, other in (
+        ("i cannot go", "i can't go"),
+        ("i can't go", "i cannot go"),
+        ("i cannot go", "i can not go"),
+        ("i can not go", "i cannot go"),
+    ):
+        assert regress(one, other, one, "negation", "en") == [], (one, other)
+    assert regress("i cannot go", "i can go", "i cannot go", "negation", "en") == [
+        {"class": "negation", "kind": "lost", "position": 1, "words": ["not"]}
+    ]
+    assert regress("i can't go", "i can go", "i cannot go", "negation", "en") == [
+        {"class": "negation", "kind": "lost", "position": 2, "words": ["not"]}
+    ]
+    # A lost word's position is that of the reference word it came from.
+    assert regress("we cannot say no", "we cannot say", "we cannot say no", "negation", "en") == [
+        {"class": "negation", "kind": "lost", "position": 3, "words": ["no"]}
     ]
     # Numeral words and digits stay distinct.
     assert regress("room seven", "room 7", "room seven", "numerals", "en") == [

@@ -173,13 +173,15 @@ judged. A word both arms get wrong is not a regression.
 reference and in each hypothesis:
 
 - **negation.** `en`: no, not, never, nothing, none, nobody, nowhere,
-  neither, nor, cannot. Before a negation fixture is aligned, the `t` an n't
+  neither, nor. Before a negation fixture is aligned, the `t` an n't
   contraction leaves, a `t` right after a word ending in `n`, reads as `not`
   in the reference and in both hypotheses, so `didn't` and `did not` are the
-  same negation, `don't` counts and `T-shirt` does not. A regression lists
-  such a word as `not`. The word error rate still scores `didn't` as `didn`
-  and `t`. `ar`: لا لم لن ليس ليست ما, also with و or ف joined in front.
-  Bare ما is critical wherever it stands, also where it is a relative
+  same negation, `don't` counts and `T-shirt` does not. Likewise `cannot`
+  reads as `can not`, so `can't`, `cannot` and `can not` agree. A regression
+  lists such a word as `not`, at the position of the reference word it came
+  from. The word error rate still scores `didn't` as `didn` and `t`, and
+  `cannot` as one word. `ar`: لا لم لن ليس ليست ما, also with و or ف joined
+  in front. Bare ما is critical wherever it stands, also where it is a relative
   pronoun ("what") and negates nothing: the check cannot tell the two apart
   from the words alone, so it errs toward a regression.
 - **numerals.** Any word containing a decimal digit, in any script, or a word
