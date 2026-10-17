@@ -511,10 +511,10 @@ line says `serves_sessions: false`.
   which can finalize an open utterance before that cancel aborts the
   session, and the decode it starts holds the speech lane until it ends.
   A client that keeps the limits its `Ready` announces never sends such an
-  event to the speech dispatch: a frame is at most 320 ms of 16 kHz mono
-  16-bit PCM, 10,240 bytes, and a text segment at most 4,096 bytes, so
-  only a client that breaks those limits pays that cost. Failing it with a
-  typed reason would mean
+  event to the speech dispatch: a frame is at most 320 ms of audio, at
+  most 10,240 bytes (16 kHz mono 16-bit PCM), and a text segment at most
+  4,096 bytes, so only a client that breaks those limits pays that cost.
+  Failing it with a typed reason would mean
   receiving it first, and gRPC buffers a whole message before it hands it
   over. A text
   segment is refused as empty when it holds nothing but ASCII whitespace;
@@ -1605,7 +1605,17 @@ It is **provisional**: the least that serves one transcription, with its
 partial transcripts, and one synthesis, standing in for the mode handlers
 that will own them.
 
-- **Audio input** (16 kHz mono 16-bit PCM, frames of 20 to 320 ms). A
+- **Audio input** (16 kHz mono 16-bit PCM, and 8 kHz mono G.711 mu-law
+  where `SpeechDispatchOptions::input_formats` lists it; frames of 20 to
+  320 ms). `create` refuses a list without 16 kHz PCM or with any other
+  format (`config_invalid`, `input_formats_invalid`), and `negotiate`
+  grants only what is listed. Mu-law is decoded and resampled to 16 kHz
+  PCM as each frame is taken ([Telephony
+  resampler](#telephony-resampler)), so every job still carries 16 kHz
+  PCM; a client Finalize and a half-close first take the samples the
+  resampler holds back, as if the input ended there, so that N input
+  samples are exactly 2N internal ones where the utterance ends. The
+  worker's own drain ends no utterance and takes nothing. A
   client Finalize, a half-close or the 30-second limit ends the
   utterance, and its accumulated audio is one `stt_decode`: copied into
   one buffer, the window the whole utterance, `start_sample` its first
@@ -1681,9 +1691,13 @@ that will own them.
   (`interval_out_of_range`); nothing is clamped, since the internal
   timeline counts no audio the input did not carry. The runner already
   clamps word times from alignment to its window's end
-  (`whisper_window.py`); no output carries them yet. The one input
-  format served is the internal one, so every conversion is the identity
-  today.
+  (`whisper_window.py`); no output carries them yet. For 16 kHz PCM
+  every conversion is the identity; for mu-law an internal end b leaves
+  as `ceil(b / 2)` input samples, and since a Finalize or a half-close
+  ends an utterance only after the resampler gave all it holds, such an
+  end is exactly twice the input accepted. The open audio is reserved at
+  the internal rate at a session's first frame, whatever its input
+  format (`stats().audio_bytes_reserved`).
 - **Partial transcripts**, with voice detection. While an utterance is
   open its audio so far, from its first sample to the end of its scored
   frames (30 seconds at most), is decoded as one `stt_decode` like a
@@ -2023,8 +2037,8 @@ activity policy found in the sidecar's own voice activity scores.
 
 `TelephonyResampler` (`runtime/src/serving/session/telephony_resampler.hpp`,
 internal) turns 8 kHz G.711 mu-law input into 16-bit samples on the 16 kHz
-internal timeline. It is pure (no clock, no thread) and is not wired yet:
-the speech dispatch still refuses any input format but 16 kHz PCM.
+internal timeline. It is pure (no clock, no thread); the speech dispatch
+keeps one for each mu-law session, its history carried across utterances.
 
 - `mulaw_to_linear` decodes a byte as the Sun `g711.c` reference does (the
   same table as CPython's `audioop.ulaw2lin`).
@@ -2034,8 +2048,9 @@ the speech dispatch still refuses any input format but 16 kHz PCM.
   rounded half away from zero and clamped to 16 bits. Its 31-sample group
   delay is compensated, so output sample n is source time n / 16,000 s.
 - `push` emits each output once the inputs it reads have arrived and no
-  flush emitted it: after N inputs, 2N - 31 outputs (2F within 16 inputs
-  of a flush after F inputs); the last 31 wait for the next 16 inputs.
+  flush emitted it: after N inputs, 2N - 31 outputs (2F for the next 15
+  inputs after a flush at F inputs); the last 31 wait for the next 16
+  inputs.
   `flush` emits them as if the input ended there, so N inputs have given
   exactly 2N outputs, and later input continues from the same history:
   only the flushed samples differ from a resample of the whole input.
@@ -2044,6 +2059,11 @@ the speech dispatch still refuses any input format but 16 kHz PCM.
   `test/unit/telephony_resampler_test.cpp` replays what
   `test/unit/fixtures/telephony_resampler/record.py` recorded from the
   reference.
+- `test/unit/speech_telephony_input_test.cpp` checks the dispatch's mu-law
+  sessions against the resampler, and a 16 kHz speech pattern against its
+  8 kHz derivation by the reference's telephony recipe, recorded by
+  `test/unit/fixtures/telephony_dispatch/record.py`: the two give the same
+  utterances, each bound within one voice-activity frame (32 ms).
 
 ### The speech dispatch in the worker
 
@@ -2055,7 +2075,9 @@ session as any other, constructs a `SpeechJobDispatch` over the bridge, the
 worker's buffer manager and the clock the listener's session manager runs
 on, and gives it to the stream listener. The listener then admits an `Open`
 and the dispatch serves it. Every job identity carries the worker's
-`deployment.generation`, or generation 1 in a worker without one.
+`deployment.generation`, or generation 1 in a worker without one. No
+configuration key sets the dispatch's input formats yet, so a worker
+takes 16 kHz PCM only and refuses mu-law (`unsupported_audio_format`).
 
 The model class is part of the condition because a session built with its
 bridge loads with speech jobs enabled, and a backend refuses that load for a

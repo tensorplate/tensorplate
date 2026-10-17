@@ -13,7 +13,9 @@
   of its decoded samples over the whole input (`pcm_s16le_hex`, 16-bit
   little-endian at 16 kHz). `noise` is 2,000 seeded random bytes, which
   drive the filter past the 16-bit range; `tones` is 2,000 samples of
-  300 Hz, 1,000 Hz and 3,400 Hz tones through the reference's encoder;
+  300 Hz, 1,000 Hz and 3,400 Hz tones through the reference's encoder,
+  which only builds this input: a later change to the encoder changes
+  this case's input alone, and the record its expected output with it;
   `short` is the first seven bytes of `noise`.
 - `flushed_prefix`: the reference's resample of the first 1,000 bytes of
   `noise` alone, as a flush after them gives it.

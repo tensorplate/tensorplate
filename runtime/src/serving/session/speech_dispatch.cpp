@@ -22,9 +22,9 @@ using Event = LogicalSessionEvent;
 /// read, whatever the session's input format.
 constexpr StreamAudioFormat kInternalFormat{StreamAudioEncoding::PcmS16Le, kJobInputSampleRateHz,
                                             1};
-/// The one input format served: the internal one, so a frame is its own
-/// internal audio.
-constexpr StreamAudioFormat kInputFormat = kInternalFormat;
+/// The other input format the dispatch can take, decoded and resampled onto
+/// the internal timeline.
+constexpr StreamAudioFormat kTelephonyFormat{StreamAudioEncoding::Mulaw, 8'000, 1};
 constexpr StreamAudioFormat kOutputFormat{StreamAudioEncoding::PcmS16Le, kJobOutputSampleRateHz, 1};
 /// The longest utterance and the longest audio of a segment: what one job's
 /// input and one job's result may hold.
@@ -107,6 +107,24 @@ SchedulerClock::Duration per_audio(SchedulerClock::Duration per_second, std::uin
                                    std::uint64_t bytes_per_second) {
   return SchedulerClock::Duration{per_second.count() * static_cast<std::int64_t>(bytes) /
                                   static_cast<std::int64_t>(bytes_per_second)};
+}
+
+/// 16-bit PCM is its own internal audio only at the internal rate, and the
+/// resampler takes 8 kHz.
+bool takes_input_in(const StreamAudioFormat& format) {
+  return format == kInternalFormat || format == kTelephonyFormat;
+}
+
+/// `samples` as internal audio, written to `bytes`.
+std::span<const std::byte> as_internal(const std::vector<std::int16_t>& samples,
+                                       std::vector<std::byte>& bytes) {
+  bytes.resize(samples.size() * kInternalWidth);
+  for (std::size_t index = 0; index < samples.size(); ++index) {
+    const auto bits = static_cast<std::uint16_t>(samples[index]);
+    bytes[2 * index] = static_cast<std::byte>(bits & 0xffU);
+    bytes[2 * index + 1] = static_cast<std::byte>(bits >> 8U);
+  }
+  return bytes;
 }
 }  // namespace
 
@@ -283,6 +301,14 @@ Result<std::unique_ptr<SpeechJobDispatch>> SpeechJobDispatch::create(
     return unexpected(Error::make(Error::Code::ConfigInvalid,
                                   "speech dispatch needs a nonzero generation", "generation_zero"));
   }
+  const auto& formats = options.input_formats;
+  if (std::find(formats.begin(), formats.end(), kInternalFormat) == formats.end() ||
+      !std::all_of(formats.begin(), formats.end(), takes_input_in)) {
+    return unexpected(Error::make(Error::Code::ConfigInvalid,
+                                  "speech dispatch input formats must hold 16 kHz PCM and only "
+                                  "formats it can take",
+                                  "input_formats_invalid"));
+  }
   std::optional<VadPolicy> detection;
   if (bridge->runs(JobClass::VadFrames)) {
     auto policy = VadPolicy::create(VadProfile{});
@@ -405,10 +431,11 @@ Result<SessionTerms> SpeechJobDispatch::negotiate(const SessionRequest& request)
   terms.input_kind = request.input_kind;
   terms.language = request.language;
   if (takes_audio) {
-    if (request.input_format != kInputFormat) {
+    const auto& formats = options_.input_formats;
+    if (std::find(formats.begin(), formats.end(), request.input_format) == formats.end()) {
       return unexpected(not_served("audio input format is not served", "unsupported_audio_format"));
     }
-    terms.audio_format = kInputFormat;
+    terms.audio_format = request.input_format;
     terms.min_frame = std::chrono::milliseconds{20};
     terms.max_frame = std::chrono::milliseconds{320};
     terms.max_utterance = std::chrono::seconds{kLongestSeconds};
@@ -471,6 +498,10 @@ void SpeechJobDispatch::run() {
     }
     waiting_.bound = next_bound();
     stats_.sessions = sessions_.size();
+    stats_.audio_bytes_reserved = 0;
+    for (const auto& entry : sessions_) {
+      stats_.audio_bytes_reserved += entry.second.open_audio.capacity();
+    }
     ++stats_.steps;
     lock.lock();
     core_->published = stats_;
@@ -534,6 +565,10 @@ void SpeechJobDispatch::handle(SessionManager& manager, Command command) {
     if (detection_ && session.terms.input_kind == SessionInputKind::Audio) {
       session.detection.emplace(*detection_);
     }
+    if (session.terms.input_kind == SessionInputKind::Audio &&
+        session.terms.audio_format.encoding == StreamAudioEncoding::Mulaw) {
+      session.resampler.emplace();
+    }
     return;
   }
   if (auto* ended = std::get_if<JobEnded>(&command.body)) {
@@ -582,14 +617,21 @@ void SpeechJobDispatch::hand_over(SessionManager& manager, std::uint64_t key, Se
     }
   } else if (const auto* asked = std::get_if<Command::FinalizeIn>(&command.body)) {
     session.owed_finalize -= std::min(session.owed_finalize, 1U);
+    // Its cleanup may have released the audio a Finalize would end.
+    if (session.ended) {
+      return;
+    }
     if (!takes_audio) {
       session.finalize_sequence = asked->client_sequence;
-    } else if (session.detection) {
-      session.detection->pending.push_back(PendingEnd{
-          session.samples_accepted, EndpointReason::ClientFinalize, asked->client_sequence});
-    } else if (may_end_utterance(manager, key, session)) {
-      (void)end_utterance(manager, key, session, session.open_start, session.samples_accepted,
-                          EndpointReason::ClientFinalize, asked->client_sequence);
+    } else {
+      end_input(manager, key, session);
+      if (session.detection) {
+        session.detection->pending.push_back(PendingEnd{
+            session.samples_accepted, EndpointReason::ClientFinalize, asked->client_sequence});
+      } else if (may_end_utterance(manager, key, session)) {
+        (void)end_utterance(manager, key, session, session.open_start, session.samples_accepted,
+                            EndpointReason::ClientFinalize, asked->client_sequence);
+      }
     }
   } else if (const auto* delivered = std::get_if<Command::Delivered>(&command.body)) {
     // Any delivery can make room for a held item; only task output counts.
@@ -1106,8 +1148,30 @@ std::optional<JobRequest> SpeechJobDispatch::next_vad_request(SessionManager& ma
 std::span<const std::byte> SpeechJobDispatch::intake(Session& session,
                                                      std::span<const std::byte> frame) {
   session.input_samples += frame.size() / session.terms.audio_format.bytes_per_sample();
-  // The one input format served is the internal one.
-  return frame;
+  // The encoding alone says how: negotiate() grants each at one rate.
+  if (!session.resampler) {
+    return frame;
+  }
+  session.resampled.clear();
+  session.resampler->push(frame, session.resampled);
+  return as_internal(session.resampled, session.internal);
+}
+
+void SpeechJobDispatch::end_input(SessionManager& manager, std::uint64_t key, Session& session) {
+  if (!session.resampler) {
+    return;
+  }
+  session.resampled.clear();
+  session.resampler->flush(session.resampled);
+  if (session.resampled.empty()) {
+    return;
+  }
+  const auto audio = as_internal(session.resampled, session.internal);
+  if (session.detection) {
+    hold_audio(session, audio);
+  } else {
+    take_audio(manager, key, session, audio);
+  }
 }
 
 void SpeechJobDispatch::take_audio(SessionManager& manager, std::uint64_t key, Session& session,
@@ -1135,6 +1199,11 @@ void SpeechJobDispatch::take_audio(SessionManager& manager, std::uint64_t key, S
 
 void SpeechJobDispatch::keep_audio(Session& session, std::span<const std::byte> audio,
                                    std::uint64_t frame_bytes) {
+  hold_audio(session, audio);
+  session.detection->held_credit.push_back({session.samples_accepted, frame_bytes});
+}
+
+void SpeechJobDispatch::hold_audio(Session& session, std::span<const std::byte> audio) {
   if (session.open_audio.capacity() == 0) {
     // The longest utterance, and the unscored audio the input credit allows
     // past its last scored frame.
@@ -1145,7 +1214,6 @@ void SpeechJobDispatch::keep_audio(Session& session, std::span<const std::byte> 
   }
   session.open_audio.insert(session.open_audio.end(), audio.begin(), audio.end());
   session.samples_accepted += audio.size() / kInternalWidth;
-  session.detection->held_credit.push_back({session.samples_accepted, frame_bytes});
 }
 
 bool SpeechJobDispatch::may_end_utterance(SessionManager& manager, std::uint64_t key,
@@ -1207,8 +1275,9 @@ bool SpeechJobDispatch::end_automatically(SessionManager& manager, std::uint64_t
 
 void SpeechJobDispatch::complete_drain(SessionManager& manager, std::uint64_t key,
                                        Session& session) {
-  // A Finalize whose frames are still to be scored is owed too.
-  if (session.owed_finalize != 0 || session.undelivered != 0 ||
+  // A Finalize whose frames are still to be scored is owed too, and so is an
+  // ended utterance: a half-close's flush can end one at the limit.
+  if (session.owed_finalize != 0 || session.undelivered != 0 || !session.ended_utterances.empty() ||
       (session.detection && !session.detection->pending.empty())) {
     return;
   }
@@ -1347,9 +1416,15 @@ bool SpeechJobDispatch::advance_audio(SessionManager& manager, std::uint64_t key
   if (!session.draining || session.owed_finalize != 0) {
     return false;
   }
+  const bool owed =
+      session.close_open_utterance &&
+      input_owed(manager, key, session.detection ? session.detection->held_credit.size() : 0);
+  if (session.close_open_utterance && !owed) {
+    end_input(manager, key, session);
+  }
   if (session.close_open_utterance && session.samples_accepted > session.ended_at) {
     // A frame accepted before the half-close belongs to this utterance.
-    if (input_owed(manager, key, session.detection ? session.detection->held_credit.size() : 0)) {
+    if (owed) {
       return false;
     }
     if (!session.detection) {

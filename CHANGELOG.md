@@ -8,6 +8,12 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- The speech dispatch ignores a client Finalize handed over after its
+  session's cleanup was requested, as one that races a cancel or a failure
+  can be. A session without voice detection could otherwise end an
+  utterance over the audio its cleanup had released and crash the worker.
+  (V030-E05-F01-T03)
+
 - Candidate qualification waits for replaced serving workers to exit before
   sampling idle memory after deploy and rollback. Each wait is recorded and
   bounded at 60 seconds; an unconfirmed exit or overlapping workers makes
@@ -348,6 +354,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The speech dispatch takes 8 kHz mono G.711 mu-law input when its options
+  list that format: each frame is decoded and resampled onto the 16 kHz
+  internal timeline as it is taken, so jobs still carry 16 kHz PCM. A
+  Finalize or a half-close first takes the samples the resampler holds
+  back, so a second of input ends at input offset 8,000 and 1,000,000 us;
+  the resampler's history carries across utterances, and the worker's own
+  drain ends no utterance. Offsets leave at 8 kHz, a decode's deadline and
+  the open audio's reservation count internal audio, and input credit
+  stays in the frame's bytes. Options that list another format, or omit
+  16 kHz PCM, are refused (`config_invalid`, `input_formats_invalid`). No
+  worker configuration lists mu-law yet, so a deployed worker still
+  refuses it. (V030-E05-F01-T03)
+
 - `tools/validation/speech_quality.py` scores a speech evaluation run's final
   transcripts (`config/schemas/speech_transcripts.json`) against a corpus
   manifest's references and writes a quality record
@@ -374,7 +393,7 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   stratum by levelling to -26 dBov before the qualification tool's telephony
   recipe, both integer-exact. The audio stays outside the repository.
   (V030-E05-F03-T02)
-- A telephony input resampler in the serving worker, not wired yet: it
+- A telephony input resampler in the serving worker: it
   decodes 8 kHz G.711 mu-law as the Sun `g711.c` reference decoder (and
   CPython's `audioop`) does and resamples it
   onto the 16 kHz internal timeline with `tp-fir63-blackman-q15-v1`, the

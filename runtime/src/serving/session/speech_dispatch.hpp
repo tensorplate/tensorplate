@@ -24,6 +24,7 @@
 #include "tensorplate/scheduler/clock.hpp"
 
 #include "serving/session/dispatch.hpp"
+#include "serving/session/telephony_resampler.hpp"
 #include "serving/session/vad_policy.hpp"
 #include "serving/session/window_scheduler.hpp"
 
@@ -35,6 +36,11 @@ struct SpeechDispatchOptions {
   /// The input kinds negotiate() grants.
   bool audio_input = true;
   bool text_input = true;
+  /// The audio input formats negotiate() grants: mono 16-bit PCM at 16 kHz,
+  /// which create() requires, and mono G.711 mu-law at 8 kHz when listed.
+  /// create() refuses any other.
+  std::vector<StreamAudioFormat> input_formats{
+      StreamAudioFormat{StreamAudioEncoding::PcmS16Le, kJobInputSampleRateHz, 1}};
   /// A job still running this long after its submit fails its session
   /// (`deadline_missed`): the base, plus the second figure for each second of
   /// the job's audio: a decode's or a voice-activity job's input, or a
@@ -78,6 +84,9 @@ struct SpeechDispatchStats {
   /// The longest a session release waited for the backend's acknowledgement,
   /// by the manager's clock: what a cancel costs behind the job in flight.
   SchedulerClock::Duration longest_release_wait{0};
+  /// Bytes the open sessions hold for audio no utterance took yet, at the
+  /// internal rate whatever their input format.
+  std::uint64_t audio_bytes_reserved = 0;
   /// Steps the thread has taken: a change tells a waiter it was not idle.
   std::uint64_t steps = 0;
 };
@@ -87,7 +96,9 @@ struct SpeechDispatchStats {
 ///
 /// Provisional, the least that serves one transcription and one synthesis:
 ///
-/// - Audio (16 kHz mono 16-bit PCM, frames of 20 to 320 ms): a client
+/// - Audio (16 kHz mono 16-bit PCM, or 8 kHz mono G.711 mu-law decoded and
+///   resampled onto the 16 kHz internal timeline when `input_formats` lists
+///   it; frames of 20 to 320 ms): a client
 ///   Finalize, a half-close or the 30 s limit ends the utterance, whose audio
 ///   is one `stt_decode`. Its result is the final's one segment, over the
 ///   whole utterance; no audio, or no text, yields a final without segments,
@@ -170,8 +181,8 @@ class SpeechJobDispatch final : public SessionDispatch {
 
   /// Registers the dispatch as `bridge`'s event sink. `buffers` and `clock`,
   /// the manager's, outlive the dispatch and the bridge.
-  /// @return ConfigInvalid with context "job_bridge_null" or
-  ///   "generation_zero", Internal with context
+  /// @return ConfigInvalid with context "job_bridge_null",
+  ///   "generation_zero" or "input_formats_invalid", Internal with context
   ///   "dispatch_thread_unavailable", or the bridge's refusal of the sink.
   [[nodiscard]] static Result<std::unique_ptr<SpeechJobDispatch>> create(
       std::shared_ptr<BoundedJobBridge> bridge, BufferManager& buffers, const SchedulerClock& clock,
@@ -351,6 +362,11 @@ class SpeechJobDispatch final : public SessionDispatch {
     /// Samples of the input format accepted: the source the internal
     /// timeline covers, which no utterance ends past.
     std::uint64_t input_samples = 0;
+    /// Mu-law input onto the internal timeline, and the last internal audio
+    /// it gave.
+    std::optional<TelephonyResampler> resampler;
+    std::vector<std::int16_t> resampled;
+    std::vector<std::byte> internal;
     std::optional<Detection> detection;
     /// Utterances ended so far: the last one's id.
     std::uint64_t utterances = 0;
@@ -449,6 +465,10 @@ class SpeechJobDispatch final : public SessionDispatch {
   /// A frame of the session's input format as internal audio; counts its
   /// input samples.
   static std::span<const std::byte> intake(Session& session, std::span<const std::byte> frame);
+  /// Takes the audio the resampler of a mu-law session holds back, as if the
+  /// input ended here: a Finalize's or a half-close's end is then where the
+  /// accepted input ends.
+  static void end_input(SessionManager& manager, std::uint64_t key, Session& session);
   /// Takes internal audio.
   static void take_audio(SessionManager& manager, std::uint64_t key, Session& session,
                          std::span<const std::byte> audio);
@@ -456,6 +476,8 @@ class SpeechJobDispatch final : public SessionDispatch {
   /// the `frame_bytes` it came from held.
   static void keep_audio(Session& session, std::span<const std::byte> audio,
                          std::uint64_t frame_bytes);
+  /// keep_audio() of audio no frame brought, so no credit is held for it.
+  static void hold_audio(Session& session, std::span<const std::byte> audio);
   void pump(SessionManager& manager, std::uint64_t key, Session& session);
   /// Offers the oldest held item. False while the queue has no room or once
   /// it stopped taking task output.
