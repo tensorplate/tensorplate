@@ -539,6 +539,9 @@ def check_rules(good: dict[str, Any]) -> None:
     refused(good, segments(1, ["s-221", "s-150"]), "not ['t101to200', 't21to100']")
     refused(good, segments(1, ["s-221", "s-1", "s-150"]), "not ['t101to200', 't1to20', 't21to100']")
     refused(good, segments(1, ["s-220", "s-0"]), "the same segments as an earlier sequence")
+    refused(good, segments(1, ["s-220", "s-1", "s-2"]), "q-1: the same first segment as q-0")
+    refused(good, segments(99, ["s-221", "s-5"]), "q-99: the same first segment as q-1")
+    accepted(good, segments(1, ["s-221", "s-0"]))
     refused(
         good,
         lambda c: c["queued_sequences"][1].update(id="q-0"),

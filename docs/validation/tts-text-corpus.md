@@ -94,8 +94,8 @@ critical class.
 **Queued sequences.** At least 100, each a long first segment (`t101to200`)
 and one or two short followers (`t1to20`), both lengths present. A sequence of
 three reaches the three-outstanding-segment bound. No two sequences have the
-same segments. Whether a run paces them for playback is the benchmark's
-choice.
+same segments or the same first segment. Whether a run paces them for
+playback is the benchmark's choice.
 
 ## Checking, counting, recording
 

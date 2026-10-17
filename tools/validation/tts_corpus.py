@@ -316,6 +316,7 @@ def _check_listening(listening: list[str], by_id: dict[str, dict[str, Any]]) -> 
 def _check_queued(sequences: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]) -> None:
     _unique(sequences, "id", "queued sequence")
     seen: set[tuple[str, ...]] = set()
+    firsts: dict[str, str] = {}
     lengths = set()
     for sequence in sequences:
         segments = tuple(sequence["segments"])
@@ -331,6 +332,9 @@ def _check_queued(sequences: list[dict[str, Any]], by_id: dict[str, dict[str, An
         if segments in seen:
             raise CorpusError(f"{name}: the same segments as an earlier sequence")
         seen.add(segments)
+        if segments[0] in firsts:
+            raise CorpusError(f"{name}: the same first segment as {firsts[segments[0]]}")
+        firsts[segments[0]] = name
         lengths.add(len(segments))
     if len(sequences) < MIN_QUEUED:
         raise CorpusError(f"{len(sequences)} queued sequences, under {MIN_QUEUED}")
