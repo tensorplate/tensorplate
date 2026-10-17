@@ -290,6 +290,13 @@ def check_rules(good: dict[str, Any]) -> None:
     refused(good, retext("s-40", "Synthetic x sentence. "), "stripped NFC")
     refused(good, retext("s-40", "Cafe\u0301 au lait."), "stripped NFC")
     refused(good, retext("s-40", "A\u200bB."), "control or format")
+    refused(good, retext("s-40", "I can\u02bct go."), "s-40: text holds U+02BC")
+    assert (
+        tts.check_corpus(
+            json.loads(json.dumps(good).replace("Do not a it.", "I can\\u2019t a it."))
+        )
+        == 330
+    )
     refused(good, retext("s-40", "Line\none."), "control or format")
     refused(good, retext("s-40", "\u00e9" * 2049), "over 4096 UTF-8 bytes")
     refused(good, retext("s-40", "\u00e9" * 2048 + "a"), "over 4096 UTF-8 bytes")

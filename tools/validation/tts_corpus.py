@@ -190,6 +190,9 @@ def _check_text(name: str, text: str) -> None:
         raise CorpusError(f"{name}: text is not stripped NFC")
     if any(unicodedata.category(ch) in ("Cc", "Cf") for ch in text):
         raise CorpusError(f"{name}: text holds a control or format character")
+    # U+02BC is a letter, so "can't" written with it stays one word and hides its negation.
+    if "\u02bc" in text:
+        raise CorpusError(f"{name}: text holds U+02BC; write the apostrophe as U+0027 or U+2019")
     if len(text.encode("utf-8")) > MAX_TEXT_BYTES:
         raise CorpusError(f"{name}: text is over {MAX_TEXT_BYTES} UTF-8 bytes")
 

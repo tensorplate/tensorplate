@@ -49,7 +49,9 @@ derives each sentence's stratum from its count and requires:
   tenth of the bound (181 tokens or more);
 - distinct texts, compared after NFC, case folding and whitespace collapse;
   each text stripped NFC with no control or format character (a newline
-  would split it into two segments) and at most 4 KiB of UTF-8.
+  would split it into two segments), no U+02BC modifier letter apostrophe
+  (a letter, so a contraction written with it would stay one word and hide
+  its negation; write U+0027 or U+2019) and at most 4 KiB of UTF-8.
 
 **Critical classes.** Derived from the text, never declared: `negation` for a
 word among no, not, never, nothing, none, nobody, nowhere, neither, nor and
