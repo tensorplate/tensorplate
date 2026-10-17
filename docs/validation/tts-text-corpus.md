@@ -10,7 +10,8 @@ in this repository.
 ## What the corpus holds
 
 Every sentence carries its text, its source and the source's identifier for
-it, its phoneme-token count, its stratum and its critical classes.
+it, its phoneme-token count, its stratum, its critical classes and whether
+its phonemes depend on the espeak-ng fallback.
 
 | Source | License | Text |
 | --- | --- | --- |
@@ -41,12 +42,23 @@ also imports numpy, which only its `trf=True` alignment uses. The list is
 `G2P_PINS` in the tool. The digest is SHA-256 over those pins' lines of
 `packaging/speech-runtime/lock/kokoro.txt`, each
 `name==version --hash=sha256:<digest>` with its whitespace collapsed to
-single spaces and ended by a newline, in the list's order. The check refuses a corpus whose
-digest is not that of the lock's lines, so a change to one of those pins
-invalidates the counts until `count --write` re-records them in the
-environment built from the new lock; a change to any other pin does not. The
-corpus also records the kokoro, misaki, spaCy and `en_core_web_sm` versions,
-which the check holds to the lock.
+single spaces and ended by a newline, in the list's order. The check refuses
+a corpus whose digest is not that of the lock's lines, so a change to one of
+those pins invalidates the counts until `count --write` re-records them in
+the environment built from the new lock; a change to any other pin does not.
+The corpus also records the kokoro, misaki, spaCy and `en_core_web_sm`
+versions, which the check holds to the lock.
+
+**espeak-ng.** The counts hold only for the `libespeak-ng1` version the
+corpus records as `espeak_ng`, which the lock does not pin: misaki
+phonemizes a word outside its lexicon with espeak-ng, and 44 of the
+corpus's sentences hold such a word (`espeak_fallback: true`; a name such as
+Billinger or Hutchinson is one). `count` and `reference` refuse when the
+installed `libespeak-ng1` is another version; `count --write` records the
+installed one. `count` phonemizes each text a second time with the fallback
+turned off and records whether the phonemes differ, and refuses a recorded
+flag that differs. Every sentence at a stratum edge or the segment bound is
+lexicon-only, so the coverage of the edges does not move with espeak-ng.
 
 **Strata.** `t1to20`, `t21to100` and `t101to200` by phoneme tokens. The check
 derives each sentence's stratum from its count and requires:
@@ -55,7 +67,8 @@ derives each sentence's stratum from its count and requires:
   samples per run need no repeated sentence. Every `t1to20` sentence is a
   short case, sent on its own and flushed;
 - a sentence at exactly 20, 21, 100, 101 and 200 tokens, the stratum edges
-  and the segment bound;
+  and the segment bound, and no sentence at one of those counts whose
+  phonemes depend on the espeak fallback;
 - at least 20 long or boundary sentences: at one of those counts, or at 181
   tokens or more;
 - distinct texts, compared after NFC, case folding and whitespace collapse;
@@ -103,11 +116,13 @@ tools/validation/tts_corpus.py count CORPUS --model-config MODEL/config.json [--
 tools/validation/tts_corpus.py reference CORPUS --model-dir MODEL --out DIR [--threads 4]
 ```
 
-- `count` re-phonemizes every sentence and refuses on any count that differs,
-  or on a phoneme the model's vocabulary lacks (the runner refuses those as
-  unsupported). `--write` writes the corpus with the counts, strata, critical
-  classes and tokenizer versions made here instead, once the check accepts
-  it; a recount the check refuses writes nothing.
+- `count` re-phonemizes every sentence and refuses on any count or fallback
+  flag that differs, on a phoneme the model's vocabulary lacks (the runner
+  refuses those as unsupported), or on an installed `libespeak-ng1` other
+  than the corpus's. `--write` writes the corpus with the counts, strata,
+  critical classes, fallback flags, tokenizer versions and `libespeak-ng1`
+  version made here instead, once the check accepts it; a recount the check
+  refuses writes nothing.
 - `reference` is the listening review's reference arm: every sentence
   synthesized by kokoro's own pipeline, `KPipeline(...)(text, voice, speed=1)`,
   from the provisioned model and voice in float32 on the CPU. The model files

@@ -2,7 +2,7 @@
   "schema_version": "0.1",
   "corpus": {
     "name": "tts-text-en-us",
-    "version": "1"
+    "version": "2"
   },
   "language": "en-US",
   "voice": "af_heart",
@@ -52,7 +52,8 @@
       "source_id": "arctic_a0030",
       "phoneme_tokens": 20,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0098",
@@ -61,7 +62,8 @@
       "source_id": "arctic_a0098",
       "phoneme_tokens": 17,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0158",
@@ -70,7 +72,8 @@
       "source_id": "arctic_a0158",
       "phoneme_tokens": 20,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0207",
@@ -79,7 +82,8 @@
       "source_id": "arctic_a0207",
       "phoneme_tokens": 16,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0287",
@@ -88,7 +92,8 @@
       "source_id": "arctic_a0287",
       "phoneme_tokens": 20,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0329",
@@ -97,16 +102,8 @@
       "source_id": "arctic_a0329",
       "phoneme_tokens": 11,
       "stratum": "t1to20",
-      "critical": []
-    },
-    {
-      "id": "arctic-a0381",
-      "text": "My name's Ferguson.",
-      "source": "cmu-arctic",
-      "source_id": "arctic_a0381",
-      "phoneme_tokens": 20,
-      "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0389",
@@ -115,7 +112,8 @@
       "source_id": "arctic_a0389",
       "phoneme_tokens": 14,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "arctic-a0484",
@@ -126,7 +124,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "arctic-a0562",
@@ -135,7 +134,8 @@
       "source_id": "arctic_a0562",
       "phoneme_tokens": 16,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0166",
@@ -144,7 +144,8 @@
       "source_id": "arctic_b0166",
       "phoneme_tokens": 19,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0211",
@@ -153,7 +154,8 @@
       "source_id": "arctic_b0211",
       "phoneme_tokens": 20,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0228",
@@ -162,7 +164,8 @@
       "source_id": "arctic_b0228",
       "phoneme_tokens": 16,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0435",
@@ -171,7 +174,8 @@
       "source_id": "arctic_b0435",
       "phoneme_tokens": 18,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0454",
@@ -180,7 +184,8 @@
       "source_id": "arctic_b0454",
       "phoneme_tokens": 17,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-001",
@@ -189,7 +194,8 @@
       "source_id": null,
       "phoneme_tokens": 5,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-002",
@@ -200,7 +206,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-003",
@@ -209,7 +216,8 @@
       "source_id": null,
       "phoneme_tokens": 14,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-004",
@@ -218,7 +226,8 @@
       "source_id": null,
       "phoneme_tokens": 5,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-005",
@@ -227,7 +236,8 @@
       "source_id": null,
       "phoneme_tokens": 8,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-006",
@@ -236,7 +246,8 @@
       "source_id": null,
       "phoneme_tokens": 20,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-007",
@@ -245,7 +256,8 @@
       "source_id": null,
       "phoneme_tokens": 9,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-008",
@@ -254,7 +266,8 @@
       "source_id": null,
       "phoneme_tokens": 11,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-009",
@@ -263,7 +276,8 @@
       "source_id": null,
       "phoneme_tokens": 8,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-010",
@@ -272,7 +286,8 @@
       "source_id": null,
       "phoneme_tokens": 12,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-011",
@@ -281,7 +296,8 @@
       "source_id": null,
       "phoneme_tokens": 10,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-012",
@@ -292,7 +308,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-013",
@@ -303,7 +320,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-014",
@@ -314,7 +332,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-015",
@@ -325,7 +344,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-016",
@@ -336,7 +356,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-017",
@@ -347,7 +368,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-018",
@@ -358,7 +380,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-020",
@@ -369,7 +392,8 @@
       "stratum": "t1to20",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-021",
@@ -380,7 +404,8 @@
       "stratum": "t1to20",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "authored-023",
@@ -391,7 +416,8 @@
       "stratum": "t1to20",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-024",
@@ -402,7 +428,8 @@
       "stratum": "t1to20",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-025",
@@ -411,7 +438,8 @@
       "source_id": null,
       "phoneme_tokens": 5,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-026",
@@ -420,7 +448,8 @@
       "source_id": null,
       "phoneme_tokens": 12,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-027",
@@ -429,7 +458,8 @@
       "source_id": null,
       "phoneme_tokens": 10,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-028",
@@ -438,7 +468,8 @@
       "source_id": null,
       "phoneme_tokens": 10,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-029",
@@ -447,7 +478,8 @@
       "source_id": null,
       "phoneme_tokens": 13,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-030",
@@ -456,7 +488,8 @@
       "source_id": null,
       "phoneme_tokens": 13,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-031",
@@ -465,7 +498,8 @@
       "source_id": null,
       "phoneme_tokens": 10,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-032",
@@ -474,7 +508,8 @@
       "source_id": null,
       "phoneme_tokens": 13,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-033",
@@ -483,7 +518,8 @@
       "source_id": null,
       "phoneme_tokens": 10,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-034",
@@ -492,7 +528,8 @@
       "source_id": null,
       "phoneme_tokens": 11,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-035",
@@ -501,7 +538,8 @@
       "source_id": null,
       "phoneme_tokens": 13,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-036",
@@ -510,7 +548,8 @@
       "source_id": null,
       "phoneme_tokens": 9,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-037",
@@ -519,7 +558,8 @@
       "source_id": null,
       "phoneme_tokens": 14,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-038",
@@ -528,7 +568,8 @@
       "source_id": null,
       "phoneme_tokens": 7,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-039",
@@ -537,7 +578,8 @@
       "source_id": null,
       "phoneme_tokens": 19,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-040",
@@ -546,7 +588,8 @@
       "source_id": null,
       "phoneme_tokens": 12,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-041",
@@ -555,7 +598,8 @@
       "source_id": null,
       "phoneme_tokens": 11,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-042",
@@ -564,7 +608,8 @@
       "source_id": null,
       "phoneme_tokens": 11,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-043",
@@ -573,7 +618,8 @@
       "source_id": null,
       "phoneme_tokens": 14,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-044",
@@ -582,7 +628,8 @@
       "source_id": null,
       "phoneme_tokens": 13,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-045",
@@ -591,7 +638,8 @@
       "source_id": null,
       "phoneme_tokens": 5,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-046",
@@ -600,7 +648,8 @@
       "source_id": null,
       "phoneme_tokens": 12,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-047",
@@ -609,7 +658,8 @@
       "source_id": null,
       "phoneme_tokens": 13,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-048",
@@ -620,7 +670,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-049",
@@ -631,7 +682,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-050",
@@ -642,7 +694,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-051",
@@ -653,7 +706,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-052",
@@ -662,7 +716,8 @@
       "source_id": null,
       "phoneme_tokens": 12,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-053",
@@ -671,7 +726,8 @@
       "source_id": null,
       "phoneme_tokens": 10,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-054",
@@ -680,7 +736,8 @@
       "source_id": null,
       "phoneme_tokens": 12,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-055",
@@ -691,7 +748,8 @@
       "stratum": "t1to20",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-057",
@@ -702,7 +760,8 @@
       "stratum": "t1to20",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-058",
@@ -711,7 +770,8 @@
       "source_id": null,
       "phoneme_tokens": 12,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-059",
@@ -720,7 +780,8 @@
       "source_id": null,
       "phoneme_tokens": 16,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-060",
@@ -729,7 +790,8 @@
       "source_id": null,
       "phoneme_tokens": 11,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-061",
@@ -738,7 +800,8 @@
       "source_id": null,
       "phoneme_tokens": 5,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-062",
@@ -747,7 +810,8 @@
       "source_id": null,
       "phoneme_tokens": 11,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-063",
@@ -756,7 +820,8 @@
       "source_id": null,
       "phoneme_tokens": 10,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-064",
@@ -765,7 +830,8 @@
       "source_id": null,
       "phoneme_tokens": 8,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-065",
@@ -776,7 +842,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-066",
@@ -785,7 +852,8 @@
       "source_id": null,
       "phoneme_tokens": 15,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-067",
@@ -794,7 +862,8 @@
       "source_id": null,
       "phoneme_tokens": 17,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-068",
@@ -805,7 +874,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-069",
@@ -816,7 +886,8 @@
       "stratum": "t1to20",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-070",
@@ -827,7 +898,8 @@
       "stratum": "t1to20",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-071",
@@ -838,7 +910,8 @@
       "stratum": "t1to20",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-072",
@@ -849,7 +922,8 @@
       "stratum": "t1to20",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-075",
@@ -860,7 +934,8 @@
       "stratum": "t1to20",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1089-134691-000022-000000",
@@ -869,7 +944,8 @@
       "source_id": "1089_134691_000022_000000",
       "phoneme_tokens": 10,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1284-1180-000045-000001",
@@ -878,7 +954,8 @@
       "source_id": "1284_1180_000045_000001",
       "phoneme_tokens": 18,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1580-141083-000056-000001",
@@ -887,7 +964,8 @@
       "source_id": "1580_141083_000056_000001",
       "phoneme_tokens": 15,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1580-141084-000050-000003",
@@ -896,7 +974,8 @@
       "source_id": "1580_141084_000050_000003",
       "phoneme_tokens": 16,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1995-1826-000012-000000",
@@ -905,7 +984,8 @@
       "source_id": "1995_1826_000012_000000",
       "phoneme_tokens": 11,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1995-1826-000012-000002",
@@ -914,7 +994,8 @@
       "source_id": "1995_1826_000012_000002",
       "phoneme_tokens": 8,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1995-1826-000038-000001",
@@ -923,7 +1004,8 @@
       "source_id": "1995_1826_000038_000001",
       "phoneme_tokens": 11,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1995-1826-000039-000000",
@@ -932,7 +1014,18 @@
       "source_id": "1995_1826_000039_000000",
       "phoneme_tokens": 15,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-237-126133-000025-000000",
+      "text": "That brought Polly to.",
+      "source": "libritts-r",
+      "source_id": "237_126133_000025_000000",
+      "phoneme_tokens": 20,
+      "stratum": "t1to20",
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-260-123286-000048-000003",
@@ -941,7 +1034,8 @@
       "source_id": "260_123286_000048_000003",
       "phoneme_tokens": 20,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-2830-3979-000011-000000",
@@ -950,7 +1044,8 @@
       "source_id": "2830_3979_000011_000000",
       "phoneme_tokens": 20,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-4446-2273-000038-000003",
@@ -959,7 +1054,8 @@
       "source_id": "4446_2273_000038_000003",
       "phoneme_tokens": 13,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-4970-29093-000040-000000",
@@ -968,7 +1064,8 @@
       "source_id": "4970_29093_000040_000000",
       "phoneme_tokens": 9,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-5142-33396-000030-000001",
@@ -977,7 +1074,8 @@
       "source_id": "5142_33396_000030_000001",
       "phoneme_tokens": 9,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-672-122797-000000-000000",
@@ -986,7 +1084,8 @@
       "source_id": "672_122797_000000_000000",
       "phoneme_tokens": 12,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-6829-68769-000001-000000",
@@ -995,7 +1094,8 @@
       "source_id": "6829_68769_000001_000000",
       "phoneme_tokens": 14,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-6829-68771-000042-000001",
@@ -1004,7 +1104,8 @@
       "source_id": "6829_68771_000042_000001",
       "phoneme_tokens": 18,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-6930-75918-000029-000000",
@@ -1013,7 +1114,8 @@
       "source_id": "6930_75918_000029_000000",
       "phoneme_tokens": 19,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-6930-75918-000031-000000",
@@ -1022,7 +1124,8 @@
       "source_id": "6930_75918_000031_000000",
       "phoneme_tokens": 16,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-6930-76324-000006-000003",
@@ -1031,7 +1134,8 @@
       "source_id": "6930_76324_000006_000003",
       "phoneme_tokens": 20,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7021-79730-000046-000001",
@@ -1040,7 +1144,8 @@
       "source_id": "7021_79730_000046_000001",
       "phoneme_tokens": 7,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7021-79730-000049-000000",
@@ -1051,7 +1156,8 @@
       "stratum": "t1to20",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7021-79730-000049-000001",
@@ -1060,7 +1166,8 @@
       "source_id": "7021_79730_000049_000001",
       "phoneme_tokens": 13,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7021-85628-000015-000000",
@@ -1069,7 +1176,8 @@
       "source_id": "7021_85628_000015_000000",
       "phoneme_tokens": 17,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7127-75947-000029-000001",
@@ -1078,7 +1186,8 @@
       "source_id": "7127_75947_000029_000001",
       "phoneme_tokens": 3,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8555-292519-000028-000000",
@@ -1087,7 +1196,8 @@
       "source_id": "8555_292519_000028_000000",
       "phoneme_tokens": 7,
       "stratum": "t1to20",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0009",
@@ -1096,7 +1206,8 @@
       "source_id": "arctic_a0009",
       "phoneme_tokens": 56,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0012",
@@ -1105,7 +1216,8 @@
       "source_id": "arctic_a0012",
       "phoneme_tokens": 50,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0015",
@@ -1114,7 +1226,8 @@
       "source_id": "arctic_a0015",
       "phoneme_tokens": 26,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0021",
@@ -1123,7 +1236,8 @@
       "source_id": "arctic_a0021",
       "phoneme_tokens": 44,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0026",
@@ -1132,7 +1246,8 @@
       "source_id": "arctic_a0026",
       "phoneme_tokens": 52,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0065",
@@ -1141,7 +1256,8 @@
       "source_id": "arctic_a0065",
       "phoneme_tokens": 61,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0081",
@@ -1152,7 +1268,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0100",
@@ -1161,7 +1278,8 @@
       "source_id": "arctic_a0100",
       "phoneme_tokens": 26,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0121",
@@ -1170,7 +1288,8 @@
       "source_id": "arctic_a0121",
       "phoneme_tokens": 54,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0147",
@@ -1179,7 +1298,8 @@
       "source_id": "arctic_a0147",
       "phoneme_tokens": 71,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0152",
@@ -1188,7 +1308,8 @@
       "source_id": "arctic_a0152",
       "phoneme_tokens": 46,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0157",
@@ -1197,7 +1318,8 @@
       "source_id": "arctic_a0157",
       "phoneme_tokens": 60,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0162",
@@ -1206,7 +1328,8 @@
       "source_id": "arctic_a0162",
       "phoneme_tokens": 38,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0171",
@@ -1215,7 +1338,8 @@
       "source_id": "arctic_a0171",
       "phoneme_tokens": 51,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "arctic-a0176",
@@ -1224,7 +1348,8 @@
       "source_id": "arctic_a0176",
       "phoneme_tokens": 60,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0184",
@@ -1235,7 +1360,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0195",
@@ -1244,7 +1370,8 @@
       "source_id": "arctic_a0195",
       "phoneme_tokens": 28,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0208",
@@ -1253,7 +1380,8 @@
       "source_id": "arctic_a0208",
       "phoneme_tokens": 59,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0218",
@@ -1262,7 +1390,8 @@
       "source_id": "arctic_a0218",
       "phoneme_tokens": 38,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0234",
@@ -1271,7 +1400,8 @@
       "source_id": "arctic_a0234",
       "phoneme_tokens": 62,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0255",
@@ -1282,7 +1412,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0259",
@@ -1291,7 +1422,8 @@
       "source_id": "arctic_a0259",
       "phoneme_tokens": 40,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0266",
@@ -1300,7 +1432,8 @@
       "source_id": "arctic_a0266",
       "phoneme_tokens": 48,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0289",
@@ -1311,7 +1444,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0316",
@@ -1320,7 +1454,8 @@
       "source_id": "arctic_a0316",
       "phoneme_tokens": 51,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0319",
@@ -1329,7 +1464,8 @@
       "source_id": "arctic_a0319",
       "phoneme_tokens": 58,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0321",
@@ -1338,7 +1474,8 @@
       "source_id": "arctic_a0321",
       "phoneme_tokens": 47,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0331",
@@ -1347,7 +1484,8 @@
       "source_id": "arctic_a0331",
       "phoneme_tokens": 44,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0343",
@@ -1356,7 +1494,8 @@
       "source_id": "arctic_a0343",
       "phoneme_tokens": 43,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0362",
@@ -1367,7 +1506,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0367",
@@ -1378,7 +1518,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0371",
@@ -1387,7 +1528,8 @@
       "source_id": "arctic_a0371",
       "phoneme_tokens": 60,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0410",
@@ -1396,7 +1538,8 @@
       "source_id": "arctic_a0410",
       "phoneme_tokens": 57,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0442",
@@ -1405,7 +1548,8 @@
       "source_id": "arctic_a0442",
       "phoneme_tokens": 46,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0466",
@@ -1414,7 +1558,8 @@
       "source_id": "arctic_a0466",
       "phoneme_tokens": 58,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-a0483",
@@ -1423,7 +1568,8 @@
       "source_id": "arctic_a0483",
       "phoneme_tokens": 58,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "arctic-a0502",
@@ -1432,7 +1578,8 @@
       "source_id": "arctic_a0502",
       "phoneme_tokens": 76,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0009",
@@ -1441,7 +1588,8 @@
       "source_id": "arctic_b0009",
       "phoneme_tokens": 46,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0011",
@@ -1452,7 +1600,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0020",
@@ -1463,7 +1612,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "arctic-b0025",
@@ -1472,7 +1622,8 @@
       "source_id": "arctic_b0025",
       "phoneme_tokens": 21,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0037",
@@ -1483,7 +1634,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0042",
@@ -1494,7 +1646,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0046",
@@ -1503,7 +1656,8 @@
       "source_id": "arctic_b0046",
       "phoneme_tokens": 65,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0049",
@@ -1514,7 +1668,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0055",
@@ -1523,7 +1678,8 @@
       "source_id": "arctic_b0055",
       "phoneme_tokens": 58,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0075",
@@ -1534,7 +1690,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0078",
@@ -1543,7 +1700,8 @@
       "source_id": "arctic_b0078",
       "phoneme_tokens": 59,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0080",
@@ -1552,7 +1710,8 @@
       "source_id": "arctic_b0080",
       "phoneme_tokens": 54,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0087",
@@ -1561,7 +1720,8 @@
       "source_id": "arctic_b0087",
       "phoneme_tokens": 52,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0117",
@@ -1570,7 +1730,8 @@
       "source_id": "arctic_b0117",
       "phoneme_tokens": 37,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0119",
@@ -1579,7 +1740,8 @@
       "source_id": "arctic_b0119",
       "phoneme_tokens": 28,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "arctic-b0133",
@@ -1588,7 +1750,8 @@
       "source_id": "arctic_b0133",
       "phoneme_tokens": 36,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0139",
@@ -1597,7 +1760,8 @@
       "source_id": "arctic_b0139",
       "phoneme_tokens": 26,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0140",
@@ -1606,7 +1770,8 @@
       "source_id": "arctic_b0140",
       "phoneme_tokens": 64,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0141",
@@ -1615,7 +1780,8 @@
       "source_id": "arctic_b0141",
       "phoneme_tokens": 58,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0156",
@@ -1624,7 +1790,8 @@
       "source_id": "arctic_b0156",
       "phoneme_tokens": 61,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "arctic-b0168",
@@ -1633,7 +1800,8 @@
       "source_id": "arctic_b0168",
       "phoneme_tokens": 54,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0189",
@@ -1642,7 +1810,8 @@
       "source_id": "arctic_b0189",
       "phoneme_tokens": 61,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0192",
@@ -1651,7 +1820,8 @@
       "source_id": "arctic_b0192",
       "phoneme_tokens": 60,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0195",
@@ -1662,7 +1832,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0200",
@@ -1671,7 +1842,8 @@
       "source_id": "arctic_b0200",
       "phoneme_tokens": 43,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0205",
@@ -1680,7 +1852,8 @@
       "source_id": "arctic_b0205",
       "phoneme_tokens": 26,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0233",
@@ -1689,7 +1862,8 @@
       "source_id": "arctic_b0233",
       "phoneme_tokens": 40,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0242",
@@ -1700,7 +1874,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0274",
@@ -1709,7 +1884,8 @@
       "source_id": "arctic_b0274",
       "phoneme_tokens": 41,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0277",
@@ -1718,7 +1894,8 @@
       "source_id": "arctic_b0277",
       "phoneme_tokens": 32,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0295",
@@ -1727,7 +1904,8 @@
       "source_id": "arctic_b0295",
       "phoneme_tokens": 47,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0299",
@@ -1736,7 +1914,8 @@
       "source_id": "arctic_b0299",
       "phoneme_tokens": 42,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "arctic-b0331",
@@ -1745,7 +1924,8 @@
       "source_id": "arctic_b0331",
       "phoneme_tokens": 51,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0347",
@@ -1754,7 +1934,8 @@
       "source_id": "arctic_b0347",
       "phoneme_tokens": 65,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0363",
@@ -1763,7 +1944,8 @@
       "source_id": "arctic_b0363",
       "phoneme_tokens": 33,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0369",
@@ -1772,7 +1954,8 @@
       "source_id": "arctic_b0369",
       "phoneme_tokens": 32,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0419",
@@ -1781,7 +1964,8 @@
       "source_id": "arctic_b0419",
       "phoneme_tokens": 38,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0427",
@@ -1790,7 +1974,8 @@
       "source_id": "arctic_b0427",
       "phoneme_tokens": 78,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0434",
@@ -1799,7 +1984,8 @@
       "source_id": "arctic_b0434",
       "phoneme_tokens": 63,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0439",
@@ -1808,7 +1994,8 @@
       "source_id": "arctic_b0439",
       "phoneme_tokens": 70,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0441",
@@ -1817,7 +2004,8 @@
       "source_id": "arctic_b0441",
       "phoneme_tokens": 56,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "arctic-b0449",
@@ -1828,7 +2016,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0461",
@@ -1837,7 +2026,8 @@
       "source_id": "arctic_b0461",
       "phoneme_tokens": 49,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0464",
@@ -1848,7 +2038,8 @@
       "stratum": "t21to100",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0467",
@@ -1857,7 +2048,8 @@
       "source_id": "arctic_b0467",
       "phoneme_tokens": 32,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "arctic-b0516",
@@ -1866,7 +2058,8 @@
       "source_id": "arctic_b0516",
       "phoneme_tokens": 66,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-019",
@@ -1877,7 +2070,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-022",
@@ -1888,7 +2082,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-056",
@@ -1899,7 +2094,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-073",
@@ -1910,7 +2106,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-074",
@@ -1921,7 +2118,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-076",
@@ -1932,7 +2130,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-077",
@@ -1943,7 +2142,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "authored-079",
@@ -1954,7 +2154,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-080",
@@ -1965,7 +2166,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-081",
@@ -1976,7 +2178,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-082",
@@ -1988,7 +2191,8 @@
       "critical": [
         "negation",
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-083",
@@ -1999,7 +2203,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-084",
@@ -2011,7 +2216,8 @@
       "critical": [
         "negation",
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-085",
@@ -2023,7 +2229,8 @@
       "critical": [
         "negation",
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-086",
@@ -2035,7 +2242,8 @@
       "critical": [
         "negation",
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-087",
@@ -2046,7 +2254,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-088",
@@ -2058,7 +2267,8 @@
       "critical": [
         "negation",
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-089",
@@ -2070,7 +2280,8 @@
       "critical": [
         "negation",
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-090",
@@ -2082,7 +2293,8 @@
       "critical": [
         "negation",
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-091",
@@ -2093,7 +2305,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-092",
@@ -2105,7 +2318,8 @@
       "critical": [
         "negation",
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "authored-093",
@@ -2116,7 +2330,8 @@
       "stratum": "t21to100",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "authored-094",
@@ -2128,7 +2343,8 @@
       "critical": [
         "negation",
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-3570-5694-000011-000004",
@@ -2137,7 +2353,18 @@
       "source_id": "3570_5694_000011_000004",
       "phoneme_tokens": 100,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
+    },
+    {
+      "id": "librittsr-4446-2275-000009-000001",
+      "text": "She looked at his heavy shoulders and big, determined head, thrust forward like a catapult in leash.",
+      "source": "libritts-r",
+      "source_id": "4446_2275_000009_000001",
+      "phoneme_tokens": 100,
+      "stratum": "t21to100",
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-4507-16021-000036-000005",
@@ -2146,7 +2373,8 @@
       "source_id": "4507_16021_000036_000005",
       "phoneme_tokens": 21,
       "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-6829-68769-000019-000003",
@@ -2155,16 +2383,8 @@
       "source_id": "6829_68769_000019_000003",
       "phoneme_tokens": 21,
       "stratum": "t21to100",
-      "critical": []
-    },
-    {
-      "id": "librittsr-8455-210777-000022-000007",
-      "text": "At any rate, my eloquence was altogether stopped. The gentleman was named Sir Ferdinando Brown.",
-      "source": "libritts-r",
-      "source_id": "8455_210777_000022_000007",
-      "phoneme_tokens": 100,
-      "stratum": "t21to100",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "authored-078",
@@ -2175,7 +2395,8 @@
       "stratum": "t101to200",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1089-134686-000024-000005",
@@ -2184,7 +2405,8 @@
       "source_id": "1089_134686_000024_000005",
       "phoneme_tokens": 196,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1089-134691-000003-000000",
@@ -2193,7 +2415,8 @@
       "source_id": "1089_134691_000003_000000",
       "phoneme_tokens": 184,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1089-134691-000025-000003",
@@ -2202,7 +2425,8 @@
       "source_id": "1089_134691_000025_000003",
       "phoneme_tokens": 108,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1089-134691-000035-000000",
@@ -2211,7 +2435,8 @@
       "source_id": "1089_134691_000035_000000",
       "phoneme_tokens": 131,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1089-134691-000046-000000",
@@ -2220,7 +2445,8 @@
       "source_id": "1089_134691_000046_000000",
       "phoneme_tokens": 183,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1188-133604-000004-000005",
@@ -2229,7 +2455,8 @@
       "source_id": "1188_133604_000004_000005",
       "phoneme_tokens": 119,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-121-127105-000042-000001",
@@ -2238,7 +2465,8 @@
       "source_id": "121_127105_000042_000001",
       "phoneme_tokens": 102,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1284-1181-000003-000002",
@@ -2247,7 +2475,8 @@
       "source_id": "1284_1181_000003_000002",
       "phoneme_tokens": 184,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-1320-122612-000020-000003",
@@ -2256,7 +2485,8 @@
       "source_id": "1320_122612_000020_000003",
       "phoneme_tokens": 142,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1580-141083-000015-000002",
@@ -2265,16 +2495,8 @@
       "source_id": "1580_141083_000015_000002",
       "phoneme_tokens": 134,
       "stratum": "t101to200",
-      "critical": []
-    },
-    {
-      "id": "librittsr-1580-141083-000037-000000",
-      "text": "\"Then it amounts to this, Mr. Soames: that, unless the Indian student recognized the roll as being proofs, the man who tampered with them came upon them accidentally without knowing that they were there.\"",
-      "source": "libritts-r",
-      "source_id": "1580_141083_000037_000000",
-      "phoneme_tokens": 200,
-      "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1580-141084-000044-000000",
@@ -2283,7 +2505,8 @@
       "source_id": "1580_141084_000044_000000",
       "phoneme_tokens": 106,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1995-1836-000041-000000",
@@ -2294,7 +2517,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-1995-1837-000025-000000",
@@ -2303,7 +2527,8 @@
       "source_id": "1995_1837_000025_000000",
       "phoneme_tokens": 107,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-2300-131720-000016-000010",
@@ -2314,7 +2539,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-2300-131720-000016-000012",
@@ -2325,7 +2551,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-2300-131720-000018-000000",
@@ -2336,7 +2563,8 @@
       "stratum": "t101to200",
       "critical": [
         "numeral"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-2300-131720-000032-000005",
@@ -2345,7 +2573,8 @@
       "source_id": "2300_131720_000032_000005",
       "phoneme_tokens": 111,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-2300-131720-000042-000003",
@@ -2354,7 +2583,8 @@
       "source_id": "2300_131720_000042_000003",
       "phoneme_tokens": 105,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-237-126133-000010-000000",
@@ -2365,7 +2595,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-237-126133-000059-000000",
@@ -2374,7 +2605,8 @@
       "source_id": "237_126133_000059_000000",
       "phoneme_tokens": 187,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-237-134493-000002-000006",
@@ -2383,7 +2615,8 @@
       "source_id": "237_134493_000002_000006",
       "phoneme_tokens": 185,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-260-123440-000015-000000",
@@ -2392,7 +2625,8 @@
       "source_id": "260_123440_000015_000000",
       "phoneme_tokens": 152,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-260-123440-000021-000001",
@@ -2401,7 +2635,8 @@
       "source_id": "260_123440_000021_000001",
       "phoneme_tokens": 185,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-2830-3979-000019-000001",
@@ -2412,7 +2647,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-2830-3980-000070-000001",
@@ -2423,7 +2659,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-2961-961-000011-000003",
@@ -2432,7 +2669,8 @@
       "source_id": "2961_961_000011_000003",
       "phoneme_tokens": 191,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-3570-5695-000000-000000",
@@ -2441,7 +2679,8 @@
       "source_id": "3570_5695_000000_000000",
       "phoneme_tokens": 134,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-3570-5695-000004-000002",
@@ -2450,7 +2689,8 @@
       "source_id": "3570_5695_000004_000002",
       "phoneme_tokens": 200,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-4077-13754-000002-000001",
@@ -2459,7 +2699,8 @@
       "source_id": "4077_13754_000002_000001",
       "phoneme_tokens": 141,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-4077-13754-000003-000001",
@@ -2470,7 +2711,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-4077-13754-000023-000001",
@@ -2479,7 +2721,8 @@
       "source_id": "4077_13754_000023_000001",
       "phoneme_tokens": 163,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-4446-2273-000019-000001",
@@ -2490,7 +2733,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-4446-2273-000022-000001",
@@ -2501,7 +2745,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-4446-2273-000035-000004",
@@ -2510,7 +2755,8 @@
       "source_id": "4446_2273_000035_000004",
       "phoneme_tokens": 175,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-4446-2275-000016-000000",
@@ -2519,7 +2765,8 @@
       "source_id": "4446_2275_000016_000000",
       "phoneme_tokens": 123,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-4507-16021-000029-000003",
@@ -2528,7 +2775,8 @@
       "source_id": "4507_16021_000029_000003",
       "phoneme_tokens": 144,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-4992-41797-000016-000001",
@@ -2537,7 +2785,8 @@
       "source_id": "4992_41797_000016_000001",
       "phoneme_tokens": 199,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-4992-41797-000025-000006",
@@ -2548,7 +2797,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-5105-28233-000019-000001",
@@ -2559,7 +2809,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-5105-28233-000022-000000",
@@ -2568,7 +2819,8 @@
       "source_id": "5105_28233_000022_000000",
       "phoneme_tokens": 130,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-5105-28240-000013-000002",
@@ -2579,7 +2831,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-5105-28241-000006-000000",
@@ -2590,7 +2843,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-5105-28241-000012-000001",
@@ -2601,7 +2855,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-5105-28241-000022-000002",
@@ -2610,7 +2865,8 @@
       "source_id": "5105_28241_000022_000002",
       "phoneme_tokens": 197,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-5142-36377-000008-000005",
@@ -2619,7 +2875,8 @@
       "source_id": "5142_36377_000008_000005",
       "phoneme_tokens": 120,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-5142-36377-000013-000003",
@@ -2628,7 +2885,8 @@
       "source_id": "5142_36377_000013_000003",
       "phoneme_tokens": 137,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-5142-36600-000011-000000",
@@ -2637,7 +2895,8 @@
       "source_id": "5142_36600_000011_000000",
       "phoneme_tokens": 161,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-5639-40744-000008-000002",
@@ -2646,7 +2905,8 @@
       "source_id": "5639_40744_000008_000002",
       "phoneme_tokens": 156,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-5639-40744-000015-000000",
@@ -2655,7 +2915,8 @@
       "source_id": "5639_40744_000015_000000",
       "phoneme_tokens": 179,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-5639-40744-000015-000002",
@@ -2664,7 +2925,8 @@
       "source_id": "5639_40744_000015_000002",
       "phoneme_tokens": 190,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-5639-40744-000033-000000",
@@ -2673,7 +2935,8 @@
       "source_id": "5639_40744_000033_000000",
       "phoneme_tokens": 132,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-5683-32865-000010-000004",
@@ -2682,7 +2945,8 @@
       "source_id": "5683_32865_000010_000004",
       "phoneme_tokens": 190,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-5683-32866-000008-000000",
@@ -2691,7 +2955,8 @@
       "source_id": "5683_32866_000008_000000",
       "phoneme_tokens": 112,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-5683-32866-000020-000001",
@@ -2702,7 +2967,18 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": true
+    },
+    {
+      "id": "librittsr-5683-32866-000045-000006",
+      "text": "I was always a lover of such antiquities, but I confess at that moment I would have vastly preferred a sprightly modern chintz and a trumpery little French bed in a corner of the Brandon Arms.",
+      "source": "libritts-r",
+      "source_id": "5683_32866_000045_000006",
+      "phoneme_tokens": 200,
+      "stratum": "t101to200",
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-6829-68769-000036-000001",
@@ -2711,7 +2987,8 @@
       "source_id": "6829_68769_000036_000001",
       "phoneme_tokens": 122,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-6829-68769-000068-000001",
@@ -2720,7 +2997,8 @@
       "source_id": "6829_68769_000068_000001",
       "phoneme_tokens": 122,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-6829-68769-000074-000000",
@@ -2731,7 +3009,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-6829-68769-000092-000001",
@@ -2740,7 +3019,8 @@
       "source_id": "6829_68769_000092_000001",
       "phoneme_tokens": 118,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-6829-68771-000010-000009",
@@ -2749,7 +3029,8 @@
       "source_id": "6829_68771_000010_000009",
       "phoneme_tokens": 154,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-6829-68771-000022-000002",
@@ -2760,7 +3041,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-6829-68771-000044-000002",
@@ -2769,7 +3051,8 @@
       "source_id": "6829_68771_000044_000002",
       "phoneme_tokens": 146,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-6930-76324-000014-000003",
@@ -2778,7 +3061,8 @@
       "source_id": "6930_76324_000014_000003",
       "phoneme_tokens": 113,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-7021-79730-000057-000000",
@@ -2787,7 +3071,8 @@
       "source_id": "7021_79730_000057_000000",
       "phoneme_tokens": 137,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7021-79740-000003-000002",
@@ -2796,7 +3081,8 @@
       "source_id": "7021_79740_000003_000002",
       "phoneme_tokens": 146,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-7021-79740-000009-000001",
@@ -2805,7 +3091,8 @@
       "source_id": "7021_79740_000009_000001",
       "phoneme_tokens": 190,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-7021-79740-000010-000006",
@@ -2816,7 +3103,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7021-79759-000009-000003",
@@ -2825,7 +3113,8 @@
       "source_id": "7021_79759_000009_000003",
       "phoneme_tokens": 177,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7021-85628-000004-000002",
@@ -2836,7 +3125,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7021-85628-000012-000000",
@@ -2847,7 +3137,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-7021-85628-000013-000001",
@@ -2856,7 +3147,8 @@
       "source_id": "7021_85628_000013_000001",
       "phoneme_tokens": 103,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7021-85628-000027-000000",
@@ -2865,7 +3157,8 @@
       "source_id": "7021_85628_000027_000000",
       "phoneme_tokens": 153,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7021-85628-000037-000000",
@@ -2874,7 +3167,8 @@
       "source_id": "7021_85628_000037_000000",
       "phoneme_tokens": 131,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-7127-75946-000039-000003",
@@ -2883,7 +3177,8 @@
       "source_id": "7127_75946_000039_000003",
       "phoneme_tokens": 164,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-7127-75946-000040-000002",
@@ -2892,7 +3187,8 @@
       "source_id": "7127_75946_000040_000002",
       "phoneme_tokens": 114,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7127-75946-000040-000007",
@@ -2901,7 +3197,8 @@
       "source_id": "7127_75946_000040_000007",
       "phoneme_tokens": 177,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7127-75946-000040-000008",
@@ -2910,7 +3207,8 @@
       "source_id": "7127_75946_000040_000008",
       "phoneme_tokens": 101,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7127-75946-000043-000000",
@@ -2921,7 +3219,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7127-75946-000058-000001",
@@ -2932,7 +3231,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-7127-75947-000023-000009",
@@ -2941,7 +3241,8 @@
       "source_id": "7127_75947_000023_000009",
       "phoneme_tokens": 131,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7127-75947-000025-000003",
@@ -2952,7 +3253,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7176-88083-000003-000001",
@@ -2961,7 +3263,8 @@
       "source_id": "7176_88083_000003_000001",
       "phoneme_tokens": 155,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7176-88083-000020-000002",
@@ -2970,7 +3273,8 @@
       "source_id": "7176_88083_000020_000002",
       "phoneme_tokens": 183,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-7176-92135-000003-000002",
@@ -2979,7 +3283,8 @@
       "source_id": "7176_92135_000003_000002",
       "phoneme_tokens": 174,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-7176-92135-000012-000000",
@@ -2988,7 +3293,8 @@
       "source_id": "7176_92135_000012_000000",
       "phoneme_tokens": 135,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7176-92135-000085-000001",
@@ -2997,7 +3303,8 @@
       "source_id": "7176_92135_000085_000001",
       "phoneme_tokens": 152,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7176-92135-000085-000002",
@@ -3008,7 +3315,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7176-92135-000085-000004",
@@ -3017,7 +3325,8 @@
       "source_id": "7176_92135_000085_000004",
       "phoneme_tokens": 137,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7729-102255-000002-000005",
@@ -3026,7 +3335,8 @@
       "source_id": "7729_102255_000002_000005",
       "phoneme_tokens": 122,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7729-102255-000010-000015",
@@ -3035,7 +3345,8 @@
       "source_id": "7729_102255_000010_000015",
       "phoneme_tokens": 126,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7729-102255-000010-000016",
@@ -3044,7 +3355,8 @@
       "source_id": "7729_102255_000010_000016",
       "phoneme_tokens": 113,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-7729-102255-000040-000003",
@@ -3053,7 +3365,8 @@
       "source_id": "7729_102255_000040_000003",
       "phoneme_tokens": 182,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8224-274384-000022-000000",
@@ -3064,7 +3377,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8224-274384-000026-000002",
@@ -3073,7 +3387,8 @@
       "source_id": "8224_274384_000026_000002",
       "phoneme_tokens": 186,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8224-274384-000032-000001",
@@ -3082,7 +3397,8 @@
       "source_id": "8224_274384_000032_000001",
       "phoneme_tokens": 121,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8230-279154-000008-000000",
@@ -3091,7 +3407,8 @@
       "source_id": "8230_279154_000008_000000",
       "phoneme_tokens": 123,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8230-279154-000019-000002",
@@ -3102,7 +3419,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8455-210777-000011-000000",
@@ -3111,7 +3429,8 @@
       "source_id": "8455_210777_000011_000000",
       "phoneme_tokens": 178,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8455-210777-000018-000000",
@@ -3120,7 +3439,8 @@
       "source_id": "8455_210777_000018_000000",
       "phoneme_tokens": 136,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8455-210777-000023-000009",
@@ -3129,7 +3449,8 @@
       "source_id": "8455_210777_000023_000009",
       "phoneme_tokens": 198,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8455-210777-000025-000000",
@@ -3140,7 +3461,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8455-210777-000033-000000",
@@ -3149,7 +3471,8 @@
       "source_id": "8455_210777_000033_000000",
       "phoneme_tokens": 123,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8463-287645-000005-000004",
@@ -3158,7 +3481,8 @@
       "source_id": "8463_287645_000005_000004",
       "phoneme_tokens": 160,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8463-294828-000047-000001",
@@ -3167,7 +3491,8 @@
       "source_id": "8463_294828_000047_000001",
       "phoneme_tokens": 102,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8463-294828-000064-000000",
@@ -3176,7 +3501,8 @@
       "source_id": "8463_294828_000064_000000",
       "phoneme_tokens": 168,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8463-294828-000069-000000",
@@ -3185,7 +3511,8 @@
       "source_id": "8463_294828_000069_000000",
       "phoneme_tokens": 192,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8555-284447-000020-000000",
@@ -3194,7 +3521,8 @@
       "source_id": "8555_284447_000020_000000",
       "phoneme_tokens": 182,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": true
     },
     {
       "id": "librittsr-8555-284449-000032-000000",
@@ -3205,7 +3533,8 @@
       "stratum": "t101to200",
       "critical": [
         "negation"
-      ]
+      ],
+      "espeak_fallback": false
     },
     {
       "id": "librittsr-8555-292519-000010-000000",
@@ -3214,7 +3543,8 @@
       "source_id": "8555_292519_000010_000000",
       "phoneme_tokens": 129,
       "stratum": "t101to200",
-      "critical": []
+      "critical": [],
+      "espeak_fallback": false
     }
   ],
   "listening": [
@@ -3463,7 +3793,7 @@
     {
       "id": "q-029",
       "segments": [
-        "librittsr-1580-141083-000037-000000",
+        "librittsr-5683-32866-000045-000006",
         "arctic-b0228"
       ]
     },
@@ -3546,7 +3876,7 @@
       "id": "q-040",
       "segments": [
         "librittsr-8455-210777-000033-000000",
-        "arctic-a0381",
+        "librittsr-237-126133-000025-000000",
         "librittsr-6829-68771-000042-000001"
       ]
     },
@@ -3674,7 +4004,7 @@
       "id": "q-057",
       "segments": [
         "librittsr-2300-131720-000032-000005",
-        "arctic-a0381"
+        "librittsr-237-126133-000025-000000"
       ]
     },
     {

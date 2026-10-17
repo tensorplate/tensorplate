@@ -127,6 +127,7 @@ def synthetic() -> dict[str, Any]:
                 "phoneme_tokens": tokens,
                 "stratum": tts.stratum(tokens),
                 "critical": tts.critical_classes(text),
+                "espeak_fallback": position == 50,
             }
         )
     listening = [
@@ -404,6 +405,18 @@ def check_rules(good: dict[str, Any]) -> None:
                 recount(name, tokens)(c)
 
         refused(good, move, f"exactly {edge} phoneme tokens")
+        for name in sorted(names):
+            refused(
+                good,
+                edit(name, espeak_fallback=True),
+                f"{name}: holds the edge count {edge} with phonemes from the espeak fallback;"
+                " an edge count is held by lexicon-only text",
+            )
+    # Next to an edge, and at 181 or more, a count may come from the fallback.
+    for name, tokens in (("s-18", 19), ("s-111", 22), ("s-188", 99), ("s-221", 102)):
+        assert sentence(good, name)["phoneme_tokens"] == tokens
+        accepted(good, edit(name, espeak_fallback=True))
+    accepted(good, edit("s-300", espeak_fallback=True))
 
     def thin_long(c: dict[str, Any]) -> None:
         for s in c["sentences"]:
@@ -611,6 +624,9 @@ def check_schemas(good: dict[str, Any]) -> None:
         (edit("s-0", stratum="t0"), "stratum"),
         (edit("s-0", critical=["other"]), "critical"),
         (edit("s-0", id="S 0"), "sentence id"),
+        (edit("s-0", espeak_fallback=0), "espeak_fallback"),
+        (lambda c: sentence(c, "s-0").pop("espeak_fallback"), "no espeak_fallback"),
+        (lambda c: c["tokenizer"].pop("g2p_pins_sha256"), "no g2p_pins_sha256"),
         (source("libritts-r", text_form="normalized"), "text_form"),
         (lambda c: c["queued_sequences"][0].update(segments=["s-220"]), "one segment"),
     ):
@@ -660,8 +676,10 @@ NO_ATTRIBUTE = object()
 class Fakes:
     """kokoro and torch as modules, holding every call they receive."""
 
-    def __init__(self, tokens: dict[str, int]) -> None:
-        self.tokens = tokens
+    def __init__(self, good: dict[str, Any]) -> None:
+        self.tokens = {s["text"]: s["phoneme_tokens"] for s in good["sentences"]}
+        # The texts with a word outside the lexicon: with the fallback off they lose phonemes.
+        self.espeak = {s["text"] for s in good["sentences"] if s["espeak_fallback"]}
         self.calls: list[tuple[Any, ...]] = []
         # NO_ATTRIBUTE leaves the g2p without a `fallback` attribute at all.
         self.fallback: object | None = object()
@@ -699,7 +717,10 @@ class Fakes:
                     self.fallback = fakes.fallback
 
             def __call__(self, text: str) -> tuple[str, list[object]]:
-                return (fakes.g2p_phonemes or (lambda t: fake_phonemes(fakes.tokens[t])))(text), []
+                result = (fakes.g2p_phonemes or (lambda t: fake_phonemes(fakes.tokens[t])))(text)
+                if getattr(self, "fallback", NO_ATTRIBUTE) is None and text in fakes.espeak:
+                    return result[: len(result) // 2], []
+                return result, []
 
         class Result:
             def __init__(self, text: str) -> None:
@@ -804,20 +825,49 @@ def check_count(good: dict[str, Any], scratch: Path) -> None:
     (model / "voices/af_heart.pt").write_bytes(b"voice")
     repo = fake_repo(scratch, model)
     assert len(fake_phonemes(20)) == 20 and {" ", ",", "."} <= set(fake_phonemes(20))
-    tokens = {s["text"]: s["phoneme_tokens"] for s in good["sentences"]}
+    espeak = {"installed": good["tokenizer"]["espeak_ng"]}
+
+    def installed() -> str:
+        return espeak["installed"]
 
     def count(corpus: dict[str, Any], **kwargs: Any) -> list[str]:
         return tts.count_corpus(
             corpus,
             model / "config.json",
             repo_root=repo,
-            espeak_version=lambda: "9.9-test",
+            espeak_version=lambda: espeak["installed"],
             **kwargs,
         )
 
-    with Fakes(tokens) as fakes:
+    with Fakes(good) as fakes:
+        tokens = fakes.tokens
         assert count(copy.deepcopy(good)) == []
         assert fakes.calls == [("pipeline", "en-US", False, False)]
+        flagged = [s["id"] for s in good["sentences"] if s["espeak_fallback"]]
+        assert flagged == ["s-50", "s-160", "s-270"], flagged
+        for name in flagged:
+            unflagged = copy.deepcopy(good)
+            sentence(unflagged, name)["espeak_fallback"] = False
+            expect_error(
+                lambda c=unflagged: count(c), f"{name}: espeak fallback true, recorded false"
+            )
+        overflagged = copy.deepcopy(good)
+        sentence(overflagged, "s-51")["espeak_fallback"] = True
+        expect_error(
+            lambda: count(copy.deepcopy(overflagged)), "s-51: espeak fallback false, recorded true"
+        )
+        assert count(overflagged, write=scratch / "reflagged.json") == [
+            "s-51: espeak fallback false, recorded true"
+        ]
+        assert json.loads((scratch / "reflagged.json").read_bytes()) == good
+        espeak["installed"] = "9.9-test"
+        expect_error(
+            lambda: count(copy.deepcopy(good)),
+            "installed libespeak-ng1 9.9-test is not the corpus's 1.51+dfsg-12build1; the"
+            " counts hold only for the libespeak-ng1 they were made with",
+        )
+        assert fakes.calls == [("pipeline", "en-US", False, False)] * 6
+        espeak["installed"] = good["tokenizer"]["espeak_ng"]
         shifted = copy.deepcopy(good)
         shifted["language"] = "en-GB"
         count(shifted)
@@ -830,11 +880,14 @@ def check_count(good: dict[str, Any], scratch: Path) -> None:
         stale["tokenizer"].update(g2p_pins_sha256="0" * 64, misaki="0.0.1", espeak_ng="old")
         recount("s-6", 150)(stale)
         sentence(stale, "s-6")["critical"] = ["numeral"]
+        espeak["installed"] = "9.9-test"
         assert count(stale, write=written) == ["s-6: 7 tokens, recorded 150"]
         rewritten = json.loads(written.read_bytes())
         assert rewritten["tokenizer"] == good["tokenizer"] | {"espeak_ng": "9.9-test"}
         assert sentence(rewritten, "s-6") == sentence(good, "s-6")
         assert tts.check_corpus(rewritten, repo_root=repo) == 330
+        assert count(rewritten) == []
+        espeak["installed"] = good["tokenizer"]["espeak_ng"]
         for i in range(11):
             tokens[sentence(good, f"s-{i}")["text"]] = 30
         unwritten = scratch / "unwritten.json"
@@ -854,7 +907,7 @@ def check_count(good: dict[str, Any], scratch: Path) -> None:
         fakes.fallback = None
         expect_error(lambda: count(copy.deepcopy(good)), "espeak fallback is unavailable")
         fakes.fallback = NO_ATTRIBUTE
-        assert count(copy.deepcopy(good)) == []
+        expect_error(lambda: count(copy.deepcopy(good)), "no espeak fallback to turn off")
         fakes.fallback = object()
         tokens[sentence(good, "s-7")["text"]] = 0
         expect_error(lambda: count(copy.deepcopy(good)), "has no phonemes")
@@ -869,7 +922,12 @@ def check_count(good: dict[str, Any], scratch: Path) -> None:
         )
         repo2 = fake_repo(scratch / "two", model)
         expect_error(
-            lambda: tts.count_corpus(copy.deepcopy(good), model / "config.json", repo_root=repo2),
+            lambda: tts.count_corpus(
+                copy.deepcopy(good),
+                model / "config.json",
+                repo_root=repo2,
+                espeak_version=installed,
+            ),
             "the model vocabulary lacks ['h']",
         )
         bare = fake_repo(scratch / "bare", model)
@@ -882,7 +940,12 @@ def check_count(good: dict[str, Any], scratch: Path) -> None:
         )
         repo3 = fake_repo(scratch / "three", model, kokoro=False)
         expect_error(
-            lambda: tts.count_corpus(copy.deepcopy(good), model / "config.json", repo_root=repo3),
+            lambda: tts.count_corpus(
+                copy.deepcopy(good),
+                model / "config.json",
+                repo_root=repo3,
+                espeak_version=installed,
+            ),
             "pins no tts-kokoro-candidate bundle",
         )
     check_lock_scope(good, scratch / "scope", model)
@@ -923,7 +986,8 @@ def check_reference(good: dict[str, Any], scratch: Path) -> None:
     relock(repo / tts.LOCK, "regex", rehash(lock_lines(LOCK_BYTES)["regex"]))
     small = copy.deepcopy(good)
     small["sentences"] = small["sentences"][:3]
-    tokens = {s["text"]: s["phoneme_tokens"] for s in good["sentences"]}
+    small["tokenizer"]["espeak_ng"] = "9.9-ref"
+    espeak = {"installed": "9.9-ref"}
 
     def record(out: Path, corpus: dict[str, Any] = small) -> dict[str, Any]:
         return tts.record_reference(
@@ -933,13 +997,22 @@ def check_reference(good: dict[str, Any], scratch: Path) -> None:
             out,
             threads=3,
             repo_root=repo,
-            espeak_version=lambda: "9.9-ref",
+            espeak_version=lambda: espeak["installed"],
         )
 
     def phonemes_sha(count: int) -> str:
         return sha(fake_phonemes(count).encode())
 
-    with Fakes(tokens) as fakes:
+    with Fakes(good) as fakes:
+        tokens = fakes.tokens
+        espeak["installed"] = "9.9-other"
+        expect_error(
+            lambda: record(scratch / "out"),
+            "installed libespeak-ng1 9.9-other is not the corpus's 9.9-ref; the counts hold"
+            " only for the libespeak-ng1 they were made with",
+        )
+        assert not (scratch / "out").exists() and fakes.calls == []
+        espeak["installed"] = "9.9-ref"
         result = record(scratch / "out")
         assert fakes.threads == 3 and result["engine"]["threads"] == 3
         assert fakes.calls[:4] == [
@@ -1165,7 +1238,7 @@ def check_cli_commands(
     corpus = scratch / "cli-corpus.json"
     corpus.write_text(json.dumps(good, indent=4))
     saved = tts.REPO_ROOT, tts._dpkg_espeak_version
-    with Fakes({s["text"]: s["phoneme_tokens"] for s in good["sentences"]}):
+    with Fakes(good):
         tts.REPO_ROOT, tts._dpkg_espeak_version = repo, lambda: "9.9-cli"
         try:
             schemaless = scratch / "cli-schemaless.json"
@@ -1179,6 +1252,10 @@ def check_cli_commands(
             assert counted["tokenizer"]["espeak_ng"] == "9.9-cli"
             assert counted["tokenizer"]["g2p_pins_sha256"] == pins_digest
             assert counted["sentences"] == good["sentences"]
+            code, _, err = tool("count", corpus, "--model-config", config)
+            assert code == 1 and "installed libespeak-ng1 9.9-cli is not the corpus's" in err, err
+            code, out, _ = tool("count", written, "--model-config", config)
+            assert code == 0 and out == "tts-corpus: counted: 330 sentences\n", (code, out)
             sources = [f"--source={name}={path}" for name, path in files.items()]
             texts = scratch / "cli-pinned.json"
             texts.write_text(json.dumps(pinned))
@@ -1191,9 +1268,12 @@ def check_cli_commands(
             assert code == 1 and "s-150: text differs" in err, (code, err)
             out_dir = scratch / "cli-reference"
             code, _, err = tool("reference", corpus, "--model-dir", model, "--out", out_dir)
+            assert code == 1 and "installed libespeak-ng1 9.9-cli is not the corpus's" in err, err
+            assert not out_dir.exists()
+            code, _, err = tool("reference", written, "--model-dir", model, "--out", out_dir)
             assert code == 0, err
             recorded = json.loads((out_dir / tts.RECORD_NAME).read_bytes())
-            assert recorded["corpus"]["sha256"] == sha(corpus.read_bytes())
+            assert recorded["corpus"]["sha256"] == sha(written.read_bytes())
             assert recorded["engine"]["g2p_pins_sha256"] == pins_digest
             assert recorded["engine"]["espeak_ng"] == "9.9-cli"
             assert len(recorded["clips"]) == 330
@@ -1201,7 +1281,13 @@ def check_cli_commands(
             tts.REPO_ROOT, tts._dpkg_espeak_version = saved
 
 
+def unqueried() -> str:
+    raise AssertionError("the tests queried this machine's libespeak-ng1")
+
+
 def main() -> int:
+    # Every test names the espeak-ng version it means; this machine's is not one of them.
+    tts._dpkg_espeak_version = unqueried
     check_derivations()
     good = synthetic()
     check_rules(good)

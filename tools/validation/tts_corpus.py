@@ -259,6 +259,12 @@ def _check_sentences(
             raise CorpusError(f"{name}: {sentence['phoneme_tokens']} tokens is stratum {derived}")
         if sentence["critical"] != critical_classes(sentence["text"]):
             raise CorpusError(f"{name}: critical classes are {critical_classes(sentence['text'])}")
+        # An edge count from espeak-ng would move with the distribution's espeak-ng.
+        if sentence["phoneme_tokens"] in BOUNDARY_TOKENS and sentence["espeak_fallback"]:
+            raise CorpusError(
+                f"{name}: holds the edge count {sentence['phoneme_tokens']} with phonemes from"
+                " the espeak fallback; an edge count is held by lexicon-only text"
+            )
     return by_id
 
 
@@ -439,21 +445,42 @@ def _require_locked(repo_root: Path, names: Iterable[str]) -> dict[str, str]:
     return installed
 
 
-def phonemizer(language: str) -> Callable[[str], str]:
-    """The Kokoro runner's phonemizer: KPipeline's g2p, with its espeak fallback present."""
+def phonemizer(language: str) -> Callable[[str], tuple[str, bool]]:
+    """The Kokoro runner's phonemizer: KPipeline's g2p, with its espeak fallback present.
+
+    Each text is phonemized again with the fallback turned off, and the flag returned with
+    its phonemes says whether the two differ: whether espeak-ng made any of them.
+    """
     from kokoro import KPipeline
 
     g2p = KPipeline(lang_code=language, model=False, trf=False).g2p
     if getattr(g2p, "fallback", True) is None:
         raise CorpusError("the phonemizer's espeak fallback is unavailable")
+    if not hasattr(g2p, "fallback"):
+        raise CorpusError("the phonemizer has no espeak fallback to turn off")
+    fallback = g2p.fallback
 
-    def phonemes(text: str) -> str:
+    def phonemes(text: str) -> tuple[str, bool]:
         result, _ = g2p(text)
         if not result.strip():
             raise CorpusError(f"{text!r} has no phonemes")
-        return result
+        g2p.fallback = None
+        try:
+            lexicon_only, _ = g2p(text)
+        finally:
+            g2p.fallback = fallback
+        return result, lexicon_only != result
 
     return phonemes
+
+
+def _require_espeak(corpus: dict[str, Any], installed: str) -> None:
+    recorded = corpus["tokenizer"]["espeak_ng"]
+    if installed != recorded:
+        raise CorpusError(
+            f"installed libespeak-ng1 {installed} is not the corpus's {recorded}; the counts"
+            " hold only for the libespeak-ng1 they were made with"
+        )
 
 
 def _pinned_files(repo_root: Path) -> dict[str, str]:
@@ -483,12 +510,15 @@ def count_corpus(
 ) -> list[str]:
     """Re-count every sentence and refuse a changed count, or write the counted corpus."""
     _require_locked(repo_root, G2P_PINS)
+    espeak = (espeak_version or _dpkg_espeak_version)()
+    if write is None:
+        _require_espeak(corpus, espeak)
     path, _ = _pinned(model_config.parent, model_config.name, _pinned_files(repo_root))
     vocab = json.loads(path.read_text(encoding="utf-8"))["vocab"]
     phonemes = phonemizer(corpus["language"])
     mismatches = []
     for sentence in corpus["sentences"]:
-        result = phonemes(sentence["text"])
+        result, fallback = phonemes(sentence["text"])
         unknown = sorted({symbol for symbol in result if symbol not in vocab})
         if unknown:
             raise CorpusError(f"{sentence['id']}: the model vocabulary lacks {unknown}")
@@ -497,9 +527,15 @@ def count_corpus(
             mismatches.append(
                 f"{sentence['id']}: {tokens} tokens, recorded {sentence['phoneme_tokens']}"
             )
+        if fallback != sentence["espeak_fallback"]:
+            mismatches.append(
+                f"{sentence['id']}: espeak fallback {json.dumps(fallback)},"
+                f" recorded {json.dumps(sentence['espeak_fallback'])}"
+            )
         sentence["phoneme_tokens"] = tokens
         sentence["stratum"] = stratum(tokens)
         sentence["critical"] = critical_classes(sentence["text"])
+        sentence["espeak_fallback"] = fallback
     if mismatches and write is None:
         raise CorpusError("; ".join(mismatches))
     if write is not None:
@@ -507,7 +543,7 @@ def count_corpus(
         corpus["tokenizer"].update(
             {field: pins[name] for field, name in LOCKED.items()},
             g2p_pins_sha256=g2p_pins_sha256(repo_root),
-            espeak_ng=(espeak_version or _dpkg_espeak_version)(),
+            espeak_ng=espeak,
         )
         check_corpus(corpus, repo_root=repo_root)
         write.write_text(json.dumps(corpus, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -569,10 +605,12 @@ def record_reference(
     if out.exists():
         raise CorpusError(f"{out}: the output directory already exists")
     installed = _require_locked(repo_root, G2P_PINS)
+    espeak = (espeak_version or _dpkg_espeak_version)()
+    _require_espeak(corpus, espeak)
     tokenizer = {
         **{field: installed[name] for field, name in LOCKED.items()},
         "g2p_pins_sha256": g2p_pins_sha256(repo_root),
-        "espeak_ng": (espeak_version or _dpkg_espeak_version)(),
+        "espeak_ng": espeak,
     }
     pins = _pinned_files(repo_root)
     config_path, config_sha = _pinned(model_dir, "config.json", pins)

@@ -31,7 +31,7 @@
         "misaki": { "type": "string", "minLength": 1 },
         "spacy": { "type": "string", "minLength": 1 },
         "en_core_web_sm": { "type": "string", "minLength": 1 },
-        "espeak_ng": { "type": "string", "minLength": 1, "description": "The distribution package version of libespeak-ng1 the counts were made with; the phonemizer falls back to it for words outside its lexicon." }
+        "espeak_ng": { "type": "string", "minLength": 1, "description": "The distribution package version of libespeak-ng1 the counts were made with; the phonemizer falls back to it for words outside its lexicon. count and reference refuse another installed version." }
       }
     },
     "sources": {
@@ -59,7 +59,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "text", "source", "source_id", "phoneme_tokens", "stratum", "critical"],
+        "required": ["id", "text", "source", "source_id", "phoneme_tokens", "stratum", "critical", "espeak_fallback"],
         "properties": {
           "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
           "text": { "type": "string", "minLength": 1 },
@@ -70,7 +70,8 @@
           "critical": {
             "type": "array",
             "items": { "type": "string", "enum": ["negation", "numeral"] }
-          }
+          },
+          "espeak_fallback": { "type": "boolean", "description": "Whether the phonemes change when the phonemizer's espeak fallback is turned off: true when espeak-ng phonemized a word outside misaki's lexicon, so the count holds only for the recorded espeak_ng. A sentence at a stratum edge or the segment bound is false." }
         }
       }
     },
