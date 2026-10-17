@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Pinned, integer-exact audio derivations for the candidate qualification tool.
+"""Pinned, integer-exact audio derivations for the candidate qualification tool
+and the release speech corpus.
 
 Every function here is deterministic across machines: the FIR taps are a
 literal Q15 table, the noise comes from a seeded integer generator, and the
@@ -17,6 +18,8 @@ import wave
 from pathlib import Path
 
 RESAMPLER_ID = "tp-fir63-blackman-q15-v1"
+# The telephony derivation: that resampler, then the STL G.711 mu-law encoder.
+TELEPHONY_RECIPE_ID = "tp-telephony8k-fir63-g711stl-v1"
 
 # 63-tap windowed sinc, cutoff 0.23 of the 16 kHz rate (3,680 Hz), Blackman
 # window, quantized to Q15 with the centre tap absorbing the rounding so the
@@ -155,23 +158,18 @@ def interpolate_2x(samples: list[int]) -> list[int]:
 
 
 _ULAW_BIAS = 0x84
-_ULAW_CLIP_14BIT = 8159
-_ULAW_SEGMENT_ENDS = (0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF, 0x1FFF)
 
 
 def ulaw_encode(sample: int) -> int:
-    """G.711 mu-law as the Sun g711.c reference encodes it (the 14-bit domain, bias 0x21)."""
-    value = sample >> 2
-    if value < 0:
-        value = -value
-        mask = 0x7F
-    else:
-        mask = 0xFF
-    value = min(value, _ULAW_CLIP_14BIT) + (_ULAW_BIAS >> 2)
-    segment = next((i for i, end in enumerate(_ULAW_SEGMENT_ENDS) if value <= end), 8)
-    if segment >= 8:
-        return 0x7F ^ mask
-    return ((segment << 4) | ((value >> (segment + 1)) & 0x0F)) ^ mask
+    """G.711 mu-law as ITU-T STL's `ulaw_compress` encodes it.
+
+    A negative sample's 14-bit magnitude is its one's complement shifted, not its
+    negation, which is where the Sun g711.c encoder (and Python's audioop) differ.
+    """
+    magnitude = min(((~sample if sample < 0 else sample) >> 2) + 33, 0x1FFF)
+    segment = 1 + (magnitude >> 6).bit_length()
+    code = ((8 - segment) << 4) | (0x0F - ((magnitude >> segment) & 0x0F))
+    return code | 0x80 if sample >= 0 else code
 
 
 def ulaw_decode(byte: int) -> int:
@@ -184,13 +182,14 @@ def ulaw_decode(byte: int) -> int:
     return -magnitude if sign else magnitude
 
 
-def ulaw_roundtrip(samples: list[int]) -> list[int]:
-    return [ulaw_decode(ulaw_encode(s)) for s in samples]
+def telephony_8k_ulaw_bytes(samples_16k: list[int]) -> bytes:
+    """The 8 kHz mu-law telephony derivation as the wire carries it: decimate, then encode."""
+    return bytes(ulaw_encode(s) for s in decimate_2x(samples_16k))
 
 
 def telephony_8k_ulaw(samples_16k: list[int]) -> list[int]:
-    """The 8 kHz mu-law telephony derivation: decimate, then transcode through G.711."""
-    return ulaw_roundtrip(decimate_2x(samples_16k))
+    """The same derivation decoded back to 16-bit PCM."""
+    return [ulaw_decode(byte) for byte in telephony_8k_ulaw_bytes(samples_16k)]
 
 
 def integer_rms(samples: list[int]) -> int:

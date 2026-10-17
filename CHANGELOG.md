@@ -1356,6 +1356,13 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   ends inside a 512-sample frame leaves that frame's samples before it
   unscored, and the state carries over them. (V030-E04-F03-T02)
 
+- The qualification tool's 8 kHz telephony derivation encodes G.711 mu-law as
+  the ITU-T STL encoder does, under the recipe id
+  `tp-telephony8k-fir63-g711stl-v1`, which a telephony clip in the inventory
+  must now name. The previous Sun-style encoder differed from the STL on 508
+  negative inputs; the encoder is pinned to the STL's reference vectors, and
+  the English telephony clip's derived digest is re-pinned. (V030-E05-F03-T02)
+
 - The `faster_whisper` runner profile decodes each `stt_decode` job in one
   pass over its window: one encoder pass over the window padded to the
   model's 30-second input, one greedy decode without timestamps, and the word

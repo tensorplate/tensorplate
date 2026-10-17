@@ -1234,10 +1234,11 @@
       "stratum": "telephony8k",
       "language": "en",
       "voice": null,
-      "digest": "sha256:43bb7cd4aac2e00eb1a18e0a10d2a03136c7853a915030ed0ffdf2c43e6a3f33",
+      "digest": "sha256:81b3695fef3b891130432faaf3c2e3728312e2f7445c910eb65f16cef2168c5c",
       "derived_from": "en-clean-16k-01",
       "derivation": {
-        "kind": "telephony_8k_ulaw"
+        "kind": "telephony_8k_ulaw",
+        "recipe": "tp-telephony8k-fir63-g711stl-v1"
       },
       "input": {
         "sample_rate_hz": 16000,
