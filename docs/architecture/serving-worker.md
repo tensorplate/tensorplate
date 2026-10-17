@@ -2048,8 +2048,9 @@ keeps one for each mu-law session, its history carried across utterances.
   rounded half away from zero and clamped to 16 bits. Its 31-sample group
   delay is compensated, so output sample n is source time n / 16,000 s.
 - `push` emits each output once the inputs it reads have arrived and no
-  flush emitted it: after N inputs, 2N - 31 outputs (2F within 16 inputs
-  of a flush after F inputs); the last 31 wait for the next 16 inputs.
+  flush emitted it: after N inputs, 2N - 31 outputs (2F for the next 15
+  inputs after a flush at F inputs); the last 31 wait for the next 16
+  inputs.
   `flush` emits them as if the input ended there, so N inputs have given
   exactly 2N outputs, and later input continues from the same history:
   only the flushed samples differ from a resample of the whole input.

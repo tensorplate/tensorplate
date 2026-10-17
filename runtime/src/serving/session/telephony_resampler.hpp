@@ -32,7 +32,7 @@ class TelephonyResampler {
 
   /// Takes the next mu-law input bytes and appends every output sample whose
   /// inputs have all arrived and that no flush emitted: after N inputs,
-  /// 2N - kPending in all, or 2F within 16 inputs of a flush after F.
+  /// 2N - kPending in all, or 2F for the next 15 inputs after a flush at F.
   void push(std::span<const std::byte> mulaw, std::vector<std::int16_t>& out);
   /// Appends the pending samples as if the input ended here, so N inputs
   /// have given exactly 2N outputs. Later input goes on from the same
