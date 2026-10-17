@@ -18,12 +18,18 @@ namespace {
 using Effect = LogicalSessionEffect;
 using Event = LogicalSessionEvent;
 
-constexpr StreamAudioFormat kInputFormat{StreamAudioEncoding::PcmS16Le, kJobInputSampleRateHz, 1};
+/// The internal timeline: the audio voice detection and every input job
+/// read, whatever the session's input format.
+constexpr StreamAudioFormat kInternalFormat{StreamAudioEncoding::PcmS16Le, kJobInputSampleRateHz,
+                                            1};
+/// The one input format served: the internal one, so a frame is its own
+/// internal audio.
+constexpr StreamAudioFormat kInputFormat = kInternalFormat;
 constexpr StreamAudioFormat kOutputFormat{StreamAudioEncoding::PcmS16Le, kJobOutputSampleRateHz, 1};
 /// The longest utterance and the longest audio of a segment: what one job's
 /// input and one job's result may hold.
 constexpr std::uint64_t kLongestSeconds = 30;
-static_assert(kInputFormat.bytes_per_second() * kLongestSeconds == kMaxAudioFramesBytes);
+static_assert(kInternalFormat.bytes_per_second() * kLongestSeconds == kMaxAudioFramesBytes);
 static_assert(kOutputFormat.bytes_per_second() * kLongestSeconds == kMaxAudioChunkBytes);
 /// The waiting segments and the one being delivered.
 constexpr std::uint32_t kSynthesisSegments = SessionBudgets::kWaitingTextSegments + 1;
@@ -37,18 +43,16 @@ constexpr std::size_t kEndedUtterances = 3;
 constexpr std::uint64_t kVoiceActivityUtterance = 1;
 /// A voice-detected utterance is split where the session's longest one ends.
 static_assert(VadProfile{}.max_utterance == std::chrono::seconds{kLongestSeconds});
-constexpr std::uint64_t kMicrosPerSecond = 1'000'000;
 /// The shortest timed wait for a bound not yet due: a clock moved by hand can
 /// stand just short of one for as long as a test likes.
 constexpr SchedulerClock::Duration kShortestWait = std::chrono::milliseconds{1};
 
-/// A segment's interval is rounded outward: its start down, its end up.
-std::uint64_t start_micros(std::uint64_t sample, std::uint64_t rate) {
-  return sample * kMicrosPerSecond / rate;
-}
+constexpr std::uint64_t kInternalWidth = kInternalFormat.bytes_per_sample();
 
-std::uint64_t end_micros(std::uint64_t sample, std::uint64_t rate) {
-  return (sample * kMicrosPerSecond + rate - 1) / rate;
+/// The longest utterance `terms` grant, in internal samples.
+std::uint64_t longest_utterance(const SessionTerms& terms) {
+  return static_cast<std::uint64_t>(terms.max_utterance.count()) * kInternalFormat.sample_rate_hz /
+         1000;
 }
 
 /// Task output a drain waits to see delivered: a partial transcript that
@@ -564,9 +568,9 @@ void SpeechJobDispatch::hand_over(SessionManager& manager, std::uint64_t key, Se
     // wrong_input_kind; with voice detection it returns once it was scored,
     // or at once, the frame dropped, when the session has ended.
     if (session.detection && !session.ended) {
-      keep_audio(session, input->frame);
+      keep_audio(session, intake(session, input->frame), input->frame.size());
     } else if (manager.release_audio_input(key, 1, input->frame.size())) {
-      take_audio(manager, key, session, input->frame);
+      take_audio(manager, key, session, intake(session, input->frame));
     } else {
       session.ended = true;
     }
@@ -584,8 +588,8 @@ void SpeechJobDispatch::hand_over(SessionManager& manager, std::uint64_t key, Se
       session.detection->pending.push_back(PendingEnd{
           session.samples_accepted, EndpointReason::ClientFinalize, asked->client_sequence});
     } else if (may_end_utterance(manager, key, session)) {
-      end_utterance(session, session.open_start, session.samples_accepted,
-                    EndpointReason::ClientFinalize, asked->client_sequence);
+      (void)end_utterance(manager, key, session, session.open_start, session.samples_accepted,
+                          EndpointReason::ClientFinalize, asked->client_sequence);
     }
   } else if (const auto* delivered = std::get_if<Command::Delivered>(&command.body)) {
     // Any delivery can make room for a held item; only task output counts.
@@ -844,17 +848,21 @@ SchedulerClock::TimePoint SpeechJobDispatch::release_due(std::uint64_t key,
 
 SchedulerClock::Duration SpeechJobDispatch::job_deadline(const JobRequest& request,
                                                          const Session& session) const {
-  // A synthesis's audio is known only once it has run: its granted maximum.
-  const StreamAudioFormat& format = session.terms.audio_format;
-  std::uint64_t bytes = static_cast<std::uint64_t>(session.terms.max_segment_audio.count()) *
-                        format.bytes_per_second() / 1000;
+  // An input job holds internal audio; a synthesis's audio is known only
+  // once it has run: its granted maximum.
+  const StreamAudioFormat* format = &kInternalFormat;
+  std::uint64_t bytes = 0;
   if (const auto* audio = std::get_if<AudioFrames>(&request.payload())) {
     bytes = audio->pcm.byte_size;
   } else if (const auto* frames = std::get_if<VadFrames>(&request.payload())) {
     bytes = frames->pcm.byte_size;
+  } else {
+    format = &session.terms.audio_format;
+    bytes = static_cast<std::uint64_t>(session.terms.max_segment_audio.count()) *
+            format->bytes_per_second() / 1000;
   }
   return options_.job_deadline_base +
-         per_audio(options_.job_deadline_per_audio_second, bytes, format.bytes_per_second());
+         per_audio(options_.job_deadline_per_audio_second, bytes, format->bytes_per_second());
 }
 
 void SpeechJobDispatch::want_job(std::uint64_t key, Session& session) {
@@ -1020,9 +1028,9 @@ std::optional<JobRequest> SpeechJobDispatch::next_partial_request(SessionManager
     return std::nullopt;
   }
   session.detection->windows.started(window->end);
-  const std::uint64_t width = session.terms.audio_format.bytes_per_sample();
-  const auto audio = std::span{session.open_audio}.subspan(
-      (window->first - session.open_start) * width, (window->end - window->first) * width);
+  const auto audio =
+      std::span{session.open_audio}.subspan((window->first - session.open_start) * kInternalWidth,
+                                            (window->end - window->first) * kInternalWidth);
   return decode_request(manager, key, session, input, audio, window->first);
 }
 
@@ -1066,8 +1074,7 @@ std::optional<JobRequest> SpeechJobDispatch::next_vad_request(SessionManager& ma
       detection.pending.empty() ? session.samples_accepted : detection.pending.front().end_sample;
   const auto frames = static_cast<std::uint32_t>(std::min<std::uint64_t>(
       (until - detection.submitted_end) / frame_samples, kMaxVadFramesPerJob));
-  const std::uint64_t width = session.terms.audio_format.bytes_per_sample();
-  const std::size_t size = frames * frame_samples * width;
+  const std::size_t size = frames * frame_samples * kInternalWidth;
   const auto buffer = core_->buffers.allocate(size);
   if (!buffer) {
     fail(manager, key, session, buffer.error());
@@ -1081,7 +1088,7 @@ std::optional<JobRequest> SpeechJobDispatch::next_vad_request(SessionManager& ma
   }
   const auto from =
       session.open_audio.begin() +
-      static_cast<std::ptrdiff_t>((detection.submitted_end - session.open_start) * width);
+      static_cast<std::ptrdiff_t>((detection.submitted_end - session.open_start) * kInternalWidth);
   std::copy(from, from + static_cast<std::ptrdiff_t>(size), bytes->begin());
   auto request = JobRequest::create(
       JobIdentity{next_job_id_++, key, options_.generation}, JobClass::VadFrames,
@@ -1096,21 +1103,26 @@ std::optional<JobRequest> SpeechJobDispatch::next_vad_request(SessionManager& ma
   return std::move(request).value();
 }
 
+std::span<const std::byte> SpeechJobDispatch::intake(Session& session,
+                                                     std::span<const std::byte> frame) {
+  session.input_samples += frame.size() / session.terms.audio_format.bytes_per_sample();
+  // The one input format served is the internal one.
+  return frame;
+}
+
 void SpeechJobDispatch::take_audio(SessionManager& manager, std::uint64_t key, Session& session,
-                                   std::span<const std::byte> frame) {
-  const std::uint64_t width = session.terms.audio_format.bytes_per_sample();
-  const std::uint64_t longest = static_cast<std::uint64_t>(session.terms.max_utterance.count()) *
-                                session.terms.audio_format.sample_rate_hz / 1000;
-  while (!frame.empty() && !session.ended) {
+                                   std::span<const std::byte> audio) {
+  const std::uint64_t longest = longest_utterance(session.terms);
+  while (!audio.empty() && !session.ended) {
     const std::uint64_t room = longest - (session.samples_accepted - session.open_start);
-    const auto part = frame.first(std::min<std::uint64_t>(frame.size(), room * width));
+    const auto part = audio.first(std::min<std::uint64_t>(audio.size(), room * kInternalWidth));
     if (session.open_audio.empty()) {
       // At its longest from the start, so it never grows past the audio it may hold.
-      session.open_audio.reserve(static_cast<std::size_t>(longest * width));
+      session.open_audio.reserve(static_cast<std::size_t>(longest * kInternalWidth));
     }
     session.open_audio.insert(session.open_audio.end(), part.begin(), part.end());
-    session.samples_accepted += part.size() / width;
-    frame = frame.subspan(part.size());
+    session.samples_accepted += part.size() / kInternalWidth;
+    audio = audio.subspan(part.size());
     if (session.samples_accepted - session.open_start < longest) {
       continue;
     }
@@ -1121,19 +1133,19 @@ void SpeechJobDispatch::take_audio(SessionManager& manager, std::uint64_t key, S
   }
 }
 
-void SpeechJobDispatch::keep_audio(Session& session, std::span<const std::byte> frame) {
-  const StreamAudioFormat& format = session.terms.audio_format;
+void SpeechJobDispatch::keep_audio(Session& session, std::span<const std::byte> audio,
+                                   std::uint64_t frame_bytes) {
   if (session.open_audio.capacity() == 0) {
     // The longest utterance, and the unscored audio the input credit allows
     // past its last scored frame.
     session.open_audio.reserve(static_cast<std::size_t>(
-        format.bytes_per_second() *
+        kInternalFormat.bytes_per_second() *
         (static_cast<std::uint64_t>(session.terms.max_utterance.count()) / 1000 +
          static_cast<std::uint64_t>(SessionBudgets::kInputAudioWindow.count()))));
   }
-  session.open_audio.insert(session.open_audio.end(), frame.begin(), frame.end());
-  session.samples_accepted += frame.size() / format.bytes_per_sample();
-  session.detection->held_credit.push_back({session.samples_accepted, frame.size()});
+  session.open_audio.insert(session.open_audio.end(), audio.begin(), audio.end());
+  session.samples_accepted += audio.size() / kInternalWidth;
+  session.detection->held_credit.push_back({session.samples_accepted, frame_bytes});
 }
 
 bool SpeechJobDispatch::may_end_utterance(SessionManager& manager, std::uint64_t key,
@@ -1148,15 +1160,23 @@ bool SpeechJobDispatch::may_end_utterance(SessionManager& manager, std::uint64_t
   return true;
 }
 
-void SpeechJobDispatch::end_utterance(Session& session, std::uint64_t first, std::uint64_t end,
-                                      EndpointReason reason, std::uint64_t finalize_sequence) {
-  const std::uint64_t width = session.terms.audio_format.bytes_per_sample();
+bool SpeechJobDispatch::end_utterance(SessionManager& manager, std::uint64_t key, Session& session,
+                                      std::uint64_t first, std::uint64_t end, EndpointReason reason,
+                                      std::uint64_t finalize_sequence) {
+  const auto wire =
+      to_wire(first, end, session.input_samples, session.terms.audio_format.sample_rate_hz);
+  if (!wire) {
+    fail(manager, key, session, wire.error());
+    return false;
+  }
   const auto begin = session.open_audio.begin();
-  const auto from = begin + static_cast<std::ptrdiff_t>((first - session.open_start) * width);
-  const auto to = begin + static_cast<std::ptrdiff_t>((end - session.open_start) * width);
+  const auto from =
+      begin + static_cast<std::ptrdiff_t>((first - session.open_start) * kInternalWidth);
+  const auto to = begin + static_cast<std::ptrdiff_t>((end - session.open_start) * kInternalWidth);
   const std::uint64_t utterance_id = ++session.utterances;
-  session.ended_utterances.push_back({utterance_id, first, end, std::vector<std::byte>(from, to),
-                                      reason, finalize_sequence, std::nullopt});
+  session.ended_utterances.push_back({utterance_id, first, end, *wire,
+                                      std::vector<std::byte>(from, to), reason, finalize_sequence,
+                                      std::nullopt});
   session.open_audio.erase(begin, to);
   session.open_start = end;
   session.ended_at = end;
@@ -1164,9 +1184,10 @@ void SpeechJobDispatch::end_utterance(Session& session, std::uint64_t first, std
   if (session.detection) {
     session.detection->windows.close();
     session.detection->partials = {};
-    session.held.push_back(
-        make_task_output_item(EndpointDetectedOutput{utterance_id, end, reason}));
+    session.held.push_back(make_task_output_item(
+        EndpointDetectedOutput{utterance_id, wire->end_sample_offset, reason}));
   }
+  return true;
 }
 
 bool SpeechJobDispatch::end_automatically(SessionManager& manager, std::uint64_t key,
@@ -1181,8 +1202,7 @@ bool SpeechJobDispatch::end_automatically(SessionManager& manager, std::uint64_t
     session.ended = true;
     return false;
   }
-  end_utterance(session, first, end, reason, 0);
-  return true;
+  return end_utterance(manager, key, session, first, end, reason, 0);
 }
 
 void SpeechJobDispatch::complete_drain(SessionManager& manager, std::uint64_t key,
@@ -1299,16 +1319,15 @@ bool SpeechJobDispatch::complete_utterance(SessionManager& manager, std::uint64_
   }
   FinalTranscriptOutput transcript;
   transcript.utterance_id = done.utterance_id;
-  transcript.end_sample_offset = done.end_sample;
+  transcript.end_sample_offset = done.wire.end_sample_offset;
   transcript.finalize_sequence = done.finalize_sequence;
   if (done.transcript.has_value() && !done.transcript->text.empty()) {
-    const std::uint64_t rate = session.terms.audio_format.sample_rate_hz;
-    transcript.segments.push_back({start_micros(done.first_sample, rate),
-                                   end_micros(done.end_sample, rate), done.transcript->text});
+    transcript.segments.push_back(
+        {done.wire.time.start_us, done.wire.time.end_us, done.transcript->text});
   }
   if (!session.detection) {
     session.held.push_back(make_task_output_item(
-        EndpointDetectedOutput{done.utterance_id, done.end_sample, done.reason}));
+        EndpointDetectedOutput{done.utterance_id, done.wire.end_sample_offset, done.reason}));
   }
   session.held.push_back(make_task_output_item(std::move(transcript)));
   return true;
@@ -1334,9 +1353,8 @@ bool SpeechJobDispatch::advance_audio(SessionManager& manager, std::uint64_t key
       return false;
     }
     if (!session.detection) {
-      end_utterance(session, session.open_start, session.samples_accepted,
-                    EndpointReason::HalfClose, 0);
-      return true;
+      return end_utterance(manager, key, session, session.open_start, session.samples_accepted,
+                           EndpointReason::HalfClose, 0);
     }
     if (session.detection->pending.empty()) {
       session.detection->pending.push_back(
@@ -1412,8 +1430,7 @@ bool SpeechJobDispatch::observe_score(SessionManager& manager, std::uint64_t key
 bool SpeechJobDispatch::end_as_asked(SessionManager& manager, std::uint64_t key, Session& session) {
   Detection& detection = *session.detection;
   const PendingEnd asked = detection.pending.front();
-  const std::uint64_t longest = static_cast<std::uint64_t>(session.terms.max_utterance.count()) *
-                                session.terms.audio_format.sample_rate_hz / 1000;
+  const std::uint64_t longest = longest_utterance(session.terms);
   // In silence the utterance holds nothing: its final has no segments.
   std::uint64_t first = detection.policy.utterance_start().value_or(asked.end_sample);
   // The frame left unscored can take an utterance in speech past the longest.
@@ -1433,7 +1450,10 @@ bool SpeechJobDispatch::end_as_asked(SessionManager& manager, std::uint64_t key,
   }
   detection.pending.pop_front();
   detection.submitted_end = asked.end_sample;
-  end_utterance(session, first, asked.end_sample, asked.reason, asked.finalize_sequence);
+  if (!end_utterance(manager, key, session, first, asked.end_sample, asked.reason,
+                     asked.finalize_sequence)) {
+    return false;
+  }
   let_go(manager, key, session, asked.end_sample);
   return !session.ended;
 }
@@ -1443,11 +1463,10 @@ void SpeechJobDispatch::let_go(SessionManager& manager, std::uint64_t key, Sessi
   Detection& detection = *session.detection;
   const std::uint64_t keep_from = detection.policy.earliest_utterance_start();
   if (keep_from > session.open_start) {
-    const std::uint64_t width = session.terms.audio_format.bytes_per_sample();
     session.open_audio.erase(
         session.open_audio.begin(),
         session.open_audio.begin() +
-            static_cast<std::ptrdiff_t>((keep_from - session.open_start) * width));
+            static_cast<std::ptrdiff_t>((keep_from - session.open_start) * kInternalWidth));
     session.open_start = keep_from;
   }
   std::uint32_t frames = 0;

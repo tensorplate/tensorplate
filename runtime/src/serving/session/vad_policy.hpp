@@ -148,4 +148,23 @@ struct MicrosecondInterval {
 ///   "sample_offset_overflow".
 [[nodiscard]] Result<MicrosecondInterval> to_microseconds(std::uint64_t internal_start,
                                                           std::uint64_t internal_end);
+
+/// An internal interval [a, b) as the wire carries it.
+struct WireInterval {
+  /// to_input_samples(b, R).
+  std::uint64_t end_sample_offset = 0;
+  /// to_microseconds(a, b).
+  MicrosecondInterval time;
+
+  friend bool operator==(const WireInterval& lhs, const WireInterval& rhs) noexcept = default;
+};
+
+/// [a, b) on the wire of a session that accepted `input_samples` at the
+/// input rate R.
+/// @return Internal with context "interval_out_of_range" if b lies past the
+///   N * 16,000 / R internal samples those cover, or an error of
+///   to_input_samples or to_microseconds.
+[[nodiscard]] Result<WireInterval> to_wire(std::uint64_t internal_start, std::uint64_t internal_end,
+                                           std::uint64_t input_samples,
+                                           std::uint32_t input_rate_hz);
 }  // namespace tensorplate::serving

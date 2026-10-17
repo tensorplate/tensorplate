@@ -1665,6 +1665,25 @@ that will own them.
   does not run `vad_frames` leaves the session as above: a Finalize, a
   half-close or the limit ends the utterance and its endpoint is offered
   with its final, and no partial transcript is offered.
+- **Two timelines.** Inside the dispatch every sample count is on the
+  16 kHz internal timeline that voice detection and every input job
+  read: the open audio, the utterances' bounds, the voice-activity
+  frames, the partial windows and a Finalize's or a half-close's end,
+  which is where the accepted audio ends. Each frame becomes internal
+  audio in one place, which counts its input samples apart, as the
+  source the internal timeline covers; input credit stays in the frame's
+  bytes. An utterance leaves on the wire once, as it ends, through
+  `to_wire` (`vad_policy.hpp`): its endpoint's and its final's
+  `end_sample_offset` at the input rate and its segment in microseconds,
+  with the rounding of the [voice detection
+  policy](#voice-detection-policy). An interval that ends past the
+  accepted input fails the session with `internal`
+  (`interval_out_of_range`); nothing is clamped, since the internal
+  timeline counts no audio the input did not carry. The runner already
+  clamps word times from alignment to its window's end
+  (`whisper_window.py`); no output carries them yet. The one input
+  format served is the internal one, so every conversion is the identity
+  today.
 - **Partial transcripts**, with voice detection. While an utterance is
   open its audio so far, from its first sample to the end of its scored
   frames (30 seconds at most), is decoded as one `stt_decode` like a
@@ -1680,7 +1699,10 @@ that will own them.
   while the partial waits on the lane, and again when its turn comes; the
   partial starts, over the latest audio, only if the last frame scored is
   speech or a frame scored since the dispatch last asked was, even if
-  silence followed that frame. A decode already running is not cancelled.
+  silence followed that frame. Only asks since the utterance opened or
+  its previous decode started count, and nothing asks while that decode
+  runs, so frames scored meanwhile release nothing. A decode already
+  running is not cancelled.
   When each job scores one frame, a partial is late by at most the pause
   it waited through: 288 ms, a frame short of the 320 ms that ends the
   utterance. When a job scores more frames (a message of up to 320 ms, or
@@ -1937,7 +1959,9 @@ back to back from sample zero or from where a reset put them.
   end b is `ceil(b * R / 16000)` samples at the input rate R (8,000 or
   16,000), and an internal interval [a, b) is
   `[floor(a * 10^6 / 16000), ceil(b * 10^6 / 16000))` microseconds,
-  both with checked arithmetic.
+  both with checked arithmetic. `to_wire` gives both for an utterance,
+  refusing one that ends past the input accepted (`internal`,
+  `interval_out_of_range`).
 
 The profile (`VadProfile`) also carries the initial decode accumulation
 (320 ms) and the decode stride (160 ms), which the partial decode windows

@@ -26,8 +26,10 @@ How a replay asks (`"utterances"` in each record):
 
 The replay scores a frame and decodes a due window at once; the dispatch
 takes as long as its jobs do, so a busy decode lane decodes later windows,
-and it holds a due window while the last frame scored is silence, which the
-replay does not.
+and it holds a due window while the last frame scored is silence and no
+frame scored since it last asked was speech, counting only asks since the
+utterance opened or its previous decode started, which the replay does
+not.
 The dispatch keeps one voice activity state over a session's audio and
 never resets it at an endpoint, so after the first endpoint a session's
 voice activity, and with it its utterances, can differ from the replay's.

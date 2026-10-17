@@ -121,7 +121,17 @@ class ReferenceBinding {
   [[nodiscard]] serving::SessionDispatch& dispatch() { return under_test->dispatch(); }
 
   std::uint64_t open(const serving::SessionRequest& request) {
-    const auto terms = dispatch().negotiate(request).value();
+    return open_with(dispatch().negotiate(request).value());
+  }
+  /// The terms negotiated for `request`, but with `audio_format`: terms the
+  /// dispatch may refuse to negotiate, opened as if it had not.
+  std::uint64_t open_as(const serving::SessionRequest& request,
+                        serving::StreamAudioFormat audio_format) {
+    auto terms = dispatch().negotiate(request).value();
+    terms.audio_format = audio_format;
+    return open_with(terms);
+  }
+  std::uint64_t open_with(const serving::SessionTerms& terms) {
     const auto budgets = serving::budgets_for(terms);
     const std::uint64_t key =
         manager
