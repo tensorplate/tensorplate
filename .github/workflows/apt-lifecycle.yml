@@ -184,6 +184,13 @@ jobs:
         shell: bash
         run: test/validation/speech_corpus_test.py
 
+      # Scores authored transcripts against a corpus manifest at the gates'
+      # minimum sizes and moves each gate across its boundary; the record and
+      # transcript schema cross-checks need the same jsonschema.
+      - name: Speech quality scorer
+        shell: bash
+        run: test/validation/speech_quality_test.py
+
       # Runs the streaming footprint harness against fake packages whose
       # worker adds known amounts to its size and resident set, and breaks
       # each guard of the record check once. The fake worker is compiled

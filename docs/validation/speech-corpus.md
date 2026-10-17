@@ -131,3 +131,6 @@ distinct references per language and pool, the files per source, and the
 noisy files per SNR.
 
 Exit status: 0 valid, 1 refused, 2 unreadable.
+
+A run over the corpus is scored with `tools/validation/speech_quality.py`; see
+[Speech evaluation quality scoring](speech-quality.md).
