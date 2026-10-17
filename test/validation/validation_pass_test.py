@@ -1017,6 +1017,34 @@ def check_streaming_line() -> None:
     assert statuses(findings)["metrics.tts.segment_to_first_audio.count"] == "changed"
     assert index_mod.verdict(findings) == index_mod.EXIT_NOT_COMPARABLE
 
+    concurrent = stream_mod.build_record(commit)
+    concurrent["schema_version"] = "0.3"
+    concurrent["settings"].update(iterations=1, sessions=3, stagger_ms=25, expect_test_count=3)
+    concurrent["run"]["finished_ns"] = 13_000_000_000
+    for mode in ("stt", "tts"):
+        for session in concurrent[mode]["sessions"]:
+            duration = concurrent[mode]["target"]["connect_ns"]
+            session["connection"] = {
+                "started_ns": session["boundaries"]["call_start"] - duration,
+                "connect_ns": duration,
+                "ended_ns": session["boundaries"]["session_closed"],
+            }
+    concurrent_line = index_mod.streaming_line(
+        index_mod.slice_record.finalize(concurrent), envelope()
+    )
+    assert concurrent_line["metrics"] == line["metrics"]
+    for name, expected in (("sessions", 3), ("stagger_ms", 25), ("expect_test_count", 3)):
+        key = f"streaming_{name}"
+        assert concurrent_line["settings"][key] == expected
+        findings = index_mod.compare_lines(line, concurrent_line)
+        assert statuses(findings)[f"settings.{key}"] == "note"
+    assert index_mod.verdict(findings) == index_mod.EXIT_UNCHANGED
+
+    refusals = index_mod.streaming_line(stream_mod.build_refusal_record(commit), envelope())
+    assert refusals["result"] == "completed_with_refusals"
+    assert refusals["metrics"]["tts.segment_to_first_audio.count"] == 2
+    assert refusals["checks"]["tts.sessions"] == "1 call_failed, 2 completed"
+
     with tempfile.TemporaryDirectory() as raw_tmp:
         tmp = Path(raw_tmp)
         record_file = tmp / "record.json"

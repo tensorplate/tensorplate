@@ -335,6 +335,16 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- The streaming slice measurement tool supports concurrent batches of up to
+  64 STT or TTS sessions on independent connections, staggered starts,
+  isolated failure records and pooled session/utterance latency distributions.
+  An optional operator-stated qualification count accompanies the requested
+  concurrency. Concurrent runs write 0.3 records with scheduling-lag
+  distributions and checkpoint only between batches; single-session runs
+  retain the 0.2 format. A concurrent run with only Open refusals reports
+  `completed_with_refusals` and exits successfully, while other failures
+  still fail the run. (V030-E05-F03-T01, V030-E05-F03-T04)
+
 - Add a private, independently tested TensorRT SDK loader with typed symbols,
   version checks and shared library ownership. Hosted x86 SDK CI now follows
   the speech runtime's CUDA family without nvcc or static TensorRT archives;

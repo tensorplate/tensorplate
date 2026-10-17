@@ -1450,6 +1450,23 @@ def check_streaming(machine: Machine) -> None:
     assert line["settings"]["streaming_iterations"] == 3
     assert list(result.lines) == ["lifecycle", "doctor", "streaming-latency"]
 
+    refusal_args = [value.replace("--iterations=3", "--iterations=1") for value in named]
+    result = machine.run(
+        *refusal_args,
+        "--streaming-arg=--sessions=3",
+        candidates=False,
+        family="none",
+        stream=stream_mod.build_refusal_record(machine.commit),
+    )
+    step = result.steps["streaming-latency"]
+    assert (step["status"], step["result"], step["exit_code"]) == (
+        "ok",
+        "completed_with_refusals",
+        0,
+    )
+    assert result.code == 0 and result.statuses("index") == ["ok"]
+    assert result.lines["streaming-latency"]["result"] == "completed_with_refusals"
+
     # With candidates the step comes after theirs.
     result = machine.run(*named)
     names = list(result.steps)

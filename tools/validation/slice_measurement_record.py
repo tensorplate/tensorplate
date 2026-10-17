@@ -33,7 +33,7 @@ from candidate_record import RecordError, validate_record  # noqa: E402
 
 TOOL_NAME = "slice-measure"
 RECORD_KIND = "slice_measurement"
-SCHEMA_VERSION = "0.2"
+SCHEMA_VERSION = "0.3"
 MODES = ("stt", "tts")
 
 # The registered values of the `stage` metric label, in pipeline order.
@@ -373,6 +373,81 @@ def derive_summary(mode: str, section: dict[str, Any]) -> dict[str, Any]:
     return {name: distribution(values) for name, values in samples.items()}
 
 
+def failure_cause(mode: str, section: dict[str, Any], session: dict[str, Any]) -> str | None:
+    """A stable cause without server detail text or endpoint identity."""
+    outcome = session["outcome"]
+    if outcome == "completed":
+        return "invalid_response" if session_findings(mode, section, session) else None
+    if outcome == "stopped":
+        return "stopped:" + session["stop_reason"]
+    if outcome == "session_failed":
+        closed = session["server"]["closed"]
+        return (
+            "session_failed:"
+            + (closed["reason"] or closed["state"])
+            + ":"
+            + (closed["code"] or "none")
+        )
+    if outcome == "call_failed":
+        return "grpc:" + session["grpc_status"]
+    if "connection" in session and session["connection"]["connect_ns"] is None:
+        return "channel_timeout"
+    return "event_timeout"
+
+
+def derive_aggregate(record: dict[str, Any]) -> dict[str, Any]:
+    """Pool raw latency samples, never per-session percentiles."""
+    recorded = opened = clean = 0
+    failures: dict[str, int] = {}
+    measurements = {}
+    for mode in MODES:
+        section = record[mode]
+        if section is None:
+            measurements[mode] = None
+            continue
+        samples: dict[str, list[int | None]] = {name: [] for name in MEASUREMENTS[mode]}
+        samples["input_lag"] = []
+        if mode == "stt":
+            samples["max_pacing_lag"] = []
+            samples.update(
+                {name: [] for name in derive_utterance_measurements(new_utterance(1, 0))}
+            )
+            samples["partial_interval"] = []
+        for session in section["sessions"]:
+            recorded += 1
+            opened += session["client"]["events_sent"] > 0
+            cause = failure_cause(mode, section, session)
+            if cause is None:
+                clean += 1
+            else:
+                failures[cause] = failures.get(cause, 0) + 1
+            for name, entry in derive_measurements(mode, session).items():
+                samples[name].append(entry["ns"] if cause is None else None)
+            # Scheduling pressure is diagnostic even when the session failed.
+            samples["input_lag"].append(session["client"]["input_lag_ns"])
+            if mode == "stt":
+                samples["max_pacing_lag"].append(session["client"]["max_pacing_lag_ns"])
+            for utterance in session.get("utterances", []):
+                for name, entry in derive_utterance_measurements(utterance).items():
+                    samples[name].append(entry["ns"] if cause is None else None)
+                samples["partial_interval"].extend(
+                    ns if cause is None else None
+                    for ns in derive_cadence(utterance)["intervals_ns"]
+                )
+        measurements[mode] = {name: distribution(values) for name, values in samples.items()}
+    return {
+        "sessions_recorded": recorded,
+        "sessions_opened": opened,
+        "sessions_clean": clean,
+        "sessions_failed": recorded - clean,
+        "failed_by_cause": [
+            {"cause": cause, "count": failures[cause]} for cause in sorted(failures)
+        ],
+        "wall_time_ns": record["run"]["finished_ns"],
+        "measurements": measurements,
+    }
+
+
 def derive_gpu_summary(samples: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not samples:
         return None
@@ -481,10 +556,31 @@ def _describe(session: dict[str, Any]) -> str:
 _RUN_ENDS = {None: "did not end", "interrupt": "interrupted", "error": "ended by an error ({})"}
 
 
+def refused_at_open(session: dict[str, Any]) -> bool:
+    """Recognized refusal statuses before any server event, excluding transport failures."""
+    return (
+        session["outcome"] == "call_failed"
+        and session["client"]["events_sent"] > 0
+        and session["server"]["events_received"] == 0
+        and session["grpc_status"]
+        in (
+            "RESOURCE_EXHAUSTED",
+            "FAILED_PRECONDITION",
+            "INVALID_ARGUMENT",
+            "NOT_FOUND",
+            "PERMISSION_DENIED",
+            "UNAUTHENTICATED",
+            "UNIMPLEMENTED",
+            "OUT_OF_RANGE",
+        )
+    )
+
+
 def derive_result(record: dict[str, Any]) -> dict[str, Any]:
     """The run's status and why, from how it ended and from the sessions."""
     failed: list[str] = []
     incomplete: list[str] = []
+    refusals: list[str] = []
     ended = record["run"]["ended_by"]
     if ended != "completed":
         failed.append(f"run: {_RUN_ENDS[ended].format(record['run']['error'])}")
@@ -498,7 +594,12 @@ def derive_result(record: dict[str, Any]) -> dict[str, Any]:
         for session in section["sessions"]:
             label = f"{mode} session {session['index']}"
             if session["outcome"] != "completed":
-                failed.append(f"{label}: {_describe(session)}")
+                reasons = (
+                    refusals
+                    if record["schema_version"] == "0.3" and refused_at_open(session)
+                    else failed
+                )
+                reasons.append(f"{label}: {_describe(session)}")
                 continue
             failed.extend(
                 f"{label}: {finding}" for finding in session_findings(mode, section, session)
@@ -506,8 +607,16 @@ def derive_result(record: dict[str, Any]) -> dict[str, Any]:
             for name, entry in derive_measurements(mode, session).items():
                 if entry["ns"] is None:
                     incomplete.append(f"{label}: no sample for {name}")
-    status = "failed" if failed else "incomplete" if incomplete else "complete"
-    return {"status": status, "reasons": failed + incomplete}
+    status = (
+        "failed"
+        if failed
+        else "completed_with_refusals"
+        if refusals
+        else "incomplete"
+        if incomplete
+        else "complete"
+    )
+    return {"status": status, "reasons": failed + refusals + incomplete}
 
 
 def finalize(record: dict[str, Any]) -> dict[str, Any]:
@@ -524,6 +633,8 @@ def finalize(record: dict[str, Any]) -> dict[str, Any]:
             session["measurements"] = derive_measurements(mode, session)
         section["summary"] = derive_summary(mode, section)
     record["gpu"]["summary"] = derive_gpu_summary(record["gpu"]["samples"])
+    if record["schema_version"] == "0.3":
+        record["aggregate"] = derive_aggregate(record)
     record["result"] = derive_result(record)
     return record
 
@@ -840,6 +951,59 @@ def _check_claims(record: dict[str, Any]) -> None:
         raise RecordError("provenance: recorded needs the worker's release or build")
     if (run["error"] is None) != (run["ended_by"] != "error"):
         raise RecordError("run: error does not agree with ended_by")
+    if record["schema_version"] == "0.3":
+        settings = record["settings"]
+        if not 1 <= settings["sessions"] <= 64:
+            raise RecordError("settings.sessions must be 1 to 64")
+        if (
+            settings["expect_test_count"] is not None
+            and not 1 <= settings["expect_test_count"] <= 2048
+        ):
+            raise RecordError("settings.expect_test_count must be 1 to 2048")
+        if (run["finished_ns"] is None) != (run["ended_by"] is None):
+            raise RecordError("run: finished_ns does not agree with ended_by")
+    elif (
+        "aggregate" in record
+        or any(key in record["settings"] for key in ("sessions", "stagger_ms", "expect_test_count"))
+        or "finished_ns" in run
+    ):
+        raise RecordError("concurrent settings and aggregates require schema version 0.3")
+
+
+def _check_connections(section: dict[str, Any], count: int, stagger_ns: int) -> None:
+    previous = None
+    batch_ends: dict[int, int] = {}
+    for session in section["sessions"]:
+        connection = session.get("connection")
+        if connection is None:
+            raise RecordError("concurrent sessions require connection observations")
+        index = session["index"]
+        start, duration, end = (connection[k] for k in ("started_ns", "connect_ns", "ended_ns"))
+        call_start = session["boundaries"]["call_start"]
+        latest = _check_boundaries(
+            "stt" if "utterances" in session else "tts", "connection", session, 0
+        )
+        if (
+            start > call_start
+            or end < latest
+            or (duration is not None and start + duration > call_start)
+        ):
+            raise RecordError("connection timestamps do not enclose the session")
+        if duration is None and (
+            session["client"]["events_sent"] or session["outcome"] not in ("timeout", "stopped")
+        ):
+            raise RecordError("an unconnected session cannot send events or complete")
+        batch = index // count
+        if start < max((at for b, at in batch_ends.items() if b < batch), default=0):
+            raise RecordError("a batch starts before the previous batch ended")
+        batch_ends[batch] = max(batch_ends.get(batch, 0), end)
+        if previous is not None and previous[0] // count == batch:
+            if start < previous[1] + (index - previous[0]) * stagger_ns:
+                raise RecordError("session launches do not respect stagger_ms")
+        previous = index, start
+    connected = [s["connection"]["connect_ns"] for s in section["sessions"]]
+    if section["target"]["connect_ns"] != next((n for n in connected if n is not None), None):
+        raise RecordError("target connect_ns is not the first successful connection")
 
 
 def check_record(record: Any) -> tuple[str, str]:
@@ -855,6 +1019,8 @@ def check_record(record: Any) -> tuple[str, str]:
     try:
         _check_claims(record)
         ended = record["run"]["ended_by"] == "completed"
+        count = record["settings"].get("sessions", 1)
+        finished = record["run"].get("finished_ns")
         loopback = True
         for mode in MODES:
             section = record[mode]
@@ -866,15 +1032,24 @@ def check_record(record: Any) -> tuple[str, str]:
                 raise RecordError(f"{mode} target: a generation without a digest, or the reverse")
             frame = _check_stt_input(section) if mode == "stt" else 0
             sessions = section["sessions"]
-            expected = 0 if target["connect_ns"] is None else record["settings"]["iterations"]
+            expected = record["settings"]["iterations"] * count
+            if count == 1 and target["connect_ns"] is None:
+                expected = 0
             if len(sessions) > expected or (ended and len(sessions) < expected):
                 raise RecordError(f"{mode}: {len(sessions)} sessions recorded, {expected} expected")
             latest = 0
+            indices = [s["index"] for s in sessions]
+            if count > 1:
+                if indices != sorted(set(indices)) or any(i >= expected for i in indices):
+                    raise RecordError(
+                        f"{mode}: session indices must be unique, ordered and in range"
+                    )
+                _check_connections(section, count, record["settings"]["stagger_ms"] * 1_000_000)
             for position, session in enumerate(sessions):
                 label = f"{mode} session {position}"
-                if session["index"] != position:
+                if count == 1 and session["index"] != position:
                     raise RecordError(f"{label}: carries index {session['index']}")
-                latest = _check_boundaries(mode, label, session, latest)
+                latest = _check_boundaries(mode, label, session, latest if count == 1 else 0)
                 if [entry["stage"] for entry in session["server_stages"]] != list(SERVER_STAGES):
                     raise RecordError(f"{label}: server_stages is not the registered stage list")
                 _check_outcome(mode, label, session, vocab)
@@ -884,13 +1059,18 @@ def check_record(record: Any) -> tuple[str, str]:
                     has_utterances = "utterances" in session
                     has_frames = "audio_frames" in session["client"]
                     if has_utterances != has_frames or (
-                        record["schema_version"] == "0.2" and not has_frames
+                        record["schema_version"] in ("0.2", "0.3") and not has_frames
                     ):
                         raise RecordError(
                             f"{label}: per-utterance records need utterances and audio_frames"
                         )
                     if has_utterances:
                         _check_utterances(label, section, session)
+                if (
+                    finished is not None
+                    and max(latest, session.get("connection", {}).get("ended_ns", 0)) > finished
+                ):
+                    raise RecordError(f"{label}: ends after the run finished")
                 _require_derived(
                     f"{label}: measurements",
                     session["measurements"],
@@ -898,6 +1078,8 @@ def check_record(record: Any) -> tuple[str, str]:
                 )
             _require_derived(f"{mode} summary", section["summary"], derive_summary(mode, section))
         _check_gpu(record["gpu"], loopback)
+        if record["schema_version"] == "0.3":
+            _require_derived("aggregate", record["aggregate"], derive_aggregate(record))
         _require_derived("result", record["result"], derive_result(record))
     except RecordError as exc:
         return "invalid", str(exc)
@@ -906,7 +1088,7 @@ def check_record(record: Any) -> tuple[str, str]:
 
 
 def exit_status(status: str) -> int:
-    if status == "complete":
+    if status in ("complete", "completed_with_refusals"):
         return EXIT_COMPLETE
     if status == "failed":
         return EXIT_FAILED
@@ -929,7 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{TOOL_NAME}: invalid: {args.record}: {exc}", file=sys.stderr)
         return EXIT_NO_VERDICT
     status, detail = check_record(record)
-    stream = sys.stdout if status == "complete" else sys.stderr
+    stream = sys.stdout if exit_status(status) == 0 else sys.stderr
     if status != "invalid" and record.get("provenance") == "synthetic":
         print(f"{TOOL_NAME}: provenance synthetic: these numbers measure nothing", file=stream)
     print(f"{TOOL_NAME}: {status}: {detail}", file=stream)

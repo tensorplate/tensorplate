@@ -290,6 +290,10 @@ def streaming_line(record: dict[str, Any], envelope: dict[str, Any]) -> dict[str
                     metrics[f"{prefix}.{percentile}_ms"] = round(nanoseconds / 1e6, 3)
     # Percentiles over different numbers of sessions, or another input, are another measurement.
     settings = {**envelope["settings"], "streaming_iterations": record["settings"]["iterations"]}
+    for name, default in (("sessions", 1), ("stagger_ms", 0), ("expect_test_count", None)):
+        value = record["settings"].get(name, default)
+        if value != default:
+            settings[f"streaming_{name}"] = value
     for mode, fields in STREAMING_INPUT_SETTINGS.items():
         if record[mode] is not None:
             for field in fields:
