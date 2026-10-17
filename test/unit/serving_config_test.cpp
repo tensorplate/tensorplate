@@ -28,6 +28,27 @@ TEST(ServingConfig, DefaultsValidate) {
   EXPECT_EQ(cfg.metrics_mode, MetricsMode::PrometheusText);
 }
 
+nlohmann::json pcm_16k() {
+  return {{"encoding", "pcm_s16le"}, {"sample_rate_hz", 16000}, {"channels", 1}};
+}
+
+nlohmann::json schema(const char* path) {
+  std::ifstream input{std::string{TP_SOURCE_DIR} + path};
+  return nlohmann::json::parse(input);
+}
+
+StreamingAudioFormat format_of(const nlohmann::json& format) {
+  return {format.at("encoding").get<std::string>(),
+          format.at("sample_rate_hz").get<std::uint32_t>(),
+          format.at("channels").get<std::uint32_t>()};
+}
+
+/// A config whose streaming object holds only `formats`, as JSON text.
+std::string with_formats(const std::string& formats) {
+  return std::string{R"({"schema_version":"0.1","streaming":{"input_audio_formats":)"} + formats +
+         "}}";
+}
+
 TEST(ServingConfig, StreamingDisabledByDefault) {
   for (const char* text :
        {R"({"schema_version":"0.1"})", R"({"schema_version":"0.1","streaming":{}})",
@@ -61,7 +82,12 @@ TEST(ServingConfig, StreamingSchemaDeclaresOptionalFields) {
   EXPECT_EQ(max_sessions.at("minimum"), 1);
   EXPECT_EQ(max_sessions.at("maximum"), ipc::kWorkerControlMaxSessions);
   EXPECT_EQ(max_sessions.at("default"), ServingConfig{}.streaming.max_sessions);
-  EXPECT_EQ(streaming.at("properties").size(), 3U);
+  const auto& formats = streaming.at("properties").at("input_audio_formats");
+  EXPECT_EQ(formats.at("type"), "array");
+  EXPECT_EQ(formats.at("uniqueItems"), true);
+  EXPECT_EQ(formats.at("contains").at("const"), pcm_16k());
+  EXPECT_EQ(formats.at("default"), nlohmann::json::array({pcm_16k()}));
+  EXPECT_EQ(streaming.at("properties").size(), 4U);
   EXPECT_FALSE(streaming.contains("required"));
   for (const auto& required : schema.at("required")) {
     EXPECT_NE(required, "streaming");
@@ -136,6 +162,7 @@ TEST(ServingConfig, StreamingPortAloneRoundTripsInEitherBuild) {
   ASSERT_TRUE(parsed.has_value());
   EXPECT_FALSE(parsed->streaming.enabled);
   EXPECT_EQ(parsed->streaming.port, 65535);
+  EXPECT_EQ(parsed->to_json().find("input_audio_formats"), std::string::npos);
   const auto again = ServingConfig::parse_json(parsed->to_json());
   ASSERT_TRUE(again.has_value());
   EXPECT_EQ(again->streaming.port, 65535);
@@ -473,6 +500,103 @@ TEST(ServingConfig, HealthAndMetricsModeNames) {
   EXPECT_EQ(to_string(MetricsMode::PrometheusText), "prometheus_text");
   EXPECT_EQ(health_mode_from_string("disabled"), std::optional{HealthMode::Disabled});
   EXPECT_EQ(metrics_mode_from_string("json"), std::optional{MetricsMode::Json});
+}
+
+// One spelling everywhere: the formats the worker's schema lists are the ones
+// a bundle's speech block may declare, the default is 16 kHz PCM, and
+// validate() takes each of them.
+TEST(ServingConfig, InputAudioFormatsAreTheOnesABundleMayDeclare) {
+  const auto worker = schema("/config/schemas/serving_worker.json");
+  const auto& listed = worker.at("properties")
+                           .at("streaming")
+                           .at("properties")
+                           .at("input_audio_formats")
+                           .at("items")
+                           .at("enum");
+  const auto manifest = schema("/protocol/schemas/bundle_manifest.json");
+  EXPECT_EQ(listed, manifest.at("definitions").at("stt_input_audio_format").at("enum"));
+  ASSERT_EQ(listed.size(), 2U);
+  EXPECT_EQ(ServingConfig{}.streaming.input_audio_formats,
+            std::vector<StreamingAudioFormat>{format_of(pcm_16k())});
+  ServingConfig config;
+  config.streaming.input_audio_formats.clear();
+  for (const auto& format : listed) {
+    config.streaming.input_audio_formats.push_back(format_of(format));
+  }
+  const auto validated = config.validate();
+  EXPECT_TRUE(validated.has_value()) << validated.error().message;
+}
+
+TEST(ServingConfig, InputAudioFormatsRoundTripInEitherBuild) {
+  const std::string mulaw = R"({"encoding":"mulaw","sample_rate_hz":8000,"channels":1})";
+  const auto parsed =
+      ServingConfig::parse_json(with_formats("[" + pcm_16k().dump() + "," + mulaw + "]"));
+  ASSERT_TRUE(parsed.has_value()) << parsed.error().message;
+  const std::vector<StreamingAudioFormat> both{{"pcm_s16le", 16000, 1}, {"mulaw", 8000, 1}};
+  EXPECT_EQ(parsed->streaming.input_audio_formats, both);
+  EXPECT_FALSE(parsed->streaming.enabled);
+  const auto again = ServingConfig::parse_json(parsed->to_json());
+  ASSERT_TRUE(again.has_value()) << again.error().message;
+  EXPECT_EQ(again->streaming.input_audio_formats, both);
+
+  const auto alone = ServingConfig::parse_json(with_formats("[" + pcm_16k().dump() + "]"));
+  ASSERT_TRUE(alone.has_value()) << alone.error().message;
+  EXPECT_EQ(alone->streaming.input_audio_formats, ServingConfig{}.streaming.input_audio_formats);
+  EXPECT_EQ(alone->to_json().find("input_audio_formats"), std::string::npos);
+}
+
+TEST(ServingConfig, InputAudioFormatsRefuseWhatTheDispatchCannotTake) {
+  const std::string pcm = pcm_16k().dump();
+  const std::string mulaw = R"({"encoding":"mulaw","sample_rate_hz":8000,"channels":1})";
+  const struct {
+    std::string formats;
+    const char* refusal;
+  } cases[] = {
+      {"[" + pcm + R"(,{"encoding":"mulaw","sample_rate_hz":16000,"channels":1}])", "takes only"},
+      {"[" + pcm + R"(,{"encoding":"pcm_s16le","sample_rate_hz":8000,"channels":1}])",
+       "takes only"},
+      {"[" + pcm + R"(,{"encoding":"mulaw","sample_rate_hz":8000,"channels":2}])", "takes only"},
+      {"[" + pcm + R"(,{"encoding":"pcm_s16le","sample_rate_hz":16000,"channels":2}])",
+       "takes only"},
+      {"[" + pcm + R"(,{"encoding":"MULAW","sample_rate_hz":8000,"channels":1}])", "takes only"},
+      {"[" + pcm + R"(,{"encoding":"alaw","sample_rate_hz":8000,"channels":1}])", "takes only"},
+      {"[]", "must hold mono pcm_s16le"},
+      {"[" + mulaw + "]", "must hold mono pcm_s16le"},
+      {"[" + pcm + "," + pcm + "]", "lists a format twice"},
+      {"[" + pcm + "," + mulaw + "," + mulaw + "]", "lists a format twice"},
+      {"[" + pcm + "," + mulaw + "," + pcm + "]", "lists a format twice"},
+  };
+  for (const auto& [formats, refusal] : cases) {
+    SCOPED_TRACE(formats);
+    const auto parsed = ServingConfig::parse_json(with_formats(formats));
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, Error::Code::ConfigInvalid);
+    EXPECT_NE(parsed.error().message.find(refusal), std::string::npos) << parsed.error().message;
+  }
+}
+
+TEST(ServingConfig, InputAudioFormatsRefuseAMalformedList) {
+  for (const char* formats :
+       {"null", "{}", R"("pcm_s16le")", "[null]", R"(["pcm_s16le"])",
+        R"([{"encoding":"pcm_s16le","sample_rate_hz":16000}])",
+        R"([{"encoding":"pcm_s16le","channels":1,"rate":16000}])",
+        R"([{"encoding":"pcm_s16le","sample_rate_hz":16000,"channel":1}])",
+        R"([{"codec":"pcm_s16le","sample_rate_hz":16000,"channels":1}])",
+        R"([{"encoding":"pcm_s16le","sample_rate_hz":16000,"channels":1,"extra":0}])",
+        R"([{"encoding":1,"sample_rate_hz":16000,"channels":1}])",
+        R"([{"encoding":"pcm_s16le","sample_rate_hz":"16000","channels":1}])",
+        R"([{"encoding":"pcm_s16le","sample_rate_hz":16000.0,"channels":1}])",
+        R"([{"encoding":"pcm_s16le","sample_rate_hz":-16000,"channels":1}])",
+        R"([{"encoding":"pcm_s16le","sample_rate_hz":4294983296,"channels":1}])",
+        R"([{"encoding":"pcm_s16le","sample_rate_hz":16000,"channels":4294967297}])"}) {
+    SCOPED_TRACE(formats);
+    const auto parsed = ServingConfig::parse_json(with_formats(formats));
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, Error::Code::ConfigInvalid);
+    EXPECT_NE(parsed.error().message.find("input_audio_formats must be an array"),
+              std::string::npos)
+        << parsed.error().message;
+  }
 }
 
 }  // namespace

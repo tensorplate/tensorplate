@@ -7,11 +7,15 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <iterator>
+#include <limits>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "tensorplate/ipc/worker_control.hpp"
 
@@ -114,11 +118,43 @@ namespace {
 /// charged to the deployment's budget (docs/architecture/serving-worker.md).
 constexpr std::uint32_t kMaxStreamSessions = 64;
 
+bool is_pcm_16k(const StreamingAudioFormat& format) {
+  return format == StreamingAudioFormat{"pcm_s16le", 16000, 1};
+}
+
+/// The formats the speech dispatch takes, in the descriptor's spelling.
+bool takes_stream_input(const StreamingAudioFormat& format) {
+  return is_pcm_16k(format) || format == StreamingAudioFormat{"mulaw", 8000, 1};
+}
+
+Result<void> validate_input_audio_formats(const std::vector<StreamingAudioFormat>& formats) {
+  if (!std::all_of(formats.begin(), formats.end(), takes_stream_input)) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "serving config: streaming.input_audio_formats takes only mono pcm_s16le "
+                      "at 16000 Hz and mono mulaw at 8000 Hz");
+  }
+  if (std::none_of(formats.begin(), formats.end(), is_pcm_16k)) {
+    return unexpected(Error::Code::ConfigInvalid,
+                      "serving config: streaming.input_audio_formats must hold mono pcm_s16le at "
+                      "16000 Hz");
+  }
+  for (auto it = formats.begin(); it != formats.end(); ++it) {
+    if (std::find(std::next(it), formats.end(), *it) != formats.end()) {
+      return unexpected(Error::Code::ConfigInvalid,
+                        "serving config: streaming.input_audio_formats lists a format twice");
+    }
+  }
+  return {};
+}
+
 Result<void> validate_streaming(const StreamingConfig& streaming,
                                 const ActiveDeploymentConfig& deployment, std::uint16_t http_port) {
   if (streaming.max_sessions == 0 || streaming.max_sessions > kMaxStreamSessions) {
     return unexpected(Error::Code::ConfigInvalid,
                       "serving config: streaming.max_sessions must be from 1 to 64 in this worker");
+  }
+  if (auto formats = validate_input_audio_formats(streaming.input_audio_formats); !formats) {
+    return formats;
   }
   if (!streaming.enabled) {
     return {};
@@ -271,12 +307,35 @@ T value_or_default(const json& obj, std::string_view key, T fallback) {
   return fallback;
 }
 
+bool unsigned_within(const json& value, std::uint64_t least, std::uint64_t most) {
+  return value.is_number_unsigned() && value.get<std::uint64_t>() >= least &&
+         value.get<std::uint64_t>() <= most;
+}
+
+/// streaming.input_audio_formats as objects of exactly the three typed
+/// fields; which formats it may hold is validate()'s.
+std::optional<std::vector<StreamingAudioFormat>> parse_input_audio_formats(const json& formats) {
+  if (!formats.is_array()) {
+    return std::nullopt;
+  }
+  constexpr std::uint64_t kMax = std::numeric_limits<std::uint32_t>::max();
+  std::vector<StreamingAudioFormat> parsed;
+  for (const auto& format : formats) {
+    if (format.size() != 3 || !format.contains("encoding") || !format.at("encoding").is_string() ||
+        !format.contains("sample_rate_hz") ||
+        !unsigned_within(format.at("sample_rate_hz"), 0U, kMax) || !format.contains("channels") ||
+        !unsigned_within(format.at("channels"), 0U, kMax)) {
+      return std::nullopt;
+    }
+    parsed.push_back(StreamingAudioFormat{format.at("encoding").get<std::string>(),
+                                          format.at("sample_rate_hz").get<std::uint32_t>(),
+                                          format.at("channels").get<std::uint32_t>()});
+  }
+  return parsed;
+}
+
 /// The streaming object, held to the schema's types and bounds.
 Result<StreamingConfig> parse_streaming(const json& streaming) {
-  const auto unsigned_within = [](const json& value, std::uint64_t least, std::uint64_t most) {
-    return value.is_number_unsigned() && value.get<std::uint64_t>() >= least &&
-           value.get<std::uint64_t>() <= most;
-  };
   const auto has = [&streaming](const char* key) { return streaming.contains(key); };
   if (!streaming.is_object() || (has("enabled") && !streaming.at("enabled").is_boolean()) ||
       (has("port") && !unsigned_within(streaming.at("port"), 0U, 65535U)) ||
@@ -284,15 +343,26 @@ Result<StreamingConfig> parse_streaming(const json& streaming) {
        !unsigned_within(streaming.at("max_sessions"), 1U, ipc::kWorkerControlMaxSessions)) ||
       streaming.size() > static_cast<std::size_t>(has("enabled")) +
                              static_cast<std::size_t>(has("port")) +
-                             static_cast<std::size_t>(has("max_sessions"))) {
+                             static_cast<std::size_t>(has("max_sessions")) +
+                             static_cast<std::size_t>(has("input_audio_formats"))) {
     return unexpected(Error::Code::ConfigInvalid,
                       "serving config: streaming accepts only a boolean enabled field, a port "
-                      "from 0 to 65535 and max_sessions from 1 to 2048");
+                      "from 0 to 65535, max_sessions from 1 to 2048 and input_audio_formats");
   }
   StreamingConfig parsed;
   parsed.enabled = streaming.value("enabled", parsed.enabled);
   parsed.port = streaming.value("port", parsed.port);
   parsed.max_sessions = streaming.value("max_sessions", parsed.max_sessions);
+  if (has("input_audio_formats")) {
+    auto formats = parse_input_audio_formats(streaming.at("input_audio_formats"));
+    if (!formats) {
+      return unexpected(Error::Code::ConfigInvalid,
+                        "serving config: streaming.input_audio_formats must be an array of "
+                        "objects of a string encoding, an unsigned sample_rate_hz and an "
+                        "unsigned channels and nothing else");
+    }
+    parsed.input_audio_formats = std::move(*formats);
+  }
   return parsed;
 }
 
@@ -479,11 +549,20 @@ Result<ServingConfig> ServingConfig::parse_json(std::string_view text) {
 std::string ServingConfig::to_json() const {
   json root;
   root["schema_version"] = schema_version;
-  if (streaming.enabled || streaming.port != 0 ||
-      streaming.max_sessions != StreamingConfig{}.max_sessions) {
+  const StreamingConfig defaults;
+  if (streaming.enabled || streaming.port != 0 || streaming.max_sessions != defaults.max_sessions ||
+      streaming.input_audio_formats != defaults.input_audio_formats) {
     root["streaming"] = {{"enabled", streaming.enabled},
                          {"port", streaming.port},
                          {"max_sessions", streaming.max_sessions}};
+    if (streaming.input_audio_formats != defaults.input_audio_formats) {
+      auto& formats = root["streaming"]["input_audio_formats"] = json::array();
+      for (const auto& format : streaming.input_audio_formats) {
+        formats.push_back({{"encoding", format.encoding},
+                           {"sample_rate_hz", format.sample_rate_hz},
+                           {"channels", format.channels}});
+      }
+    }
   }
   root["bind"] = {
       {"host", bind.host}, {"port", bind.port}, {"allow_non_loopback", bind.allow_non_loopback}};
