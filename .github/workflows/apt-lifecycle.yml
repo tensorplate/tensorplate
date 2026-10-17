@@ -89,6 +89,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        shell: bash
+        run: tools/ci/install-pinned-toolchain.sh
+
       # A stalled mirror is what costs time here, not a failing one: apt
       # holds an open-but-idle connection and waits, so a job burns its
       # whole budget without ever failing. A response timeout turns the

@@ -8,6 +8,9 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Packaging and release-driver CI installs the pinned Rust toolchain before
+  any test suite runs, avoiding partial toolchain recovery during Cargo tests.
+
 - SDK-enabled x86 workers start without NVIDIA libraries and reject unusable TensorRT drivers before runtime construction. Jetson keeps direct SDK linkage; release builds still disable TensorRT.
 
 - The streaming slice measurement tool accepts server silence and duration
