@@ -26,6 +26,11 @@ struct SampleWindow {
 /// decode_stride past the end of the last window started. The caller asks
 /// only while no decode of the session is in flight, so the strides that
 /// pass meanwhile give one window over the latest audio, never a backlog.
+///
+/// A due window waits while the utterance is in a silence run that could end
+/// it, so that its final does not queue behind a decode started on trailing
+/// silence: it starts only if the last frame scored is speech, or a frame
+/// scored since it was last asked was (silence may follow that frame).
 class WindowScheduler {
  public:
   /// `profile` is one VadPolicy::create() accepted.
@@ -40,6 +45,10 @@ class WindowScheduler {
   [[nodiscard]] std::optional<SampleWindow> due(std::uint64_t scored_end) const noexcept;
   /// A decode of the open utterance up to `end` was started.
   void started(std::uint64_t end) noexcept;
+  /// Whether the window due over audio scored up to `scored_end` waits; the
+  /// last frame scored as speech ends at `speech_end`. Asked only while a
+  /// window is due; asking again at the same `scored_end` gives the same answer.
+  [[nodiscard]] bool waits(std::uint64_t scored_end, std::uint64_t speech_end) noexcept;
 
  private:
   std::uint64_t accumulation_;
@@ -49,5 +58,8 @@ class WindowScheduler {
   std::uint64_t speech_start_ = 0;
   /// The end of the open utterance's last window started.
   std::optional<std::uint64_t> last_end_;
+  /// The scored ends at which waits() was last asked, and the one before.
+  std::optional<std::uint64_t> asked_at_;
+  std::optional<std::uint64_t> asked_before_;
 };
 }  // namespace tensorplate::serving

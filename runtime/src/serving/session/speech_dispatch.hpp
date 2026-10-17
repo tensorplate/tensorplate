@@ -435,8 +435,9 @@ class SpeechJobDispatch final : public SessionDispatch {
   void want_job(std::uint64_t key, Session& session);
   void want_vad(std::uint64_t key, Session& session);
   void want_partial(std::uint64_t key, Session& session);
-  /// The window of the partial decode due, if the open utterance has one.
-  [[nodiscard]] static std::optional<SampleWindow> partial_window(const Session& session);
+  /// The window of the partial decode due, if the open utterance has one and
+  /// it does not wait (WindowScheduler::waits, which records the asking).
+  [[nodiscard]] static std::optional<SampleWindow> partial_window(Session& session);
   /// Holds the partial transcript a decode gave. False when there is none.
   [[nodiscard]] static bool hold_partial(Session& session);
   static void take_audio(SessionManager& manager, std::uint64_t key, Session& session,

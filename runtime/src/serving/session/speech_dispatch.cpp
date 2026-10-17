@@ -873,20 +873,26 @@ void SpeechJobDispatch::want_vad(std::uint64_t key, Session& session) {
 
 void SpeechJobDispatch::want_partial(std::uint64_t key, Session& session) {
   Detection& detection = *session.detection;
-  if (session.job == JobState::None && !detection.partial_queued && partial_window(session)) {
+  // Asked even while queued, so that its turn compares with the frames scored last.
+  if (session.job == JobState::None && partial_window(session) && !detection.partial_queued) {
     detection.partial_queued = true;
     partial_lane_.push_back(key);
   }
 }
 
-std::optional<SampleWindow> SpeechJobDispatch::partial_window(const Session& session) {
-  const Detection& detection = *session.detection;
+std::optional<SampleWindow> SpeechJobDispatch::partial_window(Session& session) {
+  Detection& detection = *session.detection;
   // An utterance whose end was asked for is decoded whole next; one the
   // session drains without ending is not decoded at all.
   if (session.draining || !detection.pending.empty()) {
     return std::nullopt;
   }
-  return detection.windows.due(detection.policy.next_frame_start());
+  const std::uint64_t scored = detection.policy.next_frame_start();
+  auto window = detection.windows.due(scored);
+  if (window && detection.windows.waits(scored, detection.policy.speech_end().value_or(scored))) {
+    return std::nullopt;
+  }
+  return window;
 }
 
 bool SpeechJobDispatch::hold_partial(Session& session) {

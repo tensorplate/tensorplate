@@ -1323,6 +1323,19 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Changed
 
+- The serving worker's speech dispatch starts no partial decode while an
+  utterance is in a silence run that could still end it, so the
+  utterance's final no longer waits on the one decode lane behind a
+  partial decode of trailing silence. A due partial starts over the latest
+  audio only when the last frame scored is speech, or a frame scored since
+  the dispatch last asked was, even if silence followed it; one already
+  running is not cancelled. A partial, the first of an utterance included,
+  can be late by the pause it waited through (under 320 ms) when each
+  voice-activity job scores one frame; when jobs score more, by up to the
+  rest of the pause and the job that scores speech again (at most 40
+  frames, 1,280 ms); and by the decodes queued meanwhile when it waits at
+  its turn on the lane. (V030-E05-F03-T01)
+
 - The serving worker's speech dispatch keeps one voice-activity state for
   each audio session. Every `vad_frames` job of a session now carries the
   same utterance key, so the backend scores the session's audio as one

@@ -73,5 +73,48 @@ TEST(WindowScheduler, ClosingEndsTheUtteranceAndTheNextStartsAfresh) {
   EXPECT_FALSE(windows.due(21'599));
   EXPECT_EQ(windows.due(21'600), (SampleWindow{20'000, 21'600}));
 }
+
+constexpr std::uint64_t kFrame = 512;
+
+TEST(WindowScheduler, ADueWindowWaitsInASilenceRunUntilSpeechIsScoredSinceAsked) {
+  WindowScheduler windows{VadProfile{}};
+  windows.open(0, 0);
+  EXPECT_FALSE(windows.waits(kAccumulation, kAccumulation));
+  // From the run's first frame on.
+  EXPECT_TRUE(windows.waits(kAccumulation + kFrame, kAccumulation));
+  EXPECT_TRUE(windows.waits(kAccumulation + 2 * kFrame, kAccumulation));
+  // Speech scored since it was last asked, though silence followed.
+  EXPECT_FALSE(windows.waits(kAccumulation + 4 * kFrame, kAccumulation + 3 * kFrame));
+}
+
+TEST(WindowScheduler, SpeechCountsOnlyUntilTheNextAsk) {
+  WindowScheduler windows{VadProfile{}};
+  windows.open(0, 0);
+  ASSERT_TRUE(windows.waits(kAccumulation + kFrame, kAccumulation));
+  ASSERT_FALSE(windows.waits(kAccumulation + 3 * kFrame, kAccumulation + 2 * kFrame));
+  // Asked again at the same scored end: the same answer.
+  EXPECT_FALSE(windows.waits(kAccumulation + 3 * kFrame, kAccumulation + 2 * kFrame));
+  EXPECT_TRUE(windows.waits(kAccumulation + 5 * kFrame, kAccumulation + 2 * kFrame));
+}
+
+TEST(WindowScheduler, AStartedWindowAsksAfresh) {
+  WindowScheduler windows{VadProfile{}};
+  windows.open(0, 0);
+  ASSERT_TRUE(windows.waits(kAccumulation + kFrame, kAccumulation));
+  windows.started(kAccumulation + kFrame);
+  // Its speech came after the last ask, which was for the window started.
+  const std::uint64_t next = kAccumulation + kFrame + kStride;
+  EXPECT_TRUE(windows.waits(next, next - kFrame));
+}
+
+TEST(WindowScheduler, TheNextUtteranceAsksAfresh) {
+  WindowScheduler windows{VadProfile{}};
+  windows.open(0, 0);
+  ASSERT_TRUE(windows.waits(kAccumulation + kFrame, kAccumulation));
+  windows.close();
+  const std::uint64_t first = kAccumulation + 20 * kFrame;
+  windows.open(first, first);
+  EXPECT_TRUE(windows.waits(first + kAccumulation + kFrame, first + kAccumulation));
+}
 }  // namespace
 }  // namespace tensorplate::serving
