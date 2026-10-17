@@ -77,6 +77,7 @@ MIN_LANGUAGE_RECORDINGS = 500
 MIN_LANGUAGE_WORDS = 10_000
 MIN_SILENCE_RECORDINGS = 100
 MIN_SEMANTIC_FIXTURES = 50
+MIN_SEMANTIC_CLASS_FIXTURES = 10
 
 SEMANTIC_CLASSES = ("negation", "numerals", "repetition", "window_seam")
 REPEAT_WINDOW = 3
@@ -460,7 +461,12 @@ class _Tally:
             },
         }
         self.fixtures: dict[str, dict[str, Any]] = {
-            language: {"recordings": set(), "classes": Counter(), "batch_failed": 0}
+            language: {
+                "recordings": set(),
+                "classes": Counter(),
+                "batch_failed": 0,
+                "class_batch_failed": Counter(),
+            }
             for language in LANGUAGES
         }
         self.regressions: list[dict[str, Any]] = []
@@ -568,6 +574,7 @@ class _Tally:
             fixtures["classes"].update(entry["semantic"])
         # An empty batch prediction would make every critical word streaming decodes read as added.
         if batch_failed:
+            fixtures["class_batch_failed"].update(entry["semantic"])
             return
         for semantic_class in entry["semantic"]:
             if semantic_class == "window_seam":
@@ -720,19 +727,36 @@ def score(
     }
     semantic = []
     for language, fixtures in tally.fixtures.items():
-        count = sum(1 for item in tally.regressions if item["language"] == language)
+        found = Counter(item["class"] for item in tally.regressions if item["language"] == language)
+        class_minimums = [
+            (fixtures["classes"][name], MIN_SEMANTIC_CLASS_FIXTURES) for name in SEMANTIC_CLASSES
+        ]
         semantic.append(
             {
                 "language": language,
                 "fixtures": len(fixtures["recordings"]),
                 "minimum_fixtures": MIN_SEMANTIC_FIXTURES,
-                "by_class": {name: fixtures["classes"][name] for name in SEMANTIC_CLASSES},
+                "minimum_class_fixtures": MIN_SEMANTIC_CLASS_FIXTURES,
+                "by_class": {
+                    name: {
+                        "fixtures": fixtures["classes"][name],
+                        "batch_failed_files": fixtures["class_batch_failed"][name],
+                        "regressions": found[name],
+                        "verdict": _gate(
+                            [(fixtures["classes"][name], MIN_SEMANTIC_CLASS_FIXTURES)],
+                            None,
+                            found[name] == 0,
+                            fixtures["class_batch_failed"][name] == 0,
+                        ),
+                    }
+                    for name in SEMANTIC_CLASSES
+                },
                 "batch_failed_files": fixtures["batch_failed"],
-                "regressions": count,
+                "regressions": sum(found.values()),
                 "verdict": _gate(
-                    [(len(fixtures["recordings"]), MIN_SEMANTIC_FIXTURES)],
+                    [(len(fixtures["recordings"]), MIN_SEMANTIC_FIXTURES), *class_minimums],
                     None,
-                    count == 0,
+                    not found,
                     fixtures["batch_failed"] == 0,
                 ),
             }

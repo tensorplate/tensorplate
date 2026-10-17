@@ -147,20 +147,21 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["language", "fixtures", "minimum_fixtures", "by_class", "batch_failed_files", "regressions", "verdict"],
+            "required": ["language", "fixtures", "minimum_fixtures", "minimum_class_fixtures", "by_class", "batch_failed_files", "regressions", "verdict"],
             "properties": {
               "language": { "$ref": "#/definitions/Language" },
               "fixtures": { "type": "integer", "minimum": 0, "description": "Distinct clean recordings carrying a semantic class." },
               "minimum_fixtures": { "type": "integer", "minimum": 1 },
+              "minimum_class_fixtures": { "type": "integer", "minimum": 1, "description": "The fixtures each class needs; a class with fewer, or none, is insufficient and so is the language." },
               "by_class": {
                 "type": "object",
                 "additionalProperties": false,
                 "required": ["negation", "numerals", "repetition", "window_seam"],
                 "properties": {
-                  "negation": { "type": "integer", "minimum": 0 },
-                  "numerals": { "type": "integer", "minimum": 0 },
-                  "repetition": { "type": "integer", "minimum": 0 },
-                  "window_seam": { "type": "integer", "minimum": 0 }
+                  "negation": { "$ref": "#/definitions/SemanticClass" },
+                  "numerals": { "$ref": "#/definitions/SemanticClass" },
+                  "repetition": { "$ref": "#/definitions/SemanticClass" },
+                  "window_seam": { "$ref": "#/definitions/SemanticClass" }
                 }
               },
               "batch_failed_files": { "type": "integer", "minimum": 0, "description": "Fixture files the batch arm failed. They are not judged, and the gate cannot pass while any did." },
@@ -248,6 +249,18 @@
       "properties": {
         "files": { "type": "integer", "minimum": 0 },
         "hallucinated_words": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "SemanticClass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixtures", "batch_failed_files", "regressions", "verdict"],
+      "description": "One semantic class of one language, gated on its own.",
+      "properties": {
+        "fixtures": { "type": "integer", "minimum": 0, "description": "Distinct clean recordings carrying the class." },
+        "batch_failed_files": { "type": "integer", "minimum": 0, "description": "Files of the class the batch arm failed, which are not judged." },
+        "regressions": { "type": "integer", "minimum": 0 },
+        "verdict": { "$ref": "#/definitions/Verdict" }
       }
     },
     "TextCounts": {

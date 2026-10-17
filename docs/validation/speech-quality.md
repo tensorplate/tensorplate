@@ -123,7 +123,7 @@ duration bin and, for `noisy16k`, by signal-to-noise ratio.
 | Streaming minus batch, per stratum | at most 2 percentage points | as above |
 | Corpus size, per language | met by the minimums | 500 clean recordings and 10,000 normalized reference words |
 | Silence | no words in any streaming final of a silence file | 100 silence recordings |
-| Semantic fixtures, per language | no critical regression | 50 clean recordings with a semantic class |
+| Semantic fixtures, per language | no critical regression | 50 clean recordings with a semantic class, and 10 of each class |
 
 A gate below its minimum reads `insufficient`, never `pass`. A ratio gate
 below its minimum is `insufficient` even when its rate is over the ceiling,
@@ -184,9 +184,13 @@ reference and in each hypothesis:
 - **repetition.** A word equal to one of the three words before it, and that
   earlier word.
 
-The semantic minimum counts fixtures of all four classes together; the record
-reports each class's count beside it. The manifest check refuses a class
-listed twice on one file.
+Each class is also gated on its own (`by_class`): at least 10 clean
+recordings carrying the class, no regression of the class, and no file of the
+class that failed in the batch arm. A class with fewer fixtures, or none, reads
+`insufficient`, never `pass`. A language's semantic gate needs 50 fixtures of
+all classes together and every class's minimum, so it passes only when each of
+its four classes passes. The manifest check refuses a class listed twice on one
+file.
 
 A regression is either of:
 

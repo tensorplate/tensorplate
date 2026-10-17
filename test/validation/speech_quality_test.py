@@ -354,7 +354,13 @@ FIXTURE_TEXT = {
 class Built:
     """A manifest at the gates' minimum sizes, its references, and both arms' transcripts."""
 
-    def __init__(self, recordings: int = 500, derived: int = 100, fixtures: int = 50) -> None:
+    def __init__(
+        self,
+        recordings: int = 500,
+        derived: int = 100,
+        fixtures: int = 50,
+        classes: Callable[[int], str] = lambda clip: quality.SEMANTIC_CLASSES[clip % 4],
+    ) -> None:
         self.files: list[dict[str, Any]] = []
         self.references: dict[str, str] = {}
         self.texts: dict[str, tuple[str, str]] = {}
@@ -364,7 +370,7 @@ class Built:
                 words = [word(clip, index) for index in range(21)]
                 semantic = []
                 if clip < fixtures:
-                    semantic_class = quality.SEMANTIC_CLASSES[clip % 4]
+                    semantic_class = classes(clip)
                     semantic = [semantic_class]
                     extra = FIXTURE_TEXT[language][semantic_class].split()
                     words = words[: 21 - len(extra)] + extra if extra else words
@@ -654,11 +660,15 @@ def check_passing_run(scorer: Scorer) -> None:
     assert [c["codec"] for c in record["silence"]["by_codec"]] == ["clean16k", "telephony8k"]
     semantic = by_language(record["semantic"]["languages"], "en")
     assert semantic["fixtures"] == 50
+    assert semantic["minimum_class_fixtures"] == 10
     assert semantic["by_class"] == {
-        "negation": 13,
-        "numerals": 13,
-        "repetition": 12,
-        "window_seam": 12,
+        name: {"fixtures": count, "batch_failed_files": 0, "regressions": 0, "verdict": "pass"}
+        for name, count in (
+            ("negation", 13),
+            ("numerals", 13),
+            ("repetition", 12),
+            ("window_seam", 12),
+        )
     }
     assert record["inputs"] == {
         "streaming_sha256": "1" * 64,
@@ -839,6 +849,21 @@ def check_sample_minimums(scorer: Scorer) -> None:
 
     record = Scorer(Built(fixtures=49)).score()
     assert quality.unmet(record) == ["semantic en:insufficient", "semantic ar:insufficient"]
+    # Fifty fixtures with a class short of ten, or missing, are insufficient.
+    for seams, verdict in ((9, "insufficient"), (10, "pass"), (0, "insufficient")):
+        built = Built(
+            recordings=100,
+            classes=lambda clip, seams=seams: (
+                "window_seam" if clip < seams else quality.SEMANTIC_CLASSES[clip % 3]
+            ),
+        )
+        for item in Scorer(built).score()["semantic"]["languages"]:
+            assert item["fixtures"] == 50 and item["by_class"]["window_seam"]["fixtures"] == seams
+            assert item["verdict"] == verdict, (seams, item)
+            assert item["by_class"]["window_seam"]["verdict"] == verdict
+            assert {item["by_class"][name]["verdict"] for name in quality.SEMANTIC_CLASSES[:3]} == {
+                "pass"
+            }
 
 
 def check_silence(scorer: Scorer) -> None:
@@ -929,7 +954,15 @@ def check_semantic_run(scorer: Scorer) -> None:
             "words": ["not"],
         }
     ]
-    assert by_language(record["semantic"]["languages"], "en")["verdict"] == "fail"
+    english = by_language(record["semantic"]["languages"], "en")
+    assert english["verdict"] == "fail" and english["regressions"] == 1
+    assert english["by_class"]["negation"]["regressions"] == 1
+    assert [english["by_class"][name]["verdict"] for name in quality.SEMANTIC_CLASSES] == [
+        "fail",
+        "pass",
+        "pass",
+        "pass",
+    ]
     assert by_language(record["semantic"]["languages"], "ar")["verdict"] == "pass"
     assert record["verdict"] == "fail"
     both = scorer.score(built.arm("streaming", dropped), built.arm("batch", dropped))
@@ -949,6 +982,9 @@ def check_semantic_run(scorer: Scorer) -> None:
     english = by_language(record["semantic"]["languages"], "en")
     assert record["semantic"]["regressions"] == []
     assert (english["batch_failed_files"], english["verdict"]) == (1, "insufficient")
+    negation_class = english["by_class"]["negation"]
+    assert (negation_class["batch_failed_files"], negation_class["verdict"]) == (1, "insufficient")
+    assert english["by_class"]["numerals"]["verdict"] == "pass"
     record = scorer.score(built.arm("streaming", cut), built.arm("batch", failed))
     english = by_language(record["semantic"]["languages"], "en")
     assert english["verdict"] == "insufficient"
