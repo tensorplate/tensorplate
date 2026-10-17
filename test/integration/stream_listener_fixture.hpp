@@ -375,14 +375,16 @@ struct Client {
   void took(const wire::Ready& ready) {
     session_id = ready.session_id();
     credit_ = ready.status().input_credit();
+    sample_bytes_ = ready.input_format().encoding() == wire::AUDIO_ENCODING_MULAW ? 1U : 2U;
   }
 
-  /// One frame of `samples` 16-bit samples at the offset the stream is at,
-  /// sent once the credit has room. False if the stream ended first.
+  /// One frame of `samples` samples in the format Ready accepted, at the
+  /// offset the stream is at, sent once the credit has room. False if the
+  /// stream ended first.
   bool send_audio(std::uint32_t samples) {
     wire::ClientEvent event;
     auto& audio = *event.mutable_audio();
-    std::string data(std::size_t{samples} * 2, '\0');
+    std::string data(std::size_t{samples} * sample_bytes_, '\0');
     for (std::size_t index = 0; index < data.size(); ++index) {
       data[index] = static_cast<char>((audio_sent.size() + index) * 131U % 251U);
     }
@@ -394,7 +396,7 @@ struct Client {
     audio_sent += data;
     samples_sent += samples;
     audio.set_data(std::move(data));
-    return send_input(std::move(event), std::size_t{samples} * 2);
+    return send_input(std::move(event), std::size_t{samples} * sample_bytes_);
   }
 
   /// `samples` of audio in frames of `frame` samples, the last one shorter.
@@ -460,6 +462,7 @@ struct Client {
   }
 
   wire::InputCredit credit_;
+  std::size_t sample_bytes_ = 2;
   /// Input sent that no Accepted covers yet: its sequence and bytes.
   std::deque<std::pair<std::uint64_t, std::uint64_t>> unreported_;
   std::deque<wire::ServerEvent> stashed_;

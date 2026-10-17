@@ -69,6 +69,7 @@ TEST(SpeechWorker, FeatureFlagDisabled) {
 #include "scripted_sidecar.hpp"
 #include "serving/control_channel.hpp"
 #include "serving/mock_session.hpp"
+#include "serving/session/telephony_resampler.hpp"
 #include "serving_http_client.hpp"
 #include "stream_listener_fixture.hpp"
 
@@ -181,12 +182,16 @@ struct Serving {
   /// its config names, one by default, so the Open is asked again while the
   /// sessions before still hold their places, and for no other refusal.
   [[nodiscard]] Client ready(wire::SessionMode mode, wire::Ready* ready_out = nullptr) const {
+    return ready(open_event(mode, generation), ready_out);
+  }
+
+  [[nodiscard]] Client ready(const wire::ClientEvent& open, wire::Ready* ready_out) const {
     Client client;
     std::string refusal;
     bool admitted = false;
     (void)eventually([&] {
       client = connect();
-      client.call->Write(open_event(mode, generation));
+      client.call->Write(open);
       const auto first = client.read();
       if (first.has_value() && first->has_ready()) {
         EXPECT_EQ(first->sequence(), 1U) << "Ready is the session's first event";
@@ -776,6 +781,84 @@ TEST_F(SpeechWorkerScripted, OneUtteranceIsTranscribed) {
   EXPECT_TRUE(stopped.front().contains("longest_release_wait_ms"));
   EXPECT_EQ(sidecar.sent("unload", 1).size(), 1U);
   expect_one_job_that_ran_uncancelled();
+}
+
+wire::ClientEvent mulaw_open() {
+  auto open = open_event(wire::SESSION_MODE_STT_STREAMING);
+  auto& format = *open.mutable_open()->mutable_input_format();
+  format.set_encoding(wire::AUDIO_ENCODING_MULAW);
+  format.set_sample_rate_hz(8'000);
+  return open;
+}
+
+// The configured list reaches the dispatch: three frames of 8 kHz mu-law are
+// counted at 8 kHz on the wire and decoded at 16 kHz, so the job holds what
+// the resampler makes of them, flushed at the Finalize.
+TEST_F(SpeechWorkerScripted, AWorkerConfiguredForMulawServesAMulawSession) {
+  register_backend();
+  auto config = streaming_config(speech_model());
+  config.streaming.input_audio_formats.push_back({"mulaw", 8000, 1});
+  auto built = worker(config);
+  ASSERT_NE(built, nullptr);
+  const Serving served{std::move(built)};
+  ASSERT_TRUE(served.serves_sessions);
+
+  wire::Ready ready;
+  auto client = served.ready(mulaw_open(), &ready);
+  EXPECT_EQ(ready.input_format().SerializeAsString(),
+            mulaw_open().open().input_format().SerializeAsString());
+  constexpr std::uint32_t kInputFrame = kFrame / 2;
+  ASSERT_TRUE(client.send_audio(3 * kInputFrame, kInputFrame));
+  const auto asked = client.finalize();
+  Reader events{client, ready, 3, kInputFrame};
+  const auto endpoint = events.next();
+  ASSERT_TRUE(endpoint.has_value());
+  ASSERT_TRUE(endpoint->has_endpoint_detected()) << endpoint->ShortDebugString();
+  EXPECT_EQ(endpoint->endpoint_detected().end_sample_offset(), 3U * kInputFrame);
+  const auto transcript = events.next();
+  ASSERT_TRUE(transcript.has_value());
+  ASSERT_TRUE(transcript->has_final_transcript()) << transcript->ShortDebugString();
+  EXPECT_EQ(transcript->final_transcript().end_sample_offset(), 3U * kInputFrame);
+  EXPECT_EQ(transcript->final_transcript().finalize_sequence(), asked);
+  ASSERT_EQ(transcript->final_transcript().segments_size(), 1);
+  EXPECT_EQ(transcript->final_transcript().segments(0).end_us(), 300'000U);
+  ASSERT_TRUE(client.call->WritesDone());
+  const auto closed = closed_of(events.next());
+  EXPECT_EQ(closed.state(), wire::SESSION_STATE_CLOSED);
+  EXPECT_FALSE(closed.has_cause()) << closed.ShortDebugString();
+  EXPECT_EQ(closed.totals().input_audio_samples(), 3U * kInputFrame);
+  EXPECT_TRUE(end_of(client).ok());
+
+  tensorplate::serving::TelephonyResampler resampler;
+  std::vector<std::int16_t> decoded;
+  const auto* sent = reinterpret_cast<const std::byte*>(client.audio_sent.data());
+  resampler.push({sent, client.audio_sent.size()}, decoded);
+  resampler.flush(decoded);
+  ASSERT_EQ(decoded.size(), 3U * kFrame);
+  std::vector<std::byte> expected;
+  for (const auto sample : decoded) {
+    const auto bits = static_cast<std::uint16_t>(sample);
+    expected.push_back(static_cast<std::byte>(bits & 0xFFU));
+    expected.push_back(static_cast<std::byte>(bits >> 8U));
+  }
+  ASSERT_EQ(sidecar.sent("job_submit", 1).size(), 1U);
+  EXPECT_EQ(sidecar.payload("job_submit", 0), expected);
+  (void)served.stop();
+}
+
+// The Open differs from the one served after it in its format only.
+TEST_F(SpeechWorkerScripted, AWorkerWithTheDefaultFormatsRefusesAMulawOpen) {
+  register_backend();
+  auto built = worker(streaming_config(speech_model()));
+  ASSERT_NE(built, nullptr);
+  const Serving served{std::move(built)};
+  const auto refused = served.refused(mulaw_open());
+  EXPECT_EQ(refused.error_code(), grpc::StatusCode::FAILED_PRECONDITION) << refused.error_message();
+  EXPECT_NE(refused.error_message().find("FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY"),
+            std::string::npos)
+      << refused.error_message();
+  ASSERT_NO_FATAL_FAILURE(transcribes_one_utterance(served));
+  (void)served.stop();
 }
 
 TEST_F(SpeechWorkerScripted, AMemberServesItsGenerationToStreamsAndToItsJobs) {

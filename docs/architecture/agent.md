@@ -214,6 +214,17 @@ takes a new transaction and a new descriptor. A serving worker that predates
 `streaming.max_sessions` refuses the key, so qualification needs a worker of
 the same release.
 
+### Stream input formats
+
+A stream deploy of a speech-to-text bundle whose descriptor declares more
+input formats than 16 kHz PCM gives its worker those formats, as the
+descriptor lists them, in `streaming.input_audio_formats`, so the worker
+also takes 8 kHz mu-law. A descriptor that declares only 16 kHz PCM, a
+text-to-speech descriptor and an undescribed bundle render no key, and the
+worker takes 16 kHz PCM only. The rule is for compatibility: a serving
+worker that predates `streaming.input_audio_formats` refuses the key, so a
+bundle that declares mu-law needs a worker of the same release.
+
 ### Response shape
 
 ```json

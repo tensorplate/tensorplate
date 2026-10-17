@@ -354,6 +354,14 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Added
 
+- A speech-to-text deployment whose bundle declares 8 kHz mono G.711 mu-law
+  input serves it: the agent renders the descriptor's input formats into the
+  worker's `streaming.input_audio_formats`, which the serving worker passes
+  to its speech dispatch. The key is rendered only when the descriptor
+  declares more than 16 kHz mono PCM, since an older worker refuses it. The
+  worker refuses a list with any other format, without 16 kHz PCM or with a
+  format twice (`config_invalid`). (V030-E05-F01-T03)
+
 - The speech dispatch takes 8 kHz mono G.711 mu-law input when its options
   list that format: each frame is decoded and resampled onto the 16 kHz
   internal timeline as it is taken, so jobs still carry 16 kHz PCM. A
@@ -363,9 +371,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   drain ends no utterance. Offsets leave at 8 kHz, a decode's deadline and
   the open audio's reservation count internal audio, and input credit
   stays in the frame's bytes. Options that list another format, or omit
-  16 kHz PCM, are refused (`config_invalid`, `input_formats_invalid`). No
-  worker configuration lists mu-law yet, so a deployed worker still
-  refuses it. (V030-E05-F01-T03)
+  16 kHz PCM, are refused (`config_invalid`, `input_formats_invalid`).
+  (V030-E05-F01-T03)
 
 - `tools/validation/speech_quality.py` scores a speech evaluation run's final
   transcripts (`config/schemas/speech_transcripts.json`) against a corpus

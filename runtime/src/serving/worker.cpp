@@ -326,6 +326,13 @@ Result<void> ServingWorker::Impl::build() {
     if (config.deployment.generation) {
       options.generation = *config.deployment.generation;
     }
+    std::vector<serving::StreamAudioFormat> formats;
+    for (const auto& format : config.streaming.input_audio_formats) {
+      const auto encoding = format.encoding == "mulaw" ? serving::StreamAudioEncoding::Mulaw
+                                                       : serving::StreamAudioEncoding::PcmS16Le;
+      formats.push_back({encoding, format.sample_rate_hz, format.channels});
+    }
+    options.input_formats = std::move(formats);
     options.on_stall = [this](const Error& cause) { on_speech_stall(cause); };
     options.on_partial_failed = [this](const Error& cause) {
       log_stderr(config, "warn", "speech partial decode failed",

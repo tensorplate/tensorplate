@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Qualification deploys: the test count each generation of the deployment
-//! is started with, what records it, and the refusals before staging.
+//! is started with, what records it, and the refusals before staging; and
+//! the input formats a described speech bundle's stream block carries.
 
 use super::*;
 use tensorplate_protocol::agent_control::{
@@ -11,8 +12,16 @@ use tensorplate_protocol::{AdmissionMode, DeploymentDescriptor, DomainQuotaBytes
 
 /// A copy of the STT fixture bundle under `root` declaring `sessions`.
 fn declaring(root: &TempDir, sessions: u32) -> PathBuf {
+    edited(root, &format!("stt-declaring-{sessions}"), |manifest| {
+        manifest["max_concurrent_sessions"] = sessions.into();
+    })
+}
+
+/// A copy named `name` under `root` of the STT fixture bundle, whose manifest
+/// `edit` changes.
+fn edited(root: &TempDir, name: &str, edit: impl FnOnce(&mut serde_json::Value)) -> PathBuf {
     let source = PathBuf::from(bundle_fixture(STT));
-    let copy = root.path().join(format!("stt-declaring-{sessions}"));
+    let copy = root.path().join(name);
     fs::create_dir_all(&copy).unwrap();
     for entry in fs::read_dir(&source).unwrap() {
         let name = entry.unwrap().file_name();
@@ -21,7 +30,7 @@ fn declaring(root: &TempDir, sessions: u32) -> PathBuf {
     let path = copy.join("manifest.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    manifest["max_concurrent_sessions"] = sessions.into();
+    edit(&mut manifest);
     fs::write(&path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
     copy
 }
@@ -33,6 +42,14 @@ fn worker_config_errors(config: &serde_json::Value) -> Vec<String> {
     let compiled = jsonschema::JSONSchema::compile(&schema).unwrap();
     let errors = compiled.validate(config).err();
     errors.map_or_else(Vec::new, |errors| errors.map(|e| e.to_string()).collect())
+}
+
+fn pcm_16k() -> serde_json::Value {
+    serde_json::json!({"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1})
+}
+
+fn mulaw_8k() -> serde_json::Value {
+    serde_json::json!({"encoding": "mulaw", "sample_rate_hz": 8000, "channels": 1})
 }
 
 fn unmeasured(session_count: u32) -> MemberQuota {
@@ -97,7 +114,12 @@ fn a_qualification_deploy_starts_its_worker_with_the_test_count_and_records_it_u
     assert_eq!(answered.status, ResponseStatus::Ok, "{answered:?}");
 
     let port = ACTIVE_PORT + 10;
-    let expected = serde_json::json!({"enabled": true, "port": port, "max_sessions": 3});
+    let expected = serde_json::json!({
+        "enabled": true,
+        "port": port,
+        "max_sessions": 3,
+        "input_audio_formats": [pcm_16k(), mulaw_8k()]
+    });
     assert_eq!(w.rendered(1), expected);
     let described = w.active_descriptor();
     assert_eq!(described.admission_mode, AdmissionMode::Qualification);
@@ -164,6 +186,8 @@ fn a_rollback_and_the_next_start_start_a_qualification_deployment_with_its_test_
     assert_eq!(back.admission_mode, AdmissionMode::Qualification);
     assert_eq!(back.configuration_digest, qualified.configuration_digest);
     assert_eq!(w.rendered(3)["max_sessions"], 3);
+    let declared = serde_json::json!([pcm_16k(), mulaw_8k()]);
+    assert_eq!(w.rendered(3)["input_audio_formats"], declared);
 
     let next = wired_at(w.root.clone(), Step::BeforePrepare, streams);
     apply_startup(&next.coordinator).unwrap();
@@ -175,6 +199,7 @@ fn a_rollback_and_the_next_start_start_a_qualification_deployment_with_its_test_
         qualified.configuration_digest
     );
     assert_eq!(next.rendered(4)["max_sessions"], 3);
+    assert_eq!(next.rendered(4)["input_audio_formats"], declared);
     assert_eq!(next.reported_admission(), admitted);
 }
 
@@ -222,4 +247,38 @@ fn a_test_count_the_worker_refuses_fails_the_deploy_with_its_reason_and_the_serv
     let (reported, recorded) = active_of(&w);
     assert_eq!(recorded.deployment_id, "stt");
     assert_eq!(reported.generation, Some(1));
+}
+
+#[test]
+fn a_stream_deploy_renders_the_input_formats_its_descriptor_declares_beyond_16_khz_pcm() {
+    let w = wired_with(Step::BeforePrepare, streams);
+    w.stream("stt", Path::new(&bundle_fixture(STT))).unwrap();
+
+    let declared = w.active_descriptor().configuration.speech.unwrap();
+    assert_eq!(declared.input_audio_formats.len(), 2);
+    let rendered = w.rendered(1);
+    assert_eq!(
+        rendered["input_audio_formats"],
+        serde_json::json!([pcm_16k(), mulaw_8k()])
+    );
+    assert_eq!(rendered.get("max_sessions"), None);
+}
+
+// A worker that predates the key refuses it, so a descriptor that declares
+// no more than the worker's default renders none.
+#[test]
+fn a_stream_deploy_whose_descriptor_declares_only_16_khz_pcm_renders_no_input_formats() {
+    let w = wired_with(Step::BeforePrepare, streams);
+    let bundle = edited(&w.root, "stt-pcm-only", |manifest| {
+        manifest["model_blocks"]["speech"]["input_audio_formats"] = serde_json::json!([pcm_16k()]);
+    });
+    w.stream("stt", &bundle).unwrap();
+
+    let declared = w.active_descriptor().configuration.speech.unwrap();
+    assert_eq!(declared.input_audio_formats.len(), 1);
+    let port = ACTIVE_PORT + 10;
+    assert_eq!(
+        w.rendered(1),
+        serde_json::json!({"enabled": true, "port": port})
+    );
 }

@@ -22,7 +22,9 @@ use tensorplate_protocol::agent_state::ErrorRecord;
 use tensorplate_protocol::worker_control::{
     CandidateRef, MemberRef, WorkerControlResponse, WorkerStatusOutcome,
 };
-use tensorplate_protocol::{AdmissionMode, MemberQuota};
+use tensorplate_protocol::{
+    AdmissionMode, AudioEncoding, AudioFormat, DeploymentDescriptor, MemberQuota,
+};
 
 use crate::bundle::StagedManifest;
 use crate::config::{AgentConfig, WorkerConfig};
@@ -1263,6 +1265,9 @@ impl MemberRegistry {
                 let test_count = described.configuration.quota.session_count;
                 config["streaming"]["max_sessions"] = test_count.into();
             }
+            if let Some(formats) = descriptor.as_ref().and_then(input_formats_to_render) {
+                config["streaming"]["input_audio_formats"] = serde_json::to_value(formats)?;
+            }
             config["deployment"]["descriptor_digest"] = stream_digest(candidate).into();
         }
         fs::write(&path, serde_json::to_vec_pretty(&config)?)?;
@@ -2315,6 +2320,19 @@ impl Drop for MemberRegistry {
         stopped.extend(retiring.map(|retiring| retiring.stopping));
         self.stop(stopped);
     }
+}
+
+/// The input formats `described` declares, when they are more than 16 kHz
+/// PCM: a worker that predates `streaming.input_audio_formats` refuses the
+/// key, so a descriptor with no more than its default renders none.
+fn input_formats_to_render(described: &DeploymentDescriptor) -> Option<&[AudioFormat]> {
+    let formats = &described.configuration.speech.as_ref()?.input_audio_formats;
+    let pcm_16k = AudioFormat {
+        encoding: AudioEncoding::PcmS16le,
+        sample_rate_hz: 16_000,
+        channels: 1,
+    };
+    (formats.iter().any(|format| *format != pcm_16k)).then_some(formats.as_slice())
 }
 
 /// The digest a stream Open names for a worker started from `candidate`.

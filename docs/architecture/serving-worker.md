@@ -63,8 +63,9 @@ With `streaming.enabled`, `deployment.endpoint` must be a deployment id (1 to
 an ephemeral port) is the stream listener's port, which must differ from
 `bind.port`; its host is `bind.host`, so the HTTP bind's loopback rule covers
 it. Null, non-boolean or out-of-range
-values and unknown keys in `streaming` return `config_invalid`. A config with
-neither field set serializes without the optional block, preserving the
+values and unknown keys in `streaming` return `config_invalid`. A config whose
+streaming fields are all at their defaults serializes without the optional
+block, preserving the
 existing agent-rendered config shape; the agent renders the `streaming` block
 only for a deployment deployed with `streaming`
 ([the agent's page](agent.md#streaming)). A
@@ -1606,7 +1607,8 @@ partial transcripts, and one synthesis, standing in for the mode handlers
 that will own them.
 
 - **Audio input** (16 kHz mono 16-bit PCM, and 8 kHz mono G.711 mu-law
-  where `SpeechDispatchOptions::input_formats` lists it; frames of 20 to
+  where `SpeechDispatchOptions::input_formats` lists it, as the worker's
+  `streaming.input_audio_formats` does; frames of 20 to
   320 ms). `create` refuses a list without 16 kHz PCM or with any other
   format (`config_invalid`, `input_formats_invalid`), and `negotiate`
   grants only what is listed. Mu-law is decoded and resampled to 16 kHz
@@ -2075,9 +2077,16 @@ session as any other, constructs a `SpeechJobDispatch` over the bridge, the
 worker's buffer manager and the clock the listener's session manager runs
 on, and gives it to the stream listener. The listener then admits an `Open`
 and the dispatch serves it. Every job identity carries the worker's
-`deployment.generation`, or generation 1 in a worker without one. No
-configuration key sets the dispatch's input formats yet, so a worker
-takes 16 kHz PCM only and refuses mu-law (`unsupported_audio_format`).
+`deployment.generation`, or generation 1 in a worker without one. The
+dispatch's input formats are `streaming.input_audio_formats`: mono
+`pcm_s16le` at 16,000 Hz, the default, which the list must hold, and mono
+`mulaw` at 8,000 Hz, spelled as a bundle's speech block declares them.
+The configuration refuses any other format, a list without 16 kHz PCM and
+a duplicate (`config_invalid`). A worker given only the default refuses a
+mu-law `Open` (`unsupported_audio_format`, which reaches the client as
+`FAILED_PRECONDITION` with `FAILURE_REASON_BACKEND_UNSUPPORTED_CAPABILITY`);
+the agent renders the key from the deployment's descriptor
+([agent.md](agent.md#stream-input-formats)).
 
 The model class is part of the condition because a session built with its
 bridge loads with speech jobs enabled, and a backend refuses that load for a

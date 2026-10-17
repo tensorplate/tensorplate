@@ -183,6 +183,17 @@ struct AsyncPolicyConfig {
   std::size_t max_pending = 256;
 };
 
+/// One raw audio format a stream session may open with, spelled as the
+/// deployment descriptor spells it: `encoding` is "pcm_s16le" or "mulaw".
+struct StreamingAudioFormat {
+  std::string encoding;
+  std::uint32_t sample_rate_hz = 0;
+  std::uint32_t channels = 0;
+
+  friend bool operator==(const StreamingAudioFormat& lhs,
+                         const StreamingAudioFormat& rhs) noexcept = default;
+};
+
 /// Optional streaming transport settings, mirroring the streaming JSON object.
 struct StreamingConfig {
   /// Opt in to the gRPC stream listener. False by default; true requires a
@@ -197,6 +208,12 @@ struct StreamingConfig {
 
   /// Stream sessions served at one time: 1 to 64 (the schema allows up to 2048); 1 by default.
   std::uint32_t max_sessions = 1;
+
+  /// Audio formats a speech-to-text session may open with: mono 16-bit PCM
+  /// at 16 kHz ({"pcm_s16le", 16000, 1}), the default, which the list must
+  /// hold, and mono G.711 mu-law at 8 kHz ({"mulaw", 8000, 1}). validate()
+  /// refuses any other format, a list without 16 kHz PCM and a duplicate.
+  std::vector<StreamingAudioFormat> input_audio_formats{{"pcm_s16le", 16000, 1}};
 };
 
 /// Full serving worker runtime configuration. Validated by
