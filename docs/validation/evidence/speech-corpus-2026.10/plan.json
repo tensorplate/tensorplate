@@ -7,6 +7,21 @@
   "name": "TensorPlate speech evaluation corpus",
   "version": "2026.10"
  },
+ "label_rules": {
+  "energy_check_below_samples": 16000,
+  "energy_onset": "tp-band-energy-onset-300-3400hz-25db-3x10ms-v1",
+  "onset_tolerance_samples": 800,
+  "score_floor": 0.2,
+  "span_floor_samples": 1920
+ },
+ "listen_check": {
+  "doubtful_onset_samples": 1600,
+  "flag_samples": 800,
+  "longer_doubtful_share": "half",
+  "per_language": 50,
+  "rerule": "if more than 2 of a source's doubtful clips are off by more than 50 ms, that source's withholding is ruled again",
+  "under_1s": 15
+ },
  "noise": {
   "count": 90,
   "dir": "musan/extract/musan/noise",

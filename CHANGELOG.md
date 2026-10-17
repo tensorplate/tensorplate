@@ -383,11 +383,17 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
     the plan it was built from. The audio is held privately.
   - `tools/validation/speech_corpus_build.py` builds a corpus from downloaded
     sources and a plan. It applies stated selection rules and counts what
-    each rule withheld per source.
+    each rule withheld per source. Among them, it withholds a forced
+    alignment whose score is below 0.2 or whose span is under 120 ms, and,
+    under 1 s, one whose onset is more than 50 ms from the clip's 300-3400 Hz
+    band-energy onset. Semantic fixtures are chosen as the quality scorer
+    reads them.
   - `tools/validation/speech_corpus_align.py` labels speech onset and end by
-    CTC forced alignment. It is an operator step that needs torch.
+    CTC forced alignment, on the model's 320-sample frames. It is an operator
+    step that needs torch.
   - `speech_corpus.py check --root` now reads one clean file and one noise
-    file at a time.
+    file at a time. It refuses a file under the corpus root that the manifest
+    does not list, and U+02BC in an English transcript.
   - A manifest source may record where its license is stated and its
     selection counts. CI checks the filed manifest.
   (V030-E05-F03-T02)
