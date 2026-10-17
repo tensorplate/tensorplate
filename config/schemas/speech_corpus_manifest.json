@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$id": "https://tensorplate.com/schemas/v0.1/speech_corpus_manifest.json",
+  "title": "Speech evaluation corpus manifest",
+  "description": "The frozen identity of a speech evaluation corpus, checked by tools/validation/speech_corpus.py: every audio file by digest, its source and license, its pool, stratum and speech labels, and for a derived rendering the recipe and parameters that reproduce it from its clean source. The audio is held outside the repository. A transcript is carried as text only where its source allows republishing it, and otherwise by digest. The checker derives duration bins, inherited labels, seeds and pool separation itself and refuses a manifest that claims otherwise.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "corpus", "recipes", "sources", "noise", "files"],
+  "properties": {
+    "schema_version": { "type": "string", "const": "0.1" },
+    "corpus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]*$", "description": "Part of every noisy rendering's seed, so it is fixed when the first rendering is made." }
+      }
+    },
+    "recipes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["telephony8k", "noisy16k", "tools"],
+      "properties": {
+        "telephony8k": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["recipe", "level_dbov", "level_method"],
+          "properties": {
+            "recipe": { "type": "string", "const": "tp-telephony8k-fir63-g711stl-v1" },
+            "level_dbov": { "type": "integer", "const": -26 },
+            "level_method": { "type": "string", "const": "span_rms" }
+          }
+        },
+        "noisy16k": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["snr_db", "seed_rule"],
+          "properties": {
+            "snr_db": { "type": "array", "items": { "type": "integer", "enum": [5, 10, 15, 20] }, "minItems": 1 },
+            "seed_rule": { "type": "string", "const": "sha256-version-noisy16k-clip-v1", "description": "The seed is the first eight bytes, big-endian, of SHA-256 over <corpus version>/noisy16k/<clean file id>; the noise offset is the seed modulo (noise samples - clip samples + 1)." }
+          }
+        },
+        "tools": {
+          "type": "array",
+          "minItems": 1,
+          "description": "The recipe sources the renderings were made with, by digest; the checker compares them with the files beside it.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256"],
+            "properties": {
+              "path": { "type": "string", "pattern": "^tools/validation/[a-z_]+\\.py$" },
+              "sha256": { "$ref": "#/definitions/Sha256" }
+            }
+          }
+        }
+      }
+    },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "dataset", "revision", "url", "license", "attribution", "condition", "transcripts_public"],
+        "properties": {
+          "id": { "$ref": "#/definitions/Id" },
+          "dataset": { "type": "string", "minLength": 1 },
+          "revision": { "type": "string", "minLength": 1, "description": "The immutable release, revision or archive digest the files were taken from." },
+          "url": { "type": "string", "pattern": "^https://" },
+          "license": { "type": "string", "minLength": 1, "description": "An SPDX license identifier, or the dataset's own terms by name." },
+          "attribution": { "type": "string", "minLength": 1 },
+          "condition": { "type": "string", "minLength": 1, "description": "How the source was recorded, such as read speech on close microphones or crowd-sourced lossy recordings; results are reported per source." },
+          "transcripts_public": { "type": "boolean", "description": "Whether the source's license allows republishing its transcripts in this manifest." }
+        }
+      }
+    },
+    "noise": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "source", "file_id", "path", "sha256", "size", "samples", "pool", "excluded", "exclusion_reason"],
+        "properties": {
+          "id": { "$ref": "#/definitions/Id" },
+          "source": { "$ref": "#/definitions/Id" },
+          "file_id": { "type": "string", "minLength": 1 },
+          "path": { "$ref": "#/definitions/Path" },
+          "sha256": { "$ref": "#/definitions/Sha256" },
+          "size": { "type": "integer", "minimum": 0 },
+          "samples": { "type": "integer", "minimum": 1 },
+          "pool": { "$ref": "#/definitions/Pool" },
+          "excluded": { "type": "boolean", "description": "Withheld from mixing, for example because a listener heard speech in it." },
+          "exclusion_reason": { "type": ["string", "null"], "minLength": 1 }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/File" }
+    }
+  },
+  "definitions": {
+    "Id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$" },
+    "Path": { "type": "string", "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$" },
+    "Sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "Pool": { "type": "string", "enum": ["tuning", "held_out"] },
+    "File": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "sha256", "pcm_sha256", "size", "samples", "rate", "encoding", "suite", "pool", "codec", "language", "duration_bin", "source", "derived_from", "transcript", "labels", "recipe", "semantic"],
+      "properties": {
+        "id": { "$ref": "#/definitions/Id" },
+        "path": { "$ref": "#/definitions/Path" },
+        "sha256": { "$ref": "#/definitions/Sha256" },
+        "pcm_sha256": { "$ref": "#/definitions/Sha256", "description": "Digest of the samples alone: the WAV data chunk, or the whole file for headerless mu-law." },
+        "size": { "type": "integer", "minimum": 0 },
+        "samples": { "type": "integer", "minimum": 1 },
+        "rate": { "type": "integer", "enum": [16000, 8000] },
+        "encoding": { "type": "string", "enum": ["pcm_s16le_wav", "mulaw"] },
+        "suite": { "type": "string", "enum": ["speech", "silence"] },
+        "pool": { "$ref": "#/definitions/Pool" },
+        "codec": { "type": "string", "enum": ["clean16k", "noisy16k", "telephony8k"] },
+        "language": { "type": ["string", "null"], "enum": ["en", "ar", null] },
+        "duration_bin": { "type": ["string", "null"], "enum": ["lt1s", "1to5s", "gt5to30s", null], "description": "Of the labelled speech, end minus onset: under 1 s, 1 to 5 s, over 5 to 30 s." },
+        "source": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["source", "file_ids", "speaker"],
+          "description": "For a clean rendering; a derived rendering names its clean source in derived_from instead.",
+          "properties": {
+            "source": { "$ref": "#/definitions/Id" },
+            "file_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 }, "description": "More than one marks a concatenation of real utterances, in order." },
+            "speaker": { "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9-]*$", "description": "A per-corpus speaker key, never the source's own speaker identifier; null where the source does not identify speakers." }
+          }
+        },
+        "derived_from": { "oneOf": [{ "$ref": "#/definitions/Id" }, { "type": "null" }] },
+        "transcript": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["sha256", "text"],
+          "properties": {
+            "sha256": { "$ref": "#/definitions/Sha256", "description": "Of the reference text's UTF-8 bytes." },
+            "text": { "type": ["string", "null"], "minLength": 1 }
+          }
+        },
+        "labels": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["speech_onset_sample", "speech_end_sample", "method", "tool", "human_verified"],
+          "description": "Sample offsets at the file's own rate: the first speech sample and the exclusive end of speech.",
+          "properties": {
+            "speech_onset_sample": { "type": "integer", "minimum": 0 },
+            "speech_end_sample": { "type": "integer", "minimum": 1 },
+            "method": { "type": "string", "enum": ["forced_alignment", "human", "synthetic", "inherited"] },
+            "tool": { "type": ["string", "null"], "minLength": 1 },
+            "human_verified": { "type": "boolean" }
+          }
+        },
+        "recipe": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "noise", "noise_offset_sample", "snr_db", "seed", "mixture_peak"],
+              "properties": {
+                "kind": { "type": "string", "const": "noisy16k" },
+                "noise": { "$ref": "#/definitions/Id" },
+                "noise_offset_sample": { "type": "integer", "minimum": 0 },
+                "snr_db": { "type": "integer", "enum": [5, 10, 15, 20] },
+                "seed": { "type": "integer", "minimum": 0 },
+                "mixture_peak": { "type": "integer", "minimum": 0, "description": "Peak of the mixture before scaling; above 32767 the whole mixture was scaled to fit, never clipped." }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "level_gain_q30", "achieved_dbov", "sv56_dbov"],
+              "properties": {
+                "kind": { "type": "string", "const": "telephony8k" },
+                "level_gain_q30": { "type": ["integer", "null"], "minimum": 0, "description": "The level gain applied before decimation, in Q30; null for silence, which is not levelled." },
+                "achieved_dbov": { "type": ["number", "null"], "description": "Span RMS level after the gain, at 16 kHz." },
+                "sv56_dbov": { "type": ["number", "null"], "description": "The active speech level ITU-T STL sv56demo measures on the levelled 16 kHz signal, recorded as a cross-check; null until recorded." }
+              }
+            }
+          ]
+        },
+        "semantic": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["negation", "numerals", "repetition", "window_seam"] }
+        }
+      }
+    }
+  }
+}

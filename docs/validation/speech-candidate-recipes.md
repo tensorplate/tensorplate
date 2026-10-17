@@ -294,7 +294,11 @@ digest. Two clips are derived by the tool from their clean source with the
 derivation the inventory records, so their digests are stable and pinned the
 same way: a noisy variant mixes seeded, integer-generated noise at the given
 signal-to-noise ratio, and the telephony variant decimates to 8 kHz and
-transcodes through G.711 mu-law (the Sun reference encoder). A clip with a
+transcodes through G.711 mu-law with the ITU-T STL encoder, under the recipe id
+the inventory names (`tp-telephony8k-fir63-g711stl-v1`); a telephony clip that
+names no recipe or another one is refused. The release speech corpus renders
+its telephony stratum with the same recipe
+([speech-corpus.md](speech-corpus.md)). A clip with a
 `null` digest, provisioned or derived, is unpinned and the tool refuses to run
 on it; for a derived clip the refusal names the digest to pin. The 8 kHz clip is resampled back to the
 entry's rate before it is sent, because the runner takes exactly the model's

@@ -178,6 +178,12 @@ jobs:
         shell: bash
         run: test/validation/candidate_qualify_test.py
 
+      # Renders a synthetic corpus with the corpus tool and breaks each rule of
+      # the manifest check once; the schema cross-check needs the same jsonschema.
+      - name: Speech corpus recipes and manifest
+        shell: bash
+        run: test/validation/speech_corpus_test.py
+
       # Runs the streaming footprint harness against fake packages whose
       # worker adds known amounts to its size and resident set, and breaks
       # each guard of the record check once. The fake worker is compiled
