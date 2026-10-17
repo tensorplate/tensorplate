@@ -30,6 +30,20 @@
           "maximum": 2048,
           "default": 1,
           "description": "Stream sessions the worker serves at one time, each holding its place until its backend release; it is the worker's ledger ceiling and the session count its activate answers. The serving worker refuses a value above 64 with config_invalid while a session's memory is not charged to the deployment's memory budget."
+        },
+        "input_audio_formats": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1},
+              {"encoding": "mulaw", "sample_rate_hz": 8000, "channels": 1}
+            ]
+          },
+          "contains": {"const": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1}},
+          "default": [{"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1}],
+          "description": "Audio formats a speech-to-text stream session may open with, as the deployment's descriptor declares them, with integer rates and channel counts (the serving worker refuses 16000.0); 8 kHz mu-law is decoded and resampled onto 16 kHz in the worker. A worker that predates the key refuses it, so the agent renders it only for a descriptor that declares more than 16 kHz PCM."
         }
       }
     },
