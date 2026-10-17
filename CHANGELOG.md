@@ -8,6 +8,11 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
 
 ### Fixed
 
+- Candidate qualification waits for replaced serving workers to exit before
+  sampling idle memory after deploy and rollback. Each wait is recorded and
+  bounded at 60 seconds; an unconfirmed exit or overlapping workers makes
+  the window incomplete with a diagnostic instead of sampling it.
+
 - The public-hygiene scanner rejects extension-row identifiers and contextual
   planning step identifiers, with coverage for near misses in ordinary text.
 

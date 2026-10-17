@@ -165,6 +165,32 @@ warm idle, the candidate under load and the state after the teardown; the
 last two together show what the teardown released. All of them are sampled
 maxima, not continuous-time peaks.
 
+Before each predecessor deploy, candidate deploy and teardown rollback, the
+recipe captures Linux PID handles for the existing serving workers. It waits
+for those processes to exit before opening the corresponding idle window,
+then discovers the successor's PIDs again. The wait is bounded at 60 seconds:
+30 seconds for the retire drain, 10 for sidecar cleanup, 10 for SIGTERM
+escalation, and a 10-second margin for the control acknowledgement and
+supervision. Deploy/rollback wall times remain separate from this wait.
+
+The exit signal comes from the worker's PID handle, which stays tied to that
+process across PID reuse. Discovery uses the existing agent process tree
+because `status --output json` does not expose retiring workers: its
+`previous_active` is retained rollback metadata, and `supervision` describes
+the active supervisor rather than the retiring registry members. Exited
+zombies awaiting the agent's reap step are excluded from sampling.
+
+Each idle window records `retirement_wait` with `status`, `bound_ms`,
+`wall_ms`, `worker_pids` and `remaining_pids`. No existing worker means
+`not_needed`, zero wait and no polling. If a worker still runs at the bound,
+the window is `incomplete`, its reason names that PID, and no sampler starts.
+An unreadable PID handle or multiple serving workers still present at the
+window boundary also makes the window incomplete. Older records without
+`retirement_wait` remain valid. With explicit `--pid` values, the operator
+must supply the correct process set; automatic discovery is preferable for
+this recipe, whose deploys replace processes. No retirement check runs when
+no sampler was requested.
+
 Until the qualification runs happen, a record produced without hardware
 carries every memory window as `not_run` with the reason `pending hardware`.
 
