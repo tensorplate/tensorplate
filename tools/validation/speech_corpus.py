@@ -299,6 +299,11 @@ def _check_transcript(entry: dict[str, Any], source: dict[str, Any]) -> None:
                 else "carried by digest only"
             )
         )
+    # U+02BC is a letter, so "can't" written with it stays one word and hides its negation.
+    if text is not None and entry["language"] == "en" and "\u02bc" in text:
+        raise ManifestError(
+            f"{entry['id']}: English text holds U+02BC; write the apostrophe as U+0027 or U+2019"
+        )
     if text is not None and _sha256(text.encode("utf-8")) != transcript["sha256"]:
         raise ManifestError(f"{entry['id']}: the transcript digest is not that of its text")
 

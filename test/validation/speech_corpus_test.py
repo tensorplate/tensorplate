@@ -629,6 +629,24 @@ def check_rules(good: dict[str, Any], root: Path) -> None:
 
         return mutate
 
+    def retext(clip_id: str, text: str) -> Mutation:
+        def mutate(m: dict[str, Any]) -> None:
+            clean = file_entry(m, f"{clip_id}.clean16k")
+            for source in m["sources"]:
+                if source["id"] == clean["source"]["source"]:
+                    source["transcripts_public"] = True
+            for entry in m["files"]:
+                if entry["id"].startswith(f"{clip_id}."):
+                    entry["transcript"] = {"sha256": sha(text.encode()), "text": text}
+
+        return mutate
+
+    refused(good, retext("en-a", "one can\u02bct"), "en-a.clean16k: English text holds U+02BC")
+    for clip_id, text in (("en-a", "one can\u2019t"), ("ar-b", "\u0644\u0627 \u02bc")):
+        accepted = copy.deepcopy(good)
+        retext(clip_id, text)(accepted)
+        assert corpus.check_manifest(accepted) == len(good["files"]), text
+
     refused(good, again("en-a", ["en-a.src"]), "source file ('read', 'en-a.src') is already")
     for clip_id, file_ids in (("en-a", ["en-a.src", "other.src"]), ("sil-d", ["sil-d.src"])):
         accepted = copy.deepcopy(good)
