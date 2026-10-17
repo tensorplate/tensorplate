@@ -1699,7 +1699,10 @@ that will own them.
   while the partial waits on the lane, and again when its turn comes; the
   partial starts, over the latest audio, only if the last frame scored is
   speech or a frame scored since the dispatch last asked was, even if
-  silence followed that frame. A decode already running is not cancelled.
+  silence followed that frame. Only asks since the utterance opened or
+  its previous decode started count, and nothing asks while that decode
+  runs, so frames scored meanwhile release nothing. A decode already
+  running is not cancelled.
   When each job scores one frame, a partial is late by at most the pause
   it waited through: 288 ms, a frame short of the 320 ms that ends the
   utterance. When a job scores more frames (a message of up to 320 ms, or

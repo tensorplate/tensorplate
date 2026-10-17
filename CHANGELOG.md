@@ -1358,7 +1358,8 @@ This project follows the spirit of [Keep a Changelog](https://keepachangelog.com
   utterance's final no longer waits on the one decode lane behind a
   partial decode of trailing silence. A due partial starts over the latest
   audio only when the last frame scored is speech, or a frame scored since
-  the dispatch last asked was, even if silence followed it; one already
+  the dispatch last asked was (silence may follow it), counting only asks
+  since the utterance opened or its previous decode started; one already
   running is not cancelled. A partial, the first of an utterance included,
   can be late by the pause it waited through (under 320 ms) when each
   voice-activity job scores one frame; when jobs score more, by up to the

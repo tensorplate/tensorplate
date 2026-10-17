@@ -30,7 +30,8 @@ struct SampleWindow {
 /// A due window waits while the utterance is in a silence run that could end
 /// it, so that its final does not queue behind a decode started on trailing
 /// silence: it starts only if the last frame scored is speech, or a frame
-/// scored since it was last asked was (silence may follow that frame).
+/// scored since it was last asked was (silence may follow that frame). Only
+/// asks since the utterance opened or its last window started count.
 class WindowScheduler {
  public:
   /// `profile` is one VadPolicy::create() accepted.
