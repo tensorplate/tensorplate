@@ -12,7 +12,7 @@
     "source_commit": "0000000000000000000000000000000000000000",
     "transport_preference": "binary"
   },
-  "recorded_at_utc": "2026-09-30T23:14:45Z",
+  "recorded_at_utc": "2026-10-17T03:47:54Z",
   "request_timeout_ms": 8000,
   "subject": {
     "suite": "stt",
@@ -105,7 +105,7 @@
       "transaction_id": "txn-2",
       "phase": "active",
       "bundle_digest": "sha256:7f9785b0e739f8dc2461b0962fbc87a87066d1af12c08c2ca8bafbb64c44ffd1",
-      "wall_ms": 33,
+      "wall_ms": 26,
       "status": "ok",
       "failure": null
     },
@@ -148,7 +148,7 @@
       "method": "rollback",
       "status": "ok",
       "restored_deployment_id": "qualify-stt-predecessor",
-      "wall_ms": 28,
+      "wall_ms": 25,
       "reason": null
     }
   },
@@ -236,6 +236,13 @@
               }
             ]
           }
+        },
+        "retirement_wait": {
+          "status": "not_needed",
+          "bound_ms": 60000,
+          "wall_ms": 0,
+          "worker_pids": [],
+          "remaining_pids": []
         }
       },
       "candidate_warm_idle": {
@@ -301,6 +308,13 @@
               }
             ]
           }
+        },
+        "retirement_wait": {
+          "status": "not_needed",
+          "bound_ms": 60000,
+          "wall_ms": 0,
+          "worker_pids": [],
+          "remaining_pids": []
         }
       },
       "candidate_load": {
@@ -431,6 +445,13 @@
               }
             ]
           }
+        },
+        "retirement_wait": {
+          "status": "not_needed",
+          "bound_ms": 60000,
+          "wall_ms": 0,
+          "worker_pids": [],
+          "remaining_pids": []
         }
       }
     }
@@ -459,7 +480,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 104696,
+          "exchange_wall_us": 101089,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -490,7 +511,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 104183,
+          "exchange_wall_us": 101008,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -521,7 +542,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 102247,
+          "exchange_wall_us": 101218,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -552,7 +573,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 103965,
+          "exchange_wall_us": 101038,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -577,19 +598,50 @@
             "sample_count": 24000,
             "transcript_path": "outputs/en-clean-16k-01-load-1.transcript.json"
           }
+        },
+        {
+          "iteration": 2,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 101134,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-clean-16k-01-load-2.transcript.json"
+          }
         }
       ],
       "summary": {
-        "ok_count": 4,
+        "ok_count": 5,
         "failed_count": 0,
         "exchange_wall_us": {
-          "count": 4,
-          "min": 102247,
-          "median": 103965,
-          "max": 104696
+          "count": 5,
+          "min": 101008,
+          "median": 101089,
+          "max": 101218
         },
         "rtf": {
-          "count": 4,
+          "count": 5,
           "min": 0.1,
           "median": 0.1,
           "max": 0.1
@@ -619,7 +671,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 102859,
+          "exchange_wall_us": 101085,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -650,7 +702,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 104068,
+          "exchange_wall_us": 101009,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -681,7 +733,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 103875,
+          "exchange_wall_us": 101044,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -712,7 +764,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 103786,
+          "exchange_wall_us": 100961,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -737,19 +789,50 @@
             "sample_count": 24000,
             "transcript_path": "outputs/ar-clean-16k-01-load-1.transcript.json"
           }
+        },
+        {
+          "iteration": 2,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 100987,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "ar",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/ar-clean-16k-01-load-2.transcript.json"
+          }
         }
       ],
       "summary": {
-        "ok_count": 4,
+        "ok_count": 5,
         "failed_count": 0,
         "exchange_wall_us": {
-          "count": 4,
-          "min": 102859,
-          "median": 103786,
-          "max": 104068
+          "count": 5,
+          "min": 100961,
+          "median": 101009,
+          "max": 101085
         },
         "rtf": {
-          "count": 4,
+          "count": 5,
           "min": 0.1,
           "median": 0.1,
           "max": 0.1
@@ -783,7 +866,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 101227,
+          "exchange_wall_us": 101131,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -814,7 +897,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 103957,
+          "exchange_wall_us": 101081,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -845,7 +928,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 104122,
+          "exchange_wall_us": 101017,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -876,7 +959,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 103789,
+          "exchange_wall_us": 100921,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -901,19 +984,50 @@
             "sample_count": 24000,
             "transcript_path": "outputs/en-noisy-16k-01-load-1.transcript.json"
           }
+        },
+        {
+          "iteration": 2,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 100966,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-noisy-16k-01-load-2.transcript.json"
+          }
         }
       ],
       "summary": {
-        "ok_count": 4,
+        "ok_count": 5,
         "failed_count": 0,
         "exchange_wall_us": {
-          "count": 4,
-          "min": 101227,
-          "median": 103789,
-          "max": 104122
+          "count": 5,
+          "min": 100921,
+          "median": 101017,
+          "max": 101131
         },
         "rtf": {
-          "count": 4,
+          "count": 5,
           "min": 0.1,
           "median": 0.1,
           "max": 0.1
@@ -947,7 +1061,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 102295,
+          "exchange_wall_us": 101105,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -978,7 +1092,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 103833,
+          "exchange_wall_us": 101117,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1009,7 +1123,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 104265,
+          "exchange_wall_us": 101030,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1040,7 +1154,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 104242,
+          "exchange_wall_us": 100966,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1065,19 +1179,50 @@
             "sample_count": 24000,
             "transcript_path": "outputs/ar-noisy-16k-01-load-1.transcript.json"
           }
+        },
+        {
+          "iteration": 2,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 101006,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "ar",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/ar-noisy-16k-01-load-2.transcript.json"
+          }
         }
       ],
       "summary": {
-        "ok_count": 4,
+        "ok_count": 5,
         "failed_count": 0,
         "exchange_wall_us": {
-          "count": 4,
-          "min": 102295,
-          "median": 103833,
-          "max": 104265
+          "count": 5,
+          "min": 100966,
+          "median": 101030,
+          "max": 101117
         },
         "rtf": {
-          "count": 4,
+          "count": 5,
           "min": 0.1,
           "median": 0.1,
           "max": 0.1
@@ -1109,7 +1254,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 103923,
+          "exchange_wall_us": 101100,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1140,7 +1285,7 @@
           "phase": "timing",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 102780,
+          "exchange_wall_us": 101007,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1171,7 +1316,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 103916,
+          "exchange_wall_us": 100948,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1202,7 +1347,7 @@
           "phase": "load",
           "status": "ok",
           "transport": "binary",
-          "exchange_wall_us": 104139,
+          "exchange_wall_us": 100947,
           "worker_timing_ns": {
             "queue_latency_ns": 1000,
             "execution_latency_ns": 150000000,
@@ -1227,19 +1372,50 @@
             "sample_count": 24000,
             "transcript_path": "outputs/en-telephony-8k-01-load-1.transcript.json"
           }
+        },
+        {
+          "iteration": 2,
+          "phase": "load",
+          "status": "ok",
+          "transport": "binary",
+          "exchange_wall_us": 100960,
+          "worker_timing_ns": {
+            "queue_latency_ns": 1000,
+            "execution_latency_ns": 150000000,
+            "total_latency_ns": 150001000
+          },
+          "runner_timings_us": {
+            "load": 5000,
+            "artifact_verify": 1000,
+            "model_build": 4000,
+            "decode": 150000
+          },
+          "rtf": 0.1,
+          "within_request_timeout": true,
+          "error": null,
+          "output": {
+            "language": "en",
+            "text_chars": 20,
+            "segment_count": 1,
+            "word_count": 2,
+            "first_segment_start_us": 0,
+            "last_segment_end_us": 1500000,
+            "sample_count": 24000,
+            "transcript_path": "outputs/en-telephony-8k-01-load-2.transcript.json"
+          }
         }
       ],
       "summary": {
-        "ok_count": 4,
+        "ok_count": 5,
         "failed_count": 0,
         "exchange_wall_us": {
-          "count": 4,
-          "min": 102780,
-          "median": 103916,
-          "max": 104139
+          "count": 5,
+          "min": 100947,
+          "median": 100960,
+          "max": 101100
         },
         "rtf": {
-          "count": 4,
+          "count": 5,
           "min": 0.1,
           "median": 0.1,
           "max": 0.1

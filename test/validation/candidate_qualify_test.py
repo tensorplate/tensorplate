@@ -13,6 +13,7 @@ TP_CANDIDATE_QUALIFY_UPDATE_GOLDEN=1 to rewrite the committed synthetic record.
 from __future__ import annotations
 
 import base64
+import contextlib
 import errno
 import functools
 import http.server
@@ -28,6 +29,8 @@ import threading
 import time
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 TOOL = ROOT / "tools/validation/candidate-qualify.py"
@@ -474,7 +477,8 @@ class Harness:
         )
         command = [
             sys.executable,
-            str(TOOL),
+            str(Path(__file__).resolve()),
+            "--run-tool",
             "--candidate-bundle",
             str(bundle),
             "--evidence-dir",
@@ -509,10 +513,20 @@ class Harness:
         if sampler:
             command += ["--sampler", str(self.sampler)]
         if oom:
-            command += ["--oom-ballast-python", str(self.ballast), "--oom-ballast-bytes", "1024"]
+            command += [
+                "--oom-ballast-python",
+                str(self.ballast),
+                "--oom-ballast-bytes",
+                "1024",
+            ]
         command += list(extra)
         completed = subprocess.run(
-            command, capture_output=True, text=True, timeout=300, env=env or self.env(), check=False
+            command,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env or self.env(),
+            check=False,
         )
         record_path = evidence / "record.json"
         record = json.loads(record_path.read_text()) if record_path.exists() else None
@@ -921,8 +935,313 @@ def load_tool():
     return tool
 
 
+def check_retirement(harness: Harness, schema: dict) -> None:
+    tool = load_tool()
+    assert tool.RETIRE_WAIT_MS == 60_000
+
+    wait_schema = {"$ref": "#/definitions/RetirementWait", "definitions": schema["definitions"]}
+    good_wait = {
+        "status": "complete",
+        "bound_ms": 60000,
+        "wall_ms": 1000,
+        "worker_pids": [102],
+        "remaining_pids": [],
+    }
+    invalid_waits = [None, [], {**good_wait, "unexpected": True}]
+    for field in good_wait:
+        missing = dict(good_wait)
+        del missing[field]
+        invalid_waits.append(missing)
+    for field, value in (
+        ("status", "unknown"),
+        ("bound_ms", 0),
+        ("bound_ms", 1.5),
+        ("wall_ms", -1),
+        ("wall_ms", 0.5),
+        ("worker_pids", "102"),
+        ("worker_pids", [0]),
+        ("worker_pids", [1.5]),
+        ("remaining_pids", "102"),
+        ("remaining_pids", [0]),
+        ("remaining_pids", [1.5]),
+    ):
+        invalid_waits.append({**good_wait, field: value})
+    for validate in (
+        lambda value: jsonschema.validate(value, wait_schema),
+        lambda value: record_mod.validate_record(value, wait_schema),
+    ):
+        validate(good_wait)
+        for invalid in invalid_waits:
+            try:
+                validate(invalid)
+            except (jsonschema.ValidationError, record_mod.RecordError):
+                continue
+            raise AssertionError(f"malformed retirement wait accepted: {invalid}")
+
+    class Clock:
+        now_ms = 0
+
+        def monotonic(self):
+            return self.now_ms / 1000
+
+    # The fake sampler still runs as a subprocess. Only worker lifetime and
+    # the retirement clock are synthetic, so the 60-second bound costs no sleep.
+    for case in (
+        "exits",
+        "stays",
+        "none",
+        "gone",
+        "unreadable",
+        "poll_error",
+        "bad_event",
+        "two_workers",
+        "multiple",
+        "operation_fails",
+        "reaped",
+        "no_sampler",
+    ):
+        clock = Clock()
+        registered = set()
+        polls = []
+        captured = []
+        closed = []
+        operated = False
+
+        def pidfd_open(pid):
+            assert not operated, "worker must be captured before replacement"
+            captured.append(pid)
+            if case == "gone":
+                raise ProcessLookupError()
+            if case == "unreadable":
+                raise PermissionError("test refusal")
+            return pid + 1000
+
+        class Poll:
+            def register(self, fd, event):
+                assert event == tool.select.POLLIN
+                registered.add(fd)
+
+            def unregister(self, fd):
+                registered.remove(fd)
+
+            def poll(self, timeout):
+                assert operated, "exit wait must follow replacement"
+                polls.append(timeout)
+                assert len(polls) <= 3, "wait did not stop at its deadline"
+                if case == "poll_error":
+                    raise OSError("test poll refusal")
+                if case == "bad_event":
+                    return [(min(registered), tool.select.POLLNVAL)]
+                if case == "stays":
+                    clock.now_ms += timeout
+                    return []
+                clock.now_ms += 1000
+                return [
+                    (
+                        min(registered),
+                        tool.select.POLLHUP if case == "reaped" else tool.select.POLLIN,
+                    )
+                ]
+
+        recipe = tool.Recipe.__new__(tool.Recipe)
+        recipe.args = SimpleNamespace(
+            sampler=None if case == "no_sampler" else str(harness.sampler),
+            window="20ms",
+            sample_interval="10ms",
+        )
+        recipe.evidence_dir = harness.work / f"retirement-{case}"
+        recipe.evidence_dir.mkdir()
+        recipe.window_ms, recipe.interval_ms = 20, 10
+        recipe.record = {"memory": {"windows": {}}}
+        recipe.log = lambda message: None
+
+        def discover():
+            if not operated:
+                workers = [] if case == "none" else [102, 102]
+                if case == "multiple":
+                    workers.append(104)
+            else:
+                workers = [106, 108] if case == "two_workers" else [106]
+            return (
+                [{"pid": 101, "role": "agent"}]
+                + [{"pid": pid, "role": "serving_worker"} for pid in workers]
+                + [{"pid": 107, "role": "python_sidecar"}]
+            )
+
+        recipe.discover_pids = discover
+        with (
+            mock.patch.object(
+                tool, "os", SimpleNamespace(pidfd_open=pidfd_open, close=closed.append)
+            ),
+            mock.patch.object(
+                tool,
+                "select",
+                SimpleNamespace(
+                    poll=Poll,
+                    POLLIN=tool.select.POLLIN,
+                    POLLHUP=tool.select.POLLHUP,
+                    POLLNVAL=tool.select.POLLNVAL,
+                ),
+            ),
+            mock.patch.object(tool, "time", clock),
+        ):
+            try:
+                with recipe.idle_after_replacement("candidate_warm_idle"):
+                    operated = True
+                    if case == "operation_fails":
+                        raise tool.RecipeError("test deploy failure")
+            except tool.RecipeError:
+                assert case == "operation_fails"
+            else:
+                assert case != "operation_fails", "operation failure was swallowed"
+        expected_closed = [] if case in ("none", "gone", "unreadable", "no_sampler") else [1102]
+        if case == "multiple":
+            expected_closed.append(1104)
+        assert closed == expected_closed, (case, closed)
+        if case in ("operation_fails", "no_sampler"):
+            assert not polls and not recipe.record["memory"]["windows"]
+            if case == "no_sampler":
+                assert not captured
+            continue
+        window = recipe.record["memory"]["windows"]["candidate_warm_idle"]
+        jsonschema.validate(
+            window, {"$ref": "#/definitions/MemoryWindow", "definitions": schema["definitions"]}
+        )
+        derived = json.loads(GOLDEN.read_text())
+        derived["memory"]["windows"]["candidate_warm_idle"] = window
+        record_mod.finalize(derived)
+        check_schema(derived, schema)
+        expected_result = "incomplete" if window["status"] == "incomplete" else "pass"
+        assert derived["result"]["status"] == expected_result, (case, derived["result"])
+        wait = window["retirement_wait"]
+        assert wait["bound_ms"] == 60_000
+        if case in ("stays", "unreadable", "poll_error", "bad_event", "two_workers"):
+            assert window["status"] == "incomplete", (case, window)
+            assert not window["observations"] and not (recipe.evidence_dir / "memory").exists()
+            assert "102" in window["reason"] or case == "two_workers", window["reason"]
+            if case == "stays":
+                assert wait["status"] == "incomplete" and wait["wall_ms"] == 60_000
+                assert wait["remaining_pids"] == [102]
+                assert "exit not confirmed" in window["reason"]
+            elif case == "two_workers":
+                assert "106, 108" in window["reason"]
+                recipe.finish_window(recipe.start_window("candidate_load", "load"))
+                assert (
+                    recipe.record["memory"]["windows"]["candidate_load"]["status"] == "measured"
+                )
+            else:
+                assert wait["status"] == "incomplete"
+                if case == "poll_error":
+                    assert "cannot observe worker exit: test poll refusal" in window["reason"]
+                elif case == "bad_event":
+                    assert "poll event" in window["reason"]
+                else:
+                    assert "cannot watch serving worker PID 102" in window["reason"]
+        else:
+            assert window["status"] == "measured" and window["report"]["complete"]
+            assert wait["remaining_pids"] == []
+            if case in ("none", "gone"):
+                assert wait["status"] == "not_needed" and wait["wall_ms"] == 0
+                assert not polls and wait["worker_pids"] == []
+            else:
+                assert wait["status"] == "complete"
+                assert wait["wall_ms"] == (2000 if case == "multiple" else 1000)
+                assert wait["worker_pids"] == ([102, 104] if case == "multiple" else [102])
+                assert captured == wait["worker_pids"], "non-worker or duplicate PID captured"
+
+    # Check the ordering at every recipe call site, including the initial deploy
+    # (which may replace a worker left by an earlier qualification run).
+    recipe = tool.Recipe.__new__(tool.Recipe)
+    recipe.predecessor = recipe.candidate = {"dir": Path("unused")}
+    recipe.predecessor_id, recipe.deployment_id = "predecessor", "candidate"
+    recipe.record = {
+        "lifecycle": {},
+        "memory": {"windows": {"candidate_load": {"reason": None}}},
+    }
+    recipe.args = SimpleNamespace(timing_iterations=0)
+    recipe.client = object()
+    recipe.last_deploy_failure_code = None
+    order = []
+
+    @contextlib.contextmanager
+    def idle(name):
+        order.append(("capture", name))
+        yield
+        order.append(("wait", name))
+
+    def deploy(bundle, deployment):
+        order.append(("deploy", deployment))
+        return dict(
+            deployment_id=deployment,
+            bundle_digest="digest",
+            phase="active",
+            wall_ms=0,
+            status="ok",
+        )
+
+    def rollback():
+        order.append(("rollback", "predecessor"))
+        return {"status": "ok"}
+
+    recipe.idle_after_replacement = idle
+    recipe.deploy, recipe.rollback = deploy, rollback
+    recipe.status_snapshot = lambda *args: {"checks": {"ready": True}}
+    recipe.start_window = lambda *args: None
+    recipe.finish_window = lambda *args: None
+    recipe.window_running = lambda *args: False
+    recipe.run_negatives = lambda: None
+    recipe.run_steps()
+    assert order == [
+        ("capture", "predecessor_idle"),
+        ("deploy", "predecessor"),
+        ("wait", "predecessor_idle"),
+        ("capture", "candidate_warm_idle"),
+        ("deploy", "candidate"),
+        ("wait", "candidate_warm_idle"),
+        ("capture", "after_teardown"),
+        ("rollback", "predecessor"),
+        ("wait", "after_teardown"),
+    ], order
+
+    order.clear()
+    recipe.rollback = lambda: {"status": "failed"}
+    try:
+        recipe.run_steps()
+    except tool.RecipeError as exc:
+        assert "rollback did not restore" in str(exc)
+    else:
+        raise AssertionError("failed rollback opened an idle window")
+    assert order[-1] == ("capture", "after_teardown")
+
+    # A real kernel PID handle signals exit even before its parent reaps it.
+    with subprocess.Popen([sys.executable, "-c", "pass"]) as child:
+        fd = os.pidfd_open(child.pid)
+        try:
+            wait, reason = recipe.wait_for_retirement({child.pid: fd}, [])
+            assert reason is None and wait["status"] == "complete"
+            assert wait["remaining_pids"] == []
+            assert child.pid not in tool.children_of(os.getpid()), "zombie included in sampling"
+        finally:
+            os.close(fd)
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["--run-tool"]:
+        # The fake appliance's PID 102 is synthetic; never observe a host process
+        # that happens to have that number. Retirement has its own lifetime fake.
+        tool = load_tool()
+        with mock.patch.object(tool.os, "pidfd_open", side_effect=ProcessLookupError):
+            return tool.main(sys.argv[2:])
     schema = record_mod.load_schema()
+    if sys.argv[1:2] == ["--retirement-only"]:
+        with tempfile.TemporaryDirectory(prefix="tp-retirement-") as tmp:
+            harness = Harness(Path(tmp))
+            try:
+                check_retirement(harness, schema)
+            finally:
+                harness.server.shutdown()
+        print("candidate qualify: retirement guards and kernel PID exit passed")
+        return 0
     if sys.argv[1:2] == ["--filed-records"]:
         count = check_filed_records(schema, Path(sys.argv[2]) if sys.argv[2:] else EVIDENCE)
         print(f"candidate qualify: {count} filed records are valid and derive their own result")
@@ -959,6 +1278,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="tp-candidate-qualify-") as tmp:
         harness = Harness(Path(tmp))
+        check_retirement(harness, schema)
         check_ballast_rules(harness, schema)
         check_ballast_faults(harness, schema)
         check_ballast_record_rules(schema)

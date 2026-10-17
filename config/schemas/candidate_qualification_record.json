@@ -313,11 +313,25 @@
         }
       }
     },
+    "RetirementWait": {
+      "description": "Exit wait for serving-worker PID handles captured before a replacing deploy or rollback. Optional for records from older tools; durations use the monotonic clock.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "bound_ms", "wall_ms", "worker_pids", "remaining_pids"],
+      "properties": {
+        "status": { "enum": ["complete", "incomplete", "not_needed"] },
+        "bound_ms": { "type": "integer", "minimum": 1 },
+        "wall_ms": { "type": "integer", "minimum": 0 },
+        "worker_pids": { "type": "array", "items": { "type": "integer", "minimum": 1 } },
+        "remaining_pids": { "type": "array", "items": { "type": "integer", "minimum": 1 } }
+      }
+    },
     "MemoryWindow": {
       "type": "object",
       "additionalProperties": false,
       "required": ["status", "reason", "phase", "observations", "report", "domains"],
       "properties": {
+        "retirement_wait": { "$ref": "#/definitions/RetirementWait" },
         "status": {
           "type": "string",
           "enum": ["measured", "incomplete", "not_run"],

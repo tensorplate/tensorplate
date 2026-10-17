@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -30,7 +31,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Iterator
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parents[1]
@@ -61,6 +62,9 @@ TEXT_UTF8 = "text_utf8"
 RESULT_JSON = "result_json"
 CLI_TIMEOUT_S = 600
 BUSY_POLL_S = 1.0
+# Agent retire: 30 s drain + 10 s cleanup + 10 s SIGTERM escalation, with
+# 10 s margin for its control acknowledgement and supervision/reaping.
+RETIRE_WAIT_MS = 60_000
 UNDECLARED_LANGUAGE_CANDIDATES = ("zz", "qq", "xx")
 UNDECLARED_VOICE = "undeclared_voice"
 MAX_RESULT_JSON_BYTES = 1 << 20
@@ -727,6 +731,84 @@ class Recipe:
 
     # -- processes and memory --
 
+    @contextlib.contextmanager
+    def idle_after_replacement(self, name: str) -> Iterator[None]:
+        """Pin old workers across replacement; sample only after their PID handles signal exit."""
+        handles: dict[int, int] = {}
+        errors = []
+        try:
+            if self.args.sampler:
+                for process in self.discover_pids():
+                    if process["role"] != "serving_worker":
+                        continue
+                    pid = process["pid"]
+                    if pid in handles:
+                        continue
+                    try:
+                        handles[pid] = os.pidfd_open(pid)
+                    except ProcessLookupError:
+                        pass  # Already exited before the operation.
+                    except (OSError, AttributeError) as exc:
+                        errors.append(f"cannot watch serving worker PID {pid}: {exc}")
+            yield
+            if not self.args.sampler:
+                return
+            wait, reason = self.wait_for_retirement(handles, errors)
+            if reason:
+                window = record_mod.empty_window(name, reason)
+                window["status"] = "incomplete"
+                self.record["memory"]["windows"][name] = window
+            else:
+                self.finish_window(self.start_window(name, "warm-idle"))
+            self.record["memory"]["windows"][name]["retirement_wait"] = wait
+            self.log(
+                f"memory window {name}: retirement wait {wait['wall_ms']} ms ({wait['status']})"
+            )
+        finally:
+            for fd in handles.values():
+                os.close(fd)
+
+    def wait_for_retirement(
+        self, handles: dict[int, int], errors: list[str]
+    ) -> tuple[dict[str, Any], str | None]:
+        started = time.monotonic()
+        deadline = started + RETIRE_WAIT_MS / 1000
+        pending = {fd: pid for pid, fd in handles.items()}
+        poller = select.poll()
+        for fd in pending:
+            poller.register(fd, select.POLLIN)
+        while pending:
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            try:
+                events = poller.poll(remaining_ms)
+            except OSError as exc:
+                errors.append(f"cannot observe worker exit: {exc}")
+                break
+            for fd, event in events:
+                if event & (select.POLLIN | select.POLLHUP):
+                    del pending[fd]
+                    poller.unregister(fd)
+                else:
+                    errors.append(
+                        f"cannot observe serving worker PID {pending[fd]}: poll event {event}"
+                    )
+            if errors or time.monotonic() >= deadline:
+                break
+        remaining_pids = sorted(pending.values())
+        if remaining_pids:
+            errors.append(
+                "serving worker PID(s) "
+                + ", ".join(map(str, remaining_pids))
+                + f" exit not confirmed (retirement wait bound {RETIRE_WAIT_MS} ms)"
+            )
+        return {
+            "status": "incomplete" if errors else "complete" if handles else "not_needed",
+            "bound_ms": RETIRE_WAIT_MS,
+            "wall_ms": int((time.monotonic() - started) * 1000),
+            "worker_pids": sorted(handles),
+            "remaining_pids": remaining_pids,
+        }, "; ".join(errors) or None
+
     def _explicit_pids(self) -> list[dict[str, Any]]:
         pids = []
         for item in self.args.pid:
@@ -777,6 +859,16 @@ class Recipe:
             return None
         pids = self.discover_pids()
         self.record["memory"]["processes"] = pids
+        workers = sorted({p["pid"] for p in pids if p["role"] == "serving_worker"})
+        if phase == "warm-idle" and len(workers) > 1:
+            window = record_mod.empty_window(
+                name,
+                "multiple serving workers still present: PID(s) "
+                + ", ".join(map(str, workers)),
+            )
+            window["status"] = "incomplete"
+            self.record["memory"]["windows"][name] = window
+            return None
         if not any(p["role"] == "python_sidecar" for p in pids):
             self.record["memory"]["windows"][name] = record_mod.empty_window(
                 name, "no python_sidecar PID was discovered or given"
@@ -1577,14 +1669,14 @@ class Recipe:
         lifecycle = self.record["lifecycle"]
         windows = self.record["memory"]["windows"]
         if self.predecessor is not None:
-            outcome = self.deploy(self.predecessor["dir"], self.predecessor_id)
-            lifecycle["predecessor"] = {
-                k: outcome[k]
-                for k in ("deployment_id", "bundle_digest", "phase", "wall_ms", "status")
-            }
-            if outcome["status"] != "ok":
-                raise RecipeError("the predecessor deployment did not become active")
-            self.finish_window(self.start_window("predecessor_idle", "warm-idle"))
+            with self.idle_after_replacement("predecessor_idle"):
+                outcome = self.deploy(self.predecessor["dir"], self.predecessor_id)
+                lifecycle["predecessor"] = {
+                    k: outcome[k]
+                    for k in ("deployment_id", "bundle_digest", "phase", "wall_ms", "status")
+                }
+                if outcome["status"] != "ok":
+                    raise RecipeError("the predecessor deployment did not become active")
         else:
             windows["predecessor_idle"] = record_mod.empty_window(
                 "predecessor_idle", "no predecessor bundle given"
@@ -1595,13 +1687,13 @@ class Recipe:
             lifecycle["teardown"]["reason"] = (
                 "no predecessor bundle given: rollback has nothing to restore"
             )
-        lifecycle["deploy"] = self.deploy(self.candidate["dir"], self.deployment_id)
-        if lifecycle["deploy"]["status"] != "ok":
-            raise RecipeError("the candidate deployment did not become active")
-        lifecycle["status_after_deploy"] = self.status_snapshot(self.deployment_id)
-        if self.client is None:
-            raise RecipeError("status reported no serving URL; nothing to send requests to")
-        self.finish_window(self.start_window("candidate_warm_idle", "warm-idle"))
+        with self.idle_after_replacement("candidate_warm_idle"):
+            lifecycle["deploy"] = self.deploy(self.candidate["dir"], self.deployment_id)
+            if lifecycle["deploy"]["status"] != "ok":
+                raise RecipeError("the candidate deployment did not become active")
+            lifecycle["status_after_deploy"] = self.status_snapshot(self.deployment_id)
+            if self.client is None:
+                raise RecipeError("status reported no serving URL; nothing to send requests to")
         for iteration in range(self.args.timing_iterations):
             self.run_suite_once("timing", iteration)
         load_window = self.start_window("candidate_load", "load")
@@ -1619,15 +1711,16 @@ class Recipe:
             self.deployment_id, self.last_deploy_failure_code
         )
         if self.predecessor is not None:
-            lifecycle["teardown"] = self.rollback()
-            if lifecycle["teardown"]["status"] == "ok":
+            with self.idle_after_replacement("after_teardown"):
+                lifecycle["teardown"] = self.rollback()
+                if lifecycle["teardown"]["status"] != "ok":
+                    raise RecipeError("rollback did not restore the predecessor")
                 after = self.status_snapshot(self.predecessor_id)
                 if not all(after["checks"].values()):
                     lifecycle["teardown"]["status"] = "failed"
                     lifecycle["teardown"]["reason"] = (
                         "status after rollback does not show the predecessor active and ready"
                     )
-                self.finish_window(self.start_window("after_teardown", "warm-idle"))
 
 
 def combine_reports(existing: dict[str, Any] | None, report: dict[str, Any]) -> dict[str, Any]:
@@ -1658,7 +1751,8 @@ def children_of(pid: int) -> list[int]:
         except OSError:
             continue
         fields = stat[stat.rfind(")") + 2 :].split()
-        if len(fields) > 1 and fields[1] == str(pid):
+        # Exited children can remain zombies until the agent's next reap step.
+        if len(fields) > 1 and fields[0] not in ("Z", "X") and fields[1] == str(pid):
             children.append(int(entry.name))
     return sorted(children)
 
