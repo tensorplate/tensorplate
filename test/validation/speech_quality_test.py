@@ -859,6 +859,48 @@ def check_semantic_run(scorer: Scorer) -> None:
     english = by_language(record["semantic"]["languages"], "en")
     assert english["verdict"] == "insufficient"
     assert by_language(record["semantic"]["languages"], "ar")["verdict"] == "fail"
+    # Nor is a word the streaming arm added on it, no regression when batch adds it too.
+    never = text[: -len(" not")] + " never not"
+    added = {negation: {"id": negation, "outcome": "completed", "finals": [never]}}
+    record = scorer.score(built.arm("streaming", added), built.arm("batch", failed))
+    english = by_language(record["semantic"]["languages"], "en")
+    assert record["semantic"]["regressions"] == []
+    assert (english["batch_failed_files"], english["verdict"]) == (1, "insufficient")
+    record = scorer.score(built.arm("streaming", added), built.arm("batch", added))
+    assert by_language(record["semantic"]["languages"], "en")["verdict"] == "pass"
+    seam_en = "en-003.clean16k"
+    seam_words = built.texts[seam_en][1].split()
+    doubled = seam_words[:4] + seam_words[2:4] + seam_words[4:]
+    inserted = {seam_en: {"id": seam_en, "outcome": "completed", "finals": [" ".join(doubled)]}}
+    failed_seam = {seam_en: {"id": seam_en, "outcome": "failed", "error": "timeout"}}
+    assert [
+        r["kind"] for r in scorer.score(built.arm("streaming", inserted))["semantic"]["regressions"]
+    ] == ["added"]
+    record = scorer.score(built.arm("streaming", inserted), built.arm("batch", failed_seam))
+    assert record["semantic"]["regressions"] == []
+    assert by_language(record["semantic"]["languages"], "en")["verdict"] == "insufficient"
+    # A batch arm that failed every noisy file judges none of their fixtures.
+    noisy_ids = file_ids(built, "en", "noisy16k")
+    repeated = "en-002.noisy16k"
+    assert built.texts[repeated][1].endswith(" again again")
+    record = scorer.score(
+        built.arm(
+            "streaming",
+            {
+                repeated: {
+                    "id": repeated,
+                    "outcome": "completed",
+                    "finals": [built.texts[repeated][1] + " again"],
+                }
+            },
+        ),
+        built.arm(
+            "batch", {i: {"id": i, "outcome": "failed", "error": "timeout"} for i in noisy_ids}
+        ),
+    )
+    english = by_language(record["semantic"]["languages"], "en")
+    assert record["semantic"]["regressions"] == [] and record["verdict"] == "insufficient"
+    assert (english["batch_failed_files"], english["verdict"]) == (50, "insufficient")
     # A rendering of a fixture is a fixture: its words are listed, and its batch failure counts.
     noisy = "en-000.noisy16k"
     dropped_noisy = {noisy: {"id": noisy, "outcome": "completed", "finals": [text[: -len(" not")]]}}

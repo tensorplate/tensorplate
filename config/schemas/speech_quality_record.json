@@ -163,7 +163,7 @@
                   "window_seam": { "type": "integer", "minimum": 0 }
                 }
               },
-              "batch_failed_files": { "type": "integer", "minimum": 0, "description": "Fixture files the batch arm failed; the gate cannot pass while any did." },
+              "batch_failed_files": { "type": "integer", "minimum": 0, "description": "Fixture files the batch arm failed. They are not judged, and the gate cannot pass while any did." },
               "regressions": { "type": "integer", "minimum": 0 },
               "verdict": { "$ref": "#/definitions/Verdict" }
             }

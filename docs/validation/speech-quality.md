@@ -124,14 +124,21 @@ semantic) reads `fail` on any violation at any sample count. The record's
 verdict is `fail` if any gate failed, `insufficient` if any other gate was
 insufficient, and `pass` otherwise.
 
-The batch arm is the reference the streaming arm is judged against, so a
-batch file that failed scores empty and can only make streaming look better.
-A stratum in which the batch arm failed any file is therefore `insufficient`
-unless its ceiling or its distance already fails. Likewise, a language's
-semantic gate is `insufficient` while the batch arm failed any of its fixture
-files, unless a regression already fails it. A silence recording counts
-toward the silence minimum only when none of its files failed in the streaming
-arm.
+The batch arm is the reference the streaming arm is judged against. A batch
+file that failed scores empty, which adds to the batch arm's errors and so
+shrinks the streaming arm's distance above it. A stratum in which the batch
+arm failed any file is therefore `insufficient` unless its ceiling or its
+distance already fails.
+
+A semantic fixture file that failed in the batch arm has no batch transcript
+to judge the streaming arm against, and an empty one would make every critical
+word the streaming arm decoded read as added. Such a file is not judged: it is
+counted (`batch_failed_files`), and the language's semantic gate is
+`insufficient` while any of its fixture files failed in the batch arm, unless a
+regression on another fixture already fails it.
+
+A silence recording counts toward the silence minimum only when none of its
+files failed in the streaming arm.
 
 A record reads the pool its arms ran. Release evidence is a `held_out` run;
 the same gates on a `tuning` run are only a check of the tuning set.
@@ -148,8 +155,8 @@ The batch arm's silence words are reported and not gated.
 A manifest file may carry the classes `negation`, `numerals`, `repetition` and
 `window_seam`. Derived renderings carry their clean file's classes, and each
 rendering is checked. A regression is judged against the batch arm on the same
-file, never against the reference alone. A word both arms get wrong is not a
-regression.
+file, never against the reference alone, so a file the batch arm failed is not
+judged. A word both arms get wrong is not a regression.
 
 **Negation, numerals and repetition.** The class marks critical words in the
 reference and in each hypothesis:

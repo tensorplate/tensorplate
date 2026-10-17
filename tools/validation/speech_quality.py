@@ -341,8 +341,9 @@ def _gate(
 ) -> str:
     """A zero-tolerance violation fails at any count; a ratio needs its minimum samples first.
 
-    A gate judged against a batch arm that failed some of its files is never a pass:
-    each failed batch file scores empty, which can only make streaming look better.
+    A gate judged against a batch arm that failed some of its files is never a pass: a
+    failed batch file scores empty and shrinks a stratum's distance, and a fixture whose
+    batch file failed is not judged.
     """
     if zero_ok is False:
         return "fail"
@@ -547,9 +548,12 @@ class _Tally:
         fixtures["batch_failed"] += batch_failed
         # A reference held by digest is not republished through its words.
         public = entry["transcript"]["text"] is not None
+        if entry["derived_from"] is None:
+            fixtures["classes"].update(entry["semantic"])
+        # An empty batch prediction would make every critical word streaming decodes read as added.
+        if batch_failed:
+            return
         for semantic_class in entry["semantic"]:
-            if entry["derived_from"] is None:
-                fixtures["classes"][semantic_class] += 1
             if semantic_class == "window_seam":
                 found = seam_regressions(ref, aligned["streaming"], aligned["batch"])
             else:
