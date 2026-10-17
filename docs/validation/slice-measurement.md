@@ -106,8 +106,8 @@ rank on the sessions' raw values, all of which stay in the record.
 
 ## Per-utterance observations
 
-Single-session runs write `schema_version: "0.2"`; concurrent runs write
-`"0.3"`. The checker also accepts existing `0.1` records. This is the measurement record's version, independent
+Runs write `schema_version: "0.4"`. The checker also accepts existing
+`0.1`, `0.2` and `0.3` records. This is the measurement record's version, independent
 of the stream protocol; the schema's `$id` keeps its v0.1 identifier.
 Every STT session adds `utterances` and
 `client.audio_frames`; TTS measurements and the existing session summaries
@@ -166,6 +166,77 @@ recomputed by the checker, along with frame offsets and timestamps,
 endpoint/final identity and the session's utterance totals. Observations
 from failed or interrupted sessions remain diagnostic data, not successful
 latency samples.
+
+## Speech onset and speech end
+
+For `clip.wav`, the tool automatically reads the optional UTF-8 sidecar
+`clip.speech.json` beside it. No audio analysis or inferred onset is used.
+The file contains only an `utterances` array, in the clip's speech order:
+
+```json
+{
+  "utterances": [
+    {"onset_sample_offset": 4800, "end_sample_offset": 16000},
+    {"onset_sample_offset": 24000}
+  ]
+}
+```
+
+Offsets are zero-based samples at the WAV's sample rate. Each onset must be
+inside the clip; an optional end is exclusive, greater than its onset and
+at most the clip's sample count. Onsets must strictly increase, and an end
+cannot overlap the next onset. The array must be nonempty. Unknown fields,
+noninteger offsets, malformed JSON and invalid ordering or bounds fail
+before any session opens. The sidecar must describe this exact clip: its
+annotations are copied into `stt.input.speech_annotations`, alongside the
+existing audio digest and sample count. The sidecar path is not recorded.
+
+With no sidecar, that field is `null`, each session's
+`speech_alignment.status` is `not_provided`, and the command prints that
+speech onset data and speech-based timings are unavailable. No speech
+boundary or duration is inferred from the first audio frame.
+
+The mapping assumes server utterance IDs follow the clip's speech in order;
+IDs need not be consecutive. A server utterance counts as speech when it
+has a nonblank partial or final. Empty endpoint/Finalize responses in
+silence are excluded. The tool pairs those utterances with annotations in
+order only after the session completes and only when counts agree, every
+annotated interval fits its paired wire input interval, and no response
+precedes its annotated frame's send time. `speech_alignment.utterance_ids`
+records the resulting IDs in annotation order.
+
+A split or merge that changes the counts records `count_mismatch`; matching
+counts with incompatible offsets record `interval_mismatch`; incompatible
+response times record `timing_mismatch`. Failed or unfinished sessions with
+annotations record `incomplete`. All these states leave the ID mapping empty
+and **all speech-based timings in that session null**. The tool never shifts
+later annotations to repair a mismatch. Without speech ends, a split with
+no transcript in the extra interval may be undetectable; matching counts
+and intervals cannot establish semantic identity. Operators must inspect
+segmentation before using these measurements as evidence.
+
+For a matched utterance, `boundaries.speech_onset` is the actual caller
+`sent_ns` of the frame containing the onset sample. An onset inside a frame
+uses that frame's send time, without interpolation; an onset exactly at a
+frame boundary uses the following frame. `boundaries.speech_end` uses the
+frame holding `end_sample_offset - 1`, the last speech sample. An omitted
+end leaves this boundary null. Both use the caller's pacing clock and
+include credit delays in the recorded send time; scheduled times and
+pacing lag remain separately available.
+
+| Measurement | From | To |
+| --- | --- | --- |
+| `onset_to_first_partial` | `speech_onset` | `first_nonempty_partial`, the receipt of the first nonblank partial |
+| `speech_end_to_final` | `speech_end` | `final_transcript` receipt |
+
+`first_nonempty_partial` is independent of the existing `first_partial`,
+which still includes blank hypotheses. Finals never substitute for a
+missing partial. The old first-audio measurements keep their meanings.
+Missing boundaries yield null durations. The aggregate pools these raw
+per-utterance measurements across sessions, with unavailable or failed
+observations counted as misses. Optional missing speech observations do not
+change the existing session summaries or the run's result; a successful
+run without annotations does not establish speech-onset latency.
 
 ## What the record holds
 
@@ -287,13 +358,12 @@ The validation index retains nondefault concurrency, stagger and qualification
 counts as settings; comparisons report differences as notes under the
 existing comparison policy.
 
-`--sessions 1` preserves the sequential observation path and writes the
-0.2 format directly: no aggregate, connection observations, concurrent
-settings, or `run.finished_ns`. The existing 0.2 checker reads that output
-without a projection or schema update. Existing 0.1 and 0.2 records remain
-valid, and both schema validation and the checker reject concurrent-only
-fields on those versions. `--stagger-ms` (even zero) and `--expect-test-count`
-require `--sessions` greater than one, since 0.2 cannot record those settings.
+`--sessions 1` preserves the sequential observation path, without per-session
+connection observations. Version 0.4 includes aggregate distributions,
+`settings.sessions: 1` and `run.finished_ns` for sequential runs too.
+Existing 0.1 through 0.3 records remain valid; older checkers do not read
+0.4 records. `--stagger-ms` (even zero) and `--expect-test-count` continue
+to require `--sessions` greater than one.
 
 Before a qualification run, the operator deploys with
 `tensorplate deploy --qualification --test-count N` and uses
@@ -312,7 +382,7 @@ and one of `RESOURCE_EXHAUSTED`, `FAILED_PRECONDITION`, `INVALID_ARGUMENT`,
 `NOT_FOUND`, `PERMISSION_DENIED`, `UNAUTHENTICATED`, `UNIMPLEMENTED`, or
 `OUT_OF_RANGE`. Deadlines, connection failures, invalid responses, protocol
 violations and failures after admission still produce `failed` and exit 1.
-The 0.2 single-session result policy is unchanged. The supported count and latency remain unqualified
+The single-session result policy is unchanged. The supported count and latency remain unqualified
 until the operator's hardware measurements establish them.
 
 ### Checking checkpoint interference and compatibility
@@ -335,17 +405,9 @@ export MALLOC_ARENA_MAX=2 TP_SLICE_MEASURE_REQUIRE_PINS=1
 TP_SLICE_MEASURE_STALL_BOUND_MS=25 timeout 600 python test/validation/slice_measure_test.py
 ```
 
-To exercise the actual 0.2 reader from develop's merged implementation, unpack
-that public commit's tools and schemas and point the suite at its checker:
-
-```sh
-legacy_dir=$(mktemp -d)
-git archive b39ea34aaf0c6f4312d40df4d50de95aaf5af16d tools/validation config/schemas protocol/schemas | tar -x -C "$legacy_dir"
-TP_SLICE_MEASURE_LEGACY_CHECKER="$legacy_dir/tools/validation/slice_measurement_record.py" timeout 600 python test/validation/slice_measure_test.py
-```
-
-Both checks use only the in-process fake and synthetic input. They do not
-measure a real worker or establish latency or capacity on hardware.
+The suite also validates older 0.1, 0.2 and 0.3 records with the current
+checker. Tests use synthetic input and fake servers; they do not measure a
+real worker or establish latency or capacity on hardware.
 
 ## GPU readings
 

@@ -177,7 +177,25 @@ def load_audio(path: Path, frame_ms: int) -> dict[str, Any]:
     per_frame, remainder = divmod(rate * frame_ms, 1000)
     if not data or remainder:
         raise MeasureError(f"{path.name}: need audio in whole {frame_ms} ms frames")
+    sidecar = path.with_suffix(".speech.json")
+    annotations = None
+    try:
+        text = sidecar.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        pass
+    else:
+        try:
+            document = json.loads(text)
+            if not isinstance(document, dict) or set(document) != {"utterances"}:
+                raise record_mod.RecordError("expected an object containing only utterances")
+            annotations = document["utterances"]
+            if annotations is None:
+                raise record_mod.RecordError("utterances must be a nonempty array")
+            record_mod.check_speech_annotations(annotations, len(data) // 2)
+        except (ValueError, record_mod.RecordError) as exc:
+            raise MeasureError(f"{sidecar.name}: invalid speech annotations: {exc}") from exc
     return {
+        "speech_annotations": annotations,
         "frames": [data[at : at + per_frame * 2] for at in range(0, len(data), per_frame * 2)],
         "rate": rate,
         "frame_ms": frame_ms,
@@ -858,6 +876,7 @@ def declared_input(mode: str, plan: dict[str, Any]) -> dict[str, Any]:
     """What every session of a section sends, as the record states it."""
     if mode == "stt":
         return {
+            "speech_annotations": plan.get("speech_annotations"),
             "audio_sha256": plan["sha256"],
             "audio_bytes": plan["bytes"],
             "samples": plan["samples"],
@@ -1031,7 +1050,7 @@ def measure(
     )  # fmt: skip
     stated = worker_version is not None or worker_build is not None
     record: dict[str, Any] = {
-        "schema_version": record_mod.SCHEMA_VERSION if sessions > 1 else "0.2",
+        "schema_version": record_mod.SCHEMA_VERSION,
         "record_kind": record_mod.RECORD_KIND,
         "provenance": provenance,
         "tool": {
@@ -1067,11 +1086,10 @@ def measure(
         "run": {"ended_by": None, "error": None},
         "result": {},
     }
-    if sessions > 1:
-        record["settings"].update(
-            sessions=sessions, stagger_ms=stagger_ms, expect_test_count=expect_test_count
-        )
-        record["run"]["finished_ns"] = None
+    record["settings"].update(
+        sessions=sessions, stagger_ms=stagger_ms, expect_test_count=expect_test_count
+    )
+    record["run"]["finished_ns"] = None
 
     def save() -> None:
         record_mod.finalize(record)
@@ -1113,8 +1131,7 @@ def measure(
         traceback.print_exc()
         record["run"].update(ended_by="error", error=type(error).__name__)
     record["gpu"] = sampler.finish(serving)
-    if sessions > 1:
-        record["run"]["finished_ns"] = run.now()
+    record["run"]["finished_ns"] = run.now()
     return record_mod.finalize(record)
 
 
@@ -1164,7 +1181,9 @@ def main(argv: list[str] | None = None) -> int:
         run.add_argument(f"--{mode}-endpoint", metavar="HOST:PORT")
         run.add_argument(f"--{mode}-target", metavar="DEPLOYMENT[:GENERATION:DIGEST]")
         run.add_argument(f"--{mode}-language", help="a language tag the deployment declares")
-    run.add_argument("--audio", type=Path, help="mono 16-bit PCM WAV, one utterance")
+    run.add_argument(
+        "--audio", type=Path, help="mono 16-bit PCM WAV; optional .speech.json sidecar"
+    )
     run.add_argument("--frame-ms", type=int, default=20)
     run.add_argument("--text-file", type=Path, help="UTF-8 text of one segment")
     run.add_argument("--voice")
@@ -1214,6 +1233,8 @@ def main(argv: list[str] | None = None) -> int:
             if not (args.stt_target and args.stt_language and args.audio):
                 raise MeasureError("--stt-endpoint needs --stt-target, --stt-language and --audio")
             plan = load_audio(args.audio, args.frame_ms)
+            if plan["speech_annotations"] is None:
+                print(f"{name}: no speech onset data; speech-based timings are unavailable")
             stt = (Target.parse(args.stt_endpoint, args.stt_target), plan)
             plan["language"] = args.stt_language
         if args.tts_endpoint:

@@ -22,7 +22,7 @@
     "result"
   ],
   "properties": {
-    "schema_version": { "type": "string", "enum": ["0.1", "0.2", "0.3"], "description": "0.3 adds concurrent sessions and run aggregates; 0.1 and 0.2 records remain readable." },
+    "schema_version": { "type": "string", "enum": ["0.1", "0.2", "0.3", "0.4"], "description": "0.4 adds speech annotations and caller-clock speech timing; 0.1 through 0.3 records remain readable." },
     "record_kind": {
       "type": "string",
       "const": "slice_measurement",
@@ -140,7 +140,7 @@
         "status": {
           "type": "string",
           "enum": ["complete", "incomplete", "failed", "completed_with_refusals"],
-          "description": "`completed_with_refusals` (0.3 only) when only recognized Open refusals failed and admitted sessions closed cleanly; `failed` when the run did not end by itself, a session did not complete or an answer contradicts what was sent; otherwise `incomplete` when a mode was not run or a measurement has no sample; `complete` otherwise. Never a statement about a latency gate."
+          "description": "`completed_with_refusals` (0.3 and later) when only recognized Open refusals failed and admitted sessions closed cleanly; `failed` when the run did not end by itself, a session did not complete or an answer contradicts what was sent; otherwise `incomplete` when a mode was not run or a measurement has no sample; `complete` otherwise. Never a statement about a latency gate."
         },
         "reasons": { "type": "array", "items": { "type": "string", "minLength": 1 } }
       }
@@ -312,9 +312,143 @@
       },
       "required": ["aggregate"],
       "additionalProperties": false
+    },
+    {
+      "properties": {
+        "schema_version": {
+          "const": "0.4"
+        },
+        "record_kind": {},
+        "provenance": {},
+        "tool": {},
+        "worker": {},
+        "client_platform": {},
+        "recorded_at_utc": {},
+        "clock": {},
+        "percentile_method": {},
+        "settings": {
+          "additionalProperties": false,
+          "properties": {
+            "iterations": {},
+            "event_timeout_ms": {},
+            "max_input_lag_ms": {},
+            "sessions": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            },
+            "stagger_ms": {
+              "$ref": "#/definitions/Count"
+            },
+            "expect_test_count": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 2048,
+              "description": "Operator-stated deployment qualification count; never queried or verified by this tool."
+            }
+          },
+          "required": [
+            "sessions",
+            "stagger_ms",
+            "expect_test_count"
+          ]
+        },
+        "stt": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "sessions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "utterances",
+                      "speech_alignment"
+                    ],
+                    "properties": {
+                      "client": {
+                        "type": "object",
+                        "required": [
+                          "audio_frames"
+                        ]
+                      },
+                      "utterances": {
+                        "items": {
+                          "properties": {
+                            "boundaries": {
+                              "required": [
+                                "speech_onset",
+                                "speech_end",
+                                "first_nonempty_partial"
+                              ]
+                            },
+                            "measurements": {
+                              "required": [
+                                "onset_to_first_partial",
+                                "speech_end_to_final"
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "input": {
+                  "required": [
+                    "speech_annotations"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "tts": {},
+        "gpu": {},
+        "run": {
+          "additionalProperties": false,
+          "properties": {
+            "ended_by": {},
+            "error": {},
+            "finished_ns": {
+              "$ref": "#/definitions/OptionalNs"
+            }
+          },
+          "required": [
+            "finished_ns"
+          ]
+        },
+        "result": {
+          "properties": {
+            "status": {
+              "enum": [
+                "complete",
+                "incomplete",
+                "failed",
+                "completed_with_refusals"
+              ]
+            }
+          }
+        },
+        "aggregate": {
+          "$ref": "#/definitions/Aggregate"
+        }
+      },
+      "required": [
+        "aggregate"
+      ],
+      "additionalProperties": false
     }
   ],
   "definitions": {
+    "SpeechAnnotation": {"type": "object", "additionalProperties": false, "required": ["onset_sample_offset"], "properties": {"onset_sample_offset": {"$ref": "#/definitions/Count"}, "end_sample_offset": {"$ref": "#/definitions/Count"}}},
     "Connection": {
       "type": "object",
       "additionalProperties": false,
@@ -368,6 +502,8 @@
                     "last_audio_to_endpoint": {"$ref": "#/definitions/Distribution"},
                     "last_audio_to_final": {"$ref": "#/definitions/Distribution"},
                     "first_audio_to_first_partial": {"$ref": "#/definitions/Distribution"},
+                    "onset_to_first_partial": {"$ref": "#/definitions/Distribution"},
+                    "speech_end_to_final": {"$ref": "#/definitions/Distribution"},
                     "partial_interval": {"$ref": "#/definitions/Distribution"},
                     "max_pacing_lag": {"$ref": "#/definitions/Distribution"}
                   }
@@ -464,6 +600,9 @@
           "additionalProperties": false,
           "required": ["first_audio_sent", "last_audio_sent", "first_partial", "endpoint", "final_transcript"],
           "properties": {
+            "speech_onset": {"$ref": "#/definitions/OptionalNs"},
+            "speech_end": {"$ref": "#/definitions/OptionalNs"},
+            "first_nonempty_partial": {"$ref": "#/definitions/OptionalNs"},
             "first_audio_sent": {"$ref": "#/definitions/OptionalNs"},
             "last_audio_sent": {"$ref": "#/definitions/OptionalNs"},
             "first_partial": {"$ref": "#/definitions/OptionalNs"},
@@ -479,7 +618,9 @@
             "endpoint_to_final": {"$ref": "#/definitions/Measurement"},
             "last_audio_to_endpoint": {"$ref": "#/definitions/Measurement"},
             "last_audio_to_final": {"$ref": "#/definitions/Measurement"},
-            "first_audio_to_first_partial": {"$ref": "#/definitions/Measurement"}
+            "first_audio_to_first_partial": {"$ref": "#/definitions/Measurement"},
+            "onset_to_first_partial": {"$ref": "#/definitions/Measurement"},
+            "speech_end_to_final": {"$ref": "#/definitions/Measurement"}
           }
         },
         "cadence": {
@@ -632,6 +773,7 @@
           "required": ["audio_sha256", "audio_bytes", "samples", "format", "frame_ms", "frames", "language"],
           "description": "The audio every session of the section sends, in frames of `frame_ms` paced in real time; only the last frame may be shorter.",
           "properties": {
+            "speech_annotations": {"type": ["array", "null"], "minItems": 1, "items": {"$ref": "#/definitions/SpeechAnnotation"}},
             "audio_sha256": { "$ref": "#/definitions/Digest", "description": "Digest of the sample bytes as sent, without a container header." },
             "audio_bytes": { "type": "integer", "minimum": 1 },
             "samples": { "type": "integer", "minimum": 1 },
@@ -660,6 +802,7 @@
       "required": ["index", "outcome", "stop_reason", "grpc_status", "open_refusal", "boundaries", "measurements", "client", "server", "server_stages"],
       "properties": {
         "connection": { "$ref": "#/definitions/Connection" },
+        "speech_alignment": {"type": "object", "additionalProperties": false, "required": ["status", "utterance_ids"], "properties": {"status": {"enum": ["not_provided", "incomplete", "count_mismatch", "interval_mismatch", "timing_mismatch", "matched"]}, "utterance_ids": {"type": "array", "items": {"type": "integer", "minimum": 1}}}},
         "utterances": { "type": "array", "items": { "$ref": "#/definitions/Utterance" } },
         "index": { "$ref": "#/definitions/Count" },
         "outcome": { "$ref": "#/definitions/Outcome" },
