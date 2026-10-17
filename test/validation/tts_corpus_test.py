@@ -17,6 +17,7 @@ import importlib.metadata
 import io
 import json
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -38,16 +39,69 @@ import jsonschema  # noqa: E402
 import tts_corpus as tts  # noqa: E402
 
 LOCK_BYTES = (ROOT / "packaging/speech-runtime/lock/kokoro.txt").read_bytes()
-G2P_PINS = (
+LOCK_FILES = ("packaging/speech-runtime/lock/kokoro.txt", "packaging/speech-runtime/lock/base.txt")
+G2P_IMPORTS = (
     "addict",
-    "en-core-web-sm",
     "espeakng-loader",
     "kokoro",
     "misaki",
     "num2words",
     "phonemizer-fork",
     "regex",
+)
+G2P_PINS = (
+    "addict",
+    "annotated-doc",
+    "annotated-types",
+    "anyio",
+    "blis",
+    "catalogue",
+    "certifi",
+    "charset-normalizer",
+    "click",
+    "cloudpathlib",
+    "confection",
+    "cymem",
+    "en-core-web-sm",
+    "espeakng-loader",
+    "h11",
+    "httpcore",
+    "httpx",
+    "idna",
+    "jinja2",
+    "kokoro",
+    "markdown-it-py",
+    "markupsafe",
+    "mdurl",
+    "misaki",
+    "murmurhash",
+    "num2words",
+    "numpy",
+    "packaging",
+    "phonemizer-fork",
+    "preshed",
+    "pydantic",
+    "pydantic-core",
+    "pygments",
+    "regex",
+    "requests",
+    "rich",
+    "setuptools",
+    "shellingham",
+    "smart-open",
     "spacy",
+    "spacy-legacy",
+    "spacy-loggers",
+    "srsly",
+    "thinc",
+    "tqdm",
+    "typer",
+    "typing-extensions",
+    "typing-inspection",
+    "urllib3",
+    "wasabi",
+    "weasel",
+    "wrapt",
 )
 
 
@@ -59,9 +113,16 @@ def lock_lines(lock: bytes) -> dict[str, str]:
     return {line.split("==")[0]: line for line in lock.decode().splitlines() if "==" in line}
 
 
-def pins_sha(lock: bytes) -> str:
+def repo_lines(repo: Path) -> dict[str, str]:
+    lines: dict[str, str] = {}
+    for lock in LOCK_FILES:
+        lines |= lock_lines((repo / lock).read_bytes())
+    return lines
+
+
+def pins_sha(repo: Path) -> str:
     """The g2p pins digest, written out: the named lines, whitespace collapsed, in order."""
-    lines = lock_lines(lock)
+    lines = repo_lines(repo)
     return sha("".join(" ".join(lines[name].split()) + "\n" for name in G2P_PINS).encode())
 
 
@@ -76,13 +137,17 @@ def relock(path: Path, name: str, line: str | None) -> None:
     path.write_text("".join(f"{k}\n" for k in kept), encoding="utf-8")
 
 
+def relock_pin(repo: Path, name: str, line: str | None) -> None:
+    """Replace or drop a pin's line in whichever lock file holds it."""
+    (holder,) = [lock for lock in LOCK_FILES if name in lock_lines((repo / lock).read_bytes())]
+    relock(repo / holder, name, line)
+
+
 def rehash(line: str) -> str:
     return line.split("--hash=sha256:")[0] + "--hash=sha256:" + "0" * 64
 
 
-LOCK_VERSIONS = {
-    name: line.split("==")[1].split()[0] for name, line in lock_lines(LOCK_BYTES).items()
-}
+LOCK_VERSIONS = {name: line.split("==")[1].split()[0] for name, line in repo_lines(ROOT).items()}
 
 
 def word(index: int) -> str:
@@ -147,7 +212,7 @@ def synthetic() -> dict[str, Any]:
         "tokenizer": {
             "rule": "kokoro-kpipeline-g2p-length-v1",
             "lock": "packaging/speech-runtime/lock/kokoro.txt",
-            "g2p_pins_sha256": pins_sha(LOCK_BYTES),
+            "g2p_pins_sha256": pins_sha(ROOT),
             "kokoro": "0.9.4",
             "misaki": "0.9.4",
             "spacy": "3.8.16",
@@ -298,16 +363,18 @@ def check_derivations() -> None:
 def check_rules(good: dict[str, Any]) -> None:
     assert tts.check_corpus(good) == 330
     refused(good, lambda c: c.update(extra=1), "does not match its schema")
-    assert tts.G2P_PINS == G2P_PINS
+    assert tts.G2P_PINS == G2P_PINS and tts.G2P_LOCKS == LOCK_FILES
+    assert tts.G2P_IMPORTS == G2P_IMPORTS and tts.G2P_MODEL == ("en-core-web-sm", "spacy")
+    assert tts._canonical("Spacy_Legacy.x--Y") == "spacy-legacy-x-y"
     refused(
         good, lambda c: c["tokenizer"].update(g2p_pins_sha256="0" * 64), "counted under g2p pins"
     )
     refused(
         good,
         lambda c: c["tokenizer"].update(g2p_pins_sha256="0" * 64),
-        f"{tts.LOCK}'s {', '.join(G2P_PINS)} pins are {pins_sha(LOCK_BYTES)}; re-record the"
+        f"the G2P_PINS lines of {' and '.join(LOCK_FILES)} are {pins_sha(ROOT)}; re-record the"
         " counts with `tts_corpus.py count CORPUS --model-config MODEL/config.json --write"
-        " CORPUS` in the environment built from that lock (docs/validation/tts-text-corpus.md)",
+        " CORPUS` in the environment built from the lock (docs/validation/tts-text-corpus.md)",
     )
     # The digest of the whole lock file is not the digest of its g2p pins.
     refused(good, lambda c: c["tokenizer"].update(g2p_pins_sha256=sha(LOCK_BYTES)), "counted under")
@@ -822,7 +889,8 @@ def fake_repo(
     repo = scratch / "repo"
     (repo / "packaging/speech-runtime/lock").mkdir(parents=True)
     (repo / "packaging/provisioning").mkdir(parents=True)
-    shutil.copy(ROOT / tts.LOCK, repo / tts.LOCK)
+    for lock in LOCK_FILES:
+        shutil.copy(ROOT / lock, repo / lock)
     (repo / tts.ARCTIC_NOTICE).parent.mkdir(parents=True)
     shutil.copy(ROOT / tts.ARCTIC_NOTICE, repo / tts.ARCTIC_NOTICE)
     # A bundle file outside model/ whose name a model file shares must not pin it.
@@ -982,26 +1050,173 @@ def check_count(good: dict[str, Any], scratch: Path) -> None:
 
 
 def check_lock_scope(good: dict[str, Any], scratch: Path, model: Path) -> None:
-    """Only the g2p pins' lines of the lock are the corpus's; any of them changing refuses it."""
+    """Only the g2p pins' lines of the locks are the corpus's; any of them changing refuses it."""
     repo = fake_repo(scratch, model)
-    lock = repo / tts.LOCK
-    lines = lock_lines(LOCK_BYTES)
+    lines = repo_lines(ROOT)
+    assert {"numpy", "setuptools", "tqdm"} <= set(G2P_PINS)
+    assert all(name in lines for name in G2P_PINS)
     for name, line in lines.items():
-        if name in G2P_PINS:
-            continue
-        relock(lock, name, rehash(line))
-    relock(lock, "kokoro", lines["kokoro"].replace(" --hash", "   --hash"))
-    assert lock.read_bytes() != LOCK_BYTES
+        if name not in G2P_PINS:
+            relock_pin(repo, name, rehash(line))
+    relock_pin(repo, "kokoro", lines["kokoro"].replace(" --hash", "   --hash"))
+    relock_pin(repo, "numpy", lines["numpy"].replace(" --hash", "\t--hash"))
+    assert all((repo / lock).read_bytes() != (ROOT / lock).read_bytes() for lock in LOCK_FILES)
     assert tts.check_corpus(copy.deepcopy(good), repo_root=repo) == 330
     for name in G2P_PINS:
-        relock(lock, name, rehash(lines[name]))
+        relock_pin(repo, name, rehash(lines[name]))
         refused(good, lambda c: None, "counted under g2p pins", repo_root=repo)
-        relock(lock, name, lines[name])
+        relock_pin(repo, name, lines[name])
         assert tts.check_corpus(copy.deepcopy(good), repo_root=repo) == 330
-    relock(lock, "regex", None)
-    refused(good, lambda c: None, f"{tts.LOCK} pins no regex", repo_root=repo)
-    relock(lock, "kokoro", None)
-    refused(good, lambda c: None, f"{tts.LOCK} pins no kokoro, regex", repo_root=repo)
+    locks = " and ".join(LOCK_FILES)
+    with (repo / LOCK_FILES[0]).open("a", encoding="utf-8") as lock:
+        lock.write(lines["numpy"] + "\n")
+    refused(good, lambda c: None, f"{locks} pin numpy twice", repo_root=repo)
+    relock(repo / LOCK_FILES[0], "numpy", None)
+    assert tts.check_corpus(copy.deepcopy(good), repo_root=repo) == 330
+    relock_pin(repo, "regex", None)
+    refused(good, lambda c: None, f"{locks} pin no regex", repo_root=repo)
+    relock_pin(repo, "numpy", None)
+    refused(good, lambda c: None, f"{locks} pin no numpy, regex", repo_root=repo)
+
+
+class FakeMarker:
+    """A marker that applies on this platform unless it names win32 or an extra."""
+
+    def __init__(self, text: str, seen: list[dict[str, str]]) -> None:
+        self.text, self.seen = text, seen
+
+    def evaluate(self, environment: dict[str, str]) -> bool:
+        self.seen.append(environment)
+        if "extra ==" in self.text:
+            return environment.get("extra") == self.text.split("==")[1].strip(" '\"")
+        return "win32" not in self.text
+
+
+def fake_packaging(seen: list[dict[str, str]]) -> dict[str, types.ModuleType]:
+    """`packaging.requirements.Requirement` for `name[extras]>=1; marker` lines."""
+
+    class Requirement:
+        def __init__(self, line: str) -> None:
+            spec, _, marker = line.partition(";")
+            self.name = re.split(r"[\[<>=!~ ]", spec.strip(), maxsplit=1)[0]
+            self.marker = FakeMarker(marker.strip(), seen) if marker.strip() else None
+
+    package = types.ModuleType("packaging")
+    requirements = types.ModuleType("packaging.requirements")
+    requirements.Requirement = Requirement  # type: ignore[attr-defined]
+    package.requirements = requirements  # type: ignore[attr-defined]
+    return {"packaging": package, "packaging.requirements": requirements}
+
+
+class FakeMetadata:
+    """packaging and importlib.metadata.requires as modules, for g2p-pins."""
+
+    def __init__(self, requires: dict[str, list[str] | None]) -> None:
+        self.requires = requires
+        self.asked: list[str] = []
+        self.seen: list[dict[str, str]] = []
+        self.modules = fake_packaging(self.seen)
+
+    def lookup(self, name: str) -> list[str] | None:
+        self.asked.append(name)
+        if name not in self.requires:
+            raise importlib.metadata.PackageNotFoundError(name)
+        return self.requires[name]
+
+    def __enter__(self) -> FakeMetadata:
+        self.saved = {name: sys.modules.get(name) for name in self.modules}
+        sys.modules.update(self.modules)
+        self.real = importlib.metadata.requires
+        importlib.metadata.requires = self.lookup  # type: ignore[assignment]
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        importlib.metadata.requires = self.real  # type: ignore[assignment]
+        for name, module in self.saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
+# The locked environment's metadata in miniature: a cycle, a platform marker, an extra,
+# names spelled as distributions spell them, and an installed requirement the lock lacks.
+MINI_REQUIRES: dict[str, list[str] | None] = {
+    "spacy": [
+        "thinc<8.4.0,>=8.3.4",
+        "Spacy_Legacy<3.1.0,>=3.0.11",
+        "numpy>=1.19.0",
+        "colorama; sys_platform == 'win32'",
+        "cupy-cuda12x; extra == 'cuda12x'",
+    ],
+    "en-core-web-sm": ["spacy<3.9.0,>=3.8.0"],
+    "thinc": ["blis<1.4.0,>=1.3.0", "NumPy", "unlocked-helper"],
+    "blis": ["numpy>=1.19.0", "thinc"],
+    "spacy-legacy": None,
+    "numpy": [],
+    "unlocked-helper": [],
+}
+MINI_LOCKED = (
+    "spacy",
+    "en-core-web-sm",
+    "thinc",
+    "blis",
+    "numpy",
+    "spacy-legacy",
+    "colorama",
+    "cupy-cuda12x",
+    "rich",
+)
+
+
+def check_g2p_derivation(scratch: Path) -> None:
+    with FakeMetadata(MINI_REQUIRES) as fake:
+        derived = tts.derive_g2p_pins(MINI_LOCKED)
+        assert derived == tuple(
+            sorted(
+                {"blis", "en-core-web-sm", "numpy", "spacy", "spacy-legacy", "thinc"}
+                | set(G2P_IMPORTS)
+            )
+        ), derived
+        assert sorted(fake.asked) == sorted(
+            ["blis", "en-core-web-sm", "numpy", "spacy", "spacy-legacy", "thinc", "unlocked-helper"]
+        ), fake.asked
+        assert fake.seen and all(env == {"extra": ""} for env in fake.seen), fake.seen
+        assert tts.derive_g2p_pins(["SPACY", "En_Core_Web_Sm"]) == tuple(
+            sorted({"spacy", "en-core-web-sm"} | set(G2P_IMPORTS))
+        )
+    missing = {**MINI_REQUIRES, "spacy-legacy": ["absent"]}
+    with FakeMetadata(missing):
+        try:
+            tts.derive_g2p_pins(MINI_LOCKED)
+        except importlib.metadata.PackageNotFoundError:
+            pass
+        else:
+            raise AssertionError("an absent requirement was skipped")
+    # The locked environment's closure, flattened onto spaCy, gives the filed list.
+    closure = [n for n in G2P_PINS if n not in G2P_IMPORTS and n != "spacy"]
+    flat: dict[str, list[str] | None] = {name: [] for name in G2P_PINS}
+    flat["spacy"] = closure
+    saved = tts.REPO_ROOT
+    tts.REPO_ROOT = ROOT
+    try:
+        with FakeMetadata(flat):
+            code, out, err = tool("g2p-pins")
+            assert code == 0 and out == "".join(f"{n}\n" for n in G2P_PINS), (code, out, err)
+        dropped = [n for n in closure if n != "thinc"] + ["rdflib"]
+        with FakeMetadata({**flat, "rdflib": [], "spacy": dropped}):
+            code, out, err = tool("g2p-pins")
+            assert code == 1 and "thinc" not in out.split(), out
+            assert "G2P_PINS is not the derived list; add ['rdflib'], drop ['thinc']" in err, err
+        with FakeMetadata({**flat, "spacy": closure + ["absent"]}):
+            code, _, err = tool("g2p-pins")
+            assert code == 1 and err.startswith("tts-corpus: refused: ") and "absent" in err, err
+        tts.REPO_ROOT = scratch / "no-repo"
+        with FakeMetadata(flat):
+            code, _, err = tool("g2p-pins")
+            assert code == 1 and "tts-corpus: refused:" in err, err
+    finally:
+        tts.REPO_ROOT = saved
 
 
 def check_reference(good: dict[str, Any], scratch: Path) -> None:
@@ -1058,7 +1273,7 @@ def check_reference(good: dict[str, Any], scratch: Path) -> None:
             "misaki": "0.9.4",
             "spacy": "3.8.16",
             "en_core_web_sm": "3.8.0",
-            "g2p_pins_sha256": pins_sha((repo / tts.LOCK).read_bytes()),
+            "g2p_pins_sha256": pins_sha(repo),
             "espeak_ng": "9.9-ref",
             "torch": "0.0.0+fake",
             "device": "cpu",
@@ -1259,8 +1474,8 @@ def check_cli_commands(
     repo = fake_repo(scratch / "cli", model)
     # A g2p pin unlike the repository's, so a command that checks against REPO_ROOT's is refused.
     relock(repo / tts.LOCK, "regex", rehash(lock_lines(LOCK_BYTES)["regex"]))
-    pins_digest = pins_sha((repo / tts.LOCK).read_bytes())
-    assert pins_digest != pins_sha(LOCK_BYTES)
+    pins_digest = pins_sha(repo)
+    assert pins_digest != pins_sha(ROOT)
     good, pinned = copy.deepcopy(good), copy.deepcopy(pinned)
     for relocked in (good, pinned):
         relocked["tokenizer"]["g2p_pins_sha256"] = pins_digest
@@ -1326,6 +1541,7 @@ def main() -> int:
         scratch = Path(directory)
         pinned, files = check_source_texts(good, scratch)
         check_count(good, scratch)
+        check_g2p_derivation(scratch)
         check_reference(good, scratch)
         check_cli(good, scratch)
         check_cli_commands(good, scratch, pinned, files)

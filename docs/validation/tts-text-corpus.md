@@ -35,12 +35,21 @@ misaki's lexicon, spaCy's tagger, and espeak-ng for words outside the
 lexicon.
 
 The corpus records, as `g2p_pins_sha256`, the digest of the lock lines of the
-pins the phonemizer runs on: kokoro, misaki, `en-core-web-sm`, and the
-packages misaki's English G2P and its espeak fallback import (spaCy,
-num2words, regex, addict, `phonemizer-fork` and `espeakng-loader`); misaki
-also imports numpy, which only its `trf=True` alignment uses. The list is
-`G2P_PINS` in the tool. The digest is SHA-256 over those pins' lines of
-`packaging/speech-runtime/lock/kokoro.txt`, each
+pins the phonemizer runs on, `G2P_PINS` in the tool. They are kokoro and
+misaki, the packages misaki's English G2P and its espeak fallback import
+(num2words, regex, addict, `phonemizer-fork` and `espeakng-loader`), and the
+runtime-requirement closure of spaCy and `en-core-web-sm` in the locked
+environment, markers evaluated there, as the lock pins it: 52 pins in all,
+among them thinc, blis, numpy, cymem, preshed, murmurhash and srsly. torch is
+not among them: kokoro's pipeline module imports it, but the `en_core_web_sm`
+tagger runs on thinc's NumPy operations and the phonemizer computes nothing
+with torch. `tts_corpus.py g2p-pins`, run in the locked environment, derives
+the list from the installed packages' metadata and fails when `G2P_PINS`
+differs. The pins live in two lock files,
+`packaging/speech-runtime/lock/kokoro.txt` and
+`packaging/speech-runtime/lock/base.txt` (numpy, setuptools and the HTTP
+stack); the tool reads both and refuses a pin neither holds or one held
+twice. The digest is SHA-256 over those pins' lines, each
 `name==version --hash=sha256:<digest>` with its whitespace collapsed to
 single spaces and ended by a newline, in the list's order. The check refuses
 a corpus whose digest is not that of the lock's lines, so a change to one of
@@ -127,7 +136,11 @@ pins above is not the lock's.
 ```sh
 tools/validation/tts_corpus.py count CORPUS --model-config MODEL/config.json [--write OUT]
 tools/validation/tts_corpus.py reference CORPUS --model-dir MODEL --out DIR [--threads 4]
+tools/validation/tts_corpus.py g2p-pins
 ```
+
+- `g2p-pins` prints the pins it derives from the installed metadata, as
+  above, and fails when `G2P_PINS` is not that list.
 
 - `count` re-phonemizes every sentence and refuses on any count or fallback
   flag that differs, on a phoneme the model's vocabulary lacks (the runner

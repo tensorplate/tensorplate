@@ -15,6 +15,8 @@ runner does and compares the counts. `reference` synthesizes every sentence
 with kokoro's own pipeline on the CPU in float32, the upstream reference the
 listening review compares the candidate with, writes the clips outside the
 repository and records their digests in `config/schemas/tts_reference_record.json`.
+`g2p-pins`, also run there, derives the pins the phonemizer runs on from the installed
+packages' metadata and compares them with G2P_PINS.
 
 Exit status: 0 valid, 1 refused, 2 unreadable.
 """
@@ -44,6 +46,8 @@ REPO_ROOT = HERE.parents[1]
 SCHEMA_PATH = REPO_ROOT / "config/schemas/tts_text_corpus.json"
 RECORD_SCHEMA_PATH = REPO_ROOT / "config/schemas/tts_reference_record.json"
 LOCK = "packaging/speech-runtime/lock/kokoro.txt"
+# The lock files the phonemizer's pins live in.
+G2P_LOCKS = (LOCK, "packaging/speech-runtime/lock/base.txt")
 PROVISIONING = "packaging/provisioning/manifest.json"
 KOKORO_BUNDLE = "tts-kokoro-candidate"
 # The CMU ARCTIC license asks that its notice, conditions and disclaimer be retained.
@@ -61,19 +65,76 @@ SOURCES: dict[str, tuple[str, str | None]] = {
     "libritts-r": ("CC-BY-4.0", r"[0-9]+_[0-9]+_[0-9]+_[0-9]+"),
     "authored": ("CC0-1.0", None),
 }
-# The lock's pins the phonemizer runs on: kokoro's KPipeline, misaki's English G2P and
-# espeak fallback, the packages misaki.en, misaki.espeak and misaki.token import, and the
-# spaCy model. misaki.en also imports numpy, which only its trf=True alignment uses.
-G2P_PINS = (
+# kokoro, misaki, and the packages misaki.en, misaki.espeak and misaki.token import.
+# torch, which kokoro's pipeline module imports, computes no part of the phonemes.
+G2P_IMPORTS = (
     "addict",
-    "en-core-web-sm",
     "espeakng-loader",
     "kokoro",
     "misaki",
     "num2words",
     "phonemizer-fork",
     "regex",
+)
+# spaCy tags the words and the model carries its weights; their runtime requirements, run
+# to closure, decide the tags too.
+G2P_MODEL = ("en-core-web-sm", "spacy")
+# G2P_IMPORTS and the closure of G2P_MODEL's runtime requirements in the locked
+# environment, as `tts_corpus.py g2p-pins` derives them there; the lock pins each in
+# one of G2P_LOCKS.
+G2P_PINS = (
+    "addict",
+    "annotated-doc",
+    "annotated-types",
+    "anyio",
+    "blis",
+    "catalogue",
+    "certifi",
+    "charset-normalizer",
+    "click",
+    "cloudpathlib",
+    "confection",
+    "cymem",
+    "en-core-web-sm",
+    "espeakng-loader",
+    "h11",
+    "httpcore",
+    "httpx",
+    "idna",
+    "jinja2",
+    "kokoro",
+    "markdown-it-py",
+    "markupsafe",
+    "mdurl",
+    "misaki",
+    "murmurhash",
+    "num2words",
+    "numpy",
+    "packaging",
+    "phonemizer-fork",
+    "preshed",
+    "pydantic",
+    "pydantic-core",
+    "pygments",
+    "regex",
+    "requests",
+    "rich",
+    "setuptools",
+    "shellingham",
+    "smart-open",
     "spacy",
+    "spacy-legacy",
+    "spacy-loggers",
+    "srsly",
+    "thinc",
+    "tqdm",
+    "typer",
+    "typing-extensions",
+    "typing-inspection",
+    "urllib3",
+    "wasabi",
+    "weasel",
+    "wrapt",
 )
 # The tokenizer fields that must equal the lock's pins.
 LOCKED = {
@@ -154,12 +215,15 @@ def distinct_key(text: str) -> str:
 
 
 def _lock_lines(repo_root: Path) -> dict[str, tuple[str, str]]:
-    """Each pin's version and its lock line with the whitespace collapsed."""
-    pins = {}
-    for line in (repo_root / LOCK).read_text(encoding="utf-8").splitlines():
-        match = re.match(r"([A-Za-z0-9_.-]+)==(\S+)", line)
-        if match:
-            pins[match.group(1)] = (match.group(2), " ".join(line.split()))
+    """Each pin of G2P_LOCKS: its version and its lock line with the whitespace collapsed."""
+    pins: dict[str, tuple[str, str]] = {}
+    for lock in G2P_LOCKS:
+        for line in (repo_root / lock).read_text(encoding="utf-8").splitlines():
+            match = re.match(r"([A-Za-z0-9_.-]+)==(\S+)", line)
+            if match:
+                if match.group(1) in pins:
+                    raise CorpusError(f"{' and '.join(G2P_LOCKS)} pin {match.group(1)} twice")
+                pins[match.group(1)] = (match.group(2), " ".join(line.split()))
     return pins
 
 
@@ -172,8 +236,39 @@ def g2p_pins_sha256(repo_root: Path = REPO_ROOT) -> str:
     lines = _lock_lines(repo_root)
     missing = [name for name in G2P_PINS if name not in lines]
     if missing:
-        raise CorpusError(f"{LOCK} pins no {', '.join(missing)}")
+        raise CorpusError(f"{' and '.join(G2P_LOCKS)} pin no {', '.join(missing)}")
     return _sha256("".join(lines[name][1] + "\n" for name in G2P_PINS).encode("utf-8"))
+
+
+def _canonical(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _requirement(line: str) -> tuple[str, bool]:
+    """A requirement's distribution, and whether it applies here with no extra requested."""
+    from packaging.requirements import Requirement
+
+    requirement = Requirement(line)
+    return requirement.name, requirement.marker is None or requirement.marker.evaluate(
+        {"extra": ""}
+    )
+
+
+def derive_g2p_pins(locked: Iterable[str]) -> tuple[str, ...]:
+    """G2P_IMPORTS and the installed runtime-requirement closure of G2P_MODEL, as locked."""
+    closure: set[str] = set()
+    todo = list(G2P_MODEL)
+    while todo:
+        name = _canonical(todo.pop())
+        if name in closure:
+            continue
+        closure.add(name)
+        for line in importlib.metadata.requires(name) or []:
+            dependency, applies = _requirement(line)
+            if applies:
+                todo.append(dependency)
+    pinned = {_canonical(name) for name in locked}
+    return tuple(sorted((closure & pinned) | set(G2P_IMPORTS)))
 
 
 def _unique(items: Iterable[dict[str, Any]], key: str, what: str) -> dict[str, dict[str, Any]]:
@@ -189,10 +284,10 @@ def _check_tokenizer(tokenizer: dict[str, Any], repo_root: Path) -> None:
     actual = g2p_pins_sha256(repo_root)
     if tokenizer["g2p_pins_sha256"] != actual:
         raise CorpusError(
-            f"counted under g2p pins {tokenizer['g2p_pins_sha256']}, {LOCK}'s"
-            f" {', '.join(G2P_PINS)} pins are {actual}; re-record the counts with"
+            f"counted under g2p pins {tokenizer['g2p_pins_sha256']}, the G2P_PINS lines of"
+            f" {' and '.join(G2P_LOCKS)} are {actual}; re-record the counts with"
             " `tts_corpus.py count CORPUS --model-config MODEL/config.json --write CORPUS`"
-            " in the environment built from that lock (docs/validation/tts-text-corpus.md)"
+            " in the environment built from the lock (docs/validation/tts-text-corpus.md)"
         )
     pins = lock_pins(repo_root)
     for field, name in LOCKED.items():
@@ -712,6 +807,24 @@ def _source_file(value: str) -> tuple[str, Path]:
     return name, Path(path)
 
 
+def _g2p_pins_command() -> int:
+    try:
+        derived = derive_g2p_pins(lock_pins(REPO_ROOT))
+    except (CorpusError, OSError, ImportError) as exc:
+        print(f"{TOOL_NAME}: refused: {exc}", file=sys.stderr)
+        return EXIT_REFUSED
+    print("\n".join(derived))
+    if derived != G2P_PINS:
+        added = sorted(set(derived) - set(G2P_PINS))
+        dropped = sorted(set(G2P_PINS) - set(derived))
+        print(
+            f"{TOOL_NAME}: refused: G2P_PINS is not the derived list; add {added}, drop {dropped}",
+            file=sys.stderr,
+        )
+        return EXIT_REFUSED
+    return EXIT_VALID
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -735,7 +848,12 @@ def main(argv: list[str] | None = None) -> int:
     reference.add_argument("--model-dir", type=Path, required=True)
     reference.add_argument("--out", type=Path, required=True)
     reference.add_argument("--threads", type=int, default=4)
+    commands.add_parser(
+        "g2p-pins", help="derive the phonemizer's pins in the locked environment, and compare"
+    )
     args = parser.parse_args(argv)
+    if args.command == "g2p-pins":
+        return _g2p_pins_command()
     try:
         raw = args.corpus.read_bytes()
         corpus = json.loads(raw)

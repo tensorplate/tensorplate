@@ -9,7 +9,7 @@
   "tokenizer": {
     "rule": "kokoro-kpipeline-g2p-length-v1",
     "lock": "packaging/speech-runtime/lock/kokoro.txt",
-    "g2p_pins_sha256": "71cbbe1e7af243621020312f566700e6826fadd73da89d750d06fb4eaaccba96",
+    "g2p_pins_sha256": "ad5441473db8fd3323050d4b10a26eefd2189bb5874454aff33dc6252d0b1762",
     "kokoro": "0.9.4",
     "misaki": "0.9.4",
     "spacy": "3.8.16",

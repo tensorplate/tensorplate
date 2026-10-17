@@ -71,13 +71,22 @@ digest of the wheel that build produces;
 `test/packaging/verify_speech_runtime_packages.sh` rebuilds both and fails
 when either stops matching.
 
-A change to a pin the phonemizer runs on (`G2P_PINS` in
-`tools/validation/tts_corpus.py`: kokoro, misaki, spaCy, `en-core-web-sm`,
-num2words, regex, addict, `phonemizer-fork` and `espeakng-loader`)
-invalidates the phoneme counts of the text-to-speech corpus, which
-`tools/validation/tts_corpus.py check` then refuses; a change to any other pin
-does not. A lock change that touches one of those pins re-records the counts
-in the environment rebuilt from the new lock with
+A change to a pin the phonemizer runs on, in `lock/kokoro.txt` or
+`lock/base.txt`, invalidates the phoneme counts of the text-to-speech corpus,
+which `tools/validation/tts_corpus.py check` then refuses; a change to any
+other pin does not. Those pins are `G2P_PINS` in
+`tools/validation/tts_corpus.py`: kokoro, misaki, the packages misaki's
+English G2P imports, and the runtime-requirement closure of spaCy and
+`en-core-web-sm` as the lock resolves it. In the environment rebuilt from the
+new lock, re-derive the list with
+
+```bash
+python3 tools/validation/tts_corpus.py g2p-pins
+```
+
+which prints the derived pins and fails when `G2P_PINS` differs; a lock change
+that changes the closure updates `G2P_PINS` to match. A lock change that
+touches one of the pins re-records the counts there with
 `tools/validation/tts_corpus.py count CORPUS --model-config MODEL/config.json --write CORPUS`,
 as [`docs/validation/tts-text-corpus.md`](../../docs/validation/tts-text-corpus.md)
 describes, shows that command's output in the pull request, and commits the
