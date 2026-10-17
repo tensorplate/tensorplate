@@ -176,6 +176,9 @@ reference and in each hypothesis:
   same negation, `don't` counts and `T-shirt` does not. A regression lists
   such a word as `not`. The word error rate still scores `didn't` as `didn`
   and `t`. `ar`: لا لم لن ليس ليست ما, also with و or ف joined in front.
+  Bare ما is critical wherever it stands, also where it is a relative
+  pronoun ("what") and negates nothing: the check cannot tell the two apart
+  from the words alone, so it errs toward a regression.
 - **numerals.** Any word containing a decimal digit, in any script, or a word
   of the language's number-word list. The Arabic list also matches with و or
   ف joined in front. A number word and its digits stay different words, so

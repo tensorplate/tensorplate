@@ -294,6 +294,10 @@ def check_lexical_regressions() -> None:
     assert regress("لم يذهب", "يذهب", "لم يذهب", "negation", "ar") == [
         {"class": "negation", "kind": "lost", "position": 0, "words": ["لم"]}
     ]
+    # Bare ma stays critical where it is a relative pronoun, not a negation.
+    assert regress("أعرف ما قال", "أعرف قال", "أعرف ما قال", "negation", "ar") == [
+        {"class": "negation", "kind": "lost", "position": 1, "words": ["ما"]}
+    ]
     assert regress("دفع خمسة وعشرين", "دفع خمسة وثلاثين", "دفع خمسة وعشرين", "numerals", "ar") == [
         {"class": "numerals", "kind": "lost", "position": 2, "words": ["وعشرين"]},
         {"class": "numerals", "kind": "added", "position": None, "words": ["وثلاثين"]},
