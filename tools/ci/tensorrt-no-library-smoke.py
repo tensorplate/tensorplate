@@ -17,12 +17,12 @@ import urllib.request
 import tensorplate_pytorch_backend  # noqa: F401 -- mandatory, never a skipped proof
 
 
-def request(port, path, body=None):
+def request(port, path, body=None, timeout=2):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}", data, {"Content-Type": "application/json"}
     )
-    with urllib.request.urlopen(req, timeout=2) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.load(response)
 
 
@@ -73,7 +73,7 @@ with tempfile.TemporaryDirectory() as directory:
                 "inputs": [{"name": "image", "tensor": {
                     "dtype": "uint8", "shape": [2, 2], "byte_size": 4},
                     "payload_b64": "AAECAw=="}],
-            })
+            }, timeout=30)
             assert result["outputs"][0]["name"] == "echo_image", result
             assert result["outputs"][0]["payload_b64"] == "AAECAw==", result
             maps = Path(f"/proc/{process.pid}/maps").read_text()

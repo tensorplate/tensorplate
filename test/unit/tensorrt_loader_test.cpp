@@ -180,15 +180,26 @@ TEST_F(TensorRTLoader, InstalledSdkLoadsWithoutCreatingRuntime) {
   if (std::getenv("TP_TEST_TENSORRT_SDK") == nullptr) {
     GTEST_SKIP() << "requires the pinned runtime packages; no GPU or driver required";
   }
+  const auto is_mapped = [](const std::string& name) {
+    void* handle = ::dlopen(name.c_str(), RTLD_NOLOAD | RTLD_NOW);
+    if (handle != nullptr) {
+      ::dlclose(handle);
+      return true;
+    }
+    return false;
+  };
+  const std::vector<std::string> names{tensorrt_library_name(), cuda_library_name()};
+  std::vector<bool> already_mapped;
+  for (const auto& name : names) {
+    already_mapped.push_back(is_mapped(name));
+  }
   auto result = SdkLibraries::load();
   ASSERT_TRUE(result.has_value()) << result.error().message;
   EXPECT_EQ(result.value()->functions().infer_version(), NV_TENSORRT_VERSION);
   result.value().reset();
-  for (const auto& name : {tensorrt_library_name(), cuda_library_name()}) {
-    void* handle = ::dlopen(name.c_str(), RTLD_NOLOAD | RTLD_NOW);
-    EXPECT_EQ(handle, nullptr) << name;
-    if (handle != nullptr) {
-      ::dlclose(handle);
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    if (!already_mapped[i]) {
+      EXPECT_FALSE(is_mapped(names[i])) << names[i];
     }
   }
 }

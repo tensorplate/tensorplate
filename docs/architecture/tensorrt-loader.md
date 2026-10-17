@@ -44,23 +44,31 @@ loads close acquired handles, TensorRT before CUDA. The adapter uses
 `acquire()`: a lazy, mutex-protected process-lifetime cache of successful loads.
 Failed loads are not cached. Session unload destroys its objects and buffers,
 but successful library handles remain mapped until OS process teardown,
-including through static destruction and sanitizer checks. This retains SDK
-mapping/initialization memory once per worker; it avoids repeating the observed
-approximately 218 KB vendor leak on each real-SDK dlopen/dlclose cycle. `load()`
-remains the uncached primitive for isolated loader-lifetime tests. `LibraryOps`
+including through static destruction and sanitizer checks. A driverless refusal
+leaves these libraries loaded and cached: only runtime construction is refused.
+The cached real-SDK test peaks at approximately 241 MB max RSS versus 9 MB without
+the SDK, about 232 MB resident per process holding the owner. This retention
+avoids repeating a vendor leak of exactly 3 x 72,704 bytes per load/unload cycle:
+the libstdc++ exception emergency pools from the statically linked libstdc++
+copies inside the vendor modules are orphaned by `dlclose`. `load()` remains the
+uncached primitive for isolated loader-lifetime tests. `LibraryOps`
 is a private synthetic-test seam, not a user configuration surface; supplied
 operations must be valid for the owner's life.
 
 A separate unit executable tests absence of each library/export, both version
 checks, version-query failure, and ownership through the last shared reference.
 The SDK job also exercises the real POSIX loader with the pinned packages and no
-GPU, then uses `RTLD_NOLOAD` to verify both handles were released. Injected
-preflight tests record every probe/factory call and are mutation-checked. The
-SDK job requires a non-skipped real driverless load of a non-empty artifact, and
+GPU, then uses `RTLD_NOLOAD` to verify handles were released unless already
+mapped before the test. Injected preflight tests record every probe/factory call
+and are mutation-checked. The
+SDK job requires a non-skipped real driverless load of a non-empty artifact,
+checks that libnvinfer remains mapped after session destruction, and
 copies the worker to clean Ubuntu 22.04/24.04 containers: no NVIDIA ELF
 references, mandatory Python backend import and a real fixture-sidecar response,
 then TensorRT `Unsupported`. This is transport evidence, not model accuracy.
 Real-SDK ASan/UBSan runs keep leak detection enabled with only NVIDIA-module
 suppressions in `tools/ci/tensorrt-lsan.supp`. They exercise cached ownership;
 the uncached real dlclose test runs without sanitizers because unloading removes
-module attribution. Successful GPU inference remains hardware validation.
+module attribution. A GPU-conditional malformed-engine test requires the
+deserialization error after successful preflight. Successful GPU inference
+remains hardware validation.
