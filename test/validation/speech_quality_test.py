@@ -855,13 +855,11 @@ def check_sample_minimums(scorer: Scorer) -> None:
     assert quality.unmet(record) == ["semantic en:insufficient", "semantic ar:insufficient"]
     # Fifty fixtures with a class short of ten, or missing, are insufficient.
     for seams, verdict in ((9, "insufficient"), (10, "pass"), (0, "insufficient")):
-        built = Built(
-            recordings=100,
-            classes=lambda clip, seams=seams: (
-                "window_seam" if clip < seams else quality.SEMANTIC_CLASSES[clip % 3]
-            ),
-        )
-        for item in Scorer(built).score()["semantic"]["languages"]:
+
+        def classes(clip: int, seams: int = seams) -> str:
+            return "window_seam" if clip < seams else quality.SEMANTIC_CLASSES[clip % 3]
+
+        for item in Scorer(Built(recordings=100, classes=classes)).score()["semantic"]["languages"]:
             assert item["fixtures"] == 50 and item["by_class"]["window_seam"]["fixtures"] == seams
             assert item["verdict"] == verdict, (seams, item)
             assert item["by_class"]["window_seam"]["verdict"] == verdict
