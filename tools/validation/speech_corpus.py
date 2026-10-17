@@ -54,6 +54,9 @@ ONE_SECOND = RATE_16K
 FIVE_SECONDS = 5 * RATE_16K
 THIRTY_SECONDS = 30 * RATE_16K
 
+# What a build writes beside the audio; every other file under the root is listed.
+BUILD_FILES = ("manifest.json", "labels.jsonl")
+
 EXIT_VALID = 0
 EXIT_REFUSED = 1
 EXIT_UNREADABLE = 2
@@ -430,6 +433,15 @@ def read_audio(root: Path, path: str, encoding: str, rate: int) -> tuple[bytes, 
     return data, samples
 
 
+def _check_unlisted(root: Path, listed: set[str]) -> None:
+    for path in sorted(root.rglob("*")):
+        if path.is_dir() and not path.is_symlink():
+            continue
+        relative = path.relative_to(root).as_posix()
+        if relative not in listed and relative not in BUILD_FILES:
+            raise ManifestError(f"{relative} is under the corpus root but not in the manifest")
+
+
 def _check_observed(entry: dict[str, Any], data: bytes, pcm: bytes, samples: int) -> None:
     observed = {"size": len(data), "samples": samples, "sha256": _sha256(data)}
     if "pcm_sha256" in entry:
@@ -567,6 +579,7 @@ def check_manifest(
             _check_file_audio(root, child)
             if rebuild:
                 _rebuild(child, entry, clean_samples, noise_samples)
+    _check_unlisted(root, {item["path"] for item in files + manifest["noise"]})
     return len(files)
 
 

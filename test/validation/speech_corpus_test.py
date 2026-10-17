@@ -18,6 +18,7 @@ import json
 import math
 import os
 import random
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -669,18 +670,37 @@ def check_rules(good: dict[str, Any], root: Path) -> None:
     (root / "changed.ul").write_bytes(bytes(changed))
     refused(good, set_field("en-a.telephony8k", "path", "changed.ul"), "sha256 is", root=root)
 
+    for stray in ("escape.wav", "eight-k.wav", "changed.ul"):
+        (root / stray).unlink()
+
     # A rendering replaced consistently, digests and all, is caught only by rebuilding it.
+    copied = root.parent / "tampered-corpus"
+    shutil.copytree(root, copied)
     tampered_data = audio.telephony_8k_ulaw_bytes(sine_burst(48000, 8000, 40000, 5000, 300))
-    (root / "tampered.ul").write_bytes(tampered_data)
+    (copied / file_entry(good, "en-a.telephony8k")["path"]).write_bytes(tampered_data)
 
     def tamper(m: dict[str, Any]) -> None:
         entry = file_entry(m, "en-a.telephony8k")
-        entry.update(path="tampered.ul", sha256=sha(tampered_data), pcm_sha256=sha(tampered_data))
+        entry.update(sha256=sha(tampered_data), pcm_sha256=sha(tampered_data))
 
     broken = copy.deepcopy(good)
     tamper(broken)
-    assert corpus.check_manifest(broken, root=root) == len(good["files"])
-    refused(good, tamper, "the rebuilt rendering differs", root=root, rebuild=True)
+    assert corpus.check_manifest(broken, root=copied) == len(good["files"])
+    refused(good, tamper, "the rebuilt rendering differs", root=copied, rebuild=True)
+
+    # Every file under the root is listed, but for what a build writes beside the audio.
+    for name in corpus.BUILD_FILES:
+        (copied / name).write_text("{}")
+    assert corpus.check_manifest(good, root=root) == len(good["files"])
+    (copied / "linked").symlink_to(copied / "held_out", target_is_directory=True)
+    refused(broken, lambda m: None, "linked is under the corpus root but not in", root=copied)
+    (copied / "linked").unlink()
+    for stray in ("stray.wav", "held_out/extra/stray.wav", "tuning/manifest.json"):
+        (copied / stray).parent.mkdir(parents=True, exist_ok=True)
+        (copied / stray).write_bytes(b"")
+        refused(broken, lambda m: None, f"{stray} is under the corpus root but not in", root=copied)
+        (copied / stray).unlink()
+    assert corpus.check_manifest(broken, root=copied) == len(good["files"])
     refused(
         good,
         set_field("en-a.noisy16k", "recipe", "mixture_peak", 1),
