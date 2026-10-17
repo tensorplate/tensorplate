@@ -266,6 +266,12 @@ def check_rules(good: dict[str, Any]) -> None:
     )
     for field in ("kokoro", "misaki", "spacy", "en_core_web_sm"):
         refused(good, lambda c, f=field: c["tokenizer"].update({f: "0.0.1"}), f"tokenizer {field}")
+        # Another locked package's version is still not this package's pin.
+        other = "2.4.0" if field != "kokoro" else "3.8.16"
+        assert f"=={other} " in LOCK_BYTES.decode() and good["tokenizer"][field] != other
+        refused(
+            good, lambda c, f=field, v=other: c["tokenizer"].update({f: v}), f"tokenizer {field}"
+        )
     refused(good, source("cmu-arctic", license="CC-BY-4.0"), "license is CMU-ARCTIC")
     refused(
         good,
@@ -404,6 +410,16 @@ def check_rules(good: dict[str, Any]) -> None:
         "holds 27, under 30",
     )
     refused(good, lambda c: c["listening"].__setitem__(1, "s-150"), "not balanced across strata")
+
+    def twelve_nine_nine(c: dict[str, Any]) -> None:
+        c["listening"] = [n for n in c["listening"] if n not in ("s-147", "s-257")]
+        c["listening"] += ["s-38", "s-39"]
+
+    refused(
+        good,
+        twelve_nine_nine,
+        "not balanced across strata: {'t1to20': 12, 't21to100': 9, 't101to200': 9}",
+    )
     assert (
         tts.check_corpus(
             {**copy.deepcopy(good), "listening": good["listening"] + ["s-60", "s-170", "s-280"]}
