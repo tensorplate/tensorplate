@@ -543,6 +543,39 @@ def check_schema(record: dict, schema: dict) -> None:
     record_mod.validate_ballast(record)
 
 
+def check_derivation_schema(schema: dict) -> None:
+    """A record's derivation is one the tool makes: the old telephony form without a recipe
+    still validates, an unknown kind, recipe or field does not."""
+    golden = json.loads(GOLDEN.read_text())
+    telephony = next(i for i, f in enumerate(golden["fixtures"]) if f["stratum"] == "telephony8k")
+    noisy = next(i for i, f in enumerate(golden["fixtures"]) if f["stratum"] == "noisy16k")
+    old_form = json.loads(json.dumps(golden))
+    del old_form["fixtures"][telephony]["derivation"]["recipe"]
+    check_schema(old_form, schema)
+    for index, field, value in (
+        (telephony, "recipe", "tp-fir63-blackman-q15-v1"),
+        (telephony, "kind", "resample_8k"),
+        (telephony, "gain_db", 6),
+        (noisy, "seed", None),
+        (noisy, "snr_db", "10"),
+    ):
+        broken = json.loads(json.dumps(golden))
+        derivation = broken["fixtures"][index]["derivation"]
+        if value is None:
+            del derivation[field]
+        else:
+            derivation[field] = value
+        for validate in (
+            lambda r: jsonschema.validate(r, schema),
+            lambda r: record_mod.validate_record(r, schema),
+        ):
+            try:
+                validate(broken)
+            except (jsonschema.ValidationError, record_mod.RecordError):
+                continue
+            raise AssertionError(f"a derivation with {field}={value!r} validates")
+
+
 def check_filed_records(schema: dict, evidence: Path = EVIDENCE) -> int:
     """Every filed record is valid, candidate-only and has the result its own steps derive."""
     filed_paths = sorted(evidence.glob("speech-candidate-*/run-*/record.json"))
@@ -1280,6 +1313,7 @@ def main() -> int:
         check_ballast_rules(harness, schema)
         check_ballast_faults(harness, schema)
         check_ballast_record_rules(schema)
+        check_derivation_schema(schema)
         check_ballast_script(harness)
 
         completed, record, evidence = harness.run("stt")

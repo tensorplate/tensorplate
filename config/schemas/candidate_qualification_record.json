@@ -428,7 +428,31 @@
         "voice": { "type": ["string", "null"] },
         "digest": { "$ref": "#/definitions/Digest", "description": "Digest of the fixture bytes as provisioned or derived: the WAV file for a clip, the UTF-8 text for a sentence." },
         "derived_from": { "type": ["string", "null"] },
-        "derivation": { "type": ["object", "null"] },
+        "derivation": {
+          "description": "How a derived clip was made from its source, as the inventory records it; null for a provisioned clip or a sentence. A telephony derivation recorded before the recipe id was introduced carries no recipe.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "seed", "snr_db"],
+              "properties": {
+                "kind": { "type": "string", "const": "seeded_noise_mix" },
+                "seed": { "type": "integer", "minimum": 0 },
+                "snr_db": { "type": "integer" }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": {
+                "kind": { "type": "string", "const": "telephony_8k_ulaw" },
+                "recipe": { "type": "string", "const": "tp-telephony8k-fir63-g711stl-v1" }
+              }
+            }
+          ]
+        },
         "input": {
           "type": "object",
           "additionalProperties": false,
