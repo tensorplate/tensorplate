@@ -76,6 +76,9 @@ def check_english_normalizer() -> None:
     assert norm("a\u200bb", "en") == ["a\u200bb"]
     # Full casefold decomposes j with caron; the last NFC pass composes it again.
     assert norm("\u01f0", "en") == norm("J\u030c", "en") == ["\u01f0"]
+    # Casefold does not respect canonical equivalence, so NFC also runs before it: alpha
+    # with ypogegrammeni and psili folds alike whatever order its marks are written in.
+    assert norm("\u03b1\u0345\u0313", "en") == norm("\u1f80", "en") == ["\u1f00\u03b9"]
     try:
         norm("a", "fr")
     except quality.QualityError:

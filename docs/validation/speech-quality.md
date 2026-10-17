@@ -62,6 +62,9 @@ The last NFC pass composes what the case fold or a removal left decomposed:
 full casefold writes ǰ as `j` and a combining caron, and removing a tatweel
 written between a carrier and its hamza leaves the two side by side. So a
 normalizer's words are always NFC, and normalizing them again changes nothing.
+The first NFC pass is still needed: casefold does not respect canonical
+equivalence, so English text is composed before it is folded, and alpha with
+ypogegrammeni and psili folds alike in either order of its marks.
 
 What the normalizers keep, on purpose:
 
