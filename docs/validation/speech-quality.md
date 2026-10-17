@@ -75,7 +75,8 @@ What the normalizers keep, on purpose:
   decimal and thousands separators (٫ ٬) are punctuation, so `٣٫٥` is two
   words.
 - **The n't contraction.** The apostrophe of `don't` becomes a space, leaving
-  the words `don` and `t`.
+  the words `don` and `t`. Only the semantic negation check reads that `t` as
+  `not`.
 
 The normalizers expand no numbers. A reviewed list of spoken-number
 expansions per corpus is not part of this tool yet.
@@ -169,12 +170,17 @@ judged. A word both arms get wrong is not a regression.
 reference and in each hypothesis:
 
 - **negation.** `en`: no, not, never, nothing, none, nobody, nowhere,
-  neither, nor, cannot, and the `t` an n't contraction leaves: a `t` right
-  after a word ending in `n`, so `don't` counts and `T-shirt` does not. `ar`:
-  لا لم لن ليس ليست ما, also with و or ف joined in front.
+  neither, nor, cannot. Before a negation fixture is aligned, the `t` an n't
+  contraction leaves, a `t` right after a word ending in `n`, reads as `not`
+  in the reference and in both hypotheses, so `didn't` and `did not` are the
+  same negation, `don't` counts and `T-shirt` does not. A regression lists
+  such a word as `not`. The word error rate still scores `didn't` as `didn`
+  and `t`. `ar`: لا لم لن ليس ليست ما, also with و or ف joined in front.
 - **numerals.** Any word containing a decimal digit, in any script, or a word
   of the language's number-word list. The Arabic list also matches with و or
-  ف joined in front.
+  ف joined in front. A number word and its digits stay different words, so
+  `seven` decoded as `7` is a lost and an added numeral, until a reviewed list
+  of spoken-number expansions exists.
 - **repetition.** A word equal to one of the three words before it, and that
   earlier word.
 

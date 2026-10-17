@@ -223,6 +223,13 @@ def _contracted_not(words: list[str], i: int) -> bool:
     return words[i] == "t" and i > 0 and words[i - 1].endswith("n")
 
 
+def negation_words(words: list[str], language: str) -> list[str]:
+    """The words a negation fixture is judged on: in English, the t of n't reads as not."""
+    if language != "en":
+        return words
+    return ["not" if _contracted_not(words, i) else word for i, word in enumerate(words)]
+
+
 def critical_positions(words: list[str], semantic_class: str, language: str) -> set[int]:
     """The positions in `words` that a fixture of `semantic_class` must keep."""
     if semantic_class == "repetition":
@@ -234,10 +241,7 @@ def critical_positions(words: list[str], semantic_class: str, language: str) -> 
         return marked
     if semantic_class == "negation":
         return {
-            i
-            for i, word in enumerate(words)
-            if _in_lexicon(word, NEGATION[language], language)
-            or (language == "en" and _contracted_not(words, i))
+            i for i, word in enumerate(words) if _in_lexicon(word, NEGATION[language], language)
         }
     if semantic_class == "numerals":
         return {
@@ -265,6 +269,10 @@ def lexical_regressions(
     language: str,
 ) -> list[dict[str, Any]]:
     """Critical words the streaming arm lost or added beyond what the batch arm did."""
+    if semantic_class == "negation":
+        ref = negation_words(ref, language)
+        hyps = [negation_words(arm[0], language) for arm in (streaming, batch)]
+        streaming, batch = ((hyp, align(ref, hyp)) for hyp in hyps)
     kept_streaming, kept_batch = _matched_ref(streaming[1]), _matched_ref(batch[1])
     found: list[dict[str, Any]] = [
         {"class": semantic_class, "kind": "lost", "position": i, "words": [ref[i]]}

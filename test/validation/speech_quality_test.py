@@ -188,19 +188,23 @@ def regress(
 def check_critical_words() -> None:
     def critical(text: str, semantic_class: str, language: str) -> list[str]:
         words = norm(text, language)
+        if semantic_class == "negation":
+            words = quality.negation_words(words, language)
         return [
             words[i] for i in sorted(quality.critical_positions(words, semantic_class, language))
         ]
 
     assert critical("buy a T-shirt, T", "negation", "en") == []
     assert critical("T-shirt then", "negation", "en") == []
-    assert critical("in t", "negation", "ar") == []
+    assert quality.negation_words(["in", "t"], "ar") == ["in", "t"]
     assert (
         regress("buy a t shirt now", "buy a shirt now", "buy a t shirt now", "negation", "en") == []
     )
-    assert critical("I can't, won't; isn\u2019t", "negation", "en") == ["t", "t", "t"]
+    assert quality.negation_words(norm("I can't, won't; isn\u2019t", "en"), "en") == (
+        "i can not won not isn not".split()
+    )
     assert critical("I don't know, nobody said no; never", "negation", "en") == [
-        "t",
+        "not",
         "nobody",
         "no",
         "never",
@@ -272,6 +276,20 @@ def check_lexical_regressions() -> None:
     ]
     assert regress("i did go", "not i not did go", "i did go", "negation", "en") == [
         {"class": "negation", "kind": "added", "position": None, "words": ["not", "not"]}
+    ]
+    # In a negation fixture alone, the t of n't reads as not: didn't and did not are one negation.
+    assert regress(ref, "i didn't go", ref, "negation", "en") == []
+    assert regress("i didn't go", ref, "i didn't go", "negation", "en") == []
+    assert regress("i didn't go", "i did go", "i didn't go", "negation", "en") == [
+        {"class": "negation", "kind": "lost", "position": 2, "words": ["not"]}
+    ]
+    assert regress("i did go", "i didn't go", "i did go", "negation", "en") == [
+        {"class": "negation", "kind": "added", "position": None, "words": ["not"]}
+    ]
+    # Numeral words and digits stay distinct.
+    assert regress("room seven", "room 7", "room seven", "numerals", "en") == [
+        {"class": "numerals", "kind": "lost", "position": 1, "words": ["seven"]},
+        {"class": "numerals", "kind": "added", "position": None, "words": ["7"]},
     ]
     assert regress("لم يذهب", "يذهب", "لم يذهب", "negation", "ar") == [
         {"class": "negation", "kind": "lost", "position": 0, "words": ["لم"]}
