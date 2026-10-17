@@ -462,12 +462,13 @@ def count_corpus(
         unknown = sorted({symbol for symbol in result if symbol not in vocab})
         if unknown:
             raise CorpusError(f"{sentence['id']}: the model vocabulary lacks {unknown}")
-        if len(result) != sentence["phoneme_tokens"]:
+        tokens = len(result)
+        if tokens != sentence["phoneme_tokens"]:
             mismatches.append(
-                f"{sentence['id']}: {len(result)} tokens, recorded {sentence['phoneme_tokens']}"
+                f"{sentence['id']}: {tokens} tokens, recorded {sentence['phoneme_tokens']}"
             )
-        sentence["phoneme_tokens"] = len(result)
-        sentence["stratum"] = stratum(len(result))
+        sentence["phoneme_tokens"] = tokens
+        sentence["stratum"] = stratum(tokens)
         sentence["critical"] = critical_classes(sentence["text"])
     if mismatches and write is None:
         raise CorpusError("; ".join(mismatches))
@@ -564,10 +565,10 @@ def record_reference(
         for sentence in corpus["sentences"]:
             name = sentence["id"]
             runner_phonemes, _ = pipeline.g2p(sentence["text"])
-            if len(runner_phonemes) != sentence["phoneme_tokens"]:
+            tokens = len(runner_phonemes)
+            if tokens != sentence["phoneme_tokens"]:
                 raise CorpusError(
-                    f"{name}: {len(runner_phonemes)} tokens here,"
-                    f" the corpus counted {sentence['phoneme_tokens']}"
+                    f"{name}: {tokens} tokens here, the corpus counted {sentence['phoneme_tokens']}"
                 )
             seed = reference_seed(corpus["corpus"]["version"], name)
             torch.manual_seed(seed)

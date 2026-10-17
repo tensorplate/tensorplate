@@ -53,6 +53,14 @@ def word(index: int) -> str:
     return letters
 
 
+def fake_phonemes(count: int) -> str:
+    """A phoneme string of `count` symbols with spaces and punctuation, all of them counted."""
+    return ("h a, o. " * count)[:count]
+
+
+FAKE_VOCAB = {symbol: index for index, symbol in enumerate("h a,o.", 1)}
+
+
 def synthetic() -> dict[str, Any]:
     sentences = []
     for index in range(330):
@@ -634,11 +642,13 @@ class Fakes:
                     self.fallback = fakes.fallback
 
             def __call__(self, text: str) -> tuple[str, list[object]]:
-                return (fakes.g2p_phonemes or (lambda t: "h" * fakes.tokens[t]))(text), []
+                return (fakes.g2p_phonemes or (lambda t: fake_phonemes(fakes.tokens[t])))(text), []
 
         class Result:
             def __init__(self, text: str) -> None:
-                self.phonemes = (fakes.pipeline_phonemes or (lambda t: "h" * fakes.tokens[t]))(text)
+                self.phonemes = (
+                    fakes.pipeline_phonemes or (lambda t: fake_phonemes(fakes.tokens[t]))
+                )(text)
                 count = fakes.tokens[text]
                 self.audio = FakeTensor(
                     []
@@ -732,10 +742,11 @@ def expect_error(call: Callable[[], Any], expect: str) -> None:
 def check_count(good: dict[str, Any], scratch: Path) -> None:
     model = scratch / "model"
     (model / "voices").mkdir(parents=True)
-    (model / "config.json").write_text(json.dumps({"vocab": {"h": 1, " ": 2}}))
+    (model / "config.json").write_text(json.dumps({"vocab": FAKE_VOCAB}))
     (model / "kokoro-v1_0.pth").write_bytes(b"weights")
     (model / "voices/af_heart.pt").write_bytes(b"voice")
     repo = fake_repo(scratch, model)
+    assert len(fake_phonemes(20)) == 20 and {" ", ",", "."} <= set(fake_phonemes(20))
     tokens = {s["text"]: s["phoneme_tokens"] for s in good["sentences"]}
 
     def count(corpus: dict[str, Any], **kwargs: Any) -> list[str]:
@@ -842,7 +853,7 @@ def check_reference(good: dict[str, Any], scratch: Path) -> None:
         )
 
     def phonemes_sha(count: int) -> str:
-        return sha(("h" * count).encode())
+        return sha(fake_phonemes(count).encode())
 
     with Fakes(tokens) as fakes:
         result = record(scratch / "out")
@@ -907,7 +918,7 @@ def check_reference(good: dict[str, Any], scratch: Path) -> None:
         expect_error(lambda: record(repo / "inside"), "outside the repository")
         expect_error(lambda: record(repo), "outside the repository")
         assert not (repo / "inside").exists()
-        fakes.pipeline_phonemes = lambda text: "h" * (tokens[text] + 1)
+        fakes.pipeline_phonemes = lambda text: fake_phonemes(tokens[text] + 1)
         for s, clip in zip(small["sentences"], record(scratch / "out2")["clips"], strict=True):
             assert not clip["runner_phonemes"]
             assert clip["phonemes_sha256"] == phonemes_sha(s["phoneme_tokens"] + 1)
@@ -1056,7 +1067,7 @@ def check_cli_commands(
 ) -> None:
     model = scratch / "cli-model"
     (model / "voices").mkdir(parents=True)
-    (model / "config.json").write_text(json.dumps({"vocab": {"h": 1, " ": 2}}))
+    (model / "config.json").write_text(json.dumps({"vocab": FAKE_VOCAB}))
     (model / "kokoro-v1_0.pth").write_bytes(b"weights")
     (model / "voices/af_heart.pt").write_bytes(b"voice")
     repo = fake_repo(scratch / "cli", model)
