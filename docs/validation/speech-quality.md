@@ -98,7 +98,10 @@ A stratum is one language and codec. Its micro word error rate is the sum of
 its files' substitutions, deletions and insertions, divided by the sum of
 their normalized reference words. Only finals count: an arm's finals for a file
 are joined with a space, and a failed file is an empty prediction. Failures are
-also counted per arm and error code.
+also counted per arm and error code. A speech file an arm completed with no
+word once normalized, whether it returned no finals or only punctuation, is
+scored the same way, as all deletions, and is counted per arm (`empty_files`);
+it is not a failure.
 
 The raw rate scores the same texts split on whitespace with no normalization.
 It is reported and not gated.

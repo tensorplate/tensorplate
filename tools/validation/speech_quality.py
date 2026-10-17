@@ -15,8 +15,9 @@ letter and every numeral kept as written. The record holds, per language and
 codec, each arm's micro word error rate, normalized and raw, and the streaming
 arm's distance from the batch arm; the words decoded on silence; and the
 semantic fixtures' critical regressions against the batch arm. A failed file is
-scored as an empty prediction and counted as a failure. Each gate reads pass,
-fail, or insufficient when it has fewer samples than its minimum.
+scored as an empty prediction and counted as a failure; a completed speech file
+with no words is counted too. Each gate reads pass, fail, or insufficient when
+it has fewer samples than its minimum.
 
 Exit status: 0 every gate passed, 1 refused, 2 unreadable, 3 a gate failed or
 had too few samples.
@@ -462,6 +463,7 @@ class _Tally:
             "raw_errors": 0,
             "failed_files": 0,
             "failures": {},
+            "empty_files": 0,
         }
 
     def hypothesis_text(self, arm: str, text: str) -> None:
@@ -526,6 +528,7 @@ class _Tally:
             totals["errors"] += sum(counts.values())
             totals["raw_errors"] += sum(edit_counts(align(raw_ref, hyp_text.split())).values())
             _count_failure(totals, clip)
+            totals["empty_files"] += clip["outcome"] == "completed" and not hyp
             for by, value in groups:
                 self.breakdowns[(language, entry["codec"], by, value)][arm] += sum(counts.values())
             aligned[arm] = (hyp, ops)

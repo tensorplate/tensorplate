@@ -685,6 +685,12 @@ def check_failures_and_raw(scorer: Scorer) -> None:
     assert row["batch"]["errors"] == 21 and row["batch"]["failures"] == {"inference_failed": 1}
     assert row["delta_pp"] == round(2100 / words, 3)
     assert row["verdict"] == "insufficient"
+    # The file completed with no finals is counted, the failed one is not.
+    assert (row["streaming"]["empty_files"], row["batch"]["empty_files"]) == (1, 0)
+    blank = {second: {"id": second, "outcome": "completed", "finals": ["", " ... "]}}
+    row = stratum(scorer.score(batch=built.arm("batch", blank)), "ar", "clean16k")
+    assert (row["streaming"]["empty_files"], row["batch"]["empty_files"]) == (0, 1)
+    assert row["batch"]["deletions"] == 21 and row["batch"]["failed_files"] == 0
     clip = file_ids(built, "en", "clean16k")[70]
     text = built.texts[clip][1]
     split = text.split()

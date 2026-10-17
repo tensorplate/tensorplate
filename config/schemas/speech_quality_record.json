@@ -216,7 +216,7 @@
     "Arm": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["errors", "substitutions", "deletions", "insertions", "raw_errors", "failed_files", "failures", "wer_percent", "raw_wer_percent"],
+      "required": ["errors", "substitutions", "deletions", "insertions", "raw_errors", "failed_files", "failures", "empty_files", "wer_percent", "raw_wer_percent"],
       "properties": {
         "errors": { "type": "integer", "minimum": 0 },
         "substitutions": { "type": "integer", "minimum": 0 },
@@ -225,6 +225,7 @@
         "raw_errors": { "type": "integer", "minimum": 0 },
         "failed_files": { "type": "integer", "minimum": 0 },
         "failures": { "$ref": "#/definitions/Failures" },
+        "empty_files": { "type": "integer", "minimum": 0, "description": "Speech files the arm completed with no word once normalized, with no finals or only punctuation; each is scored as all deletions and is not a failure." },
         "wer_percent": { "type": ["number", "null"] },
         "raw_wer_percent": { "type": ["number", "null"] }
       }
